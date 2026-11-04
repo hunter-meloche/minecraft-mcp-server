@@ -5,6 +5,17 @@ import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 
+// how many items one of each fuel smelts (200 ticks per item)
+const SMELTS_PER_FUEL: Record<string, number> = {
+  coal: 8, charcoal: 8, coal_block: 80, lava_bucket: 100, blaze_rod: 12, dried_kelp_block: 20, stick: 0.5, bamboo: 0.25
+};
+export function smeltsPerFuel(name: string): number {
+  if (name in SMELTS_PER_FUEL) return SMELTS_PER_FUEL[name];
+  if (/_(planks|log|wood|stem|hyphae)$/.test(name) || /_(fence|fence_gate)$/.test(name)) return 1.5;
+  if (/_slab$/.test(name)) return 0.75;
+  return 1;
+}
+
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
 
 export function registerFurnaceTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
@@ -18,7 +29,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       inputItem: z.string().trim().min(1).describe("Name of item to smelt"),
       inputCount: z.number().int().positive().optional().describe("Amount of input to smelt (default: 1)"),
       fuelItem: z.string().trim().min(1).describe("Name of fuel item"),
-      fuelCount: z.number().int().positive().optional().describe("Amount of fuel to use (default: 1)"),
+      fuelCount: z.number().int().positive().optional().describe("Most fuel to add (default: as much as the input needs, counting fuel already in the furnace)"),
       takeOutput: z.boolean().optional().describe("Whether to take output when ready (default: true)"),
       timeoutMs: z.number().int().positive().optional().describe("Timeout waiting for output in ms (default: 60000)")
     },
@@ -29,7 +40,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       inputItem,
       inputCount = 1,
       fuelItem,
-      fuelCount = 1,
+      fuelCount,
       takeOutput = true,
       timeoutMs = 60000
     }: {
@@ -93,15 +104,21 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
         const addFuel = fuel && !(existingFuel && existingFuel.name !== fuel.name) ? fuel : null;
 
         let resolvedInputCount = 0;
+        let fuelAdded = 0;
         if (input) {
           resolvedInputCount = Math.min(inputCount, input.count);
-          if (addFuel) await furnace.putFuel(addFuel.type, addFuel.metadata ?? null, Math.min(fuelCount, addFuel.count));
+          // only what the job still needs: adding a coal per call wasted most of each one
+          const queued = resolvedInputCount + (existingInput?.count ?? 0);
+          const stocked = (existingFuel ? existingFuel.count * smeltsPerFuel(existingFuel.name) : 0) + (burning > 0 ? 1 : 0);
+          const needed = addFuel ? Math.ceil(Math.max(0, queued - stocked) / smeltsPerFuel(addFuel.name)) : 0;
+          fuelAdded = Math.min(needed, fuelCount ?? needed, addFuel?.count ?? 0);
+          if (addFuel && fuelAdded > 0) await furnace.putFuel(addFuel.type, addFuel.metadata ?? null, fuelAdded);
           await furnace.putInput(input.type, input.metadata ?? null, resolvedInputCount);
         }
 
         if (!takeOutput) {
           return factory.createResponse(
-            `Started smelting ${resolvedInputCount} ${input?.name ?? existingInput?.name}${addFuel ? ` with ${Math.min(fuelCount, addFuel.count)} ${addFuel.name}` : ''}`
+            `Started smelting ${resolvedInputCount} ${input?.name ?? existingInput?.name}${addFuel && fuelAdded ? ` with ${fuelAdded} ${addFuel.name}` : ''}`
           );
         }
 

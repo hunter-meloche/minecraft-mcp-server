@@ -27,6 +27,18 @@ interface DefendState {
   shelteredAt: string | null; // feet cell of the last emergency shelter, so it isn't rebuilt every tick
   notes: string[]; // since the last alert was taken
   shieldUp: boolean; // raised by the shield guard
+  seenDamageEvents: boolean; // the server sends damage_event (1.19.4+): take hurts from there, with their cause
+  escaping: 'water' | 'lava' | null; // holding jump to get out of it
+}
+
+/** Damage type names by id, from the server's registry (sent while logging in). */
+const damageTypes = new WeakMap<mineflayer.Bot, string[]>();
+
+/** Keep the damage type names from a registry_data packet, so hurts can say 'lava' or 'fall' instead of 'unknown'. */
+export function rememberRegistry(bot: mineflayer.Bot, packet: { id?: string; entries?: { key: string }[] }): void {
+  if (packet.id?.replace('minecraft:', '') === 'damage_type' && Array.isArray(packet.entries)) {
+    damageTypes.set(bot, packet.entries.map(e => e.key.replace('minecraft:', '')));
+  }
 }
 
 const states = new WeakMap<mineflayer.Bot, DefendState>();
@@ -34,7 +46,7 @@ const states = new WeakMap<mineflayer.Bot, DefendState>();
 function stateOf(bot: mineflayer.Bot): DefendState {
   let s = states.get(bot);
   if (!s) {
-    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false };
+    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false, seenDamageEvents: false, escaping: null };
     states.set(bot, s);
   }
   return s;
@@ -48,11 +60,12 @@ export function autoDefendEnabled(bot: mineflayer.Bot): boolean {
   return stateOf(bot).enabled;
 }
 
-/** Record who hurt the bot. Hooked to 'entityHurt'. */
-export function noteHurt(bot: mineflayer.Bot, entity: Entity | undefined, source: Entity | undefined): void {
+/** Record who or what hurt the bot. `cause` is the damage type ('lava', 'fall', 'arrow', ...) when known. */
+export function noteHurt(bot: mineflayer.Bot, entity: Entity | undefined, source: Entity | undefined, cause?: string): void {
   if (!entity || entity !== bot.entity) return;
   const s = stateOf(bot);
-  s.hurts.push({ by: source ? describe(source) : 'unknown', at: Date.now() });
+  const by = source ? (cause && cause !== 'mob_attack' ? `${cause} from ${describe(source)}` : describe(source)) : cause ?? 'unknown';
+  s.hurts.push({ by, at: Date.now() });
   s.lastHurtAt = Date.now();
   if (source) s.attackers.set(source.id, Date.now());
 }
@@ -140,6 +153,38 @@ export async function shieldTick(bot: mineflayer.Bot, now = Date.now()): Promise
   }
 }
 
+/** Air at or below this (of 20) with the head under water: swim up. */
+const LOW_AIR = 12;
+
+/**
+ * Environmental hazards: under water and running out of air, swim up (hold jump); standing in lava, jump to get
+ * out of it. The bot drowned standing in a flooded crater at night while nothing else was going on.
+ * Exported for tests; installAutoDefend runs it before the other reflexes.
+ */
+export function hazardTick(bot: mineflayer.Bot): 'water' | 'lava' | null {
+  const s = stateOf(bot);
+  if (!s.enabled || !bot.entity || typeof bot.setControlState !== 'function') return null;
+  if (bot.game?.gameMode === 'creative' || bot.game?.gameMode === 'spectator') return null;
+  const p = bot.entity.position;
+  const isWater = (name?: string) => name === 'water' || name === 'bubble_column';
+  const head = bot.blockAt(p.offset(0, 1.62, 0));
+  const feet = bot.blockAt(p);
+  const air = (bot as unknown as { oxygenLevel?: number }).oxygenLevel ?? 20;
+  let hazard: 'water' | 'lava' | null = null;
+  if (feet?.name === 'lava' || head?.name === 'lava') hazard = 'lava';
+  else if (isWater(head?.name) && air <= LOW_AIR) hazard = 'water';
+  else if (s.escaping === 'water' && isWater(head?.name) && air < 20) hazard = 'water'; // keep going till we breathe
+
+  if (hazard && s.escaping !== hazard) {
+    bot.setControlState('jump', true);
+    s.notes.push(hazard === 'water' ? `out of air under water (${air}/20): swimming up` : 'in lava: jumping out');
+  } else if (!hazard && s.escaping) {
+    bot.setControlState('jump', false);
+  }
+  s.escaping = hazard;
+  return hazard;
+}
+
 /**
  * Low health and still taking damage, while no fight of ours is running (e.g. shot while idle or walking): wall in
  * and eat. Exported for tests; installAutoDefend runs it with the reflex.
@@ -190,9 +235,20 @@ export async function gearTick(bot: mineflayer.Bot): Promise<string[]> {
 
 export function installAutoDefend(bot: mineflayer.Bot, onError?: (err: unknown) => void): void {
   stateOf(bot);
-  bot.on('entityHurt', (entity, source) => noteHurt(bot, entity, source as Entity | undefined));
+  // 1.19.4+: damage_event says what kind of damage it was; before that only entity_status (no cause, no source)
+  bot._client?.on('damage_event', (p: { entityId: number; sourceTypeId: number; sourceCauseId: number }) => {
+    const s = stateOf(bot);
+    s.seenDamageEvents = true;
+    if (p.entityId !== bot.entity?.id) return;
+    const source = p.sourceCauseId > 0 ? bot.entities[p.sourceCauseId - 1] : undefined;
+    noteHurt(bot, bot.entity, source, damageTypes.get(bot)?.[p.sourceTypeId]);
+  });
+  bot.on('entityHurt', (entity, source) => {
+    if (!stateOf(bot).seenDamageEvents) noteHurt(bot, entity, source as Entity | undefined);
+  });
   let ticks = 0;
   const timer = setInterval(() => {
+    try { hazardTick(bot); } catch (err) { onError?.(err); }
     if (++ticks % 20 === 0) { gearTick(bot).catch(err => onError?.(err)); return; }
     emergencyTick(bot)
       .then(sheltered => (sheltered ? null : shieldTick(bot)))
