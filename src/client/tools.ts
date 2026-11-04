@@ -8,6 +8,11 @@ import { mineflayerToolDefinitions } from '../tools/register-all.js';
 import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
 import { layoutSpec, writeSchematic, type StructureSpec } from './schematic.js';
+import type { Item } from 'prismarine-item';
+import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
+import { smeltsPerFuel } from '../tools/furnace-tools.js';
+
+const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByName: Record<string, FoodInfo> }).foodsByName;
 
 /**
  * The client backend's tools: the same names and parameters as the mineflayer backend (taken from its definitions),
@@ -159,6 +164,178 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       throw new Error(`Could not reach ${fmt(target)}: ${why}. Stopped at ${fmt(r.at!)}, ${r.distance} blocks away.${baritoneSaid(r.baritone)}`);
     }
   };
+
+  // ---- phase 2: interaction
+
+  const inventoryCounts = async () => {
+    const inv = await call<Inventory>('inventory');
+    const counts = new Map<string, number>();
+    for (const i of inv.items) counts.set(i.name, (counts.get(i.name) ?? 0) + i.count);
+    return { inv, counts };
+  };
+  const gainedText = (before: Map<string, number>, after: Map<string, number>) =>
+    [...after].filter(([n, c]) => c > (before.get(n) ?? 0)).map(([n, c]) => `${n} x${c - (before.get(n) ?? 0)}`).join(', ');
+  const goNear = (p: Pos, range: number, timeoutMs = 30_000) =>
+    call<ProcessResult & { arrived: boolean }>('goto', { ...floorPos(p), range, timeoutMs }, timeoutMs + 15_000);
+
+  /** Walk onto the drops near a broken block (they pop out and may fall a few blocks). */
+  const collectDropsNear = async (p: Pos) => {
+    const r = await call<{ entities: EntityInfo[] }>('world.entities', { maxDistance: 24, type: 'item' });
+    const drops = r.entities.filter(e => Math.hypot(e.position.x - p.x - 0.5, e.position.z - p.z - 0.5) <= 3 &&
+      e.position.y - p.y <= 1 && e.position.y - p.y >= -6);
+    for (const d of drops.slice(0, 6)) await goNear(d.position, 0, 8000).catch(() => undefined);
+  };
+
+  Object.assign(impl, {
+    'look-at': async ({ x, y, z }) => {
+      await call('look', { x, y, z });
+      return factory.createResponse(`Looking at position (${x}, ${y}, ${z})`);
+    },
+
+    'jump': async () => {
+      await call('keys', { key: 'jump', ms: 100 });
+      return factory.createResponse('Successfully jumped');
+    },
+
+    'move-in-direction': async ({ direction, duration = 1000 }) => {
+      await call('keys', { key: direction, ms: duration }, Number(duration) + 10_000);
+      return factory.createResponse(`Moved ${direction} for ${duration}ms`);
+    },
+
+    'equip-item': async ({ itemName, destination = 'hand' }) => {
+      try {
+        await call('item.equip', { name: itemName, destination });
+      } catch (e) {
+        if (/^no /.test((e as Error).message)) return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
+        throw e;
+      }
+      return factory.createResponse(`Equipped ${itemName} to ${destination}`);
+    },
+
+    'dig-block': async ({ x, y, z, collect = true }) => {
+      const p = floorPos({ x: Number(x), y: Number(y), z: Number(z) });
+      const before = (await inventoryCounts()).counts;
+      const r = await call<{ dug: boolean; block?: string; tool?: string | null; reason: string; baritone?: string[] }>('dig', { ...p, timeoutMs: 60_000 }, 75_000);
+      if (r.reason === 'air' || r.block === undefined) return factory.createResponse(`No block found at position ${fmt(p)}`);
+      if (!r.dug) throw new Error(`Could not dig ${r.block} at ${fmt(p)} (${r.reason}).${baritoneSaid(r.baritone ?? [])}`);
+      if (collect) await collectDropsNear(p);
+      const gained = gainedText(before, (await inventoryCounts()).counts);
+      return factory.createResponse(`Dug ${r.block} at ${fmt(p)}${r.tool ? ` with ${r.tool}` : ''}` +
+        (gained ? `. Picked up ${gained}` : collect ? '. Nothing picked up' : ''));
+    },
+
+    'place-block': async ({ x, y, z, faceDirection = 'down', item }) => {
+      const p = floorPos({ x: Number(x), y: Number(y), z: Number(z) });
+      if (item) {
+        try { await call('item.select', { name: item }); } catch { return factory.createResponse(`No ${item} in inventory to place`); }
+      }
+      type Placed = { placed: boolean; block?: string; face?: string; reason?: string };
+      let r = await call<Placed>('place', { ...p, face: faceDirection });
+      if (!r.placed && r.reason === 'too far') {
+        await goNear(p, 3);
+        r = await call<Placed>('place', { ...p, face: faceDirection });
+      }
+      if (!r.placed) {
+        if (r.reason?.startsWith('occupied by ')) return factory.createResponse(`There's already a block (${r.reason.slice(12)}) at ${fmt(p)}`);
+        if (r.reason === 'the bot is standing there') return factory.createResponse(`You can't place a block where you're standing or one block above`);
+        return factory.createResponse(`Failed to place block at ${fmt(p)}: ${r.reason ?? 'the server did not accept it'}`);
+      }
+      return factory.createResponse(`Placed ${r.block} at ${fmt(p)} using ${r.face} face`);
+    },
+
+    'eat': async ({ item }) => {
+      const s = await status();
+      if (s.gameMode === 'creative') return factory.createResponse('No need to eat in creative mode');
+      const vitals = `Health ${s.health}/20, food ${s.food}/20`;
+      const { inv } = await inventoryCounts();
+      const foods = foodsFor26();
+      let food: string | undefined;
+      if (item) {
+        food = String(item).replace(/^minecraft:/, '');
+        if (!inv.items.some(i => i.name === food)) return factory.createResponse(`No ${food} in inventory`);
+        if (!foods[food] && !ALWAYS_EDIBLE.has(food)) return factory.createResponse(`${food} isn't edible`);
+      } else {
+        food = chooseFood(inv.items as unknown as Item[], foods, s.food ?? 20)?.name;
+        if (!food) return factory.createResponse(`Nothing safe to eat in inventory. ${vitals}`);
+      }
+      if ((s.food ?? 0) >= 20 && !ALWAYS_EDIBLE.has(food)) return factory.createResponse(`Not hungry. ${vitals}`);
+      await call('item.select', { name: food });
+      const r = await call<{ finished: boolean; food: number; foodBefore: number; health: number; healthBefore: number }>('use', {}, 15_000);
+      if (!r.finished) throw new Error(`Could not eat ${food}`);
+      return factory.createResponse(`Ate ${food}: food ${r.foodBefore} -> ${r.food}, health ${r.healthBefore} -> ${r.health}`);
+    },
+
+    'craft-item': async ({ outputItem, amount = 1 }) => {
+      const item = String(outputItem).replace(/^minecraft:/, '');
+      type Crafted = { crafted: number; gained: Record<string, number> };
+      let r: Crafted;
+      try {
+        r = await call<Crafted>('craft', { item, count: amount }, 60_000);
+      } catch (e) {
+        const msg = (e as Error).message;
+        if (!msg.startsWith('needs_table')) return factory.createErrorResponse(msg);
+        const tables = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'crafting_table', maxDistance: 16, count: 1 });
+        if (!tables.positions.length) {
+          const hasTable = (await call<Inventory>('inventory')).items.some(i => i.name === 'crafting_table');
+          return factory.createErrorResponse(`${item} needs a crafting table and there is none within 16 blocks. ` +
+            (hasTable ? 'Place the crafting_table from the inventory nearby, then craft again.' : 'Craft a crafting_table (4 planks), place it nearby, then craft again.'));
+        }
+        const table = tables.positions[0];
+        await goNear(table, 3);
+        r = await call<Crafted>('craft', { item, count: amount, ...table }, 60_000);
+      }
+      if (!r.crafted) return factory.createErrorResponse(`Failed to craft ${item}: nothing was crafted`);
+      return factory.createResponse(`Successfully crafted ${item} ${r.crafted} time(s)`);
+    },
+
+    'smelt-item': async ({ x, y, z, inputItem, inputCount = 1, fuelItem, fuelCount, takeOutput = true, timeoutMs = 60_000 }) => {
+      const at = floorPos({ x: Number(x), y: Number(y), z: Number(z) });
+      const block = await call<{ name?: string }>('world.block', { ...at });
+      if (!['furnace', 'blast_furnace', 'smoker'].includes(block.name ?? '')) return factory.createResponse(`No furnace at ${fmt(at)}`);
+      type Slot = { name: string; count: number } | null;
+      type Furnace = { open: boolean; input: Slot; fuel: Slot; output: Slot; lit: boolean };
+      let f: Furnace;
+      try {
+        f = await call<Furnace>('furnace.open', { ...at });
+      } catch {
+        await goNear(at, 3);
+        f = await call<Furnace>('furnace.open', { ...at });
+      }
+      try {
+        const { counts } = await inventoryCounts();
+        const input = String(inputItem).replace(/^minecraft:/, '');
+        const fuel = String(fuelItem).replace(/^minecraft:/, '');
+        if (f.input && f.input.name !== input) return factory.createResponse(`Furnace input slot is occupied by ${f.input.name}`);
+        const queued = Math.min(Number(inputCount), counts.get(input) ?? 0) + (f.input?.count ?? 0);
+        if (!queued && !f.output) return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
+        const stocked = (f.fuel ? f.fuel.count * smeltsPerFuel(f.fuel.name) : 0) + (f.lit ? 1 : 0);
+        const needed = Math.ceil(Math.max(0, queued - stocked) / smeltsPerFuel(fuel));
+        const addFuel = Math.min(needed, fuelCount === undefined ? needed : Number(fuelCount), counts.get(fuel) ?? 0);
+        if (needed > 0 && !addFuel && !f.fuel && !f.lit) return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
+        if (addFuel > 0 && (!f.fuel || f.fuel.name === fuel)) await call('furnace.put', { slot: 'fuel', name: fuel, count: addFuel });
+        const putCount = Math.min(Number(inputCount), counts.get(input) ?? 0);
+        if (putCount > 0) await call('furnace.put', { slot: 'input', name: input, count: putCount });
+        if (!takeOutput) return factory.createResponse(`Started smelting ${putCount} ${input}${addFuel ? ` with ${addFuel} ${fuel}` : ''}`);
+        const deadline = Date.now() + Math.max(Number(timeoutMs), queued * 10_500 + 5000);
+        let taken = 0;
+        let outName = '';
+        while (Date.now() < deadline) {
+          const st = await call<Furnace>('furnace.status');
+          if (st.output) {
+            const t = await call<{ took: Slot }>('furnace.take');
+            if (t.took) { taken += t.took.count; outName = t.took.name; }
+          }
+          if (!st.input && !st.output) break;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        return taken ? factory.createResponse(`Smelted ${taken} ${outName}`) : factory.createResponse(`No output after ${timeoutMs}ms`);
+      } finally {
+        await call('container.close').catch(() => undefined);
+      }
+    },
+
+    'fly-to': async () => factory.createErrorResponse('fly-to is not supported on the client backend (Baritone walks; use move-to-position).')
+  } satisfies Record<string, Executor>);
 
   const notYet: Executor = async () => factory.createErrorResponse(
     'This tool is not available on the client backend yet. Run the server with --backend mineflayer to use it.');

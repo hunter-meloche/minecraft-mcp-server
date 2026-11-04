@@ -112,7 +112,7 @@ test('build-structure checks materials, writes the schematic, and builds it', as
 
 test('tools the client backend does not have yet say so', async (t) => {
   const { run } = setup({});
-  const r = await run('dig-block', { x: 0, y: 0, z: 0 });
+  const r = await run('attack-entity', { target: 'zombie' });
   t.true(r.isError);
   t.regex(r.text, /not available on the client backend yet/);
 });
@@ -121,4 +121,89 @@ test('slot and entity helpers', (t) => {
   t.deepEqual([0, 8, 9, 35, 36, 39, 40].map(mineflayerSlot), [36, 44, 9, 35, 8, 5, 45]);
   t.deepEqual(entityKind('zombie'), { type: 'hostile', name: 'zombie' });
   t.deepEqual(entityKind('player'), { type: 'player', name: 'player' });
+});
+
+test('dig-block digs through Baritone, walks onto the drops and reports the pickup', async (t) => {
+  let invCalls = 0;
+  const { run, request } = setup({
+    inventory: () => ({ items: invCalls++ === 0 ? [] : [{ slot: 3, name: 'cobblestone', count: 1 }], selectedSlot: 0, held: null }),
+    dig: { dug: true, block: 'stone', tool: 'wooden_pickaxe', reason: 'done', seconds: 2, baritone: [] },
+    'world.entities': { entities: [{ id: 9, name: 'item', category: 'misc', position: { x: 5.4, y: 63, z: 5.6 }, distance: 2 }, { id: 8, name: 'item', category: 'misc', position: { x: 30, y: 64, z: 30 }, distance: 30 }] },
+    goto: { arrived: true, reason: 'done', seconds: 1, baritone: [], at: { x: 5, y: 63, z: 5 }, distance: 0 }
+  });
+  t.is((await run('dig-block', { x: 5, y: 64, z: 5 })).text, 'Dug stone at (5, 64, 5) with wooden_pickaxe. Picked up cobblestone x1');
+  const gotos = request.getCalls().filter(c => c.args[0] === 'goto');
+  t.is(gotos.length, 1); // only the drop next to the block
+  t.like(gotos[0].args[1], { x: 5, y: 63, z: 5, range: 0 });
+});
+
+test('place-block selects the item, walks closer when too far, and reports the face', async (t) => {
+  let tries = 0;
+  const { run, request } = setup({
+    'item.select': { held: 0 },
+    place: () => (tries++ === 0 ? { placed: false, reason: 'too far' } : { placed: true, block: 'cobblestone', face: 'down' }),
+    goto: { arrived: true, reason: 'done', seconds: 3, baritone: [], at: { x: 0, y: 64, z: 2 }, distance: 2 }
+  });
+  t.is((await run('place-block', { x: 0, y: 64, z: 0, item: 'cobblestone' })).text, 'Placed cobblestone at (0, 64, 0) using down face');
+  t.deepEqual(request.getCalls().map(c => c.args[0]), ['item.select', 'place', 'goto', 'place']);
+  const occupied = setup({ place: { placed: false, reason: 'occupied by stone' } });
+  t.is((await occupied.run('place-block', { x: 0, y: 64, z: 0 })).text, "There's already a block (stone) at (0, 64, 0)");
+});
+
+test('eat picks the best safe food and reports hunger before and after', async (t) => {
+  const { run, request } = setup({
+    status: { ...STATUS, food: 12 },
+    inventory: { items: [{ slot: 1, name: 'rotten_flesh', count: 3 }, { slot: 2, name: 'cooked_porkchop', count: 2 }], selectedSlot: 0, held: null },
+    'item.select': { held: 2 },
+    use: { finished: true, food: 20, foodBefore: 12, health: 18, healthBefore: 18 }
+  });
+  t.is((await run('eat')).text, 'Ate cooked_porkchop: food 12 -> 20, health 18 -> 18');
+  t.like(request.getCalls().find(c => c.args[0] === 'item.select')!.args[1], { name: 'cooked_porkchop' });
+});
+
+test('craft-item uses the inventory grid, and falls back to the nearest table', async (t) => {
+  const grid = setup({ craft: { crafted: 2, gained: { oak_planks: 8 } } });
+  t.is((await grid.run('craft-item', { outputItem: 'oak_planks', amount: 2 })).text, 'Successfully crafted oak_planks 2 time(s)');
+
+  let first = true;
+  const table = setup({
+    craft: (p: Record<string, unknown>) => {
+      if (first) { first = false; throw new Error('needs_table: wooden_pickaxe needs a crafting table'); }
+      return { crafted: 1, gained: { wooden_pickaxe: 1 }, ...p };
+    },
+    'world.findBlocks': { positions: [{ x: 3, y: 64, z: 3 }] },
+    goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 3, y: 64, z: 1 }, distance: 2 }
+  });
+  t.is((await table.run('craft-item', { outputItem: 'wooden_pickaxe' })).text, 'Successfully crafted wooden_pickaxe 1 time(s)');
+  t.like(table.request.lastCall.args[1], { item: 'wooden_pickaxe', x: 3, y: 64, z: 3 });
+
+  const none = setup({
+    craft: () => { throw new Error('needs_table: x'); },
+    'world.findBlocks': { positions: [] },
+    inventory: { items: [], selectedSlot: 0, held: null }
+  });
+  t.regex((await none.run('craft-item', { outputItem: 'wooden_pickaxe' })).text, /needs a crafting table and there is none within 16 blocks\. Craft a crafting_table/);
+});
+
+test('smelt-item opens the furnace, adds only the fuel needed, and collects the output', async (t) => {
+  let polls = 0;
+  const { run, request } = setup({
+    'world.block': { loaded: true, name: 'furnace' },
+    'furnace.open': { open: true, input: null, fuel: null, output: null, lit: false },
+    inventory: { items: [{ slot: 4, name: 'raw_iron', count: 5 }, { slot: 5, name: 'coal', count: 3 }], selectedSlot: 0, held: null },
+    'furnace.put': { open: true },
+    'furnace.status': () => {
+      polls++;
+      if (polls === 1) return { open: true, input: { name: 'raw_iron', count: 2 }, fuel: null, output: { name: 'iron_ingot', count: 3 }, lit: true };
+      if (polls === 2) return { open: true, input: null, fuel: null, output: { name: 'iron_ingot', count: 2 }, lit: false };
+      return { open: true, input: null, fuel: null, output: null, lit: false };
+    },
+    'furnace.take': () => ({ took: polls === 1 ? { name: 'iron_ingot', count: 3 } : { name: 'iron_ingot', count: 2 } }),
+    'container.close': { ok: true }
+  });
+  const r = await run('smelt-item', { x: 1, y: 64, z: 1, inputItem: 'raw_iron', inputCount: 5, fuelItem: 'coal' });
+  t.is(r.text, 'Smelted 5 iron_ingot');
+  const puts = request.getCalls().filter(c => c.args[0] === 'furnace.put').map(c => c.args[1]);
+  t.deepEqual(puts, [{ slot: 'fuel', name: 'coal', count: 1 }, { slot: 'input', name: 'raw_iron', count: 5 }]);
+  t.is(request.lastCall.args[0], 'container.close');
 });

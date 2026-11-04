@@ -35,6 +35,7 @@ public class ClaudeBridge implements ClientModInitializer {
         }
         server = new BridgeServer(port, token);
         Handlers.register(server);
+        Interact.register(server);
         configureBaritone();
         server.start();
     }
