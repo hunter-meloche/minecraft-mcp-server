@@ -85,3 +85,34 @@ test('dig-block reports what it picked up, and collect:false skips walking', asy
   bot.dig = sinon.stub().resolves();
   t.regex((await dig({ x: 1, y: 64, z: 0, collect: false })).content[0].text, /Dug stone at \(1, 64, 0\)[^.]*$/);
 });
+
+test('collectDrops stands in the drop cell and forbids placing a block there while walking', async (t) => {
+  const bot = fakeBot([{ id: 1, name: 'item', position: new Vec3(5.5, 63, 5.5), isValid: true }], []);
+  const exclusionAreasPlace: ((b: { position: Vec3 }) => number)[] = [];
+  let costDuringWalk = -1;
+  const walk = bot.pathfinder.goto;
+  Object.assign(bot.pathfinder, { movements: { exclusionAreasPlace } });
+  bot.pathfinder.goto = sinon.stub().callsFake(async (goal: unknown) => {
+    costDuringWalk = exclusionAreasPlace.reduce((c, rule) => c + rule({ position: new Vec3(5, 63, 5) }), 0);
+    return walk(goal);
+  });
+  await collectDrops(bot as unknown as mineflayer.Bot, new Vec3(5, 64, 5), { settleMs: 0, timeoutMs: 1000 });
+  const goal = (bot.pathfinder.goto as sinon.SinonStub).firstCall.args[0];
+  t.is(goal.constructor.name, 'GoalBlock');
+  t.like(goal, { x: 5, y: 63, z: 5 });
+  t.is(costDuringWalk, 100);
+  t.is(exclusionAreasPlace.length, 0);
+});
+
+test('collectDrops leaves a drop that has no complete, short path', async (t) => {
+  const bot = fakeBot([
+    { id: 1, name: 'item', position: new Vec3(5.5, 62, 5.5), isValid: true }, // fell down a shaft
+    { id: 2, name: 'item', position: new Vec3(6.5, 64, 5.5), isValid: true }
+  ], []);
+  const getPathTo = sinon.stub().callsFake((_m: unknown, goal: { y: number }) => (goal.y === 62 ? { status: 'partial', cost: 9 } : { status: 'success', cost: 3 }));
+  Object.assign(bot.pathfinder, { getPathTo, movements: { exclusionAreasPlace: [] } });
+  await collectDrops(bot as unknown as mineflayer.Bot, new Vec3(5, 64, 5), { settleMs: 0, timeoutMs: 3000 });
+  t.is(bot.pathfinder.goto.callCount, 1); // only the reachable one
+  t.like(bot.pathfinder.goto.firstCall.args[0], { x: 6, y: 64, z: 5 });
+  t.truthy(bot.entities[1]);
+});
