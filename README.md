@@ -119,13 +119,13 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `equip-item` - Equip a specific item
 
 ### Block Interaction
-- `place-block` - Place a block at specified coordinates
-- `dig-block` - Dig a block at specified coordinates
+- `place-block` - Place a block at specified coordinates; optional `item` picks what to place (equipped first). Builds over grass, leaf litter and other replaceable blocks, and pathfinding won't dig through blocks placed this way
+- `dig-block` - Dig a block at specified coordinates, equipping the best tool for it first
 - `get-block-info` - Get information about a block
 - `find-blocks` - Find one or more nearby blocks of a specific type
 
 ### Furnace
-- `smelt-item` - Smelt items using a furnace-like block
+- `smelt-item` - Smelt items using a furnace-like block; waits for and collects all the output (and collects what a furnace already holds when no input is given)
 
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type

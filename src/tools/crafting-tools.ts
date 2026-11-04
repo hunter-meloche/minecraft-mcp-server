@@ -3,6 +3,7 @@ import mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
+import { settleInventory } from '../inventory-sync.js';
 
 interface RecipeIngredient {
   name: string;
@@ -449,6 +450,8 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
             } else {
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
             }
+            // wait for the server before the next round, and recover anything left on the cursor
+            await settleInventory(bot);
             craftedCount++;
             craftedThisAttempt = true;
             log('info', `Crafted ${candidate.resultName}`);

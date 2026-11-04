@@ -2,6 +2,9 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
+import type { Block } from 'prismarine-block';
+import { bestHarvestTool } from './best-tool.js';
+import { installBuildProtection } from './build-protection.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.3';
 
@@ -76,6 +79,11 @@ export class BotConnection {
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
       bot.pathfinder.setMovements(defaultMove);
+      // pathfinder equips its bestHarvestTool before digging along a path; its version picks the first
+      // inventory item when nothing digs faster, which swapped e.g. an apple into the hand
+      bot.pathfinder.bestHarvestTool = (block: Block) => bestHarvestTool(bot, block);
+      // never dig through blocks the bot placed itself (it walked into a fresh hut through the wall)
+      installBuildProtection(bot, defaultMove as unknown as Parameters<typeof installBuildProtection>[1]);
 
       bot.chat('LLM-powered bot ready to receive instructions!');
       this.callbacks.onLog('info', `Bot connected successfully. Username: ${this.config.username}, Server: ${this.config.host}:${this.config.port}`);
