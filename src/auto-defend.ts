@@ -28,6 +28,7 @@ interface DefendState {
   notes: string[]; // since the last alert was taken
   shieldUp: boolean; // raised by the shield guard
   seenDamageEvents: boolean; // the server sends damage_event (1.19.4+): take hurts from there, with their cause
+  escaping: 'water' | 'lava' | null; // holding jump to get out of it
 }
 
 /** Damage type names by id, from the server's registry (sent while logging in). */
@@ -45,7 +46,7 @@ const states = new WeakMap<mineflayer.Bot, DefendState>();
 function stateOf(bot: mineflayer.Bot): DefendState {
   let s = states.get(bot);
   if (!s) {
-    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false, seenDamageEvents: false };
+    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false, seenDamageEvents: false, escaping: null };
     states.set(bot, s);
   }
   return s;
@@ -152,6 +153,38 @@ export async function shieldTick(bot: mineflayer.Bot, now = Date.now()): Promise
   }
 }
 
+/** Air at or below this (of 20) with the head under water: swim up. */
+const LOW_AIR = 12;
+
+/**
+ * Environmental hazards: under water and running out of air, swim up (hold jump); standing in lava, jump to get
+ * out of it. The bot drowned standing in a flooded crater at night while nothing else was going on.
+ * Exported for tests; installAutoDefend runs it before the other reflexes.
+ */
+export function hazardTick(bot: mineflayer.Bot): 'water' | 'lava' | null {
+  const s = stateOf(bot);
+  if (!s.enabled || !bot.entity || typeof bot.setControlState !== 'function') return null;
+  if (bot.game?.gameMode === 'creative' || bot.game?.gameMode === 'spectator') return null;
+  const p = bot.entity.position;
+  const isWater = (name?: string) => name === 'water' || name === 'bubble_column';
+  const head = bot.blockAt(p.offset(0, 1.62, 0));
+  const feet = bot.blockAt(p);
+  const air = (bot as unknown as { oxygenLevel?: number }).oxygenLevel ?? 20;
+  let hazard: 'water' | 'lava' | null = null;
+  if (feet?.name === 'lava' || head?.name === 'lava') hazard = 'lava';
+  else if (isWater(head?.name) && air <= LOW_AIR) hazard = 'water';
+  else if (s.escaping === 'water' && isWater(head?.name) && air < 20) hazard = 'water'; // keep going till we breathe
+
+  if (hazard && s.escaping !== hazard) {
+    bot.setControlState('jump', true);
+    s.notes.push(hazard === 'water' ? `out of air under water (${air}/20): swimming up` : 'in lava: jumping out');
+  } else if (!hazard && s.escaping) {
+    bot.setControlState('jump', false);
+  }
+  s.escaping = hazard;
+  return hazard;
+}
+
 /**
  * Low health and still taking damage, while no fight of ours is running (e.g. shot while idle or walking): wall in
  * and eat. Exported for tests; installAutoDefend runs it with the reflex.
@@ -215,6 +248,7 @@ export function installAutoDefend(bot: mineflayer.Bot, onError?: (err: unknown) 
   });
   let ticks = 0;
   const timer = setInterval(() => {
+    try { hazardTick(bot); } catch (err) { onError?.(err); }
     if (++ticks % 20 === 0) { gearTick(bot).catch(err => onError?.(err)); return; }
     emergencyTick(bot)
       .then(sheltered => (sheltered ? null : shieldTick(bot)))

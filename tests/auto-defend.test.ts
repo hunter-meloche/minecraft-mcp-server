@@ -1,7 +1,8 @@
 import test from 'ava';
+import { Vec3 } from 'vec3';
 import sinon from 'sinon';
 import { EventEmitter } from 'events';
-import { defendTick, gearTick, installAutoDefend, noteHurt, reflexTarget, rememberRegistry, setAutoDefend, shieldTick, takeAlerts } from '../src/auto-defend.js';
+import { defendTick, gearTick, hazardTick, installAutoDefend, noteHurt, reflexTarget, rememberRegistry, setAutoDefend, shieldTick, takeAlerts } from '../src/auto-defend.js';
 import { fighting } from '../src/combat.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -134,4 +135,33 @@ test('hurts are named by damage type from the registry: lava, fall, arrows from 
   client.emit('damage_event', { entityId: 77, sourceTypeId: 2, sourceCauseId: 0 }); // someone else
   bot.emit('end');
   t.regex(takeAlerts(asBot) ?? '', /^Took damage 3x \(lava x1, fall x1, arrow from skeleton x1\); health 12\/20/);
+});
+
+test('hazardTick swims up when out of air under water, and lets go once breathing again', (t) => {
+  const { bot, asBot } = arena({});
+  const controls: Record<string, boolean> = {};
+  let headIn = 'water';
+  Object.assign(bot, {
+    setControlState: (c: string, on: boolean) => { controls[c] = on; },
+    blockAt: (p: Vec3) => ({ name: p.y > 65 ? headIn : 'air', position: p.floored() }),
+    oxygenLevel: 15
+  });
+  t.is(hazardTick(asBot), null); // plenty of air: leave it to whatever the bot is doing
+  Object.assign(bot, { oxygenLevel: 8 });
+  t.is(hazardTick(asBot), 'water');
+  t.true(controls.jump);
+  Object.assign(bot, { oxygenLevel: 14 });
+  t.is(hazardTick(asBot), 'water'); // still under: keep swimming
+  headIn = 'air';
+  t.is(hazardTick(asBot), null);
+  t.false(controls.jump);
+  t.regex(takeAlerts(asBot) ?? '', /out of air under water \(8\/20\): swimming up/);
+});
+
+test('hazardTick jumps out of lava', (t) => {
+  const { bot, asBot } = arena({});
+  const controls: Record<string, boolean> = {};
+  Object.assign(bot, { setControlState: (c: string, on: boolean) => { controls[c] = on; }, blockAt: (p: Vec3) => ({ name: 'lava', position: p.floored() }) });
+  t.is(hazardTick(asBot), 'lava');
+  t.true(controls.jump);
 });

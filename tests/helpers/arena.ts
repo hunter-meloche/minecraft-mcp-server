@@ -77,7 +77,7 @@ export function arena(opts: {
       if (opts.misses?.(swing)) return;
       bot.emit('entityHurt', target, bot.entity);
       target.hp -= opts.damage ?? 20;
-      if (target.hp <= 0) { target.isValid = false; delete entities[target.id]; }
+      if (target.hp <= 0) { bot.emit('entityDead', target); target.isValid = false; delete entities[target.id]; }
     }),
     activateItem: sinon.spy((_offHand?: boolean) => { bot.usingHeldItem = true; }),
     deactivateItem: sinon.spy(() => { bot.usingHeldItem = false; }),

@@ -137,3 +137,14 @@ test("fight gives up on a target it can't get closer to, and moves on to the nex
   t.deepEqual(r.unreachable, ['zombie']);
   t.true(r.kills.includes('spider'));
 });
+
+test('a creeper that explodes is not a kill, and the shield goes up toward it after each hit', async (t) => {
+  const creeper = mob('creeper', 2);
+  const { bot, asBot, entities } = arena({ mobs: [creeper], items: [item('stone_sword'), item('shield')], damage: 5 });
+  // after the first hit it blows up: gone, no death event
+  bot.attack = ((target: { id: number }) => { bot.emit('entityHurt', target, bot.entity); setTimeout(() => { delete entities[target.id]; creeper.isValid = false; }, 50); }) as unknown as typeof bot.attack;
+  const r = await fight(asBot, 'creeper');
+  t.deepEqual(r.kills, []);
+  t.deepEqual(r.vanished, ['creeper (exploded)']);
+  t.true(bot.activateItem.calledWith(true));
+});

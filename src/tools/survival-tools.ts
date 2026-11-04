@@ -38,7 +38,8 @@ export function registerSurvivalTools(factory: ToolFactory, getBot: () => minefl
         : 'no swings';
       const lines: string[] = [];
       if (r.wore.length) lines.push(`Put on ${r.wore.join(', ')}.`);
-      const killed = r.kills.length ? `Killed ${r.kills.join(', ')}` : '';
+      const killed = [r.kills.length ? `Killed ${r.kills.join(', ')}` : '', r.vanished.length ? `Gone without dying: ${r.vanished.join(', ')}` : '']
+        .filter(Boolean).join('. ');
       switch (r.outcome) {
         case 'done': lines.push(`${killed} with ${swings} in ${r.seconds.toFixed(1)}s.` + (r.unreachable.length ? ` Couldn't get to ${r.unreachable.join(', ')}.` : '')); break;
         case 'low_health': lines.push(`${killed ? killed + '. ' : ''}Stopped fighting ${r.target} after ${swings}: health is low.` + (r.retreat ? ` Then ${r.retreat}.` : '')); break;

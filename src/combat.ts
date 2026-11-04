@@ -157,6 +157,8 @@ export interface FightResult {
   kills: string[];
   /** targets given up on because the bot couldn't get to them */
   unreachable: string[];
+  /** targets that vanished without dying: a creeper that exploded, a mob that despawned */
+  vanished: string[];
   target?: string;
   hits: number;
   landed: number;
@@ -171,7 +173,7 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
   const { maxDistance = 16, timeoutMs = 30000, minHealth = 6, retreat = true } = opts;
   const multiple = opts.multiple ?? query.toLowerCase() === 'hostile';
   const { stuckMs = 12000 } = opts;
-  const result: FightResult = { outcome: 'none', kills: [], unreachable: [], hits: 0, landed: 0, swungWith: new Map(), seconds: 0, wore: [], threats: [] };
+  const result: FightResult = { outcome: 'none', kills: [], unreachable: [], vanished: [], hits: 0, landed: 0, swungWith: new Map(), seconds: 0, wore: [], threats: [] };
   const skip = new Set<number>();
   const pick = () => bot.nearestEntity(e => e !== bot.entity && !skip.has(e.id) && matchesTarget(e, query) && e.position.distanceTo(bot.entity.position) <= maxDistance);
 
@@ -187,6 +189,10 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
     if (e && victim && e.id === victim.id && source?.id === bot.entity.id) result.landed++;
   };
   bot.on('entityHurt', onHurt);
+  // a target that disappears without a death event exploded (creeper) or despawned: not a kill
+  const died = new Set<number>();
+  const onDead = (e: Entity | undefined) => { if (e) died.add(e.id); };
+  bot.on('entityDead', onDead);
   let dropsAt: Vec3 | null = null;
 
   // Chasing: pathfinder's GoalFollow re-plans whenever the target moves 2 blocks, which for a target 40 blocks away
@@ -217,7 +223,8 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
 
     while (Date.now() - startedAt < timeoutMs) {
       if (!alive(bot, victim)) {
-        result.kills.push(describe(victim));
+        if (died.has(victim.id)) result.kills.push(describe(victim));
+        else result.vanished.push(describe(victim) === 'creeper' ? 'creeper (exploded)' : `${describe(victim)} (despawned)`);
         dropsAt = victim.position.floored();
         // only take on the next one while still in decent shape
         const next = multiple && bot.health >= Math.max(12, minHealth + 6) ? pick() : null;
@@ -263,9 +270,15 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
       closestAt = Date.now(); // in reach and swinging is progress
 
       if (victim.name === 'creeper') {
-        // knock it back and step out of its blast radius before it can finish swelling
-        bot.pathfinder.setGoal(new goals.GoalInvert(new goals.GoalFollow(victim, 6)), true);
-        await sleep(cooldownMs);
+        // Its fuse keeps burning while we're within 7 blocks: knock it back, get out to 8, and face it with the
+        // shield up (a raised shield blocks the whole blast) until the next swing.
+        bot.pathfinder.setGoal(new goals.GoalInvert(new goals.GoalFollow(victim, 8)), true);
+        if (hasShield) {
+          await bot.lookAt(victim.position.offset(0, 1, 0), true);
+          bot.activateItem(true);
+          shieldUp = true;
+        }
+        await sleep(Math.max(cooldownMs, 1200));
         chaseMode = null;
         chase(victim);
       } else if (hasShield && (RANGED.has(victim.name ?? '') || hostilesNear(bot, 4).some(e => e.name === 'creeper'))) {
@@ -280,6 +293,7 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
     lowerShield();
     bot.pathfinder.setGoal(null);
     bot.removeListener('entityHurt', onHurt);
+    bot.removeListener('entityDead', onDead);
     fighting.delete(bot);
   }
 
