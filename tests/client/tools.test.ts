@@ -356,3 +356,20 @@ test('blocks the bot built are remembered per world, and mine-blocks digs around
   t.deepEqual(miner.request.getCalls().find(c => c.args[0] === 'protect.set')?.args[1], { positions: [[0, 65, 0]] });
   t.regex(r.text, /^Mined 1 oak_log one by one in [\d.]+s, leaving 1 that belong to your builds: oak_log x1\.$/);
 });
+
+test('build-structure leaves blocks the bot placed in cells the spec clears (a rebuild cleared the cabin door)', async (t) => {
+  const saved: Record<string, string[]> = { 'seed:-42': ['overworld:1,64,0'] }; // the door the bot hung
+  const store: ProtectionStore = { load: w => saved[w] ?? [], save: (w, keys) => { saved[w] = keys; } };
+  const spec = { palette: { L: 'oak_log[axis=y]' }, layers: [['L.L']] };
+  const { run, gameDir } = setup({
+    status: { ...STATUS, hashedSeed: '-42' },
+    inventory: { items: [{ slot: 1, name: 'oak_log', count: 2 }], selectedSlot: 0, held: null },
+    // before: only the door; after: the logs too
+    'world.region': (() => { let n = 0; return () => ({ blocks: n++ === 0 ? ['air', 'oak_door[half=lower]', 'air'] : ['oak_log[axis=y]', 'oak_door[half=lower]', 'oak_log[axis=y]'] }); })(),
+    build: { reason: 'done', seconds: 3, baritone: [], used: { oak_log: 2 } }
+  }, store);
+  t.false((await run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'wall' })).isError);
+  const parsed = nbt.simplify((await nbt.parse(zlib.gunzipSync(fs.readFileSync(path.join(gameDir, 'schematics', 'wall.schem'))))).parsed) as { Palette: Record<string, number>; BlockData: number[] };
+  const byIndex = Object.fromEntries(Object.entries(parsed.Palette).map(([k, v]) => [v, k]));
+  t.deepEqual(parsed.BlockData.map(b => byIndex[b]), ['minecraft:oak_log[axis=y]', 'minecraft:structure_void', 'minecraft:oak_log[axis=y]']);
+});

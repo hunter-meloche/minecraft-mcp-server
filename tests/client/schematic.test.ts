@@ -1,7 +1,7 @@
 import test from 'ava';
 import zlib from 'zlib';
 import nbt from 'prismarine-nbt';
-import { checkBuild, layoutSpec, placerFacing, splitDirectional, varints, writeSchematic } from '../../src/client/schematic.js';
+import { checkBuild, keepExisting, layoutSpec, missingCells, placerFacing, splitDirectional, varints, writeSchematic } from '../../src/client/schematic.js';
 
 test('layoutSpec: dimensions, palette, Sponge index order, and material counts', (t) => {
   const s = layoutSpec({ palette: { L: 'acacia_log[axis=y]', P: 'acacia_planks' }, layers: [['LP', 'P.L'], ['L']] });
@@ -65,4 +65,20 @@ test('a door or bed needs one item for its two cells', (t) => {
   const door = layoutSpec({ palette: { D: 'oak_door[facing=north,half=lower]', d: 'oak_door[facing=north,half=upper]' }, layers: [['D'], ['d']] });
   t.deepEqual(door.counts, { oak_door: 1 });
   t.deepEqual(checkBuild(door, ['air', 'air']).missing, { oak_door: 1 });
+});
+
+test("' ' leaves a cell as it is: no material, never missing", (t) => {
+  const s = layoutSpec({ palette: { L: 'oak_log' }, layers: [['L L']] });
+  t.deepEqual(s.counts, { oak_log: 2 });
+  t.is(s.blocks[1], s.palette['minecraft:structure_void']);
+  t.deepEqual(checkBuild(s, ['oak_log', 'oak_door[half=lower]', 'oak_log']), { placed: 2, total: 2, missing: {}, misplaced: {} });
+  t.deepEqual(missingCells(s, ['oak_log', 'air', 'air']).map(c => c.x), [2]);
+});
+
+test('keepExisting turns the picked air cells into leave-as-is cells', (t) => {
+  const s = layoutSpec({ palette: { L: 'oak_log' }, layers: [['L..']] });
+  const kept = keepExisting(s, i => i === 1);
+  t.deepEqual(kept.blocks, [1, 2, 0]);
+  t.is(kept.palette['minecraft:structure_void'], 2);
+  t.is(keepExisting(s, () => false), s);
 });

@@ -33,6 +33,9 @@ function blockState(name: string): string {
 }
 
 /** Check and lay out a spec: dimensions, palette ids, block indices (x + z*W + y*W*L), and block counts. */
+/** A cell to leave as it is: Baritone's skip list holds structure_void, and the checks ignore it. */
+export const LEAVE = 'minecraft:structure_void';
+
 /** The half of a two-block block (door top, bed head) that appears when the other half is placed. */
 export const secondHalf = (state: string): boolean => /_door\[.*half=upper/.test(state) || /_bed\[.*part=head/.test(state);
 
@@ -48,7 +51,12 @@ export function layoutSpec(spec: StructureSpec): Schematic {
   const counts: Record<string, number> = {};
   const blocks = new Array<number>(width * height * length).fill(0);
   spec.layers.forEach((layer, y) => layer.forEach((row, z) => [...row].forEach((ch, x) => {
-    if (ch === '.' || ch === ' ') return;
+    if (ch === '.') return;
+    if (ch === ' ') { // leave whatever is there (Baritone skips structure_void)
+      if (!(LEAVE in palette)) palette[LEAVE] = Object.keys(palette).length;
+      blocks[x + z * width + y * width * length] = palette[LEAVE];
+      return;
+    }
     const name = spec.palette[ch];
     if (!name) throw new Error(`layer ${y} row ${z} column ${x}: "${ch}" is not in the palette`);
     const state = blockState(name);
@@ -120,6 +128,7 @@ export function missingCells(layout: Schematic, world: (string | null)[]): Cell[
   layout.blocks.forEach((p, i) => {
     if (p === 0) return;
     const want = byIndex.get(p)!;
+    if (want.state === LEAVE) return;
     const got = world[i] ? parseState(world[i]!) : null;
     if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) return;
     const x = i % layout.width, z = Math.floor(i / layout.width) % layout.length, y = Math.floor(i / (layout.width * layout.length));
@@ -140,7 +149,7 @@ export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCh
   const misplaced: Record<string, number> = {};
   let placed = 0, total = 0;
   layout.blocks.forEach((p, i) => {
-    if (p === 0) return;
+    if (p === 0 || byState.get(p) === LEAVE) return;
     total++;
     const want = byIndex.get(p)!;
     const got = world[i] ? parseState(world[i]!) : null;
@@ -195,4 +204,12 @@ const OPPOSITE: Record<string, string> = { north: 'south', south: 'north', east:
  */
 export function placerFacing(id: string, facing: string): string {
   return /stairs|_door$|fence_gate|_bed$/.test(id) ? facing : (OPPOSITE[facing] ?? facing);
+}
+
+/** Turn the air cells `keep` picks into leave-as-is cells (blocks the bot placed there itself: a door, furniture). */
+export function keepExisting(layout: Schematic, keep: (index: number) => boolean): Schematic {
+  if (!layout.blocks.some((b, i) => b === 0 && keep(i))) return layout;
+  const palette = { ...layout.palette };
+  if (!(LEAVE in palette)) palette[LEAVE] = Object.keys(palette).length;
+  return { ...layout, palette, blocks: layout.blocks.map((b, i) => b === 0 && keep(i) ? palette[LEAVE] : b) };
 }

@@ -9,7 +9,7 @@ import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
 import { ClientProtection } from './protection.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
-import { checkBuild, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
+import { checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -236,12 +236,20 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       `${gained || 'nothing gained'}.`);
   };
 
-  /** World positions of the structure's (non-air) cells that hold a block now. */
+  /** The world position of a structure cell (schematic index order: x, then z, then y). */
+  const cellPos = (origin: Pos, layout: Schematic, i: number): Pos => ({
+    x: origin.x + i % layout.width,
+    y: origin.y + Math.floor(i / (layout.width * layout.length)),
+    z: origin.z + Math.floor(i / layout.width) % layout.length
+  });
+
+  /** World positions of the structure's block cells (not air, not leave-as-is) that hold a block now. */
   const standing = (origin: Pos, layout: Schematic, world: (string | null)[]): Pos[] => {
+    const leave = layout.palette[LEAVE];
     const out: Pos[] = [];
     layout.blocks.forEach((b, i) => {
-      if (b === 0 || !world[i] || /^(minecraft:)?(air|cave_air|void_air)$/.test(world[i]!)) return;
-      out.push({ x: origin.x + i % layout.width, y: origin.y + Math.floor(i / (layout.width * layout.length)), z: origin.z + Math.floor(i / layout.width) % layout.length });
+      if (b === 0 || b === leave || !world[i] || /^(minecraft:)?(air|cave_air|void_air)$/.test(world[i]!)) return;
+      out.push(cellPos(origin, layout, i));
     });
     return out;
   };
@@ -530,7 +538,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   factory.registerTool(
     'build-structure',
-    "Build a structure block by block with Baritone (it places blocks from the inventory, clears what's in the way, and scaffolds as needed). Describe it as `spec`: a palette of single characters to blocks and `layers` from the bottom up, each a list of rows along +z whose characters run along +x; '.' is air (cleared). Example: {palette:{L:'oak_log[axis=y]',P:'oak_planks'}, layers:[['LPL','P.P','LPL']]}. Or give `file`, a .schem/.litematic path. The structure's minimum corner goes at x,y,z. Checks the inventory has the blocks first (survival).",
+    "Build a structure block by block with Baritone (it places blocks from the inventory, clears what's in the way, and scaffolds as needed). Describe it as `spec`: a palette of single characters to blocks and `layers` from the bottom up, each a list of rows along +z whose characters run along +x; '.' is air (cleared, except blocks the bot placed there itself, like a door or furniture), ' ' leaves the cell as it is. Example: {palette:{L:'oak_log[axis=y]',P:'oak_planks'}, layers:[['LPL','P.P','LPL']]}. Or give `file`, a .schem/.litematic path. The structure's minimum corner goes at x,y,z. Checks the inventory has the blocks first (survival).",
     {
       x: z.coerce.number().describe('X of the minimum corner'),
       y: z.coerce.number().describe('Y of the bottom layer'),
@@ -552,11 +560,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (spec) {
         layout = layoutSpec(spec);
         const s = await status();
+        const dim = s.dimension ?? 'overworld';
+        const now = await region(origin, layout);
+        const box = layout;
         if (s.gameMode !== 'creative') {
           // only what is not standing yet: a second run continues a build
-          const now = await region(origin, layout);
           const before = checkBuild(layout, now);
-          protection.add(await dimension(), standing(origin, layout, now)); // what stands of it is the bot's, even if it stops here
+          protection.add(dim, standing(origin, layout, now)); // what stands of it is the bot's, even if it stops here
           if (!before.total || before.placed === before.total) {
             return factory.createResponse(`${name} is already built at ${fmt(origin)}: all ${before.total} blocks in place.`);
           }
@@ -569,7 +579,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const dir = path.join(options.gameDir, 'schematics');
         fs.mkdirSync(dir, { recursive: true });
         schematicFile = path.join(dir, `${name}.schem`);
-        fs.writeFileSync(schematicFile, writeSchematic(splitDirectional(layout).baritone));
+        // '.' clears a cell, but not of what the bot placed there itself: a rebuild of the cabin cleared its door and furniture
+        const kept = keepExisting(layout, i => !!now[i] && !/^(minecraft:)?(air|cave_air|void_air)$/.test(now[i]!) &&
+          protection.has(dim, cellPos(origin, box, i)));
+        fs.writeFileSync(schematicFile, writeSchematic(splitDirectional(kept).baritone));
       } else if (file) {
         schematicFile = path.resolve(file);
       } else {
