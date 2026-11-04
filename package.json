@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "start": "node dist/main.js",
+    "postinstall": "node scripts/patch-pathfinder.cjs",
     "test": "ava",
     "lint": "eslint \"{src,tests}/**/*.ts\"",
     "lint:fix": "eslint \"{src,tests}/**/*.ts\" --fix"

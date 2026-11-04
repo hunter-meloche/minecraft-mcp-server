@@ -1,6 +1,7 @@
 import type mineflayer from 'mineflayer';
 import type { Entity } from 'prismarine-entity';
-import { bestWeapon, describe, eatSomething, equipBestArmor, fighting, FIST_COOLDOWN_MS, hostilesNear, matchesTarget } from './combat.js';
+import type { Vec3 } from 'vec3';
+import { bestWeapon, canSee, describe, eatSomething, equipBestArmor, fighting, FIST_COOLDOWN_MS, hostilesNear, matchesTarget } from './combat.js';
 import { countCover, describeShelter, wallIn } from './bunker.js';
 
 /**
@@ -29,7 +30,10 @@ interface DefendState {
   shieldUp: boolean; // raised by the shield guard
   seenDamageEvents: boolean; // the server sends damage_event (1.19.4+): take hurts from there, with their cause
   escaping: 'water' | 'lava' | null; // holding jump to get out of it
+  deaths: DeathRecord[]; // since the last alert was taken
 }
+
+interface DeathRecord { at: Vec3 | null; message: string | null; respawnedAt: Vec3 | null; when: number; event: boolean }
 
 /** Damage type names by id, from the server's registry (sent while logging in). */
 const damageTypes = new WeakMap<mineflayer.Bot, string[]>();
@@ -46,7 +50,7 @@ const states = new WeakMap<mineflayer.Bot, DefendState>();
 function stateOf(bot: mineflayer.Bot): DefendState {
   let s = states.get(bot);
   if (!s) {
-    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false, seenDamageEvents: false, escaping: null };
+    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false, seenDamageEvents: false, escaping: null, deaths: [] };
     states.set(bot, s);
   }
   return s;
@@ -78,6 +82,7 @@ export function reflexTarget(bot: mineflayer.Bot, now = Date.now()): Entity | nu
   const inReach = Object.values(bot.entities)
     .filter(e => e !== bot.entity && e.isValid !== false && e.position.distanceTo(me) <= REACH)
     .filter(e => matchesTarget(e, 'hostile') || (recentAttacker(e) && e.type !== 'player'))
+    .filter(e => canSee(bot, e)) // not through walls
     .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me));
   return inReach[0] ?? null;
 }
@@ -233,8 +238,55 @@ export async function gearTick(bot: mineflayer.Bot): Promise<string[]> {
   }
 }
 
+/**
+ * Deaths have to be reported: three of them showed up in tool replies only as "Health 20/20" after the respawn.
+ * Record where the bot died and the server's death message, and where it came back. Exported for tests.
+ */
+export function noteDeath(bot: mineflayer.Bot): void {
+  const s = stateOf(bot);
+  // the death message can arrive before the death event (seen live): same death, one record
+  const last = s.deaths.at(-1);
+  if (last && !last.event && !last.respawnedAt && Date.now() - last.when < 10000) {
+    last.event = true;
+    last.at ??= bot.entity?.position?.floored() ?? null;
+  } else {
+    s.deaths.push({ at: bot.entity?.position?.floored() ?? null, message: null, respawnedAt: null, when: Date.now(), event: true });
+  }
+  // whatever the reflexes were holding no longer applies
+  s.shieldUp = false;
+  s.escaping = null;
+  s.shelteredAt = null;
+  s.attackers.clear();
+}
+
+/** A chat message that is this bot's death message ("ClaudeBot was shot by Skeleton"). */
+export function noteDeathMessage(bot: mineflayer.Bot, message: { translate?: string; toString(): string }): void {
+  const text = message.toString();
+  if (!message.translate?.startsWith('death.') || !text.includes(bot.username)) return;
+  const s = stateOf(bot);
+  const last = s.deaths.at(-1);
+  if (last && !last.message && Date.now() - last.when < 10000) last.message = text;
+  else s.deaths.push({ at: bot.entity?.position?.floored() ?? null, message: text, respawnedAt: null, when: Date.now(), event: false });
+}
+
+export function noteRespawn(bot: mineflayer.Bot): void {
+  const last = stateOf(bot).deaths.at(-1);
+  if (last && !last.respawnedAt) last.respawnedAt = bot.entity?.position?.floored() ?? null;
+}
+
+const where = (v: Vec3 | null) => (v ? `(${v.x}, ${v.y}, ${v.z})` : 'an unknown spot');
+
+function describeDeath(d: DeathRecord): string {
+  return `DIED: ${d.message ?? 'cause unknown'} at ${where(d.at)}.` +
+    (d.respawnedAt ? ` Respawned at ${where(d.respawnedAt)}.` : '') +
+    ` Everything carried was dropped at the death spot; it despawns after 5 minutes (explosions destroy it sooner)`;
+}
+
 export function installAutoDefend(bot: mineflayer.Bot, onError?: (err: unknown) => void): void {
   stateOf(bot);
+  bot.on('death', () => noteDeath(bot));
+  bot.on('message', (message) => noteDeathMessage(bot, message as unknown as { translate?: string; toString(): string }));
+  bot.on('spawn', () => noteRespawn(bot));
   // 1.19.4+: damage_event says what kind of damage it was; before that only entity_status (no cause, no source)
   bot._client?.on('damage_event', (p: { entityId: number; sourceTypeId: number; sourceCauseId: number }) => {
     const s = stateOf(bot);
@@ -264,8 +316,8 @@ export function installAutoDefend(bot: mineflayer.Bot, onError?: (err: unknown) 
  */
 export function takeAlerts(bot: mineflayer.Bot): string | null {
   const s = states.get(bot);
-  if (!s || (s.hurts.length === 0 && s.hitsByReflex.size === 0 && s.notes.length === 0)) return null;
-  const parts: string[] = [...s.notes];
+  if (!s || (s.hurts.length === 0 && s.hitsByReflex.size === 0 && s.notes.length === 0 && s.deaths.length === 0)) return null;
+  const parts: string[] = [...s.deaths.map(describeDeath), ...s.notes];
   if (s.hurts.length) {
     const by = new Map<string, number>();
     for (const h of s.hurts) by.set(h.by, (by.get(h.by) ?? 0) + 1);
@@ -279,5 +331,6 @@ export function takeAlerts(bot: mineflayer.Bot): string | null {
   s.hurts = [];
   s.hitsByReflex = new Map();
   s.notes = [];
+  s.deaths = [];
   return parts.join('; ');
 }
