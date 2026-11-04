@@ -54,7 +54,8 @@ async function setup() {
 
 /** Fresh start for the bot: arena centre, healed, fed, empty-handed, no mobs, given `items`. */
 async function reset(items = [], time = 18000) {
-  await gm('kill @e[type=!player]');
+  // only the arena: a bare kill @e also wipes every animal in the loaded world (it did, around spawn)
+  await gm(`execute positioned ${ax} ${ay + 1} ${az} run kill @e[type=!player,distance=..20]`);
   await gm(`fill ${ax - 11} ${ay + 1} ${az - 11} ${ax + 11} ${ay + 3} ${az + 11} air`); // clear leftovers (old shelters)
   await gm(`clear ${BOTNAME}`);
   await gm(`effect clear ${BOTNAME}`);
