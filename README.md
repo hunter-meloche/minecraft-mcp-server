@@ -121,7 +121,7 @@ Run with `--backend client` (plus the usual `--host/--port/--username`). The ser
 window opens; first start takes about a minute) in its own folder, `~/.minecraft-mcp-server/client` (`--client-dir`).
 Offline accounts only for now: like mineflayer's offline mode, this works on servers that accept offline players.
 
-It offers the same tools (combat, wall-in and auto-defend still answer "not available on the client backend yet"; fly-to is not supported) plus:
+It offers the same tools (all except fly-to; combat and the auto-defend reflexes run inside the game client, on the game tick) plus:
 - `mine-blocks` - Gather blocks with Baritone until the inventory holds `count` of the item
 - `build-structure` - Build a structure from a text spec (palette + layers) or a .schem/.litematic file with Baritone
 - `stop` - Stop walking, mining or building

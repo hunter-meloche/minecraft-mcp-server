@@ -52,13 +52,14 @@ test('the client backend offers every mineflayer tool with the same schema, plus
 test('read tools answer in the mineflayer wording', async (t) => {
   const { run } = setup({
     status: STATUS,
+    'guardian.status': { enabled: true, armor: ['iron_boots', 'shield'] },
     inventory: { items: [{ slot: 0, name: 'stone_pickaxe', count: 1 }, { slot: 12, name: 'oak_log', count: 5 }, { slot: 40, name: 'shield', count: 1 }], selectedSlot: 0, held: null },
     'world.findBlocks': { positions: [{ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 }] },
     'world.block': { loaded: true, name: 'oak_log', properties: { axis: 'y' } },
     'world.entities': { entities: [{ id: 1, name: 'cow', category: 'creature', position: { x: 1.5, y: 64, z: 2.5 }, distance: 3 }, { id: 2, name: 'zombie', category: 'monster', position: { x: -4.2, y: 64, z: 0 }, distance: 6 }] }
   });
   t.is((await run('get-position')).text, 'Current position: (10, 64, -4)');
-  t.regex((await run('get-status')).text, /^Health 18\/20, food 17\/20, saturation 2.5\nTime of day 11800 \(day; night in 1.0 min\)\nDimension overworld, game mode survival, difficulty easy\nBackend: game client with Baritone \(idle\)$/);
+  t.regex((await run('get-status')).text, /^Health 18\/20, food 17\/20, saturation 2.5\nTime of day 11800 \(day; night in 1.0 min\)\nDimension overworld, game mode survival, difficulty easy\nArmor: iron_boots, shield; auto-defend on\nBackend: game client with Baritone \(idle\)$/);
   t.is((await run('list-inventory')).text, 'Found 3 items in inventory:\n\n- stone_pickaxe (x1) in slot 36\n- oak_log (x5) in slot 12\n- shield (x1) in slot 45\n');
   t.is((await run('find-item', { nameOrType: 'log' })).text, 'Found 5 oak_log in inventory (slot 12)');
   t.is((await run('find-blocks', { blockType: 'oak_log', count: 5 })).text, 'Found 2 oak_log block(s) within 16 blocks:\n1. (1, 2, 3)\n2. (4, 5, 6)');
@@ -110,11 +111,40 @@ test('build-structure checks materials, writes the schematic, and builds it', as
   t.like(parsed, { Width: 3, Height: 2, Length: 1 });
 });
 
-test('tools the client backend does not have yet say so', async (t) => {
+test('fly-to says it is not supported on the client backend', async (t) => {
   const { run } = setup({});
-  const r = await run('attack-entity', { target: 'zombie' });
+  const r = await run('fly-to', { x: 0, y: 100, z: 0 });
   t.true(r.isError);
-  t.regex(r.text, /not available on the client backend yet/);
+  t.regex(r.text, /not supported on the client backend/);
+});
+
+test('attack-entity reports kills, landed hits, gear and threats like the mineflayer backend', async (t) => {
+  const { run } = setup({
+    status: { ...STATUS, health: 15, food: 17 },
+    fight: { outcome: 'done', kills: ['zombie', 'skeleton'], vanished: ['creeper (exploded)'], unreachable: [], hits: 7, landed: 6,
+      swungWith: { iron_sword: 7 }, seconds: 12.5, wore: ['iron_helmet'], target: 'skeleton', dropsAt: { x: 1, y: 64, z: 1 }, threats: 'spider 9 blocks away', health: 15 }
+  });
+  t.is((await run('attack-entity', { target: 'hostile' })).text,
+    'Put on iron_helmet. Killed zombie, skeleton. Gone without dying: creeper (exploded) with 7 swing(s), 6 landed (iron_sword x7) in 12.5s. Health 15/20, food 17/20. Hostiles nearby: spider 9 blocks away.');
+  const low = setup({
+    status: { ...STATUS, health: 6 },
+    fight: { outcome: 'low_health', kills: [], vanished: [], unreachable: [], hits: 2, landed: 2, swungWith: { stone_sword: 2 }, seconds: 5,
+      wore: [], target: 'zombie', dropsAt: { x: 0, y: 64, z: 0 }, retreat: 'walled in at (0, 64, 0) (10 block(s) placed), ate bread', threats: 'zombie 2 blocks away', health: 6 }
+  });
+  t.regex((await low.run('attack-entity', { target: 'zombie' })).text,
+    /^Stopped fighting zombie after 2 swing\(s\), 2 landed \(stone_sword x2\): health is low\. Then walled in at \(0, 64, 0\) \(10 block\(s\) placed\), ate bread\. Health 6\/20.*Wall yourself in/);
+  const none = setup({ fight: { outcome: 'none' } });
+  t.is((await none.run('attack-entity', { target: 'zombie' })).text, 'No zombie within 16 blocks');
+});
+
+test('wall-in and set-auto-defend', async (t) => {
+  const { run } = setup({ wallin: { at: { x: 1, y: 64, z: 2 }, placed: 9, alreadySolid: 1, gaps: [] }, 'guardian.set': { enabled: false } });
+  t.is((await run('wall-in')).text, "Walled in at (1, 64, 2) (9 block(s) placed). Dig out with dig-block when it's safe.");
+  t.is((await run('set-auto-defend', { enabled: false })).text, 'Auto-defend off');
+  const gaps = setup({ wallin: { at: { x: 1, y: 64, z: 2 }, placed: 7, alreadySolid: 0, gaps: [{ x: 2, y: 64, z: 2 }] } });
+  t.is((await gaps.run('wall-in')).text, 'Walled in at (1, 64, 2) with 1 gap(s) left at (2, 64, 2) (7 placed).');
+  const none = setup({ wallin: { error: 'no blocks to wall in with' } });
+  t.regex((await none.run('wall-in')).text, /^No blocks to wall in with/);
 });
 
 test('slot and entity helpers', (t) => {

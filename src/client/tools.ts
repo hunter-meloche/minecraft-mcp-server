@@ -29,6 +29,12 @@ interface Status {
 interface InventoryItem { slot: number; name: string; count: number }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
 interface EntityInfo { id: number; name: string; category: string; position: Pos; distance: number; health?: number }
+interface FightResult {
+  outcome: 'none' | 'done' | 'timeout' | 'low_health' | 'unreachable';
+  kills: string[]; vanished: string[]; unreachable: string[]; hits: number; landed: number;
+  swungWith: Record<string, number>; seconds: number; wore: string[]; target: string; dropsAt: Pos;
+  retreat?: string; threats?: string; health?: number;
+}
 interface ProcessResult { reason: 'done' | 'timeout' | 'paused' | 'cancelled'; seconds: number; baritone: string[]; at?: Pos }
 
 type Executor = (args: Record<string, unknown>) => Promise<ReturnType<ToolFactory['createResponse']>>;
@@ -91,10 +97,12 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
     'get-status': async () => {
       const s = await status();
+      const guard = await call<{ enabled: boolean; armor: string[] }>('guardian.status');
       return factory.createResponse([
         `Health ${s.health}/20, food ${s.food}/20, saturation ${s.saturation}`,
         timeLine(s.timeOfDay ?? 0),
         `Dimension ${s.dimension}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
+        `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}`,
         `Backend: game client with Baritone (${s.process ? `busy: ${s.process}` : 'idle'})` +
           (s.underWater ? `; under water, air ${s.air}/20` : '') + (s.inLava ? '; IN LAVA' : '')
       ].join('\n'));
@@ -334,7 +342,44 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
     },
 
-    'fly-to': async () => factory.createErrorResponse('fly-to is not supported on the client backend (Baritone walks; use move-to-position).')
+    'fly-to': async () => factory.createErrorResponse('fly-to is not supported on the client backend (Baritone walks; use move-to-position).'),
+
+    // ---- phase 3: combat (the fight loop and reflexes run in the game client, on the tick)
+
+    'attack-entity': async ({ target, maxDistance = 16, timeoutMs = 30_000, minHealth = 6, retreat = true }) => {
+      const r = await call<FightResult>('fight', { target: String(target), maxDistance, timeoutMs, minHealth, retreat }, Number(timeoutMs) + 60_000);
+      if (r.outcome === 'none') return factory.createResponse(`No ${target} within ${maxDistance} blocks`);
+      const swings = r.hits
+        ? `${r.hits} swing(s), ${r.landed} landed (${Object.entries(r.swungWith).map(([n, c]) => `${n} x${c}`).join(', ')})`
+        : 'no swings';
+      const killed = [r.kills.length ? `Killed ${r.kills.join(', ')}` : '', r.vanished.length ? `Gone without dying: ${r.vanished.join(', ')}` : '']
+        .filter(Boolean).join('. ');
+      const lines: string[] = [];
+      if (r.wore.length) lines.push(`Put on ${r.wore.join(', ')}.`);
+      switch (r.outcome) {
+        case 'done': lines.push(`${killed} with ${swings} in ${r.seconds}s.` + (r.unreachable.length ? ` Couldn't get to ${r.unreachable.join(', ')}.` : '')); break;
+        case 'low_health': lines.push(`${killed ? killed + '. ' : ''}Stopped fighting ${r.target} after ${swings}: health is low.` + (r.retreat ? ` Then ${r.retreat}.` : '')); break;
+        case 'unreachable': lines.push(`Couldn't get to ${r.unreachable.join(', ')} (no way through, or not getting closer).`); break;
+        default: lines.push(`${killed ? killed + '. ' : ''}${r.target} still alive after ${r.seconds}s and ${swings}.`);
+      }
+      const s = await status();
+      lines.push(`Health ${s.health}/20, food ${s.food}/20.`);
+      if (r.threats) lines.push(`Hostiles nearby: ${r.threats}.` + (r.outcome === 'low_health' ? ' Wall yourself in or keep away until health recovers.' : ''));
+      if (r.kills.length && r.outcome !== 'low_health' && !r.threats) await collectDropsNear(r.dropsAt).catch(() => undefined);
+      return factory.createResponse(lines.join(' '));
+    },
+
+    'wall-in': async () => {
+      const r = await call<{ error?: string; at: Pos; placed: number; alreadySolid: number; gaps: Pos[] }>('wallin', {}, 30_000);
+      if (r.error) return factory.createResponse('No blocks to wall in with (dirt, cobblestone, stone, planks, ...)');
+      if (!r.gaps.length) return factory.createResponse(`Walled in at ${fmt(r.at)} (${r.placed} block(s) placed). Dig out with dig-block when it's safe.`);
+      return factory.createResponse(`Walled in at ${fmt(r.at)} with ${r.gaps.length} gap(s) left at ${r.gaps.map(fmt).join(', ')} (${r.placed} placed).`);
+    },
+
+    'set-auto-defend': async ({ enabled }) => {
+      await call('guardian.set', { enabled: Boolean(enabled) });
+      return factory.createResponse(`Auto-defend ${enabled ? 'on' : 'off'}`);
+    }
   } satisfies Record<string, Executor>);
 
   const notYet: Executor = async () => factory.createErrorResponse(

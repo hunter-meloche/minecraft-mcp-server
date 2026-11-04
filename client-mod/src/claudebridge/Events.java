@@ -25,7 +25,10 @@ public final class Events {
     /** The bot was hurt: what kind of damage (registry name), and who caused it, if anyone. */
     public static void onDamage(ClientboundDamageEventPacket packet) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null || packet.entityId() != mc.player.getId()) return;
+        if (mc.player == null) return;
+        Combat.onDamage(packet.entityId(), packet.sourceCauseId()); // landed hits in a fight
+        if (packet.entityId() != mc.player.getId()) return;
+        Guardian.onSelfHurt(packet.sourceCauseId());
         String cause = packet.sourceType().getRegisteredName().replace("minecraft:", "");
         Entity source = packet.sourceCauseId() >= 0 && mc.level != null ? mc.level.getEntity(packet.sourceCauseId()) : null;
         server().emit("hurt", Json.obj(

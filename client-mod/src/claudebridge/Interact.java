@@ -48,6 +48,13 @@ public final class Interact {
         return Handlers.player();
     }
 
+    /** An item is being used through the bridge ("use"/eating): reflexes keep their hands off the use key. */
+    static volatile boolean using;
+
+    static boolean isActivatable(String blockName) {
+        return ACTIVATABLE.matcher(blockName).matches();
+    }
+
     // ---------------------------------------------------------------- inventory slots
 
     /** Inventory index of the item (exact name first, then a name containing it), or -1. */
@@ -204,6 +211,7 @@ public final class Interact {
             LocalPlayer pl = player();
             int foodBefore = pl.getFoodData().getFoodLevel();
             float healthBefore = pl.getHealth();
+            using = true;
             mc.gameMode.useItem(pl, InteractionHand.MAIN_HAND);
             mc.options.keyUse.setDown(true); // the client stops using an item as soon as the use key is up
             Ticker.add(new Ticker.Task() {
@@ -215,6 +223,7 @@ public final class Interact {
                     if (!(started && !m.player.isUsingItem()) && age < 80) return false;
                     m.options.keyUse.setDown(false);
                     if (m.player.isUsingItem()) m.gameMode.releaseUsingItem(m.player);
+                    using = false;
                     c.ok(obj("finished", started, "food", m.player.getFoodData().getFoodLevel(), "foodBefore", foodBefore,
                         "health", round(m.player.getHealth()), "healthBefore", round(healthBefore)));
                     return true;
