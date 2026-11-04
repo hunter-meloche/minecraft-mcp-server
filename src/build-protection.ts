@@ -1,5 +1,8 @@
 import type mineflayer from 'mineflayer';
 import type { Vec3 } from 'vec3';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 // Blocks the game lets you place a block into (it replaces them).
 const REPLACEABLE = new Set([
@@ -19,24 +22,94 @@ export function isReplaceable(block: { name: string; getProperties?: () => Recor
 type BreakRule = (block: { position: Vec3 }) => number;
 interface MovementsWithExclusions { exclusionAreasBreak: BreakRule[] }
 
-const placedByBot = new WeakMap<mineflayer.Bot, Set<string>>();
-const key = (p: Vec3) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+/** Where the placed-block list survives MCP restarts: one list of block keys per world. */
+export interface ProtectionStore {
+  load(world: string): string[];
+  save(world: string, keys: string[]): void;
+}
+
+export const DEFAULT_PROTECTION_FILE = path.join(os.homedir(), '.minecraft-mcp-server', 'placed-blocks.json');
+
+export function jsonFileStore(file = DEFAULT_PROTECTION_FILE): ProtectionStore {
+  const readAll = (): Record<string, string[]> => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, string[]>;
+    } catch {
+      return {}; // missing or unreadable file: start empty
+    }
+  };
+  return {
+    load: (world) => readAll()[world] ?? [],
+    save: (world, keys) => {
+      const all = readAll();
+      all[world] = keys;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(all, null, 1));
+    }
+  };
+}
+
+/** Identify a world across sessions by its hashed seed (sent in the login packet); LAN ports change every time. */
+export function worldIdFromSeed(hashedSeed: unknown): string | undefined {
+  return hashedSeed === undefined || hashedSeed === null ? undefined : `seed:${String(hashedSeed)}`;
+}
+
+interface ProtectionState { blocks: Set<string>; world?: string; store?: ProtectionStore }
+const states = new WeakMap<mineflayer.Bot, ProtectionState>();
+
+function stateOf(bot: mineflayer.Bot): ProtectionState {
+  let state = states.get(bot);
+  if (!state) { state = { blocks: new Set() }; states.set(bot, state); }
+  return state;
+}
+
+const key = (bot: mineflayer.Bot, p: Vec3) =>
+  `${bot.game?.dimension ?? 'overworld'}:${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+
+function persist(state: ProtectionState): void {
+  if (state.store && state.world) state.store.save(state.world, [...state.blocks]);
+}
 
 /** Remember a block the bot placed so pathfinding won't dig through it. */
 export function protectPlacedBlock(bot: mineflayer.Bot, pos: Vec3): void {
-  let set = placedByBot.get(bot);
-  if (!set) { set = new Set(); placedByBot.set(bot, set); }
-  set.add(key(pos));
+  const state = stateOf(bot);
+  const k = key(bot, pos);
+  if (state.blocks.has(k)) return;
+  state.blocks.add(k);
+  persist(state);
 }
 
 export function isProtected(bot: mineflayer.Bot, pos: Vec3): boolean {
-  return placedByBot.get(bot)?.has(key(pos)) ?? false;
+  return states.get(bot)?.blocks.has(key(bot, pos)) ?? false;
+}
+
+/** Forget a block (it was dug or otherwise removed). */
+export function unprotectBlock(bot: mineflayer.Bot, pos: Vec3): void {
+  const state = states.get(bot);
+  if (state?.blocks.delete(key(bot, pos))) persist(state);
 }
 
 /**
  * Make pathfinder treat blocks placed with place-block as unbreakable (cost 100 = can't break). Without this,
  * walking into a freshly built hut dug a hole through its wall.
+ *
+ * With a store and world id the list is loaded now and saved on every change, so a restart of the MCP keeps
+ * protecting what was built before it. A protected block that the bot sees turn into air (or anything
+ * replaceable) is dropped from the list, whoever removed it.
  */
-export function installBuildProtection(bot: mineflayer.Bot, movements: MovementsWithExclusions): void {
+export function installBuildProtection(
+  bot: mineflayer.Bot,
+  movements: MovementsWithExclusions,
+  options: { store?: ProtectionStore; world?: string } = {}
+): void {
+  const state = stateOf(bot);
+  if (options.store && options.world) {
+    state.store = options.store;
+    state.world = options.world;
+    for (const k of options.store.load(options.world)) state.blocks.add(k);
+  }
   movements.exclusionAreasBreak.push((block) => (isProtected(bot, block.position) ? 100 : 0));
+  bot.on?.('blockUpdate', (_old, now) => {
+    if (now && isReplaceable(now)) unprotectBlock(bot, now.position);
+  });
 }

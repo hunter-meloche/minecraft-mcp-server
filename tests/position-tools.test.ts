@@ -156,8 +156,9 @@ test('move-to-position succeeds without timeout and does not stop pathfinder', a
     pathfinder: {
       goto: sinon.stub().resolves(),
       stop: sinon.stub()
-    }
-  } as Partial<mineflayer.Bot>;
+    },
+    entity: { position: new Vec3(100.5, 64, 200.5) }
+  } as unknown as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
   registerPositionTools(factory, getBot);
@@ -189,8 +190,9 @@ test.serial('move-to-position succeeds before timeout and does not stop pathfind
     pathfinder: {
       goto: sinon.stub().resolves(),
       stop: sinon.stub()
-    }
-  } as Partial<mineflayer.Bot>;
+    },
+    entity: { position: new Vec3(100.5, 64, 200.5) }
+  } as unknown as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;
 
   registerPositionTools(factory, getBot);
@@ -235,4 +237,39 @@ test('move-to-position preserves pathfinder error when not timing out', async (t
   t.true(result.isError);
   t.true(result.content[0].text.includes('Path was stopped before it could be completed'));
   t.true((mockBot.pathfinder!.stop as sinon.SinonStub).notCalled);
+});
+
+test('move-to-position reports failure when pathfinder gives up short of the goal', async (t) => {
+  // pathfinder's goto resolves (no error) when its best path is empty, e.g. the target is walled in
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockBot = {
+    pathfinder: { goto: sinon.stub().resolves(), stop: sinon.stub() },
+    entity: { position: new Vec3(-950.5, 115, -389.5) }
+  } as unknown as Partial<mineflayer.Bot>;
+
+  registerPositionTools(factory, () => mockBot as mineflayer.Bot);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'move-to-position')!.args[3];
+  const result = await executor({ x: -952, y: 115, z: -389, range: 0 });
+
+  t.true(result.isError);
+  t.regex(result.content[0].text, /Could not reach \(-952, 115, -389\).*Stopped at \(-951, 115, -390\), 1\.4 blocks away/);
+});
+
+test('move-to-position counts standing one block below the goal as arrived, like pathfinder', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockBot = {
+    pathfinder: { goto: sinon.stub().resolves(), stop: sinon.stub() },
+    entity: { position: new Vec3(10.5, 63, 20.5) }
+  } as unknown as Partial<mineflayer.Bot>;
+
+  registerPositionTools(factory, () => mockBot as mineflayer.Bot);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'move-to-position')!.args[3];
+  const result = await executor({ x: 10, y: 64, z: 20, range: 0 });
+
+  t.falsy(result.isError);
+  t.regex(result.content[0].text, /Successfully moved/);
 });

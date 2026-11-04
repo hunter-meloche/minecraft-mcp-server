@@ -6,7 +6,10 @@ import { registerFurnaceTools } from '../src/tools/furnace-tools.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import { BotConnection } from '../src/bot-connection.js';
 import { settleInventory } from '../src/inventory-sync.js';
-import { isReplaceable, protectPlacedBlock, isProtected, installBuildProtection } from '../src/build-protection.js';
+import { isReplaceable, protectPlacedBlock, isProtected, installBuildProtection, jsonFileStore, worldIdFromSeed } from '../src/build-protection.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type mineflayer from 'mineflayer';
 
@@ -93,4 +96,59 @@ test('pathfinder may not break blocks the bot placed', (t) => {
   t.true(isProtected(bot, new Vec3(-961.6, 113.9, -384.2))); // any point inside the block
   t.is(movements.exclusionAreasBreak[0]({ position: new Vec3(-962, 113, -385) }), 100);
   t.is(movements.exclusionAreasBreak[0]({ position: new Vec3(-961, 113, -385) }), 0);
+});
+
+type Rule = (b: { position: Vec3 }) => number;
+const fakeBot = (dimension = 'overworld') => Object.assign(new EventEmitter(), { game: { dimension } }) as unknown as mineflayer.Bot;
+const tempStoreFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-protect-')), 'placed-blocks.json');
+
+test('placed blocks stay protected for a new bot in the same world after a restart', (t) => {
+  const file = tempStoreFile();
+  const first = fakeBot();
+  installBuildProtection(first, { exclusionAreasBreak: [] as Rule[] }, { store: jsonFileStore(file), world: 'seed:42' });
+  protectPlacedBlock(first, new Vec3(-952, 115, -388));
+
+  const second = fakeBot();
+  const movements = { exclusionAreasBreak: [] as Rule[] };
+  installBuildProtection(second, movements, { store: jsonFileStore(file), world: 'seed:42' });
+  t.is(movements.exclusionAreasBreak[0]({ position: new Vec3(-952, 115, -388) }), 100);
+
+  const otherWorld = fakeBot();
+  installBuildProtection(otherWorld, { exclusionAreasBreak: [] as Rule[] }, { store: jsonFileStore(file), world: 'seed:7' });
+  t.false(isProtected(otherWorld, new Vec3(-952, 115, -388)));
+});
+
+test('the same coordinates in another dimension are not protected', (t) => {
+  const bot = fakeBot('overworld');
+  installBuildProtection(bot, { exclusionAreasBreak: [] as Rule[] });
+  protectPlacedBlock(bot, new Vec3(1, 2, 3));
+  (bot.game as { dimension: string }).dimension = 'the_nether';
+  t.false(isProtected(bot, new Vec3(1, 2, 3)));
+});
+
+test('a protected block that turns into air is forgotten, also in the saved file', (t) => {
+  const file = tempStoreFile();
+  const bot = fakeBot();
+  installBuildProtection(bot, { exclusionAreasBreak: [] as Rule[] }, { store: jsonFileStore(file), world: 'seed:42' });
+  protectPlacedBlock(bot, new Vec3(5, 64, 5));
+  protectPlacedBlock(bot, new Vec3(6, 64, 5));
+  bot.emit('blockUpdate', { name: 'cobblestone', position: new Vec3(5, 64, 5) }, { name: 'air', position: new Vec3(5, 64, 5) });
+  bot.emit('blockUpdate', null, { name: 'stone', position: new Vec3(6, 64, 5) }); // still solid: keep it
+  t.false(isProtected(bot, new Vec3(5, 64, 5)));
+  t.true(isProtected(bot, new Vec3(6, 64, 5)));
+  t.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { 'seed:42': ['overworld:6,64,5'] });
+});
+
+test('a missing or corrupt protection file starts empty', (t) => {
+  const file = tempStoreFile();
+  t.deepEqual(jsonFileStore(file).load('seed:1'), []);
+  fs.writeFileSync(file, '{not json');
+  t.deepEqual(jsonFileStore(file).load('seed:1'), []);
+});
+
+test('worldIdFromSeed uses the decimal hashed seed and tolerates a missing one', (t) => {
+  const signedBigIntLike = Object.assign([-1, -2], { toString: () => '-2' }); // protodef i64 stringifies to decimal
+  t.is(worldIdFromSeed(signedBigIntLike), 'seed:-2');
+  t.is(worldIdFromSeed(123n), 'seed:123');
+  t.is(worldIdFromSeed(undefined), undefined);
 });
