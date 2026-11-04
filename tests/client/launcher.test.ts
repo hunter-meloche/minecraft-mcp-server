@@ -33,6 +33,7 @@ test('prepareLaunch installs the mods, writes a token, and joins the server offl
   t.is(fs.readFileSync(plan.tokenFile, 'utf8'), plan.token);
   t.regex(plan.token, /^[0-9a-f]{48}$/);
   t.true(plan.args.includes('-Dclaudebridge.offline=true'));
+  t.true(plan.args.includes('-Dclaudebridge.passive=true')); // minimized, ignores the user's mouse and keyboard
   t.true(plan.args.includes(`-Dclaudebridge.tokenFile=${plan.tokenFile}`));
   const cp = plan.args[plan.args.indexOf('-cp') + 1].split(path.delimiter);
   t.true(cp[0].endsWith('fabric-loader-0.20.1.jar'));
@@ -48,4 +49,10 @@ test('prepareLaunch explains what is missing', (t) => {
   fs.rmSync(path.join(f.mod, 'dist', BRIDGE_JAR));
   t.throws(() => prepareLaunch({ minecraftDir: f.mc, javaBin: f.java, gameDir: f.gameDir, username: 'B', server: 's:1', bridgePort: 1, offline: true }, f.mod),
     { message: /client mod not built/ });
+});
+
+test('prepareLaunch leaves the window interactive when asked', (t) => {
+  const f = fakeInstall();
+  const plan = prepareLaunch({ minecraftDir: f.mc, javaBin: f.java, gameDir: f.gameDir, username: 'ClaudeBot', server: 'localhost:25565', bridgePort: 25599, offline: true, passive: false }, f.mod);
+  t.false(plan.args.includes('-Dclaudebridge.passive=true'));
 });

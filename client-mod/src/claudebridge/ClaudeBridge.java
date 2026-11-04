@@ -39,6 +39,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Combat.register(server);
         Guardian.register(server);
         Protection.register(server);
+        Passive.register();
         configureBaritone();
         server.start();
     }

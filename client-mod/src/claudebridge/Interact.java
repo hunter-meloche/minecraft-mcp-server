@@ -74,6 +74,18 @@ public final class Interact {
     }
 
     /** Slot of an inventory index in a container menu with {@code containerSlots} slots of its own before the player's. */
+    static JsonObject chestContents(net.minecraft.world.inventory.ChestMenu menu) {
+        JsonObject items = new JsonObject();
+        int own = menu.getRowCount() * 9, free = 0;
+        for (int k = 0; k < own; k++) {
+            ItemStack in = menu.getSlot(k).getItem();
+            if (in.isEmpty()) { free++; continue; }
+            String n = Names.item(in);
+            items.addProperty(n, (items.has(n) ? items.get(n).getAsInt() : 0) + in.getCount());
+        }
+        return obj("slots", own, "free", free, "items", items);
+    }
+
     static int containerMenuSlot(int containerSlots, int i) {
         return i < 9 ? containerSlots + 27 + i : containerSlots + (i - 9);
     }
@@ -294,6 +306,97 @@ public final class Interact {
             });
             return BridgeServer.LATER;
         });
+        // chests (single or double) and barrels: open, put items in, report what they hold
+        s.register("chest.open", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            BlockPos at = blockPos(p);
+            Vec3 hit = faceCenter(at, Direction.UP);
+            if (pl.getEyePosition().distanceTo(hit) > 4.5) throw new IllegalStateException("chest too far to open");
+            pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
+            mc.gameMode.useItemOn(pl, InteractionHand.MAIN_HAND, new BlockHitResult(hit, Direction.UP, at, false));
+            Ticker.add(new Ticker.Task() {
+                int age = 0;
+                @Override public boolean tick(Minecraft m) {
+                    if (m.player.containerMenu instanceof net.minecraft.world.inventory.ChestMenu menu) { c.ok(chestContents(menu)); return true; }
+                    if (++age > 40) { c.fail("the chest did not open (blocked lid, or not a chest)"); return true; }
+                    return false;
+                }
+            });
+            return BridgeServer.LATER;
+        });
+        s.register("chest.deposit", true, (p, c) -> {
+            LocalPlayer pl = player();
+            if (!(pl.containerMenu instanceof net.minecraft.world.inventory.ChestMenu menu)) throw new IllegalStateException("no chest open");
+            String name = required(p, "name").replace("minecraft:", "");
+            int want = intParam(p, "count", Integer.MAX_VALUE);
+            int own = menu.getRowCount() * 9;
+            int moved = 0;
+            for (int i = 0; i < 36 && moved < want; i++) {
+                ItemStack st = pl.getInventory().getItem(i);
+                if (st.isEmpty() || !Names.item(st).equals(name)) continue;
+                int slot = containerMenuSlot(own, i);
+                int before = st.getCount();
+                if (want - moved >= before) {
+                    click(menu, slot, 0, ContainerInput.QUICK_MOVE);
+                } else {
+                    // part of a stack: carry it, drop one at a time into the first chest slot that takes it, put the rest back
+                    click(menu, slot, 0, ContainerInput.PICKUP);
+                    for (int n = moved; n < want; n++) {
+                        int dest = -1;
+                        for (int k = 0; k < own && dest < 0; k++) {
+                            ItemStack in = menu.getSlot(k).getItem();
+                            if (in.isEmpty() || (ItemStack.isSameItemSameComponents(in, menu.getCarried()) && in.getCount() < in.getMaxStackSize())) dest = k;
+                        }
+                        if (dest < 0) break;
+                        click(menu, dest, 1, ContainerInput.PICKUP);
+                    }
+                    if (!menu.getCarried().isEmpty()) click(menu, slot, 0, ContainerInput.PICKUP);
+                }
+                moved += before - pl.getInventory().getItem(i).getCount();
+                if (pl.getInventory().getItem(i).getCount() == before) break; // the chest is full
+            }
+            JsonObject r = chestContents(menu);
+            r.addProperty("moved", moved);
+            return r;
+        });
+
+        s.register("chest.withdraw", true, (p, c) -> {
+            LocalPlayer pl = player();
+            if (!(pl.containerMenu instanceof net.minecraft.world.inventory.ChestMenu menu)) throw new IllegalStateException("no chest open");
+            String name = required(p, "name").replace("minecraft:", "");
+            int want = intParam(p, "count", Integer.MAX_VALUE);
+            int own = menu.getRowCount() * 9;
+            int taken = 0;
+            for (int k = 0; k < own && taken < want; k++) {
+                ItemStack in = menu.getSlot(k).getItem();
+                if (in.isEmpty() || !Names.item(in).equals(name)) continue;
+                int before = in.getCount();
+                if (want - taken >= before) {
+                    click(menu, k, 0, ContainerInput.QUICK_MOVE);
+                } else {
+                    // part of a stack: carry it, drop the wanted number into the player's inventory, put the rest back
+                    click(menu, k, 0, ContainerInput.PICKUP);
+                    for (int n = taken; n < want; n++) {
+                        int dest = -1;
+                        for (int s2 = own; s2 < own + 36 && dest < 0; s2++) {
+                            ItemStack st = menu.getSlot(s2).getItem();
+                            if (st.isEmpty() || (ItemStack.isSameItemSameComponents(st, menu.getCarried()) && st.getCount() < st.getMaxStackSize())) dest = s2;
+                        }
+                        if (dest < 0) break;
+                        click(menu, dest, 1, ContainerInput.PICKUP);
+                    }
+                    if (!menu.getCarried().isEmpty()) click(menu, k, 0, ContainerInput.PICKUP);
+                }
+                int after = menu.getSlot(k).getItem().isEmpty() ? 0 : menu.getSlot(k).getItem().getCount();
+                if (after == before) break; // the inventory is full
+                taken += before - after;
+            }
+            JsonObject r = chestContents(menu);
+            r.addProperty("moved", taken);
+            return r;
+        });
+
         s.register("furnace.status", true, (p, c) -> furnaceStatus());
         s.register("furnace.put", true, (p, c) -> {
             LocalPlayer pl = player();

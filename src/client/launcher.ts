@@ -23,6 +23,8 @@ export interface LaunchOptions {
   bridgePort: number;
   /** offline account: no session join (servers that verify logins will refuse the bot) */
   offline: boolean;
+  /** the game window opens minimized and ignores the user's mouse and keyboard (default true) */
+  passive?: boolean;
   width?: number;
   height?: number;
 }
@@ -84,6 +86,7 @@ export function prepareLaunch(opts: LaunchOptions, modDir = clientModDir()): Lau
     `-Dio.netty.native.workdir=${natives}`, `-Dfabric.gameVersion=${MC_VERSION}`,
     `-Dclaudebridge.port=${opts.bridgePort}`, `-Dclaudebridge.tokenFile=${tokenFile}`,
     ...(opts.offline ? ['-Dclaudebridge.offline=true'] : []),
+    ...(opts.passive !== false ? ['-Dclaudebridge.passive=true'] : []),
     '-cp', classpath, 'net.fabricmc.loader.impl.launch.knot.KnotClient',
     '--username', opts.username, '--version', `fabric-loader-${FABRIC_LOADER}-${MC_VERSION}`, '--gameDir', opts.gameDir,
     '--assetsDir', path.join(opts.minecraftDir, 'assets'), '--assetIndex', version.assetIndex.id,

@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'mine-blocks', 'stop']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -372,4 +372,34 @@ test('build-structure leaves blocks the bot placed in cells the spec clears (a r
   const parsed = nbt.simplify((await nbt.parse(zlib.gunzipSync(fs.readFileSync(path.join(gameDir, 'schematics', 'wall.schem'))))).parsed) as { Palette: Record<string, number>; BlockData: number[] };
   const byIndex = Object.fromEntries(Object.entries(parsed.Palette).map(([k, v]) => [v, k]));
   t.deepEqual(parsed.BlockData.map(b => byIndex[b]), ['minecraft:oak_log[axis=y]', 'minecraft:structure_void', 'minecraft:oak_log[axis=y]']);
+});
+
+test('store-in-chest walks to the chest, stores the items and reports what it holds', async (t) => {
+  let opens = 0;
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 3, name: 'iron_ingot', count: 32 }], selectedSlot: 0, held: null },
+    'world.block': { loaded: true, name: 'chest' },
+    'chest.open': () => { if (opens++ === 0) throw new Error('chest too far to open'); return { slots: 27, free: 27, items: {} }; },
+    goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 1, y: 64, z: 2 }, distance: 1 },
+    'chest.deposit': { slots: 27, free: 26, items: { iron_ingot: 32 }, moved: 32 },
+    'container.close': { ok: true }
+  });
+  const r = await run('store-in-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot' });
+  t.is(r.text, 'Stored 32 iron_ingot in the chest at (1, 64, 0). It holds: iron_ingot x32; 26/27 slots free.');
+  t.like(request.getCalls().find(c => c.args[0] === 'chest.deposit')!.args[1], { name: 'iron_ingot' });
+  t.is(request.lastCall.args[0], 'container.close');
+  const none = setup({ inventory: { items: [], selectedSlot: 0, held: null } });
+  t.true((await none.run('store-in-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot' })).isError);
+});
+
+test('take-from-chest takes what was asked and says when the chest has none', async (t) => {
+  const { run, request } = setup({
+    'world.block': { loaded: true, name: 'chest' },
+    'chest.open': { slots: 27, free: 26, items: { iron_ingot: 32 } },
+    'chest.withdraw': { slots: 27, free: 26, items: { iron_ingot: 5 }, moved: 27 },
+    'container.close': { ok: true }
+  });
+  t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot', count: 27 })).text, 'Took 27 iron_ingot from the chest at (1, 64, 0). It holds: iron_ingot x5.');
+  t.like(request.getCalls().find(c => c.args[0] === 'chest.withdraw')!.args[1], { name: 'iron_ingot', count: 27 });
+  t.true((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'diamond' })).isError);
 });

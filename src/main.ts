@@ -48,7 +48,8 @@ async function main() {
         username: config.username,
         server: `${config.host}:${config.port}`,
         bridgePort: config.bridgePort,
-        offline: true
+        offline: true,
+        passive: !config.interactiveClient
       },
       { onLog: log, onChatMessage: (username, message) => messageStore.addMessage(username, message) }
     );

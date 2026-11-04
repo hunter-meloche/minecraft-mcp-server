@@ -61,6 +61,8 @@ public final class Handlers {
             r.addProperty("timeOfDay", Math.floorMod(mc.level.getOverworldClockTime(), 24000L));
             r.addProperty("hashedSeed", hashedSeed(mc));
             r.addProperty("protectedCount", Protection.count());
+            r.addProperty("windowMinimized", mc.getWindow().isIconified());
+            r.addProperty("mouseGrabbed", mc.mouseHandler.isMouseGrabbed());
             IBaritone b = Processes.baritone();
             r.addProperty("process", Processes.active());
             Object goal = b.getPathingBehavior().getGoal();
@@ -218,13 +220,16 @@ public final class Handlers {
             int timeoutTicks = intParam(p, "timeoutMs", 300_000) / 50;
             Map<String, Integer> before = Processes.inventoryCounts(Minecraft.getInstance());
             long seq = Events.baritoneLogSeq();
-            Processes.baritone().getMineProcess().mineByName(count, block);
+            // several names at once ("iron_ore,deepslate_iron_ore"); counted together, as Baritone does
+            String[] names = java.util.Arrays.stream(block.split(",")).map(String::trim).filter(n -> !n.isEmpty()).toArray(String[]::new);
+            Processes.baritone().getMineProcess().mineByName(count, names);
             // Baritone counts a block's drops from its loot table and misses some (a berry bush's berries: it harvested
             // 78 when asked for 12). Also stop once the inventory holds `count` of the block's own item (the same "have
             // count" rule Baritone uses).
-            String own = Names.item(new net.minecraft.world.item.ItemStack(new baritone.api.utils.BlockOptionalMeta(block).getBlock().asItem()));
+            List<String> own = java.util.Arrays.stream(names)
+                .map(n -> Names.item(new net.minecraft.world.item.ItemStack(new baritone.api.utils.BlockOptionalMeta(n).getBlock().asItem()))).toList();
             Processes.watch(c, seq, timeoutTicks,
-                () -> Processes.inventoryCounts(Minecraft.getInstance()).getOrDefault(own, 0) >= count,
+                () -> { var inv = Processes.inventoryCounts(Minecraft.getInstance()); return own.stream().mapToInt(n -> inv.getOrDefault(n, 0)).sum() >= count; },
                 reason ->
                 obj("gained", Processes.gained(before, Processes.inventoryCounts(Minecraft.getInstance())),
                     "at", pos(Minecraft.getInstance().player.blockPosition())));

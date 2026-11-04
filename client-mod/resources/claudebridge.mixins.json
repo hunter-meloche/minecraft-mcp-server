@@ -6,7 +6,10 @@
     "OfflineLoginMixin",
     "MinecraftTickMixin",
     "ClientPacketListenerMixin",
-    "ChatComponentMixin"
+    "ChatComponentMixin",
+    "MouseHandlerMixin",
+    "KeyboardHandlerMixin",
+    "WindowMixin"
   ],
   "injectors": { "defaultRequire": 1 }
 }

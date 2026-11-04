@@ -27,6 +27,7 @@ interface Status {
   position?: Pos; block?: Pos; health?: number; food?: number; saturation?: number; air?: number;
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
   timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
+  windowMinimized?: boolean; mouseGrabbed?: boolean;
 }
 interface InventoryItem { slot: number; name: string; count: number }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
@@ -132,6 +133,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         `Dimension ${s.dimension}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
         `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}`,
         `Backend: game client with Baritone (${s.process ? `busy: ${s.process}` : 'idle'})` +
+          (s.windowMinimized !== undefined ? `; window ${s.windowMinimized ? 'minimized' : 'shown'}${s.mouseGrabbed ? ', mouse captured' : ''}` : '') +
           (s.underWater ? `; under water, air ${s.air}/20` : '') + (s.inLava ? '; IN LAVA' : '')
       ].join('\n'));
     },
@@ -519,16 +521,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     'mine-blocks',
     "Gather blocks with Baritone: it finds the nearest blocks of the type (from its memory of the world and nearby chunks), walks there, mines them with the right tool and picks up the drops, until the inventory has `count` of the item (counting what it already holds). E.g. block 'oak_log', count 16.",
     {
-      block: z.string().describe("Block to mine, e.g. 'oak_log', 'stone', 'iron_ore'"),
+      block: z.string().describe("Block to mine, e.g. 'oak_log', 'stone', or several comma-separated: 'iron_ore,deepslate_iron_ore'"),
       count: z.coerce.number().int().positive().optional().describe('How many of the item to have in the inventory when done (default: 1)'),
       timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 300000)')
     },
     async ({ block, count = 1, timeoutMs = 300_000 }: { block: string; count?: number; timeoutMs?: number }) => {
-      const name = block.replace(/^minecraft:/, '');
+      const names = block.split(',').map(n => n.trim().replace(/^minecraft:/, '')).filter(Boolean);
       const dim = await dimension();
-      const near = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 64, count: 256 });
-      const guarded = near.positions.filter(p => protection.has(dim, p)).length;
-      if (guarded) return mineAround(name, count, timeoutMs, dim, guarded);
+      let guarded = 0;
+      for (const name of names) {
+        const near = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 64, count: 256 });
+        guarded += near.positions.filter(p => protection.has(dim, p)).length;
+      }
+      if (guarded && names.length === 1) return mineAround(names[0], count, timeoutMs, dim, guarded);
       const r = await call<ProcessResult & { gained: Record<string, number> }>('mine', { block, count, timeoutMs }, timeoutMs + 15_000);
       const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
       const head = r.reason === 'timeout' ? `Stopped after ${r.seconds}s (time limit)` : `Mined for ${r.seconds}s`;
@@ -656,6 +661,67 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       const head = r.reason === 'timeout' ? `Build stopped after ${r.seconds}s (time limit)` : `Built ${name} at ${fmt(origin)} in ${r.seconds}s`;
       return factory.createResponse(`${head}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);
+    }
+  );
+
+  factory.registerTool(
+    'store-in-chest',
+    'Put items from the inventory into a chest (or barrel) at x,y,z, walking to it first. Reports what the chest holds afterwards.',
+    {
+      x: z.coerce.number().describe('X of the chest'),
+      y: z.coerce.number().describe('Y of the chest'),
+      z: z.coerce.number().describe('Z of the chest'),
+      item: z.string().describe("Item to store, e.g. 'iron_ingot'"),
+      count: z.coerce.number().int().positive().optional().describe('How many (default: all of them)')
+    },
+    async ({ x, y, z: zz, item, count }: { x: number; y: number; z: number; item: string; count?: number }) => {
+      const at = floorPos({ x, y, z: zz });
+      const name = item.replace(/^minecraft:/, '');
+      const have = (await inventoryCounts()).counts.get(name) ?? 0;
+      if (!have) return factory.createErrorResponse(`No ${name} in the inventory`);
+      const block = await call<{ name?: string }>('world.block', { ...at });
+      if (!/chest|barrel/.test(block.name ?? '')) return factory.createErrorResponse(`No chest at ${fmt(at)} (found ${block.name ?? 'nothing'})`);
+      type Chest = { slots: number; free: number; items: Record<string, number>; moved?: number };
+      try {
+        try { await call<Chest>('chest.open', { ...at }); } catch { await goNear(at, 2); await call<Chest>('chest.open', { ...at }); }
+        const r = await call<Chest>('chest.deposit', { name, ...(count ? { count } : {}) });
+        const holds = Object.entries(r.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing';
+        const short = (r.moved ?? 0) < Math.min(count ?? have, have) ? ' (the chest is full)' : '';
+        return factory.createResponse(`Stored ${r.moved} ${name} in the chest at ${fmt(at)}${short}. It holds: ${holds}; ${r.free}/${r.slots} slots free.`);
+      } finally {
+        await call('container.close').catch(() => undefined);
+      }
+    }
+  );
+
+  factory.registerTool(
+    'take-from-chest',
+    'Take items out of a chest (or barrel) at x,y,z into the inventory, walking to it first. Reports what the chest holds afterwards.',
+    {
+      x: z.coerce.number().describe('X of the chest'),
+      y: z.coerce.number().describe('Y of the chest'),
+      z: z.coerce.number().describe('Z of the chest'),
+      item: z.string().describe("Item to take, e.g. 'iron_ingot'"),
+      count: z.coerce.number().int().positive().optional().describe('How many (default: all of them)')
+    },
+    async ({ x, y, z: zz, item, count }: { x: number; y: number; z: number; item: string; count?: number }) => {
+      const at = floorPos({ x, y, z: zz });
+      const name = item.replace(/^minecraft:/, '');
+      const block = await call<{ name?: string }>('world.block', { ...at });
+      if (!/chest|barrel/.test(block.name ?? '')) return factory.createErrorResponse(`No chest at ${fmt(at)} (found ${block.name ?? 'nothing'})`);
+      type Chest = { slots: number; free: number; items: Record<string, number>; moved?: number };
+      try {
+        let opened: Chest;
+        try { opened = await call<Chest>('chest.open', { ...at }); } catch { await goNear(at, 2); opened = await call<Chest>('chest.open', { ...at }); }
+        const inside = opened.items[name] ?? 0;
+        if (!inside) return factory.createErrorResponse(`The chest at ${fmt(at)} has no ${name}. It holds: ${Object.entries(opened.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing'}`);
+        const r = await call<Chest>('chest.withdraw', { name, ...(count ? { count } : {}) });
+        const holds = Object.entries(r.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing';
+        const short = (r.moved ?? 0) < Math.min(count ?? inside, inside) ? ' (the inventory is full)' : '';
+        return factory.createResponse(`Took ${r.moved} ${name} from the chest at ${fmt(at)}${short}. It holds: ${holds}.`);
+      } finally {
+        await call('container.close').catch(() => undefined);
+      }
     }
   );
 

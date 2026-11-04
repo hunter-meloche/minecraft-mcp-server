@@ -13,6 +13,8 @@ export interface ServerConfig {
   java?: string;
   clientDir?: string;
   bridgePort: number;
+  /** client backend: let the user's mouse and keyboard reach the bot's game window (default: passive) */
+  interactiveClient: boolean;
 }
 
 export function parseConfig(): ServerConfig {
@@ -64,6 +66,11 @@ export function parseConfig(): ServerConfig {
       type: 'number',
       description: 'client backend: loopback port of the bridge mod',
       default: 25599
+    })
+    .option('interactive-client', {
+      type: 'boolean',
+      description: "client backend: let your mouse and keyboard control the bot's game window (by default it opens minimized and ignores them)",
+      default: false
     })
     .help()
     .alias('help', 'h')
