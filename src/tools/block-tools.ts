@@ -8,7 +8,7 @@ import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { equipBestTool } from '../best-tool.js';
-import { isReplaceable, protectPlacedBlock } from '../build-protection.js';
+import { canPlaceAgainst, isReplaceable, protectPlacedBlock } from '../build-protection.js';
 import { collectDrops, describeGain, inventoryCounts } from '../drops.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
@@ -80,7 +80,7 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         const referencePos = placePos.plus(face.vector);
         const referenceBlock = bot.blockAt(referencePos);
 
-        if (referenceBlock && !isReplaceable(referenceBlock)) {
+        if (canPlaceAgainst(referenceBlock)) {
           if (!bot.canSeeBlock(referenceBlock)) {
             const goal = new goals.GoalNear(referencePos.x, referencePos.y, referencePos.z, 2);
             await bot.pathfinder.goto(goal);

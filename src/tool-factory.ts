@@ -9,9 +9,14 @@ type McpResponse = {
 };
 
 export class ToolFactory {
+  /**
+   * @param alerts called after every tool; anything it returns (e.g. "took damage from a zombie") is appended to the
+   *   reply, so the caller learns about events it didn't ask about
+   */
   constructor(
     private server: McpServer,
-    private connection: BotConnection
+    private connection: BotConnection,
+    private alerts?: () => string | null
   ) {}
 
   registerTool(
@@ -35,11 +40,18 @@ export class ToolFactory {
         const parsedArgs = this.shouldValidateSchema(schema)
           ? this.parseArgs(schema as ZodRawShape, args)
           : args;
-        return await executor(parsedArgs);
+        return this.withAlerts(await executor(parsedArgs));
       } catch (error) {
-        return this.createErrorResponse(error as Error);
+        return this.withAlerts(this.createErrorResponse(error as Error));
       }
     });
+  }
+
+  private withAlerts(response: McpResponse): McpResponse {
+    let alert: string | null = null;
+    try { alert = this.alerts?.() ?? null; } catch { /* never let alerts break a reply */ }
+    if (!alert) return response;
+    return { ...response, content: [...response.content, { type: "text", text: `[!] ${alert}` }] };
   }
 
   createResponse(text: string): McpResponse {

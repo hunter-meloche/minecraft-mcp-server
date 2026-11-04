@@ -5,6 +5,7 @@ import minecraftData from 'minecraft-data';
 import type { Block } from 'prismarine-block';
 import { bestHarvestTool } from './best-tool.js';
 import { installBuildProtection, jsonFileStore, worldIdFromSeed } from './build-protection.js';
+import { installAutoDefend } from './auto-defend.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '1.21.11';
 
@@ -96,6 +97,8 @@ export class BotConnection {
       // never dig through blocks the bot placed itself (it walked into a fresh hut through the wall)
       installBuildProtection(bot, defaultMove as unknown as Parameters<typeof installBuildProtection>[1],
         { store: jsonFileStore(), world: worldId });
+      // hit back at mobs within reach while other tools run (set-auto-defend turns it off)
+      installAutoDefend(bot, (err) => this.callbacks.onLog('warn', `auto-defend: ${this.formatError(err)}`));
 
       bot.chat('LLM-powered bot ready to receive instructions!');
       this.callbacks.onLog('info', `Bot connected successfully. Username: ${this.config.username}, Server: ${this.config.host}:${this.config.port}`);

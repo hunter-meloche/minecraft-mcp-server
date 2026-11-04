@@ -18,6 +18,7 @@ import { registerGameStateTools } from './tools/gamestate-tools.js';
 import { registerCraftingTools } from './tools/crafting-tools.js';
 import { registerFurnaceTools } from './tools/furnace-tools.js';
 import { registerSurvivalTools } from './tools/survival-tools.js';
+import { takeAlerts } from './auto-defend.js';
 
 setupStdioFiltering();
 
@@ -48,7 +49,11 @@ async function main() {
     version: "2.0.4"
   });
 
-  const factory = new ToolFactory(server, connection);
+  // every reply also says if the bot was hurt (or auto-defend fought) since the last call
+  const factory = new ToolFactory(server, connection, () => {
+    const bot = connection.getBot();
+    return bot && connection.isConnected() ? takeAlerts(bot) : null;
+  });
   const getBot = () => connection.getBot()!;
 
   registerPositionTools(factory, getBot);

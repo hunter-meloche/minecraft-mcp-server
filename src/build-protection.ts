@@ -19,6 +19,14 @@ export function isReplaceable(block: { name: string; getProperties?: () => Recor
   return false;
 }
 
+// Right-clicking these uses them (opens a crafting table, toggles a door) instead of placing against them.
+const ACTIVATABLE = /^(crafting_table|crafter|(blast_)?furnace|smoker|(trapped_)?chest|ender_chest|barrel|.*shulker_box|hopper|dispenser|dropper|brewing_stand|enchanting_table|(chipped_|damaged_)?anvil|grindstone|stonecutter|loom|cartography_table|smithing_table|fletching_table|lectern|beacon|bell|note_block|jukebox|lever|respawn_anchor|.*_(door|trapdoor|fence_gate|bed|button|sign|hanging_sign))$/;
+
+/** Can a block be placed against `block`? Solid and not something right-clicking would use instead. */
+export function canPlaceAgainst<T extends { name: string; getProperties?: () => Record<string, unknown> }>(block: T | null | undefined): block is T {
+  return !!block && !isReplaceable(block) && !ACTIVATABLE.test(block.name);
+}
+
 type BreakRule = (block: { position: Vec3 }) => number;
 interface MovementsWithExclusions { exclusionAreasBreak: BreakRule[] }
 
