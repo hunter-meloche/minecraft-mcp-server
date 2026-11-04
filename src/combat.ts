@@ -148,11 +148,15 @@ export interface FightOptions {
   multiple?: boolean;
   /** take cover (wall in, or flee without blocks) and eat when stopping at low health (default: true) */
   retreat?: boolean;
+  /** give up on a target we haven't got closer to (or hit) for this long (default: 12000) */
+  stuckMs?: number;
 }
 
 export interface FightResult {
-  outcome: 'none' | 'done' | 'timeout' | 'low_health' | 'lost';
+  outcome: 'none' | 'done' | 'timeout' | 'low_health' | 'lost' | 'unreachable';
   kills: string[];
+  /** targets given up on because the bot couldn't get to them */
+  unreachable: string[];
   target?: string;
   hits: number;
   landed: number;
@@ -166,8 +170,10 @@ export interface FightResult {
 export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptions = {}): Promise<FightResult> {
   const { maxDistance = 16, timeoutMs = 30000, minHealth = 6, retreat = true } = opts;
   const multiple = opts.multiple ?? query.toLowerCase() === 'hostile';
-  const result: FightResult = { outcome: 'none', kills: [], hits: 0, landed: 0, swungWith: new Map(), seconds: 0, wore: [], threats: [] };
-  const pick = () => bot.nearestEntity(e => e !== bot.entity && matchesTarget(e, query) && e.position.distanceTo(bot.entity.position) <= maxDistance);
+  const { stuckMs = 12000 } = opts;
+  const result: FightResult = { outcome: 'none', kills: [], unreachable: [], hits: 0, landed: 0, swungWith: new Map(), seconds: 0, wore: [], threats: [] };
+  const skip = new Set<number>();
+  const pick = () => bot.nearestEntity(e => e !== bot.entity && !skip.has(e.id) && matchesTarget(e, query) && e.position.distanceTo(bot.entity.position) <= maxDistance);
 
   let victim = pick();
   if (!victim) return result;
@@ -183,10 +189,31 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
   bot.on('entityHurt', onHurt);
   let dropsAt: Vec3 | null = null;
 
+  // Chasing: pathfinder's GoalFollow re-plans whenever the target moves 2 blocks, which for a target 40 blocks away
+  // is before the search finishes, so the bot never set off (60 s, no swings, after a cow). Far away, walk to where
+  // it is (refreshed every 2 s); close by, follow it.
+  let chaseMode: 'follow' | 'near' | null = null;
+  let chasedAt = 0;
+  const chase = (target: Entity) => {
+    const d = bot.entity.position.distanceTo(target.position);
+    if (d <= 8) {
+      if (chaseMode !== 'follow') { bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true); chaseMode = 'follow'; }
+    } else if (chaseMode !== 'near' || Date.now() - chasedAt > 2000) {
+      const p = target.position;
+      bot.pathfinder.setGoal(new goals.GoalNear(p.x, p.y, p.z, 2));
+      chaseMode = 'near';
+      chasedAt = Date.now();
+    }
+  };
+  // progress: closest we've been to the current target, and when
+  let closest = Infinity;
+  let closestAt = Date.now();
+  const newTarget = (next: Entity) => { victim = next; chaseMode = null; closest = Infinity; closestAt = Date.now(); chase(next); };
+
   try {
     result.wore = await equipBestArmor(bot);
     const hasShield = await equipShield(bot);
-    bot.pathfinder.setGoal(new goals.GoalFollow(victim, 2), true);
+    newTarget(victim);
 
     while (Date.now() - startedAt < timeoutMs) {
       if (!alive(bot, victim)) {
@@ -195,8 +222,7 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
         // only take on the next one while still in decent shape
         const next = multiple && bot.health >= Math.max(12, minHealth + 6) ? pick() : null;
         if (!next) { result.outcome = 'done'; break; }
-        victim = next;
-        bot.pathfinder.setGoal(new goals.GoalFollow(victim, 2), true);
+        newTarget(next);
         continue;
       }
       // outnumbered: stop a bit earlier, arrows from the others keep coming while we swing
@@ -206,12 +232,22 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
       if (distance > maxDistance * 2) {
         const next = multiple ? pick() : null;
         if (!next) { result.outcome = 'lost'; break; }
-        victim = next;
-        bot.pathfinder.setGoal(new goals.GoalFollow(victim, 2), true);
+        newTarget(next);
+        continue;
+      }
+      if (distance < closest - 1) { closest = distance; closestAt = Date.now(); }
+      if (Date.now() - closestAt > stuckMs) {
+        // not getting any closer (no path, or it's across water/a ravine): leave it
+        result.unreachable.push(describe(victim));
+        skip.add(victim.id);
+        const next = multiple ? pick() : null;
+        if (!next) { result.outcome = result.kills.length ? 'done' : 'unreachable'; break; }
+        newTarget(next);
         continue;
       }
       if (distance > 3.2) {
         lowerShield();
+        chase(victim);
         await sleep(100);
         continue;
       }
@@ -224,12 +260,14 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
       bot.attack(victim);
       result.hits++;
       result.swungWith.set(held, (result.swungWith.get(held) ?? 0) + 1);
+      closestAt = Date.now(); // in reach and swinging is progress
 
       if (victim.name === 'creeper') {
         // knock it back and step out of its blast radius before it can finish swelling
         bot.pathfinder.setGoal(new goals.GoalInvert(new goals.GoalFollow(victim, 6)), true);
         await sleep(cooldownMs);
-        bot.pathfinder.setGoal(new goals.GoalFollow(victim, 2), true);
+        chaseMode = null;
+        chase(victim);
       } else if (hasShield && (RANGED.has(victim.name ?? '') || hostilesNear(bot, 4).some(e => e.name === 'creeper'))) {
         bot.activateItem(true);
         shieldUp = true;

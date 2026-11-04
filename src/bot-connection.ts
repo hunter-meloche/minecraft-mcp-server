@@ -5,7 +5,7 @@ import minecraftData from 'minecraft-data';
 import type { Block } from 'prismarine-block';
 import { bestHarvestTool } from './best-tool.js';
 import { installBuildProtection, jsonFileStore, worldIdFromSeed } from './build-protection.js';
-import { installAutoDefend } from './auto-defend.js';
+import { installAutoDefend, rememberRegistry } from './auto-defend.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.3';
 
@@ -78,6 +78,9 @@ export class BotConnection {
     bot._client?.once('login', (packet: { worldState?: { hashedSeed?: unknown }; hashedSeed?: unknown }) => {
       worldId = worldIdFromSeed(packet.worldState?.hashedSeed ?? packet.hashedSeed);
     });
+
+    // damage type names arrive during login; auto-defend uses them to say what hurt the bot
+    bot._client?.on('registry_data', (packet: { id?: string; entries?: { key: string }[] }) => rememberRegistry(bot, packet));
 
     // Since 1.21.4 the protocol maps difficulty to a name ('easy'), but mineflayer indexes its name array with it
     // and stores undefined. Its listener is attached later (plugins load after a timeout), so set the name in a

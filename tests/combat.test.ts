@@ -1,4 +1,5 @@
 import test from 'ava';
+import sinon from 'sinon';
 import { Vec3 } from 'vec3';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { fight, fleeAndEat, equipBestArmor, matchesTarget, hostilesNear } from '../src/combat.js';
@@ -108,4 +109,31 @@ test('fight counts only its own hits as landed, not arrows or blasts from others
   const r = await fight(asBot, 'zombie');
   t.is(r.hits, 2);
   t.is(r.landed, 2);
+});
+
+test('fight walks toward a far target with a fixed goal and follows it once close', async (t) => {
+  const cow = mob('cow', 20, { type: 'animal' });
+  const { bot, asBot } = arena({ mobs: [cow], items: [item('stone_sword')] });
+  // walking: each new goal brings the bot up to 7 blocks closer
+  bot.pathfinder.setGoal = sinon.spy(() => { bot.entity.position = bot.entity.position.offset(Math.max(0, Math.min(7, cow.position.x - bot.entity.position.x - 2)), 0, 0); });
+  await fight(asBot, 'cow', { maxDistance: 64, timeoutMs: 10_000 });
+  const kinds = (bot.pathfinder.setGoal as sinon.SinonSpy).getCalls().map(c => c.args[0]?.constructor?.name ?? 'null');
+  t.is(kinds[0], 'GoalNear');
+  t.true(kinds.includes('GoalFollow'));
+  t.true(kinds.indexOf('GoalFollow') > kinds.indexOf('GoalNear'));
+});
+
+test("fight gives up on a target it can't get closer to, and moves on to the next one with 'hostile'", async (t) => {
+  const across = mob('zombie', 10); // across a ravine: never gets closer
+  const near = mob('spider', 3);
+  const { asBot } = arena({ mobs: [across], items: [item('stone_sword')] });
+  const lone = await fight(asBot, 'zombie', { stuckMs: 300 });
+  t.is(lone.outcome, 'unreachable');
+  t.deepEqual(lone.unreachable, ['zombie']);
+
+  const ledge = mob('zombie', 1.5, { y: 70 }); // on a ledge 6 up: never in reach, and the nearest
+  const two = arena({ mobs: [ledge, near], items: [item('stone_sword')] });
+  const r = await fight(two.asBot, 'hostile', { stuckMs: 300 });
+  t.deepEqual(r.unreachable, ['zombie']);
+  t.true(r.kills.includes('spider'));
 });

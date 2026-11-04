@@ -162,3 +162,45 @@ test('smelt-item returns validation error for non-positive counts', async (t) =>
   t.true(fuelCountResult.content[0].text.includes('Invalid tool arguments'));
   t.true(fuelCountResult.content[0].text.includes('fuelCount'));
 });
+
+function startSmelt (opts: { fuelInSlot?: { name: string; count: number } | null; burning?: number; inventory: { name: string; count: number }[] }) {
+  const server = { tool: sinon.stub() } as unknown as McpServer;
+  const connection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const furnace = new EventEmitter() as mineflayer.Furnace & EventEmitter;
+  furnace.putInput = sinon.stub().resolves();
+  furnace.putFuel = sinon.stub().resolves();
+  furnace.inputItem = sinon.stub().returns(null);
+  furnace.fuelItem = sinon.stub().returns(opts.fuelInSlot ?? null);
+  furnace.outputItem = sinon.stub().returns(null);
+  furnace.close = sinon.stub();
+  Object.assign(furnace, { fuel: opts.burning ?? 0 });
+  const bot = {
+    blockAt: () => ({ name: 'furnace' }),
+    openFurnace: async () => furnace,
+    inventory: { items: () => opts.inventory.map((i, n) => createMockItem({ ...i, type: 10 + n, metadata: 0 })) }
+  };
+  registerFurnaceTools(new ToolFactory(server, connection), () => bot as unknown as mineflayer.Bot);
+  const run = (server.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === 'smelt-item')!.args[3];
+  return { run, putFuel: furnace.putFuel as sinon.SinonStub };
+}
+
+test('smelt-item adds only the fuel the input still needs', async (t) => {
+  // 3 coal in the slot covers 24 items: none added for 5
+  const stocked = startSmelt({ fuelInSlot: { name: 'coal', count: 3 }, inventory: [{ name: 'raw_iron', count: 5 }, { name: 'coal', count: 9 }] });
+  const r1 = await stocked.run({ x: 0, y: 0, z: 0, inputItem: 'raw_iron', inputCount: 5, fuelItem: 'coal', takeOutput: false });
+  t.false(stocked.putFuel.called);
+  t.is(r1.content[0].text, 'Started smelting 5 raw_iron');
+
+  // 10 items from an empty furnace: 2 coal
+  const empty = startSmelt({ inventory: [{ name: 'raw_iron', count: 10 }, { name: 'coal', count: 9 }] });
+  await empty.run({ x: 0, y: 0, z: 0, inputItem: 'raw_iron', inputCount: 10, fuelItem: 'coal', takeOutput: false });
+  t.is(empty.putFuel.firstCall.args[2], 2);
+
+  // fuelCount caps it; planks smelt 1.5 each
+  const planks = startSmelt({ inventory: [{ name: 'porkchop', count: 6 }, { name: 'oak_planks', count: 20 }] });
+  await planks.run({ x: 0, y: 0, z: 0, inputItem: 'porkchop', inputCount: 6, fuelItem: 'oak_planks', takeOutput: false });
+  t.is(planks.putFuel.firstCall.args[2], 4);
+  const capped = startSmelt({ inventory: [{ name: 'porkchop', count: 6 }, { name: 'oak_planks', count: 20 }] });
+  await capped.run({ x: 0, y: 0, z: 0, inputItem: 'porkchop', inputCount: 6, fuelItem: 'oak_planks', fuelCount: 2, takeOutput: false });
+  t.is(capped.putFuel.firstCall.args[2], 2);
+});

@@ -27,6 +27,17 @@ interface DefendState {
   shelteredAt: string | null; // feet cell of the last emergency shelter, so it isn't rebuilt every tick
   notes: string[]; // since the last alert was taken
   shieldUp: boolean; // raised by the shield guard
+  seenDamageEvents: boolean; // the server sends damage_event (1.19.4+): take hurts from there, with their cause
+}
+
+/** Damage type names by id, from the server's registry (sent while logging in). */
+const damageTypes = new WeakMap<mineflayer.Bot, string[]>();
+
+/** Keep the damage type names from a registry_data packet, so hurts can say 'lava' or 'fall' instead of 'unknown'. */
+export function rememberRegistry(bot: mineflayer.Bot, packet: { id?: string; entries?: { key: string }[] }): void {
+  if (packet.id?.replace('minecraft:', '') === 'damage_type' && Array.isArray(packet.entries)) {
+    damageTypes.set(bot, packet.entries.map(e => e.key.replace('minecraft:', '')));
+  }
 }
 
 const states = new WeakMap<mineflayer.Bot, DefendState>();
@@ -34,7 +45,7 @@ const states = new WeakMap<mineflayer.Bot, DefendState>();
 function stateOf(bot: mineflayer.Bot): DefendState {
   let s = states.get(bot);
   if (!s) {
-    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false };
+    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false, seenDamageEvents: false };
     states.set(bot, s);
   }
   return s;
@@ -48,11 +59,12 @@ export function autoDefendEnabled(bot: mineflayer.Bot): boolean {
   return stateOf(bot).enabled;
 }
 
-/** Record who hurt the bot. Hooked to 'entityHurt'. */
-export function noteHurt(bot: mineflayer.Bot, entity: Entity | undefined, source: Entity | undefined): void {
+/** Record who or what hurt the bot. `cause` is the damage type ('lava', 'fall', 'arrow', ...) when known. */
+export function noteHurt(bot: mineflayer.Bot, entity: Entity | undefined, source: Entity | undefined, cause?: string): void {
   if (!entity || entity !== bot.entity) return;
   const s = stateOf(bot);
-  s.hurts.push({ by: source ? describe(source) : 'unknown', at: Date.now() });
+  const by = source ? (cause && cause !== 'mob_attack' ? `${cause} from ${describe(source)}` : describe(source)) : cause ?? 'unknown';
+  s.hurts.push({ by, at: Date.now() });
   s.lastHurtAt = Date.now();
   if (source) s.attackers.set(source.id, Date.now());
 }
@@ -190,7 +202,17 @@ export async function gearTick(bot: mineflayer.Bot): Promise<string[]> {
 
 export function installAutoDefend(bot: mineflayer.Bot, onError?: (err: unknown) => void): void {
   stateOf(bot);
-  bot.on('entityHurt', (entity, source) => noteHurt(bot, entity, source as Entity | undefined));
+  // 1.19.4+: damage_event says what kind of damage it was; before that only entity_status (no cause, no source)
+  bot._client?.on('damage_event', (p: { entityId: number; sourceTypeId: number; sourceCauseId: number }) => {
+    const s = stateOf(bot);
+    s.seenDamageEvents = true;
+    if (p.entityId !== bot.entity?.id) return;
+    const source = p.sourceCauseId > 0 ? bot.entities[p.sourceCauseId - 1] : undefined;
+    noteHurt(bot, bot.entity, source, damageTypes.get(bot)?.[p.sourceTypeId]);
+  });
+  bot.on('entityHurt', (entity, source) => {
+    if (!stateOf(bot).seenDamageEvents) noteHurt(bot, entity, source as Entity | undefined);
+  });
   let ticks = 0;
   const timer = setInterval(() => {
     if (++ticks % 20 === 0) { gearTick(bot).catch(err => onError?.(err)); return; }
