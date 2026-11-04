@@ -135,7 +135,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `eat` - Eat the best safe food in the inventory, or the named `item`; reports hunger and health before and after
 - `get-status` - Health, hunger, saturation, time of day and minutes until night (or dawn), dimension, game mode and difficulty
 - `wall-in` - Shelter on the spot: blocks on all four sides at feet and head height and a roof (up to 10 dirt/cobblestone/...)
-- `set-auto-defend` - Turn the auto-defend reflex on or off (on by default). It hits hostiles within reach while other tools run, walls in when health drops to 6 under attack, and keeps the best armor and a shield on. Every tool reply ends with a `[!]` line when the bot was hurt, fought back or put on gear since the last call
+- `set-auto-defend` - Turn the auto-defend reflex on or off (on by default). It hits hostiles within reach while other tools run, holds up a shield against the nearest threat when idle, walls in when health drops to 6 under attack, and keeps the best armor and a shield on. Every tool reply ends with a `[!]` line when the bot was hurt, fought back or put on gear since the last call
 
 ### Communication
 - `send-chat` - Send a chat message in-game
