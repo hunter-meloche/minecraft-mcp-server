@@ -50,6 +50,9 @@ public class ClaudeBridge implements ClientModInitializer {
         s.maxFallHeightNoWater.value = 3;
         s.avoidance.value = true;
         s.allowInventory.value = true; // let the builder (and tool choice) use items outside the hotbar; without it a build stalls silently
+        // build-structure writes structure_void where a directional block goes (stairs facing out over a wall can't be
+        // placed from where Baritone stands) and places those itself afterwards; Baritone leaves those cells alone
+        s.buildSkipBlocks.value.add(net.minecraft.world.level.block.Blocks.STRUCTURE_VOID);
         s.chatControl.value = false; // only this bridge controls the bot, not chat from other players
         Consumer<Component> previous = s.logger.value;
         s.logger.value = message -> {

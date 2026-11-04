@@ -7,7 +7,7 @@ import { MessageStore } from '../message-store.js';
 import { mineflayerToolDefinitions } from '../tools/register-all.js';
 import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
-import { checkBuild, layoutSpec, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
+import { checkBuild, layoutSpec, missingCells, placerFacing, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -38,6 +38,12 @@ interface FightResult {
 interface ProcessResult { reason: 'done' | 'timeout' | 'paused' | 'cancelled'; seconds: number; baritone: string[]; at?: Pos }
 
 type Executor = (args: Record<string, unknown>) => Promise<ReturnType<ToolFactory['createResponse']>>;
+
+/** build-structure: how often it looks at the build while Baritone works, and how long without change counts as stuck. */
+let STALL_POLL_MS = 15_000;
+let STALL_MS = 60_000;
+/** For tests: shorter stall timing. */
+export function setStallTiming(pollMs: number, stallMs: number): void { STALL_POLL_MS = pollMs; STALL_MS = stallMs; }
 
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
@@ -181,6 +187,25 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   /** The world's blocks in a structure's box (for checkBuild). */
   const region = async (origin: Pos, layout: Schematic) => (await call<{ blocks: (string | null)[] }>('world.region',
     { ...origin, width: layout.width, height: layout.height, length: layout.length }, 30_000)).blocks;
+
+  /** Place `item` at `at` while facing `look` (clearing a wrong block first); returns why not, or undefined when placed. */
+  const placeFacing = async (at: Pos, item: string, look?: string): Promise<string | undefined> => {
+    type Placed = { placed: boolean; block?: string; reason?: string };
+    try { await call('item.select', { name: item }); } catch { return `no ${item} in the inventory`; }
+    const attempt = () => call<Placed>('place', { ...at, face: 'down', ...(look ? { facing: look } : {}) });
+    let r = await attempt();
+    if (!r.placed && r.reason?.startsWith('occupied by')) {
+      await call('dig', { ...at }, 75_000).catch(() => undefined);
+      await call('item.select', { name: item });
+      r = await attempt();
+    }
+    if (!r.placed && (r.reason === 'too far' || r.reason === 'the bot is standing there')) {
+      await goNear(at, 2).catch(() => undefined);
+      await call('item.select', { name: item });
+      r = await attempt();
+    }
+    return r.placed ? undefined : (r.reason ?? 'the server did not accept it');
+  };
 
   const inventoryCounts = async () => {
     const inv = await call<Inventory>('inventory');
@@ -455,23 +480,62 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
             return factory.createResponse(`${name} is already built at ${fmt(origin)}: all ${before.total} blocks in place.`);
           }
           const { counts: have } = await inventoryCounts();
-          const missing = Object.entries(before.missing).filter(([item, n]) => (have.get(item) ?? 0) < n)
-            .map(([item, n]) => `${item} ${have.get(item) ?? 0}/${n}`);
+          const own = (item: string) => (have.get(item) ?? 0) + (before.misplaced[item] ?? 0);
+          const missing = Object.entries(before.missing).filter(([item, n]) => own(item) < n)
+            .map(([item, n]) => `${item} ${own(item)}/${n}`);
           if (missing.length) return factory.createErrorResponse(`Not enough blocks to build it. Missing: ${missing.join(', ')}`);
         }
         const dir = path.join(options.gameDir, 'schematics');
         fs.mkdirSync(dir, { recursive: true });
         schematicFile = path.join(dir, `${name}.schem`);
-        fs.writeFileSync(schematicFile, writeSchematic(layout));
+        fs.writeFileSync(schematicFile, writeSchematic(splitDirectional(layout).baritone));
       } else if (file) {
         schematicFile = path.resolve(file);
       } else {
         return factory.createErrorResponse('Give either spec or file');
       }
-      const r = await call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs }, timeoutMs + 15_000);
+      const building = call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs }, timeoutMs + 15_000);
+      // Baritone can stand still for minutes when nothing left is placeable from where it can stand (a log over a
+      // doorway, a ridge with no stairs under it yet): when the box hasn't changed for STALL_MS, stop it and finish by hand
+      let stalled = false;
+      if (layout) {
+        const box = layout;
+        let done = false;
+        void building.finally(() => { done = true; }).catch(() => undefined);
+        let last = JSON.stringify(await region(origin, box).catch(() => []));
+        let lastChange = Date.now();
+        while (!done) {
+          await Promise.race([building.catch(() => undefined), new Promise(res => setTimeout(res, STALL_POLL_MS))]);
+          if (done) break;
+          const now = JSON.stringify(await region(origin, box).catch(() => []));
+          if (now !== last) { last = now; lastChange = Date.now(); continue; }
+          if (Date.now() - lastChange >= STALL_MS) { stalled = true; await call('cancel').catch(() => undefined); break; }
+        }
+      }
+      const r = await building;
       const used = Object.entries(r.used).map(([n, c]) => `${n} x${c}`).join(', ');
       if (r.reason === 'paused') {
         return factory.createErrorResponse(`Build paused after ${r.seconds}s (probably out of a block it needs).${baritoneSaid(r.baritone)}`);
+      }
+      let placedByHand = 0;
+      const handFailures: string[] = [];
+      if (layout && (r.reason === 'done' || stalled)) {
+        // what Baritone skipped (directional blocks) or couldn't get to, placed by hand; passes repeat while they make
+        // progress, since a block may only have something to rest against once its neighbour is in
+        const failures = new Map<string, string>();
+        for (let pass = 0; pass < 4; pass++) {
+          const todo = missingCells(layout, await region(origin, layout));
+          if (!todo.length) break;
+          let progress = 0;
+          for (const cell of todo) {
+            const at = { x: origin.x + cell.x, y: origin.y + cell.y, z: origin.z + cell.z };
+            const why = await placeFacing(at, cell.id, cell.facing ? placerFacing(cell.id, cell.facing) : undefined);
+            if (why) failures.set(fmt(at), `${cell.id} at ${fmt(at)}: ${why}`);
+            else { failures.delete(fmt(at)); progress++; placedByHand++; }
+          }
+          if (!progress) break;
+        }
+        handFailures.push(...failures.values());
       }
       if (layout) {
         // Baritone can call a build done with most of it missing (it did: 19 of 117 blocks), so look at the world
@@ -479,11 +543,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (check.placed < check.total) {
           const inv = await inventoryCounts();
           const missing = Object.entries(check.missing).map(([n, c]) => `${n} x${c} (have ${inv.counts.get(n) ?? 0})`).join(', ');
-          const why = r.reason === 'timeout' ? `stopped after ${r.seconds}s (time limit)` : `ended after ${r.seconds}s`;
+          const why = r.reason === 'timeout' ? `stopped after ${r.seconds}s (time limit)` : stalled ? `stalled after ${r.seconds}s` : `ended after ${r.seconds}s`;
+          const hand = handFailures.length ? ` Couldn't place: ${handFailures.slice(0, 5).join('; ')}.` : '';
           return factory.createErrorResponse(`Build of ${name} ${why} with ${check.placed}/${check.total} blocks in place. ` +
-            `Missing: ${missing}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)} Run build-structure again to continue.`);
+            `Missing: ${missing}. Used: ${used || 'nothing'}.${hand}${baritoneSaid(r.baritone)} Run build-structure again to continue.`);
         }
-        return factory.createResponse(`Built ${name} at ${fmt(origin)} in ${r.seconds}s: all ${check.total} blocks in place. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);
+        const hand = placedByHand ? ` (${placedByHand} placed by hand${stalled ? ' after Baritone stalled' : ''})` : '';
+        return factory.createResponse(`Built ${name} at ${fmt(origin)} in ${r.seconds}s: all ${check.total} blocks in place${hand}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);
       }
       const head = r.reason === 'timeout' ? `Build stopped after ${r.seconds}s (time limit)` : `Built ${name} at ${fmt(origin)} in ${r.seconds}s`;
       return factory.createResponse(`${head}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);

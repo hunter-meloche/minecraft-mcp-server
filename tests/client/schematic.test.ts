@@ -1,7 +1,7 @@
 import test from 'ava';
 import zlib from 'zlib';
 import nbt from 'prismarine-nbt';
-import { layoutSpec, varints, writeSchematic } from '../../src/client/schematic.js';
+import { checkBuild, layoutSpec, placerFacing, splitDirectional, varints, writeSchematic } from '../../src/client/schematic.js';
 
 test('layoutSpec: dimensions, palette, Sponge index order, and material counts', (t) => {
   const s = layoutSpec({ palette: { L: 'acacia_log[axis=y]', P: 'acacia_planks' }, layers: [['LP', 'P.L'], ['L']] });
@@ -33,4 +33,28 @@ test('writeSchematic round-trips through NBT', async (t) => {
   t.like(parsed, { Version: 2, DataVersion: 5023, Width: 3, Height: 1, Length: 1, PaletteMax: 2 });
   t.deepEqual(parsed.Palette, { 'minecraft:air': 0, 'minecraft:oak_log': 1 });
   t.deepEqual(parsed.BlockData, [1, 0, 1]);
+});
+
+test('splitDirectional: Baritone gets structure_void where stairs go; the stairs come back bottom up', (t) => {
+  const s = layoutSpec({
+    palette: { P: 'oak_planks', S: 'oak_stairs[facing=south,half=bottom]', N: 'oak_stairs[facing=north,half=bottom]' },
+    layers: [['PP', 'PP'], ['S.', '.N']]
+  });
+  const { baritone, cells } = splitDirectional(s);
+  t.deepEqual(baritone.palette, { 'minecraft:air': 0, 'minecraft:oak_planks': 1, 'minecraft:structure_void': 2 });
+  t.deepEqual(baritone.blocks, [1, 1, 1, 1, 2, 0, 0, 2]);
+  t.deepEqual(cells.map(c => [c.x, c.y, c.z, c.id, c.facing]), [[0, 1, 0, 'oak_stairs', 'south'], [1, 1, 1, 'oak_stairs', 'north']]);
+});
+
+test('placerFacing: stairs and doors face where the player looks, furnaces and chests face back', (t) => {
+  t.is(placerFacing('oak_stairs', 'south'), 'south');
+  t.is(placerFacing('oak_door', 'east'), 'east');
+  t.is(placerFacing('furnace', 'south'), 'north');
+  t.is(placerFacing('chest', 'west'), 'east');
+});
+
+test('checkBuild: counts only the structure, and only the properties the spec names', (t) => {
+  const s = layoutSpec({ palette: { L: 'oak_log[axis=y]', P: 'oak_planks' }, layers: [['LP.']] });
+  t.deepEqual(checkBuild(s, ['oak_log[axis=y]', 'oak_planks', 'stone']), { placed: 2, total: 2, missing: {}, misplaced: {} });
+  t.deepEqual(checkBuild(s, ['oak_log[axis=z]', null, 'air']), { placed: 0, total: 2, missing: { oak_log: 1, oak_planks: 1 }, misplaced: { oak_log: 1 } });
 });

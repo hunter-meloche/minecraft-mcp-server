@@ -93,10 +93,14 @@ export function writeSchematic(s: Schematic, dataVersion = DATA_VERSION_26_3): B
   return zlib.gzipSync(nbt.writeUncompressed(root as unknown as nbt.NBT));
 }
 
-export interface BuildCheck { placed: number; total: number; missing: Record<string, number> }
+export interface BuildCheck {
+  placed: number; total: number; missing: Record<string, number>;
+  /** cells holding the right block in the wrong state (a stair facing the wrong way): breaking it gives the item back */
+  misplaced: Record<string, number>;
+}
 
 /** Split "minecraft:oak_log[axis=y]" into its id (no namespace) and properties. */
-function parseState(state: string): { id: string; props: Record<string, string> } {
+export function parseState(state: string): { id: string; props: Record<string, string> } {
   const m = /^(?:minecraft:)?([^[]+)(?:\[(.*)\])?$/.exec(state);
   const props: Record<string, string> = {};
   for (const kv of (m?.[2] ?? '').split(',').filter(Boolean)) {
@@ -104,6 +108,21 @@ function parseState(state: string): { id: string; props: Record<string, string> 
     props[k.trim()] = (v ?? '').trim();
   }
   return { id: m?.[1] ?? state, props };
+}
+
+/** The structure's blocks that the world doesn't have yet, bottom up (then x, then z), so supports come first. */
+export function missingCells(layout: Schematic, world: (string | null)[]): Cell[] {
+  const byIndex = new Map(Object.entries(layout.palette).map(([state, i]) => [i, { state, ...parseState(state) }]));
+  const out: Cell[] = [];
+  layout.blocks.forEach((p, i) => {
+    if (p === 0) return;
+    const want = byIndex.get(p)!;
+    const got = world[i] ? parseState(world[i]!) : null;
+    if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) return;
+    const x = i % layout.width, z = Math.floor(i / layout.width) % layout.length, y = Math.floor(i / (layout.width * layout.length));
+    out.push({ x, y, z, state: want.state, id: want.id, ...(want.props.facing ? { facing: want.props.facing } : {}) });
+  });
+  return out.sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
 }
 
 /**
@@ -114,6 +133,7 @@ function parseState(state: string): { id: string; props: Record<string, string> 
 export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCheck {
   const byIndex = new Map(Object.entries(layout.palette).map(([state, i]) => [i, parseState(state)]));
   const missing: Record<string, number> = {};
+  const misplaced: Record<string, number> = {};
   let placed = 0, total = 0;
   layout.blocks.forEach((p, i) => {
     if (p === 0) return;
@@ -121,7 +141,54 @@ export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCh
     const want = byIndex.get(p)!;
     const got = world[i] ? parseState(world[i]!) : null;
     if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) placed++;
-    else missing[want.id] = (missing[want.id] ?? 0) + 1;
+    else {
+      missing[want.id] = (missing[want.id] ?? 0) + 1;
+      if (got?.id === want.id) misplaced[want.id] = (misplaced[want.id] ?? 0) + 1;
+    }
   });
-  return { placed, total, missing };
+  return { placed, total, missing, misplaced };
+}
+
+export interface FacingCell { x: number; y: number; z: number; state: string; id: string; facing: string }
+/** A structure cell (relative to the minimum corner) and the block it wants. */
+export interface Cell { x: number; y: number; z: number; state: string; id: string; facing?: string }
+
+/**
+ * Split a structure for building: Baritone gets every block except the ones with a `facing` (stairs on a roof edge must be
+ * placed from outside the wall, which it can't stand at), which become structure_void (Baritone's skip list holds it);
+ * those come back as cells, bottom up, for build-structure to place itself with the right facing.
+ */
+export function splitDirectional(layout: Schematic): { baritone: Schematic; cells: FacingCell[] } {
+  const palette: Record<string, number> = {};
+  const remap = new Map<number, number>();
+  const directional = new Map<number, string>();
+  for (const [state, i] of Object.entries(layout.palette)) {
+    const facing = parseState(state).props.facing;
+    const keep = facing ? 'minecraft:structure_void' : state;
+    if (facing) directional.set(i, state);
+    if (!(keep in palette)) palette[keep] = Object.keys(palette).length;
+    remap.set(i, palette[keep]);
+  }
+  const cells: FacingCell[] = [];
+  const blocks = layout.blocks.map((p, i) => {
+    const state = directional.get(p);
+    if (state) {
+      const { id, props } = parseState(state);
+      const x = i % layout.width, z = Math.floor(i / layout.width) % layout.length, y = Math.floor(i / (layout.width * layout.length));
+      cells.push({ x, y, z, state, id, facing: props.facing });
+    }
+    return remap.get(p)!;
+  });
+  cells.sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
+  return { baritone: { ...layout, palette, blocks }, cells };
+}
+
+const OPPOSITE: Record<string, string> = { north: 'south', south: 'north', east: 'west', west: 'east' };
+
+/**
+ * Which way the player must face to place `id` with `facing`: stairs, doors, fence gates and beds face the way the player
+ * looks; most others (furnaces, chests, observers...) face back at the player.
+ */
+export function placerFacing(id: string, facing: string): string {
+  return /stairs|_door$|fence_gate|_bed$/.test(id) ? facing : (OPPOSITE[facing] ?? facing);
 }

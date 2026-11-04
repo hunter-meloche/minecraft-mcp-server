@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { registerClientTools, mineflayerSlot, entityKind } from '../../src/client/tools.js';
+import { registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
 
@@ -286,9 +286,40 @@ test('build-structure checks the world and reports a build Baritone called done 
     inventory: { items: [{ slot: 1, name: 'oak_log', count: 9 }, { slot: 2, name: 'oak_planks', count: 5 }], selectedSlot: 0, held: null },
     build: { reason: 'done', seconds: 422, baritone: [], used: { oak_planks: 1 } },
     // planks placed; one log lies sideways (wrong axis), two missing
-    'world.region': afterBuild(['oak_log[axis=x]', 'oak_planks', 'air', 'air', 'air', 'oak_log[axis=y]'])
+    'world.region': afterBuild(['oak_log[axis=x]', 'oak_planks', 'air', 'air', 'air', 'oak_log[axis=y]']),
+    // the hand pass gets nowhere either
+    'item.select': { held: 'oak_log' },
+    place: { placed: false, reason: 'nothing solid next to it to place against' },
+    dig: { dug: true }
   });
   const r = await run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'cabin' });
   t.true(r.isError);
-  t.is(r.text, 'Failed: Build of cabin ended after 422s with 2/5 blocks in place. Missing: oak_log x3 (have 9). Used: oak_planks x1. Run build-structure again to continue.');
+  t.regex(r.text, /^Failed: Build of cabin ended after 422s with 2\/5 blocks in place\. Missing: oak_log x3 \(have 9\)\. Used: oak_planks x1\. Couldn't place: oak_log at \(0, 64, 0\): nothing solid next to it/);
+  t.regex(r.text, /Run build-structure again to continue\.$/);
+});
+
+test('build-structure stops a stalled Baritone and places the rest by hand, facing the right way', async (t) => {
+  setStallTiming(20, 80);
+  t.teardown(() => setStallTiming(15_000, 60_000));
+  const spec = { palette: { P: 'oak_planks', S: 'oak_stairs[facing=south,half=bottom]' }, layers: [['PS']] };
+  let release: (v: unknown) => void = () => undefined;
+  let world = ['oak_planks', 'air'];
+  const { run, request } = setup({
+    status: STATUS,
+    inventory: { items: [{ slot: 1, name: 'oak_planks', count: 2 }, { slot: 2, name: 'oak_stairs', count: 2 }], selectedSlot: 0, held: null },
+    'world.region': () => ({ blocks: world }),
+    // Baritone never finishes on its own; cancel ends it
+    build: () => new Promise(res => { release = res; }),
+    cancel: () => { release({ reason: 'cancelled', seconds: 61, baritone: [], used: {} }); return { cancelled: true }; },
+    'item.select': { held: 'oak_stairs' },
+    place: () => { world = ['oak_planks', 'oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]']; return { placed: true, block: 'oak_stairs', face: 'west' }; }
+  });
+  // the first look (materials check) sees nothing built yet
+  world = ['air', 'air'];
+  const pending = run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'step' });
+  await new Promise(res => setTimeout(res, 10));
+  world = ['oak_planks', 'air'];
+  const r = await pending;
+  t.is(r.text, 'Built step at (0, 64, 0) in 61s: all 2 blocks in place (1 placed by hand after Baritone stalled). Used: nothing.');
+  t.like(request.getCalls().find(c => c.args[0] === 'place')!.args[1], { x: 1, y: 64, z: 0, facing: 'south' });
 });

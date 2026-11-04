@@ -172,15 +172,22 @@ public final class Interact {
                 BlockState rs = mc.level.getBlockState(ref);
                 if (replaceable(rs) || ACTIVATABLE.matcher(Names.block(rs)).matches()) continue;
                 Direction face = toRef.getOpposite(); // the reference block's face that points at the target
-                Vec3 hit = faceCenter(ref, face);
+                // click a side face low, so stairs and slabs come out as bottom halves (the exact middle is a coin toss)
+                Vec3 hit = faceCenter(ref, face).add(0, face.getAxis().isHorizontal() ? -0.25 : 0, 0);
                 if (pl.getEyePosition().distanceTo(hit) > 4.5) return obj("placed", false, "reason", "too far", "distance", round(pl.getEyePosition().distanceTo(hit)));
                 pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
-                mc.gameMode.useItemOn(pl, InteractionHand.MAIN_HAND, new BlockHitResult(hit, face, ref, false));
+                // directional blocks (stairs, doors, furnaces...) take the way the player faces: turn to `facing` if asked
+                Direction facing = Direction.byName(strParam(p, "facing", ""));
+                if (facing != null && facing.getAxis().isHorizontal()) pl.setYRot(facing.toYRot());
                 String faceName = toRef.getSerializedName();
+                BlockHitResult click = new BlockHitResult(hit, face, ref, false);
+                // the server reads the rotation from the last movement packet, which the client sends on its next tick: place after it
                 Ticker.add(new Ticker.Task() {
-                    int wait = 3;
+                    int wait = 5;
                     @Override public boolean tick(Minecraft m) {
-                        if (--wait > 0) return false;
+                        wait--;
+                        if (wait == 3) m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click);
+                        if (wait > 0) return false;
                         BlockState now = m.level.getBlockState(target);
                         c.ok(obj("placed", !replaceable(now), "block", Names.block(now), "face", faceName));
                         return true;
