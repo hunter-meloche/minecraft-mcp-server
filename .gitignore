@@ -24,3 +24,7 @@ pids/
 # Claude Code configuration
 .claude
 .idea
+
+# client mod: fetched libraries and build output
+client-mod/libs/
+client-mod/build/

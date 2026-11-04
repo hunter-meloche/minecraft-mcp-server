@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "claudebridge",
+  "version": "0.2.0",
+  "name": "Claude Bridge",
+  "description": "Lets the Minecraft MCP server drive this client and Baritone over a loopback JSON-RPC connection.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["claudebridge.ClaudeBridge"]
+  },
+  "mixins": ["claudebridge.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.20.0",
+    "minecraft": "~26.3",
+    "baritone": "*"
+  }
+}

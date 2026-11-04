@@ -1,6 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, ZodError, ZodRawShape, ZodType } from "zod";
-import { BotConnection } from './bot-connection.js';
+
+/** What tools need from a game connection: a check (and reconnect) before each call. Both backends implement it. */
+export interface ToolConnection {
+  checkConnectionAndReconnect(): Promise<{ connected: boolean; message?: string }>;
+}
 
 type McpResponse = {
   content: { type: "text"; text: string }[];
@@ -15,7 +19,7 @@ export class ToolFactory {
    */
   constructor(
     private server: McpServer,
-    private connection: BotConnection,
+    private connection: ToolConnection,
     private alerts?: () => string | null
   ) {}
 

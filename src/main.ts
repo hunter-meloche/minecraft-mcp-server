@@ -8,16 +8,12 @@ import { parseConfig } from './config.js';
 import { BotConnection } from './bot-connection.js';
 import { ToolFactory } from './tool-factory.js';
 import { MessageStore } from './message-store.js';
-import { registerPositionTools } from './tools/position-tools.js';
-import { registerInventoryTools } from './tools/inventory-tools.js';
-import { registerBlockTools } from './tools/block-tools.js';
-import { registerEntityTools } from './tools/entity-tools.js';
-import { registerChatTools } from './tools/chat-tools.js';
-import { registerFlightTools } from './tools/flight-tools.js';
-import { registerGameStateTools } from './tools/gamestate-tools.js';
-import { registerCraftingTools } from './tools/crafting-tools.js';
-import { registerFurnaceTools } from './tools/furnace-tools.js';
-import { registerSurvivalTools } from './tools/survival-tools.js';
+import { registerMineflayerTools } from './tools/register-all.js';
+import os from 'os';
+import path from 'path';
+import { ClientConnection } from './client/client-connection.js';
+import { registerClientTools } from './client/tools.js';
+import { defaultMinecraftDir } from './client/install.js';
 import { takeAlerts } from './auto-defend.js';
 
 setupStdioFiltering();
@@ -33,42 +29,52 @@ process.on('uncaughtException', (error) => {
 async function main() {
   const config = parseConfig();
   const messageStore = new MessageStore();
-
-  const connection = new BotConnection(
-    config,
-    {
-      onLog: log,
-      onChatMessage: (username, message) => messageStore.addMessage(username, message)
-    }
-  );
-
-  connection.connect();
-
   const server = new McpServer({
     name: "minecraft-mcp-server",
     version: "2.0.4-mc26.3"
   });
+  let cleanup: () => void;
 
-  // every reply also says if the bot was hurt (or auto-defend fought) since the last call
-  const factory = new ToolFactory(server, connection, () => {
-    const bot = connection.getBot();
-    return bot && connection.isConnected() ? takeAlerts(bot) : null;
-  });
-  const getBot = () => connection.getBot()!;
-
-  registerPositionTools(factory, getBot);
-  registerInventoryTools(factory, getBot);
-  registerBlockTools(factory, getBot);
-  registerEntityTools(factory, getBot);
-  registerChatTools(factory, getBot, messageStore);
-  registerFlightTools(factory, getBot);
-  registerGameStateTools(factory, getBot);
-  registerCraftingTools(factory, getBot);
-  registerFurnaceTools(factory, getBot);
-  registerSurvivalTools(factory, getBot);
+  if (config.backend === 'client') {
+    // the official game client with Baritone and the bridge mod (client-mod/) plays as the bot
+    if (config.auth === 'microsoft') throw new Error('--backend client supports offline accounts only for now');
+    const gameDir = config.clientDir ?? path.join(os.homedir(), '.minecraft-mcp-server', 'client');
+    const connection = new ClientConnection(
+      {
+        minecraftDir: config.minecraftDir ?? defaultMinecraftDir(),
+        javaBin: config.java,
+        gameDir,
+        username: config.username,
+        server: `${config.host}:${config.port}`,
+        bridgePort: config.bridgePort,
+        offline: true
+      },
+      { onLog: log, onChatMessage: (username, message) => messageStore.addMessage(username, message) }
+    );
+    connection.start();
+    const factory = new ToolFactory(server, connection, () => (connection.isConnected() ? connection.alerts.take() : null));
+    registerClientTools(factory, connection.bridge, messageStore, { gameDir });
+    cleanup = () => connection.cleanup();
+  } else {
+    const connection = new BotConnection(
+      config,
+      {
+        onLog: log,
+        onChatMessage: (username, message) => messageStore.addMessage(username, message)
+      }
+    );
+    connection.connect();
+    // every reply also says if the bot was hurt (or auto-defend fought) since the last call
+    const factory = new ToolFactory(server, connection, () => {
+      const bot = connection.getBot();
+      return bot && connection.isConnected() ? takeAlerts(bot) : null;
+    });
+    registerMineflayerTools(factory, () => connection.getBot()!, messageStore);
+    cleanup = () => connection.cleanup();
+  }
 
   process.stdin.on('end', () => {
-    connection.cleanup();
+    cleanup();
     log('info', 'MCP Client has disconnected. Shutting down...');
     process.exit(0);
   });

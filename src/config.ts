@@ -7,6 +7,12 @@ export interface ServerConfig {
   username: string;
   mcVersion?: string;
   auth: 'offline' | 'microsoft';
+  /** mineflayer (default) or client: a modded game client with Baritone (see client-mod/) */
+  backend: 'mineflayer' | 'client';
+  minecraftDir?: string;
+  java?: string;
+  clientDir?: string;
+  bridgePort: number;
 }
 
 export function parseConfig(): ServerConfig {
@@ -35,6 +41,29 @@ export function parseConfig(): ServerConfig {
       choices: ['offline', 'microsoft'] as const,
       description: 'offline for offline-mode/LAN servers, microsoft for online-mode servers',
       default: 'offline' as const
+    })
+    .option('backend', {
+      type: 'string',
+      choices: ['mineflayer', 'client'] as const,
+      description: 'mineflayer: protocol bot (default). client: the official game client with Baritone and the bridge mod',
+      default: 'mineflayer' as const
+    })
+    .option('minecraft-dir', {
+      type: 'string',
+      description: 'client backend: the official Minecraft install to launch from (default: the standard .minecraft folder)'
+    })
+    .option('java', {
+      type: 'string',
+      description: 'client backend: bin folder of a Java 25 runtime (default: the one the Minecraft launcher installed)'
+    })
+    .option('client-dir', {
+      type: 'string',
+      description: 'client backend: game folder of the bot client (default: ~/.minecraft-mcp-server/client)'
+    })
+    .option('bridge-port', {
+      type: 'number',
+      description: 'client backend: loopback port of the bridge mod',
+      default: 25599
     })
     .help()
     .alias('help', 'h')

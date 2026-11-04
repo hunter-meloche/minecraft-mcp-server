@@ -1,0 +1,219 @@
+package claudebridge;
+
+import baritone.api.IBaritone;
+import baritone.api.pathing.goals.GoalBlock;
+import baritone.api.pathing.goals.GoalNear;
+import baritone.api.utils.BlockOptionalMetaLookup;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.phys.Vec3;
+
+import java.io.File;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+
+import static claudebridge.Json.*;
+
+/** The bridge methods. Each one runs on the game thread unless registered otherwise. */
+public final class Handlers {
+    private Handlers() { }
+
+    static LocalPlayer player() {
+        LocalPlayer p = Minecraft.getInstance().player;
+        if (p == null) throw new IllegalStateException("not in a world");
+        return p;
+    }
+
+    public static void register(BridgeServer s) {
+        s.register("ping", false, (p, c) -> obj("pong", true));
+
+        s.register("status", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = mc.player;
+            JsonObject r = new JsonObject();
+            r.addProperty("username", mc.getUser().getName());
+            r.addProperty("inWorld", pl != null && mc.level != null);
+            var screen = mc.gui.screen();
+            r.addProperty("screen", screen == null ? null : screen.getClass().getSimpleName());
+            if (pl == null || mc.level == null) return r;
+            r.add("position", pos(pl.position()));
+            r.add("block", pos(pl.blockPosition()));
+            r.addProperty("yaw", round(pl.getYRot()));
+            r.addProperty("pitch", round(pl.getXRot()));
+            r.addProperty("health", round(pl.getHealth()));
+            r.addProperty("food", pl.getFoodData().getFoodLevel());
+            r.addProperty("saturation", round(pl.getFoodData().getSaturationLevel()));
+            r.addProperty("air", Math.max(0, pl.getAirSupply()) / 15); // 0..20 like mineflayer's oxygenLevel
+            r.addProperty("underWater", pl.isUnderWater());
+            r.addProperty("inLava", pl.isInLava());
+            r.addProperty("dimension", Names.strip(mc.level.dimension().identifier().toString()));
+            r.addProperty("gameMode", mc.gameMode == null ? null : mc.gameMode.getPlayerMode().name().toLowerCase());
+            r.addProperty("difficulty", mc.level.getLevelData().getDifficulty().getSerializedName());
+            r.addProperty("timeOfDay", Math.floorMod(mc.level.getOverworldClockTime(), 24000L));
+            IBaritone b = Processes.baritone();
+            r.addProperty("process", Processes.active());
+            Object goal = b.getPathingBehavior().getGoal();
+            r.addProperty("goal", goal == null ? null : goal.toString());
+            return r;
+        });
+
+        s.register("inventory", true, (p, c) -> {
+            LocalPlayer pl = player();
+            var inv = pl.getInventory();
+            JsonArray items = new JsonArray();
+            for (int i = 0; i < inv.getContainerSize(); i++) {
+                var st = inv.getItem(i);
+                if (st.isEmpty()) continue;
+                items.add(obj("slot", i, "name", Names.item(st), "count", st.getCount()));
+            }
+            var held = pl.getMainHandItem();
+            return obj("items", items, "selectedSlot", inv.getSelectedSlot(),
+                "held", held.isEmpty() ? null : obj("name", Names.item(held), "count", held.getCount()));
+        });
+
+        s.register("screen", true, (p, c) -> {
+            var screen = Minecraft.getInstance().gui.screen();
+            if (screen == null) return obj("screen", null);
+            StringBuilder texts = new StringBuilder();
+            for (Class<?> k = screen.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+                for (var f : k.getDeclaredFields()) {
+                    try {
+                        f.setAccessible(true);
+                        Object v = f.get(screen);
+                        if (v instanceof Component comp) texts.append(f.getName()).append('=').append(comp.getString()).append(" | ");
+                        else if (v instanceof Record rec) {
+                            for (var rc : rec.getClass().getRecordComponents()) {
+                                Object rv = rc.getAccessor().invoke(rec);
+                                if (rv instanceof Component comp) texts.append(f.getName()).append('.').append(rc.getName()).append('=').append(comp.getString()).append(" | ");
+                            }
+                        }
+                    } catch (Exception ignored) { }
+                }
+            }
+            return obj("screen", screen.getClass().getName(), "title", screen.getTitle().getString(), "texts", texts.toString());
+        });
+
+        s.register("chat.send", true, (p, c) -> {
+            String text = required(p, "text");
+            if (text.startsWith("/")) player().connection.sendCommand(text.substring(1));
+            else player().connection.sendChat(text);
+            return obj("ok", true);
+        });
+
+        s.register("baritone.command", true, (p, c) -> obj("ok", Processes.baritone().getCommandManager().execute(required(p, "command"))));
+
+        s.register("world.block", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null) throw new IllegalStateException("not in a world");
+            BlockPos at = blockPos(p);
+            if (!mc.level.isLoaded(at)) return obj("loaded", false);
+            BlockState st = mc.level.getBlockState(at);
+            JsonObject props = new JsonObject();
+            for (Property<?> prop : st.getProperties()) props.addProperty(prop.getName(), valueName(st, prop));
+            return obj("loaded", true, "name", Names.block(st), "properties", props);
+        });
+
+        s.register("world.findBlocks", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            String name = required(p, "block").replace("minecraft:", "");
+            int maxDistance = Math.min(intParam(p, "maxDistance", 32), 128);
+            int count = Math.min(intParam(p, "count", 1), 256);
+            List<BlockPos> found = baritone.api.BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
+                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), 4096, -1, (maxDistance >> 4) + 1);
+            Vec3 eye = pl.position();
+            JsonArray out = new JsonArray();
+            found.stream()
+                .filter(bp -> Vec3.atCenterOf(bp).distanceTo(eye) <= maxDistance)
+                .sorted(Comparator.comparingDouble(bp -> Vec3.atCenterOf(bp).distanceTo(eye)))
+                .limit(count)
+                .forEach(bp -> out.add(pos(bp)));
+            return obj("block", name, "positions", out);
+        });
+
+        s.register("world.entities", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            double maxDistance = numParam(p, "maxDistance", 32);
+            String type = strParam(p, "type", null);
+            JsonArray out = new JsonArray();
+            java.util.ArrayList<Entity> list = new java.util.ArrayList<>();
+            for (Entity e : mc.level.entitiesForRendering()) {
+                if (e == pl || e.distanceTo(pl) > maxDistance) continue;
+                if (type != null && !Names.entity(e).equals(type)) continue;
+                list.add(e);
+            }
+            list.sort(Comparator.comparingDouble(e -> e.distanceTo(pl)));
+            for (Entity e : list) {
+                JsonObject o = obj("id", e.getId(), "name", Names.entity(e), "category", e.getType().getCategory().getName(),
+                    "position", pos(e.position()), "distance", round(e.distanceTo(pl)), "height", round(e.getBbHeight()));
+                if (e instanceof LivingEntity le) o.addProperty("health", round(le.getHealth()));
+                out.add(o);
+            }
+            return obj("entities", out);
+        });
+
+        s.register("goto", true, (p, c) -> {
+            LocalPlayer pl = player();
+            BlockPos target = blockPos(p);
+            int range = intParam(p, "range", 1);
+            int timeoutTicks = intParam(p, "timeoutMs", 180_000) / 50;
+            long seq = Events.baritoneLogSeq();
+            Processes.baritone().getCustomGoalProcess().setGoalAndPath(range <= 0 ? new GoalBlock(target) : new GoalNear(target, range));
+            Processes.watch(c, seq, timeoutTicks, reason -> {
+                LocalPlayer now = Minecraft.getInstance().player;
+                BlockPos at = now == null ? pl.blockPosition() : now.blockPosition();
+                double away = Math.sqrt(at.distSqr(target));
+                return obj("arrived", away <= Math.max(range, 0) + 0.01 || (range <= 0 && at.equals(target)),
+                    "at", pos(at), "distance", round(away));
+            });
+            return BridgeServer.LATER;
+        });
+
+        s.register("mine", true, (p, c) -> {
+            String block = required(p, "block").replace("minecraft:", "");
+            int count = intParam(p, "count", 1);
+            int timeoutTicks = intParam(p, "timeoutMs", 300_000) / 50;
+            Map<String, Integer> before = Processes.inventoryCounts(Minecraft.getInstance());
+            long seq = Events.baritoneLogSeq();
+            Processes.baritone().getMineProcess().mineByName(count, block);
+            Processes.watch(c, seq, timeoutTicks, reason ->
+                obj("gained", Processes.gained(before, Processes.inventoryCounts(Minecraft.getInstance())),
+                    "at", pos(Minecraft.getInstance().player.blockPosition())));
+            return BridgeServer.LATER;
+        });
+
+        s.register("build", true, (p, c) -> {
+            File file = new File(required(p, "file"));
+            if (!file.isFile()) throw new IllegalArgumentException("no schematic file at " + file);
+            BlockPos origin = blockPos(p);
+            int timeoutTicks = intParam(p, "timeoutMs", 600_000) / 50;
+            Map<String, Integer> before = Processes.inventoryCounts(Minecraft.getInstance());
+            long seq = Events.baritoneLogSeq();
+            boolean loaded = Processes.baritone().getBuilderProcess().build(file.getName(), file, origin);
+            if (!loaded) throw new IllegalStateException("Baritone could not load the schematic " + file.getName());
+            Processes.watch(c, seq, timeoutTicks, reason -> {
+                Map<String, Integer> after = Processes.inventoryCounts(Minecraft.getInstance());
+                Map<String, Integer> used = Processes.gained(after, before); // what went down
+                return obj("used", used, "at", pos(Minecraft.getInstance().player.blockPosition()));
+            });
+            return BridgeServer.LATER;
+        });
+
+        s.register("cancel", true, (p, c) -> obj("cancelled", Processes.baritone().getPathingBehavior().cancelEverything()));
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static String valueName(BlockState st, Property prop) {
+        return prop.getName(st.getValue(prop));
+    }
+}

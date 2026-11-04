@@ -103,6 +103,29 @@ Example usage: [shared Claude chat](https://claude.ai/share/535d5f69-f102-4cdb-9
 
 Once connected to a Minecraft server, Claude can use these commands:
 
+## Client backend (Baritone) — experimental
+
+`--backend client` makes the bot a real Minecraft 26.3 client instead of a mineflayer protocol bot: the official game
+(from your installed launcher files) with Fabric, [Baritone](https://github.com/cabaletta/baritone) and a small bridge mod
+(`client-mod/`) that the MCP server talks to over 127.0.0.1. Servers stay vanilla; all the modding is client-side.
+Baritone does the travelling, gathering and building far better than mineflayer-pathfinder.
+
+Setup (once): start Minecraft 26.3 once from the official launcher (for the game files and its Java 25), then
+
+```bash
+npm run client-mod:fetch    # Fabric Loader 0.20.1 + Baritone 1.20.0, SHA-1 checked, into client-mod/libs
+npm run client-mod:build    # compiles the bridge mod with the launcher's JDK into client-mod/dist
+```
+
+Run with `--backend client` (plus the usual `--host/--port/--username`). The server starts the game client itself (a game
+window opens; first start takes about a minute) in its own folder, `~/.minecraft-mcp-server/client` (`--client-dir`).
+Offline accounts only for now: like mineflayer's offline mode, this works on servers that accept offline players.
+
+It offers the same tools (some answer "not available on the client backend yet" while it is being built out) plus:
+- `mine-blocks` - Gather blocks with Baritone until the inventory holds `count` of the item
+- `build-structure` - Build a structure from a text spec (palette + layers) or a .schem/.litematic file with Baritone
+- `stop` - Stop walking, mining or building
+
 ### Movement
 - `get-position` - Get the current position of the bot
 - `move-to-position` - Move to specific coordinates; reports an error with where the bot stopped if no path reaches them
