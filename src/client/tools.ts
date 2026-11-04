@@ -51,6 +51,12 @@ export function setStallTiming(pollMs: number, stallMs: number): void { STALL_PO
 /** Items that break from use rather than being placed. */
 const WEARABLE = /_(pickaxe|axe|shovel|hoe|sword)$|^(shears|fishing_rod|flint_and_steel|shield|bow|crossbow|trident|mace)$/;
 
+/** Baritone's process names, readable: "Mine BlockOptionalMetaLookup{[...block=Block{minecraft:glass}...]}" -> "Mine glass". */
+export function processName(raw: string): string {
+  const blocks = [...raw.matchAll(/Block\{minecraft:([a-z0-9_]+)\}/g)].map(m => m[1]);
+  return blocks.length ? `${raw.split(' ')[0]} ${blocks.join(', ')}` : raw;
+}
+
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
 
@@ -132,7 +138,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         timeLine(s.timeOfDay ?? 0),
         `Dimension ${s.dimension}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
         `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}`,
-        `Backend: game client with Baritone (${s.process ? `busy: ${s.process}` : 'idle'})` +
+        `Backend: game client with Baritone (${s.process ? `busy: ${processName(s.process)}` : 'idle'})` +
           (s.windowMinimized !== undefined ? `; window ${s.windowMinimized ? 'minimized' : 'shown'}${s.mouseGrabbed ? ', mouse captured' : ''}` : '') +
           (s.underWater ? `; under water, air ${s.air}/20` : '') + (s.inLava ? '; IN LAVA' : '')
       ].join('\n'));

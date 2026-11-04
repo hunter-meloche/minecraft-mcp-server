@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
+import { processName, registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -402,4 +402,9 @@ test('take-from-chest takes what was asked and says when the chest has none', as
   t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot', count: 27 })).text, 'Took 27 iron_ingot from the chest at (1, 64, 0). It holds: iron_ingot x5.');
   t.like(request.getCalls().find(c => c.args[0] === 'chest.withdraw')!.args[1], { name: 'iron_ingot', count: 27 });
   t.true((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'diamond' })).isError);
+});
+
+test('processName makes Baritone process names readable', (t) => {
+  t.is(processName('Mine BlockOptionalMetaLookup{[BlockOptionalMeta{block=Block{minecraft:iron_ore},properties={}}, BlockOptionalMeta{block=Block{minecraft:deepslate_iron_ore},properties={}}]}'), 'Mine iron_ore, deepslate_iron_ore');
+  t.is(processName('Defend against husk'), 'Defend against husk');
 });

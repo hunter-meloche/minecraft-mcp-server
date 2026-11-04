@@ -40,6 +40,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Guardian.register(server);
         Protection.register(server);
         Passive.register();
+        Processes.baritone().getPathingControlManager().registerProcess(new DefendProcess());
         configureBaritone();
         server.start();
     }
@@ -51,6 +52,7 @@ public class ClaudeBridge implements ClientModInitializer {
         s.allowParkourPlace.value = false;
         s.maxFallHeightNoWater.value = 3;
         s.avoidance.value = true;
+        s.blocksToAvoid.value.add(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH); // it hurts: 5 hits on one walk
         s.allowInventory.value = true; // let the builder (and tool choice) use items outside the hotbar; without it a build stalls silently
         // build-structure writes structure_void where a directional block goes (stairs facing out over a wall can't be
         // placed from where Baritone stands) and places those itself afterwards; Baritone leaves those cells alone
