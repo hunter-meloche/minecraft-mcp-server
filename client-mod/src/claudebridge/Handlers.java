@@ -214,7 +214,13 @@ public final class Handlers {
             Map<String, Integer> before = Processes.inventoryCounts(Minecraft.getInstance());
             long seq = Events.baritoneLogSeq();
             Processes.baritone().getMineProcess().mineByName(count, block);
-            Processes.watch(c, seq, timeoutTicks, reason ->
+            // Baritone counts a block's drops from its loot table and misses some (a berry bush's berries: it harvested
+            // 78 when asked for 12). Also stop once the inventory holds `count` of the block's own item (the same "have
+            // count" rule Baritone uses).
+            String own = Names.item(new net.minecraft.world.item.ItemStack(new baritone.api.utils.BlockOptionalMeta(block).getBlock().asItem()));
+            Processes.watch(c, seq, timeoutTicks,
+                () -> Processes.inventoryCounts(Minecraft.getInstance()).getOrDefault(own, 0) >= count,
+                reason ->
                 obj("gained", Processes.gained(before, Processes.inventoryCounts(Minecraft.getInstance())),
                     "at", pos(Minecraft.getInstance().player.blockPosition())));
             return BridgeServer.LATER;
@@ -237,7 +243,10 @@ public final class Handlers {
             return BridgeServer.LATER;
         });
 
-        s.register("cancel", true, (p, c) -> obj("cancelled", Processes.baritone().getPathingBehavior().cancelEverything()));
+        s.register("cancel", true, (p, c) -> {
+            Processes.cancels++;
+            return obj("cancelled", Processes.baritone().getPathingBehavior().cancelEverything());
+        });
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

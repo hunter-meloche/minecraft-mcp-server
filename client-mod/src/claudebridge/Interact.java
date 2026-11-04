@@ -154,6 +154,35 @@ public final class Interact {
             return BridgeServer.LATER;
         });
 
+        // walk (or swim) straight at a nearby point, no pathfinding: for drops Baritone can't path to, such as one floating
+        // in water. Ends within half a block (horizontally) of it, or at the timeout.
+        s.register("steer", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            double tx = Double.parseDouble(required(p, "x")), ty = Double.parseDouble(required(p, "y")), tz = Double.parseDouble(required(p, "z"));
+            int timeout = intParam(p, "timeoutMs", 5000) / 50;
+            Ticker.add(new Ticker.Task() {
+                int age = 0;
+                @Override public boolean tick(Minecraft m) {
+                    LocalPlayer pl = m.player;
+                    double dx = tx - pl.getX(), dz = tz - pl.getZ();
+                    double dist = Math.sqrt(dx * dx + dz * dz);
+                    boolean done = dist < 0.5 || ++age >= timeout;
+                    if (!done) {
+                        pl.setYRot((float) (Math.toDegrees(Math.atan2(-dx, dz))));
+                        m.options.keyUp.setDown(true);
+                        // keep the head up in water, and hop small steps on land
+                        m.options.keyJump.setDown(pl.isInWater() ? pl.getY() < ty + 0.2 : pl.horizontalCollision);
+                        return false;
+                    }
+                    m.options.keyUp.setDown(false);
+                    m.options.keyJump.setDown(false);
+                    c.ok(obj("reached", dist < 0.5, "distance", Json.round(dist), "at", pos(pl.blockPosition())));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
+        });
+
         s.register("place", true, (p, c) -> {
             Minecraft mc = Minecraft.getInstance();
             LocalPlayer pl = player();

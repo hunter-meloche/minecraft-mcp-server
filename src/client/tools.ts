@@ -7,7 +7,7 @@ import { MessageStore } from '../message-store.js';
 import { mineflayerToolDefinitions } from '../tools/register-all.js';
 import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
-import { checkBuild, layoutSpec, missingCells, placerFacing, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
+import { checkBuild, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -223,7 +223,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     const r = await call<{ entities: EntityInfo[] }>('world.entities', { maxDistance: 24, type: 'item' });
     const drops = r.entities.filter(e => Math.hypot(e.position.x - p.x - 0.5, e.position.z - p.z - 0.5) <= 3 &&
       e.position.y - p.y <= 1 && e.position.y - p.y >= -6);
-    for (const d of drops.slice(0, 6)) await goNear(d.position, 0, 8000).catch(() => undefined);
+    for (const d of drops.slice(0, 6)) {
+      const r = await goNear(d.position, 0, 8000).catch(() => undefined);
+      // Baritone has no path to a drop floating in water: swim straight at it when it's close
+      if (!r?.arrived) await call('steer', { ...d.position, timeoutMs: 6000 }, 12_000).catch(() => undefined);
+    }
   };
 
   Object.assign(impl, {
@@ -528,6 +532,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           if (!todo.length) break;
           let progress = 0;
           for (const cell of todo) {
+            if (secondHalf(cell.state)) continue; // comes with the lower half / foot
             const at = { x: origin.x + cell.x, y: origin.y + cell.y, z: origin.z + cell.z };
             const why = await placeFacing(at, cell.id, cell.facing ? placerFacing(cell.id, cell.facing) : undefined);
             if (why) failures.set(fmt(at), `${cell.id} at ${fmt(at)}: ${why}`);
@@ -543,7 +548,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (check.placed < check.total) {
           const inv = await inventoryCounts();
           const missing = Object.entries(check.missing).map(([n, c]) => `${n} x${c} (have ${inv.counts.get(n) ?? 0})`).join(', ');
-          const why = r.reason === 'timeout' ? `stopped after ${r.seconds}s (time limit)` : stalled ? `stalled after ${r.seconds}s` : `ended after ${r.seconds}s`;
+          const why = r.reason === 'timeout' ? `stopped after ${r.seconds}s (time limit)` : stalled ? `stalled after ${r.seconds}s`
+            : r.reason === 'cancelled' ? `was stopped after ${r.seconds}s` : `ended after ${r.seconds}s`;
           const hand = handFailures.length ? ` Couldn't place: ${handFailures.slice(0, 5).join('; ')}.` : '';
           return factory.createErrorResponse(`Build of ${name} ${why} with ${check.placed}/${check.total} blocks in place. ` +
             `Missing: ${missing}. Used: ${used || 'nothing'}.${hand}${baritoneSaid(r.baritone)} Run build-structure again to continue.`);

@@ -58,3 +58,11 @@ test('checkBuild: counts only the structure, and only the properties the spec na
   t.deepEqual(checkBuild(s, ['oak_log[axis=y]', 'oak_planks', 'stone']), { placed: 2, total: 2, missing: {}, misplaced: {} });
   t.deepEqual(checkBuild(s, ['oak_log[axis=z]', null, 'air']), { placed: 0, total: 2, missing: { oak_log: 1, oak_planks: 1 }, misplaced: { oak_log: 1 } });
 });
+
+test('a door or bed needs one item for its two cells', (t) => {
+  const bed = layoutSpec({ palette: { B: 'red_bed[facing=north,part=foot]', b: 'red_bed[facing=north,part=head]' }, layers: [['b', 'B']] });
+  t.deepEqual(bed.counts, { red_bed: 1 });
+  const door = layoutSpec({ palette: { D: 'oak_door[facing=north,half=lower]', d: 'oak_door[facing=north,half=upper]' }, layers: [['D'], ['d']] });
+  t.deepEqual(door.counts, { oak_door: 1 });
+  t.deepEqual(checkBuild(door, ['air', 'air']).missing, { oak_door: 1 });
+});

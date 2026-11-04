@@ -33,6 +33,9 @@ function blockState(name: string): string {
 }
 
 /** Check and lay out a spec: dimensions, palette ids, block indices (x + z*W + y*W*L), and block counts. */
+/** The half of a two-block block (door top, bed head) that appears when the other half is placed. */
+export const secondHalf = (state: string): boolean => /_door\[.*half=upper/.test(state) || /_bed\[.*part=head/.test(state);
+
 export function layoutSpec(spec: StructureSpec): Schematic {
   if (!spec.layers?.length) throw new Error('structure has no layers');
   for (const ch of Object.keys(spec.palette ?? {})) {
@@ -52,7 +55,7 @@ export function layoutSpec(spec: StructureSpec): Schematic {
     if (!(state in palette)) palette[state] = Object.keys(palette).length;
     blocks[x + z * width + y * width * length] = palette[state];
     const item = state.replace(/^minecraft:/, '').replace(/\[.*$/, '');
-    counts[item] = (counts[item] ?? 0) + 1;
+    if (!secondHalf(state)) counts[item] = (counts[item] ?? 0) + 1; // one door or bed item fills both cells
   })));
   return { width, height, length, palette, blocks, counts };
 }
@@ -132,6 +135,7 @@ export function missingCells(layout: Schematic, world: (string | null)[]): Cell[
  */
 export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCheck {
   const byIndex = new Map(Object.entries(layout.palette).map(([state, i]) => [i, parseState(state)]));
+  const byState = new Map(Object.entries(layout.palette).map(([state, i]) => [i, state]));
   const missing: Record<string, number> = {};
   const misplaced: Record<string, number> = {};
   let placed = 0, total = 0;
@@ -141,7 +145,7 @@ export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCh
     const want = byIndex.get(p)!;
     const got = world[i] ? parseState(world[i]!) : null;
     if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) placed++;
-    else {
+    else if (!secondHalf(byState.get(p)!)) { // a missing door top or bed head needs no item of its own
       missing[want.id] = (missing[want.id] ?? 0) + 1;
       if (got?.id === want.id) misplaced[want.id] = (misplaced[want.id] ?? 0) + 1;
     }

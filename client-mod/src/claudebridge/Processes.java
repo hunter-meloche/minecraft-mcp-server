@@ -31,7 +31,17 @@ public final class Processes {
      * Watch the process just started. {@code onEnd} builds the reply from the end state; "reason" is set to
      * "done", "timeout", "paused" (builder waiting for materials) or "cancelled".
      */
+    /** Bumped by the bridge's cancel call, so a watched process stopped on request ends as "cancelled", not "done". */
+    public static volatile long cancels = 0;
+
     public static void watch(BridgeServer.Call call, long logSeqAtStart, int timeoutTicks, Function<String, JsonObject> onEnd) {
+        watch(call, logSeqAtStart, timeoutTicks, () -> false, onEnd);
+    }
+
+    /** As above, and also ends the process ("done") as soon as `enough` says so. */
+    public static void watch(BridgeServer.Call call, long logSeqAtStart, int timeoutTicks, java.util.function.BooleanSupplier enough,
+                             Function<String, JsonObject> onEnd) {
+        long cancelsAtStart = cancels;
         Ticker.add(new Ticker.Task() {
             int age = 0;
             int idle = 0;
@@ -44,7 +54,9 @@ public final class Processes {
                 String reason = null;
                 String now = active();
                 if (now != null) { seenActive = true; idle = 0; } else idle++;
-                if (baritone().getBuilderProcess().isPaused()) reason = "paused";
+                if (cancels != cancelsAtStart) reason = "cancelled";
+                else if (enough.getAsBoolean()) { reason = "done"; baritone().getPathingBehavior().cancelEverything(); }
+                else if (baritone().getBuilderProcess().isPaused()) reason = "paused";
                 else if (seenActive && idle >= 5) reason = "done";
                 else if (!seenActive && age >= 60) reason = "done"; // never started (nothing to do, or refused at once)
                 else if (age >= timeoutTicks) reason = "timeout";
