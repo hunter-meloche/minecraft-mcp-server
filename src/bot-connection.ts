@@ -110,7 +110,9 @@ export class BotConnection {
     bot.on('end', (reason) => {
       this.callbacks.onLog('info', `Bot disconnected: ${this.formatError(reason)}`);
 
-      if (this.state === 'connected') {
+      // Also when the connection drops before spawn; otherwise the state stays 'connecting' forever
+      // and checkConnectionAndReconnect never retries.
+      if (this.bot === bot) {
         this.state = 'disconnected';
       }
 

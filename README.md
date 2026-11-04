@@ -22,7 +22,10 @@ ___
 Upstream Prismarine releases (mineflayer 4.39.0, minecraft-data 3.119.0) cannot join 26.3 yet. This branch:
 
 - Pins mineflayer to a `master` commit that sends `tick_end` every client tick (PRs #4137/#4162). 26.3 servers kick clients that don't, about 1.5 s after joining. The `pc26_3` branch alone does **not** include this fix; it was cut before it landed.
-- Runs `scripts/patch-mc-26.3.cjs` on `npm install` to register 26.3 in minecraft-data, mineflayer, minecraft-protocol, prismarine-chunk and prismarine-physics. Upstream's own 26.3 data shows the wire protocol is identical to 26.1 (only the protocol number, 777, changes), so 26.3 reuses the 26.1 data.
+- Runs `scripts/patch-mc-26.3.cjs` on `npm install`, which installs real 26.3 support into minecraft-data, minecraft-protocol, mineflayer, prismarine-chunk and prismarine-physics. 26.3 is **not** wire-compatible with 26.1: packet ids shifted, several packets changed shape (login, teleport confirm, entity movement, light masks, particles, teams, advancements, ...) and the block/item/particle/component/attribute registries grew. Everything was derived from the vanilla 26.1.2 and 26.3 client jars (both unobfuscated):
+  - `scripts/mc-26.3/data/`: minecraft-data files for `pc/26.3`. `protocol.json` is built from 26.1's by `scripts/mc-26.3/build-protocol.cjs` (every change is commented there); the other files come from `scripts/mc-26.3/tools/` (`Dump.java` runs the game's own registries, `gen-data.cjs` turns that plus the game's data reports into minecraft-data format). Run against 26.1.2, the generator reproduces minecraft-data's 26.1 files.
+  - `scripts/mc-26.3/datatypes.js`: two new minecraft-protocol datatypes (stepped entity move deltas, byte-array BitSets).
+  - small mineflayer fixes: `teleport_confirm` echoes the position, arm swings use the new `punch` packet, and at most one position packet is sent per tick (26.3 kicks a second one with "Invalid move player packet").
 - Adds `--mc-version <v>` (default: auto-detect) and `--auth offline|microsoft` (default `offline`; use `microsoft` for online-mode servers).
 
 `npm run smoke:26.3` starts a mock 26.3 server that kicks clients missing `tick_end`, connects the bot, and walks it with pathfinder.
