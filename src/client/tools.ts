@@ -7,7 +7,7 @@ import { MessageStore } from '../message-store.js';
 import { mineflayerToolDefinitions } from '../tools/register-all.js';
 import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
-import { layoutSpec, writeSchematic, type StructureSpec } from './schematic.js';
+import { checkBuild, layoutSpec, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -38,6 +38,9 @@ interface FightResult {
 interface ProcessResult { reason: 'done' | 'timeout' | 'paused' | 'cancelled'; seconds: number; baritone: string[]; at?: Pos }
 
 type Executor = (args: Record<string, unknown>) => Promise<ReturnType<ToolFactory['createResponse']>>;
+
+/** How far craft-item looks for a crafting table to walk to. */
+const TABLE_SEARCH = 48;
 
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 const floorPos = (p: Pos): Pos => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
@@ -175,6 +178,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   // ---- phase 2: interaction
 
+  /** The world's blocks in a structure's box (for checkBuild). */
+  const region = async (origin: Pos, layout: Schematic) => (await call<{ blocks: (string | null)[] }>('world.region',
+    { ...origin, width: layout.width, height: layout.height, length: layout.length }, 30_000)).blocks;
+
   const inventoryCounts = async () => {
     const inv = await call<Inventory>('inventory');
     const counts = new Map<string, number>();
@@ -282,10 +289,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       } catch (e) {
         const msg = (e as Error).message;
         if (!msg.startsWith('needs_table')) return factory.createErrorResponse(msg);
-        const tables = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'crafting_table', maxDistance: 16, count: 1 });
+        // Baritone walks well, so look further than arm's reach plus a few steps (the mineflayer backend's 16)
+        const tables = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'crafting_table', maxDistance: TABLE_SEARCH, count: 1 });
         if (!tables.positions.length) {
           const hasTable = (await call<Inventory>('inventory')).items.some(i => i.name === 'crafting_table');
-          return factory.createErrorResponse(`${item} needs a crafting table and there is none within 16 blocks. ` +
+          return factory.createErrorResponse(`${item} needs a crafting table and there is none within ${TABLE_SEARCH} blocks. ` +
             (hasTable ? 'Place the crafting_table from the inventory nearby, then craft again.' : 'Craft a crafting_table (4 planks), place it nearby, then craft again.'));
         }
         const table = tables.positions[0];
@@ -316,7 +324,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (f.input && f.input.name !== input) return factory.createResponse(`Furnace input slot is occupied by ${f.input.name}`);
         const queued = Math.min(Number(inputCount), counts.get(input) ?? 0) + (f.input?.count ?? 0);
         if (!queued && !f.output) return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
-        const stocked = (f.fuel ? f.fuel.count * smeltsPerFuel(f.fuel.name) : 0) + (f.lit ? 1 : 0);
+        // a lit furnace's leftover burn is not counted: it may be nearly spent (it was, and a log sat unsmelted)
+        const stocked = f.fuel ? f.fuel.count * smeltsPerFuel(f.fuel.name) : 0;
         const needed = Math.ceil(Math.max(0, queued - stocked) / smeltsPerFuel(fuel));
         const addFuel = Math.min(needed, fuelCount === undefined ? needed : Number(fuelCount), counts.get(fuel) ?? 0);
         if (needed > 0 && !addFuel && !f.fuel && !f.lit) return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
@@ -327,16 +336,24 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const deadline = Date.now() + Math.max(Number(timeoutMs), queued * 10_500 + 5000);
         let taken = 0;
         let outName = '';
+        let unfuelled = 0;
+        let left: Slot = null;
         while (Date.now() < deadline) {
           const st = await call<Furnace>('furnace.status');
           if (st.output) {
             const t = await call<{ took: Slot }>('furnace.take');
             if (t.took) { taken += t.took.count; outName = t.took.name; }
           }
+          left = st.input;
           if (!st.input && !st.output) break;
+          // input waiting with no fuel and no fire: it will never finish (two looks, so a re-light between items isn't mistaken for it)
+          unfuelled = st.input && !st.fuel && !st.lit ? unfuelled + 1 : 0;
+          if (unfuelled >= 2) break;
           await new Promise(r => setTimeout(r, 1000));
         }
-        return taken ? factory.createResponse(`Smelted ${taken} ${outName}`) : factory.createResponse(`No output after ${timeoutMs}ms`);
+        const smelted = taken ? `Smelted ${taken} ${outName}` : 'Nothing smelted';
+        if (unfuelled >= 2 && left) return factory.createResponse(`${smelted}; the furnace ran out of fuel with ${left.count} ${left.name} still in it. Add fuel (smelt-item again with fuelItem).`);
+        return taken ? factory.createResponse(smelted) : factory.createResponse(`No output after ${timeoutMs}ms`);
       } finally {
         await call('container.close').catch(() => undefined);
       }
@@ -427,15 +444,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }) => {
       const origin = floorPos({ x, y, z: zz });
       let schematicFile: string;
+      let layout: Schematic | undefined;
       if (spec) {
-        const layout = layoutSpec(spec);
+        layout = layoutSpec(spec);
         const s = await status();
         if (s.gameMode !== 'creative') {
-          const inv = await call<Inventory>('inventory');
-          const have: Record<string, number> = {};
-          for (const i of inv.items) have[i.name] = (have[i.name] ?? 0) + i.count;
-          const missing = Object.entries(layout.counts).filter(([item, n]) => (have[item] ?? 0) < n)
-            .map(([item, n]) => `${item} ${have[item] ?? 0}/${n}`);
+          // only what is not standing yet: a second run continues a build
+          const before = checkBuild(layout, await region(origin, layout));
+          if (!before.total || before.placed === before.total) {
+            return factory.createResponse(`${name} is already built at ${fmt(origin)}: all ${before.total} blocks in place.`);
+          }
+          const { counts: have } = await inventoryCounts();
+          const missing = Object.entries(before.missing).filter(([item, n]) => (have.get(item) ?? 0) < n)
+            .map(([item, n]) => `${item} ${have.get(item) ?? 0}/${n}`);
           if (missing.length) return factory.createErrorResponse(`Not enough blocks to build it. Missing: ${missing.join(', ')}`);
         }
         const dir = path.join(options.gameDir, 'schematics');
@@ -451,6 +472,18 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const used = Object.entries(r.used).map(([n, c]) => `${n} x${c}`).join(', ');
       if (r.reason === 'paused') {
         return factory.createErrorResponse(`Build paused after ${r.seconds}s (probably out of a block it needs).${baritoneSaid(r.baritone)}`);
+      }
+      if (layout) {
+        // Baritone can call a build done with most of it missing (it did: 19 of 117 blocks), so look at the world
+        const check = checkBuild(layout, await region(origin, layout));
+        if (check.placed < check.total) {
+          const inv = await inventoryCounts();
+          const missing = Object.entries(check.missing).map(([n, c]) => `${n} x${c} (have ${inv.counts.get(n) ?? 0})`).join(', ');
+          const why = r.reason === 'timeout' ? `stopped after ${r.seconds}s (time limit)` : `ended after ${r.seconds}s`;
+          return factory.createErrorResponse(`Build of ${name} ${why} with ${check.placed}/${check.total} blocks in place. ` +
+            `Missing: ${missing}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)} Run build-structure again to continue.`);
+        }
+        return factory.createResponse(`Built ${name} at ${fmt(origin)} in ${r.seconds}s: all ${check.total} blocks in place. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);
       }
       const head = r.reason === 'timeout' ? `Build stopped after ${r.seconds}s (time limit)` : `Built ${name} at ${fmt(origin)} in ${r.seconds}s`;
       return factory.createResponse(`${head}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);

@@ -91,22 +91,46 @@ test('mine-blocks reports what was gained', async (t) => {
   t.like(request.firstCall.args[1], { block: 'acacia_log', count: 14 });
 });
 
+/** world.region answers: all air the first time (the materials check), then `blocks` (the check after building). */
+function afterBuild(blocks: string[]) {
+  let calls = 0;
+  return () => ({ blocks: calls++ === 0 ? blocks.map(() => 'air') : blocks });
+}
+
 test('build-structure checks materials, writes the schematic, and builds it', async (t) => {
   const spec = { palette: { L: 'oak_log[axis=y]' }, layers: [['L.L'], ['L.L']] };
-  const poor = setup({ status: STATUS, inventory: { items: [{ slot: 1, name: 'oak_log', count: 2 }], selectedSlot: 0, held: null } });
+  const empty = { blocks: ['air', 'air', 'air', 'air', 'air', 'air'] };
+  const poor = setup({ status: STATUS, inventory: { items: [{ slot: 1, name: 'oak_log', count: 2 }], selectedSlot: 0, held: null }, 'world.region': empty });
   const refused = await poor.run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'posts' });
   t.true(refused.isError);
   t.regex(refused.text, /Missing: oak_log 2\/4/);
 
+  // half built already: two logs are enough to finish it
+  const half = setup({
+    status: STATUS, inventory: { items: [{ slot: 1, name: 'oak_log', count: 2 }], selectedSlot: 0, held: null },
+    'world.region': (() => {
+      let calls = 0;
+      const half = ['oak_log[axis=y]', 'air', 'oak_log[axis=y]', 'air', 'air', 'air'];
+      return () => ({ blocks: calls++ === 0 ? half : half.map((b, i) => i === 3 || i === 5 ? 'oak_log[axis=y]' : b) });
+    })(),
+    build: { reason: 'done', seconds: 5, baritone: [], used: { oak_log: 2 } }
+  });
+  t.false((await half.run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'posts' })).isError);
+  t.true(half.request.getCalls().some(c => c.args[0] === 'build'));
+
   const rich = setup({
     status: STATUS,
     inventory: { items: [{ slot: 1, name: 'oak_log', count: 9 }], selectedSlot: 0, held: null },
-    build: { reason: 'done', seconds: 30, baritone: ['Done building'], used: { oak_log: 4 } }
+    build: { reason: 'done', seconds: 30, baritone: ['Done building'], used: { oak_log: 4 } },
+    // the world afterwards (x, then z, then y): both posts stand, the gap is grass
+    'world.region': afterBuild(['oak_log[axis=y]', 'short_grass', 'oak_log[axis=y]', 'oak_log[axis=y]', 'air', 'oak_log[axis=y]'])
   });
   const r = await rich.run('build-structure', { x: -706.4, y: 73, z: -336, spec, name: 'posts' });
-  t.is(r.text, 'Built posts at (-707, 73, -336) in 30s. Used: oak_log x4. Baritone: Done building');
+  t.is(r.text, 'Built posts at (-707, 73, -336) in 30s: all 4 blocks in place. Used: oak_log x4. Baritone: Done building');
   const file = path.join(rich.gameDir, 'schematics', 'posts.schem');
-  t.like(rich.request.lastCall.args[1], { file, x: -707, y: 73, z: -336 });
+  const buildCall = rich.request.getCalls().find(c => c.args[0] === 'build')!;
+  t.like(buildCall.args[1], { file, x: -707, y: 73, z: -336 });
+  t.like(rich.request.lastCall.args, ['world.region', { x: -707, y: 73, z: -336, width: 3, height: 2, length: 1 }]);
   const parsed = nbt.simplify((await nbt.parse(zlib.gunzipSync(fs.readFileSync(file)))).parsed) as Record<string, unknown>;
   t.like(parsed, { Width: 3, Height: 2, Length: 1 });
 });
@@ -212,7 +236,7 @@ test('craft-item uses the inventory grid, and falls back to the nearest table', 
     'world.findBlocks': { positions: [] },
     inventory: { items: [], selectedSlot: 0, held: null }
   });
-  t.regex((await none.run('craft-item', { outputItem: 'wooden_pickaxe' })).text, /needs a crafting table and there is none within 16 blocks\. Craft a crafting_table/);
+  t.regex((await none.run('craft-item', { outputItem: 'wooden_pickaxe' })).text, /needs a crafting table and there is none within 48 blocks\. Craft a crafting_table/);
 });
 
 test('smelt-item opens the furnace, adds only the fuel needed, and collects the output', async (t) => {
@@ -236,4 +260,35 @@ test('smelt-item opens the furnace, adds only the fuel needed, and collects the 
   const puts = request.getCalls().filter(c => c.args[0] === 'furnace.put').map(c => c.args[1]);
   t.deepEqual(puts, [{ slot: 'fuel', name: 'coal', count: 1 }, { slot: 'input', name: 'raw_iron', count: 5 }]);
   t.is(request.lastCall.args[0], 'container.close');
+});
+
+test('smelt-item adds fuel even when the furnace is still lit, and reports a furnace that runs dry', async (t) => {
+  const { run, request } = setup({
+    'world.block': { loaded: true, name: 'furnace' },
+    // lit from the last job, nothing in the fuel slot: the leftover burn may be nearly spent
+    'furnace.open': { open: true, input: null, fuel: null, output: null, lit: true },
+    inventory: { items: [{ slot: 4, name: 'oak_log', count: 3 }, { slot: 5, name: 'oak_planks', count: 10 }], selectedSlot: 0, held: null },
+    'furnace.put': { open: true },
+    'furnace.status': { open: true, input: { name: 'oak_log', count: 1 }, fuel: null, output: null, lit: false },
+    'furnace.take': { took: null },
+    'container.close': { ok: true }
+  });
+  const r = await run('smelt-item', { x: 1, y: 64, z: 1, inputItem: 'oak_log', inputCount: 1, fuelItem: 'oak_planks', timeoutMs: 20000 });
+  const puts = request.getCalls().filter(c => c.args[0] === 'furnace.put').map(c => c.args[1]);
+  t.deepEqual(puts, [{ slot: 'fuel', name: 'oak_planks', count: 1 }, { slot: 'input', name: 'oak_log', count: 1 }]);
+  t.is(r.text, 'Nothing smelted; the furnace ran out of fuel with 1 oak_log still in it. Add fuel (smelt-item again with fuelItem).');
+});
+
+test('build-structure checks the world and reports a build Baritone called done but left unfinished', async (t) => {
+  const spec = { palette: { L: 'oak_log[axis=y]', P: 'oak_planks' }, layers: [['LPL'], ['L.L']] };
+  const { run } = setup({
+    status: STATUS,
+    inventory: { items: [{ slot: 1, name: 'oak_log', count: 9 }, { slot: 2, name: 'oak_planks', count: 5 }], selectedSlot: 0, held: null },
+    build: { reason: 'done', seconds: 422, baritone: [], used: { oak_planks: 1 } },
+    // planks placed; one log lies sideways (wrong axis), two missing
+    'world.region': afterBuild(['oak_log[axis=x]', 'oak_planks', 'air', 'air', 'air', 'oak_log[axis=y]'])
+  });
+  const r = await run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'cabin' });
+  t.true(r.isError);
+  t.is(r.text, 'Failed: Build of cabin ended after 422s with 2/5 blocks in place. Missing: oak_log x3 (have 9). Used: oak_planks x1. Run build-structure again to continue.');
 });

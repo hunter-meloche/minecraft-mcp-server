@@ -92,3 +92,36 @@ export function writeSchematic(s: Schematic, dataVersion = DATA_VERSION_26_3): B
   };
   return zlib.gzipSync(nbt.writeUncompressed(root as unknown as nbt.NBT));
 }
+
+export interface BuildCheck { placed: number; total: number; missing: Record<string, number> }
+
+/** Split "minecraft:oak_log[axis=y]" into its id (no namespace) and properties. */
+function parseState(state: string): { id: string; props: Record<string, string> } {
+  const m = /^(?:minecraft:)?([^[]+)(?:\[(.*)\])?$/.exec(state);
+  const props: Record<string, string> = {};
+  for (const kv of (m?.[2] ?? '').split(',').filter(Boolean)) {
+    const [k, v] = kv.split('=');
+    props[k.trim()] = (v ?? '').trim();
+  }
+  return { id: m?.[1] ?? state, props };
+}
+
+/**
+ * Compare a laid-out structure with the blocks now in the world (`world`, same x-fastest, z, y order; null = not loaded).
+ * Only the structure's blocks count, not its air, and only the properties the spec names (so `oak_log[axis=y]` must stand
+ * upright, while plain `oak_planks` matches any planks state).
+ */
+export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCheck {
+  const byIndex = new Map(Object.entries(layout.palette).map(([state, i]) => [i, parseState(state)]));
+  const missing: Record<string, number> = {};
+  let placed = 0, total = 0;
+  layout.blocks.forEach((p, i) => {
+    if (p === 0) return;
+    total++;
+    const want = byIndex.get(p)!;
+    const got = world[i] ? parseState(world[i]!) : null;
+    if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) placed++;
+    else missing[want.id] = (missing[want.id] ?? 0) + 1;
+  });
+  return { placed, total, missing };
+}

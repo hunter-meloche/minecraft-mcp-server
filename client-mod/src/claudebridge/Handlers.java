@@ -122,6 +122,34 @@ public final class Handlers {
             return obj("loaded", true, "name", Names.block(st), "properties", props);
         });
 
+        // every block in a box, as "name[prop=value,...]" in x-fastest, then z, then y order (the schematic's order); null if unloaded
+        s.register("world.region", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null) throw new IllegalStateException("not in a world");
+            BlockPos o = blockPos(p);
+            int w = intParam(p, "width", 1), h = intParam(p, "height", 1), l = intParam(p, "length", 1);
+            if ((long) w * h * l > 65_536) throw new IllegalArgumentException("region too large (max 65536 blocks)");
+            JsonArray out = new JsonArray();
+            for (int y = 0; y < h; y++) for (int z = 0; z < l; z++) for (int x = 0; x < w; x++) {
+                BlockPos at = o.offset(x, y, z);
+                if (!mc.level.isLoaded(at)) { out.add((String) null); continue; }
+                BlockState st = mc.level.getBlockState(at);
+                StringBuilder sb = new StringBuilder(Names.block(st));
+                if (!st.getProperties().isEmpty()) {
+                    sb.append('[');
+                    boolean first = true;
+                    for (Property<?> prop : st.getProperties()) {
+                        if (!first) sb.append(',');
+                        sb.append(prop.getName()).append('=').append(valueName(st, prop));
+                        first = false;
+                    }
+                    sb.append(']');
+                }
+                out.add(sb.toString());
+            }
+            return obj("blocks", out);
+        });
+
         s.register("world.findBlocks", true, (p, c) -> {
             Minecraft mc = Minecraft.getInstance();
             LocalPlayer pl = player();

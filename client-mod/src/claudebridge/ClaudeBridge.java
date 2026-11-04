@@ -49,6 +49,7 @@ public class ClaudeBridge implements ClientModInitializer {
         s.allowParkourPlace.value = false;
         s.maxFallHeightNoWater.value = 3;
         s.avoidance.value = true;
+        s.allowInventory.value = true; // let the builder (and tool choice) use items outside the hotbar; without it a build stalls silently
         s.chatControl.value = false; // only this bridge controls the bot, not chat from other players
         Consumer<Component> previous = s.logger.value;
         s.logger.value = message -> {
