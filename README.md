@@ -120,7 +120,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 
 ### Block Interaction
 - `place-block` - Place a block at specified coordinates; optional `item` picks what to place (equipped first). Builds over grass, leaf litter and other replaceable blocks, and pathfinding won't dig through blocks placed this way. The list of placed blocks is saved per world (keyed by the world's hashed seed) in `~/.minecraft-mcp-server/placed-blocks.json`, so it survives restarts; a block is dropped from it once the bot sees it removed
-- `dig-block` - Dig a block at specified coordinates, equipping the best tool for it first
+- `dig-block` - Dig a block at specified coordinates, equipping the best tool for it first, then walk over the drops to pick them up (`collect: false` to skip)
 - `get-block-info` - Get information about a block
 - `find-blocks` - Find one or more nearby blocks of a specific type
 
@@ -128,7 +128,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `smelt-item` - Smelt items using a furnace-like block; waits for and collects all the output (and collects what a furnace already holds when no input is given)
 
 ### Entity Interaction
-- `find-entity` - Find the nearest entity of a specific type
+- `find-entity` - Find the nearest entity by name, or `hostile`, `mob` (any creature) or `player`
 - `attack-entity` - Attack the nearest matching entity (a name like `zombie`, or `hostile` / `mob`) until it dies: equips the best weapon, chases it, stops at low health (`minHealth`, default 6) and picks up the drops
 
 ### Survival
