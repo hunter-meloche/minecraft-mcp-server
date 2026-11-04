@@ -13,6 +13,7 @@ import os from 'os';
 import path from 'path';
 import { ClientConnection } from './client/client-connection.js';
 import { registerClientTools } from './client/tools.js';
+import { jsonFileStore } from './build-protection.js';
 import { defaultMinecraftDir } from './client/install.js';
 import { takeAlerts } from './auto-defend.js';
 
@@ -53,7 +54,7 @@ async function main() {
     );
     connection.start();
     const factory = new ToolFactory(server, connection, () => (connection.isConnected() ? connection.alerts.take() : null));
-    registerClientTools(factory, connection.bridge, messageStore, { gameDir });
+    registerClientTools(factory, connection.bridge, messageStore, { gameDir, protectionStore: jsonFileStore() });
     cleanup = () => connection.cleanup();
   } else {
     const connection = new BotConnection(

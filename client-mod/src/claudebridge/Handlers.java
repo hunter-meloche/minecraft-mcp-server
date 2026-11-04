@@ -59,6 +59,8 @@ public final class Handlers {
             r.addProperty("gameMode", mc.gameMode == null ? null : mc.gameMode.getPlayerMode().name().toLowerCase());
             r.addProperty("difficulty", mc.level.getLevelData().getDifficulty().getSerializedName());
             r.addProperty("timeOfDay", Math.floorMod(mc.level.getOverworldClockTime(), 24000L));
+            r.addProperty("hashedSeed", hashedSeed(mc));
+            r.addProperty("protectedCount", Protection.count());
             IBaritone b = Processes.baritone();
             r.addProperty("process", Processes.active());
             Object goal = b.getPathingBehavior().getGoal();
@@ -196,12 +198,15 @@ public final class Handlers {
             int range = intParam(p, "range", 1);
             int timeoutTicks = intParam(p, "timeoutMs", 180_000) / 50;
             long seq = Events.baritoneLogSeq();
-            Processes.baritone().getCustomGoalProcess().setGoalAndPath(range <= 0 ? new GoalBlock(target) : new GoalNear(target, range));
+            // away: at least `away` blocks from the point (step out of a cell to place a block there)
+            int awayFrom = intParam(p, "away", 0);
+            Processes.baritone().getCustomGoalProcess().setGoalAndPath(awayFrom > 0 ? new baritone.api.pathing.goals.GoalRunAway(awayFrom, target)
+                : range <= 0 ? new GoalBlock(target) : new GoalNear(target, range));
             Processes.watch(c, seq, timeoutTicks, reason -> {
                 LocalPlayer now = Minecraft.getInstance().player;
                 BlockPos at = now == null ? pl.blockPosition() : now.blockPosition();
                 double away = Math.sqrt(at.distSqr(target));
-                return obj("arrived", away <= Math.max(range, 0) + 0.01 || (range <= 0 && at.equals(target)),
+                return obj("arrived", awayFrom > 0 ? away >= awayFrom - 0.01 : away <= Math.max(range, 0) + 0.01 || (range <= 0 && at.equals(target)),
                     "at", pos(at), "distance", round(away));
             });
             return BridgeServer.LATER;
@@ -235,7 +240,9 @@ public final class Handlers {
             long seq = Events.baritoneLogSeq();
             boolean loaded = Processes.baritone().getBuilderProcess().build(file.getName(), file, origin);
             if (!loaded) throw new IllegalStateException("Baritone could not load the schematic " + file.getName());
+            Protection.suspend(); // the builder replaces wrong blocks inside its own box
             Processes.watch(c, seq, timeoutTicks, reason -> {
+                Protection.resume();
                 Map<String, Integer> after = Processes.inventoryCounts(Minecraft.getInstance());
                 Map<String, Integer> used = Processes.gained(after, before); // what went down
                 return obj("used", used, "at", pos(Minecraft.getInstance().player.blockPosition()));
@@ -247,6 +254,17 @@ public final class Handlers {
             Processes.cancels++;
             return obj("cancelled", Processes.baritone().getPathingBehavior().cancelEverything());
         });
+    }
+
+    /** The world's hashed seed (what the login packet carries; the mineflayer backend keys its build protection by it). */
+    private static String hashedSeed(Minecraft mc) {
+        try {
+            java.lang.reflect.Field f = net.minecraft.world.level.biome.BiomeManager.class.getDeclaredField("biomeZoomSeed");
+            f.setAccessible(true);
+            return Long.toString(f.getLong(mc.level.getBiomeManager()));
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return null;
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

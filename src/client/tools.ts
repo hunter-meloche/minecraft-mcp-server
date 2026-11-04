@@ -7,6 +7,8 @@ import { MessageStore } from '../message-store.js';
 import { mineflayerToolDefinitions } from '../tools/register-all.js';
 import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
+import { ClientProtection } from './protection.js';
+import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
 import { checkBuild, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
@@ -24,7 +26,7 @@ interface Status {
   inWorld: boolean; username: string; screen: string | null;
   position?: Pos; block?: Pos; health?: number; food?: number; saturation?: number; air?: number;
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
-  timeOfDay?: number; process?: string | null; goal?: string | null;
+  timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
 }
 interface InventoryItem { slot: number; name: string; count: number }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
@@ -44,6 +46,9 @@ let STALL_POLL_MS = 15_000;
 let STALL_MS = 60_000;
 /** For tests: shorter stall timing. */
 export function setStallTiming(pollMs: number, stallMs: number): void { STALL_POLL_MS = pollMs; STALL_MS = stallMs; }
+
+/** Items that break from use rather than being placed. */
+const WEARABLE = /_(pickaxe|axe|shovel|hoe|sword)$|^(shears|fishing_rod|flint_and_steel|shield|bow|crossbow|trident|mace)$/;
 
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
@@ -85,16 +90,30 @@ function baritoneSaid(lines: string[], max = 3): string {
 export interface ClientToolOptions {
   /** the client's game folder (schematics are written to <gameDir>/schematics) */
   gameDir: string;
+  /** where the list of blocks the bot built is kept (default: memory only) */
+  protectionStore?: ProtectionStore;
 }
 
 export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, messageStore: MessageStore, options: ClientToolOptions): void {
   const call = <T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number) =>
     bridge.request<T>(method, params, timeoutMs ? { timeoutMs } : undefined);
+  const protection = new ClientProtection(options.protectionStore);
+  let syncedVersion = -1;
+  /** Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current. */
+  const syncProtection = async (dim: string, force = false) => {
+    if (!force && syncedVersion === protection.version) return;
+    const positions = protection.positions(dim).map(p => [p.x, p.y, p.z]);
+    await call('protect.set', { positions }).then(() => { syncedVersion = protection.version; }).catch(() => undefined);
+  };
   const status = async () => {
     const s = await call<Status>('status');
     if (!s.inWorld) throw new Error(`The bot is not in a world yet (screen: ${s.screen ?? 'none'}). Try again shortly.`);
+    protection.attach(worldIdFromSeed(s.hashedSeed ?? undefined));
+    // a relaunched client starts with none: resend when its count differs
+    await syncProtection(s.dimension ?? 'overworld', s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length);
     return s;
   };
+  const dimension = async () => (await status()).dimension ?? 'overworld';
 
   const impl: Record<string, Executor> = {
     'get-position': async () => {
@@ -184,6 +203,49 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   // ---- phase 2: interaction
 
+  /**
+   * mine-blocks when some blocks of the type nearby are the bot's own builds: dig the nearest others one at a time
+   * (dig walks into reach) instead of Baritone's mine process, which would take the walls. Counts like Baritone does:
+   * done when the inventory holds `count` of what the blocks drop (the first dig shows what that is).
+   */
+  const mineAround = async (block: string, count: number, timeoutMs: number, dim: string, guarded: number) => {
+    const started = Date.now();
+    const before = (await inventoryCounts()).counts;
+    const skip = new Set<string>();
+    let drop: string | undefined;
+    let dug = 0;
+    const have = async () => (await inventoryCounts()).counts.get(drop ?? block) ?? 0;
+    while (Date.now() - started < timeoutMs && (await have()) < count) {
+      const found = await call<{ positions: Pos[] }>('world.findBlocks', { block, maxDistance: 64, count: 256 });
+      const next = found.positions.find(p => !protection.has(dim, p) && !skip.has(fmt(p)));
+      if (!next) break;
+      skip.add(fmt(next));
+      const r = await call<{ dug: boolean }>('dig', { ...next, timeoutMs: 30_000 }, 45_000).catch(() => ({ dug: false }));
+      if (!r.dug) continue;
+      dug++;
+      await collectDropsNear(next);
+      if (!drop) {
+        const g = [...(await inventoryCounts()).counts].filter(([n, c]) => c > (before.get(n) ?? 0)).sort((a, b) => b[1] - a[1]);
+        drop = g.find(([n]) => n === block)?.[0] ?? g[0]?.[0];
+      }
+    }
+    const seconds = Math.round((Date.now() - started) / 100) / 10;
+    const gained = gainedText(before, (await inventoryCounts()).counts);
+    const why = (await have()) >= count ? '' : Date.now() - started >= timeoutMs ? ' (time limit)' : ` (no more reachable ${block} that isn't part of a build)`;
+    return factory.createResponse(`Mined ${dug} ${block} one by one in ${seconds}s${why}, leaving ${guarded} that belong to your builds: ` +
+      `${gained || 'nothing gained'}.`);
+  };
+
+  /** World positions of the structure's (non-air) cells that hold a block now. */
+  const standing = (origin: Pos, layout: Schematic, world: (string | null)[]): Pos[] => {
+    const out: Pos[] = [];
+    layout.blocks.forEach((b, i) => {
+      if (b === 0 || !world[i] || /^(minecraft:)?(air|cave_air|void_air)$/.test(world[i]!)) return;
+      out.push({ x: origin.x + i % layout.width, y: origin.y + Math.floor(i / (layout.width * layout.length)), z: origin.z + Math.floor(i / layout.width) % layout.length });
+    });
+    return out;
+  };
+
   /** The world's blocks in a structure's box (for checkBuild). */
   const region = async (origin: Pos, layout: Schematic) => (await call<{ blocks: (string | null)[] }>('world.region',
     { ...origin, width: layout.width, height: layout.height, length: layout.length }, 30_000)).blocks;
@@ -199,7 +261,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       await call('item.select', { name: item });
       r = await attempt();
     }
-    if (!r.placed && (r.reason === 'too far' || r.reason === 'the bot is standing there')) {
+    if (!r.placed && r.reason === 'the bot is standing there') {
+      // step out of the cell (Baritone may end a build standing where a block still goes), then place from beside it
+      await call('goto', { ...at, away: 2, timeoutMs: 15_000 }, 30_000).catch(() => undefined);
+      await call('item.select', { name: item });
+      r = await attempt();
+    }
+    if (!r.placed && r.reason === 'too far') {
       await goNear(at, 2).catch(() => undefined);
       await call('item.select', { name: item });
       r = await attempt();
@@ -262,6 +330,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const r = await call<{ dug: boolean; block?: string; tool?: string | null; reason: string; baritone?: string[] }>('dig', { ...p, timeoutMs: 60_000 }, 75_000);
       if (r.reason === 'air' || r.block === undefined) return factory.createResponse(`No block found at position ${fmt(p)}`);
       if (!r.dug) throw new Error(`Could not dig ${r.block} at ${fmt(p)} (${r.reason}).${baritoneSaid(r.baritone ?? [])}`);
+      protection.remove(await dimension(), p);
       if (collect) await collectDropsNear(p);
       const gained = gainedText(before, (await inventoryCounts()).counts);
       return factory.createResponse(`Dug ${r.block} at ${fmt(p)}${r.tool ? ` with ${r.tool}` : ''}` +
@@ -284,6 +353,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (r.reason === 'the bot is standing there') return factory.createResponse(`You can't place a block where you're standing or one block above`);
         return factory.createResponse(`Failed to place block at ${fmt(p)}: ${r.reason ?? 'the server did not accept it'}`);
       }
+      protection.add(await dimension(), [p]);
       return factory.createResponse(`Placed ${r.block} at ${fmt(p)} using ${r.face} face`);
     },
 
@@ -446,6 +516,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 300000)')
     },
     async ({ block, count = 1, timeoutMs = 300_000 }: { block: string; count?: number; timeoutMs?: number }) => {
+      const name = block.replace(/^minecraft:/, '');
+      const dim = await dimension();
+      const near = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 64, count: 256 });
+      const guarded = near.positions.filter(p => protection.has(dim, p)).length;
+      if (guarded) return mineAround(name, count, timeoutMs, dim, guarded);
       const r = await call<ProcessResult & { gained: Record<string, number> }>('mine', { block, count, timeoutMs }, timeoutMs + 15_000);
       const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
       const head = r.reason === 'timeout' ? `Stopped after ${r.seconds}s (time limit)` : `Mined for ${r.seconds}s`;
@@ -479,7 +554,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const s = await status();
         if (s.gameMode !== 'creative') {
           // only what is not standing yet: a second run continues a build
-          const before = checkBuild(layout, await region(origin, layout));
+          const now = await region(origin, layout);
+          const before = checkBuild(layout, now);
+          protection.add(await dimension(), standing(origin, layout, now)); // what stands of it is the bot's, even if it stops here
           if (!before.total || before.placed === before.total) {
             return factory.createResponse(`${name} is already built at ${fmt(origin)}: all ${before.total} blocks in place.`);
           }
@@ -517,7 +594,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         }
       }
       const r = await building;
-      const used = Object.entries(r.used).map(([n, c]) => `${n} x${c}`).join(', ');
+      // tools that went missing broke from wear (digging, fighting): say so instead of listing them as material
+      const worn = Object.entries(r.used).filter(([n]) => WEARABLE.test(n));
+      const placedItems = Object.entries(r.used).filter(([n]) => !WEARABLE.test(n)).map(([n, c]) => `${n} x${c}`).join(', ');
+      const used = [placedItems, worn.length ? `wore out: ${worn.map(([n, c]) => c > 1 ? `${n} x${c}` : n).join(', ')}` : '']
+        .filter(Boolean).join('; ');
       if (r.reason === 'paused') {
         return factory.createErrorResponse(`Build paused after ${r.seconds}s (probably out of a block it needs).${baritoneSaid(r.baritone)}`);
       }
@@ -544,7 +625,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       if (layout) {
         // Baritone can call a build done with most of it missing (it did: 19 of 117 blocks), so look at the world
-        const check = checkBuild(layout, await region(origin, layout));
+        const finalWorld = await region(origin, layout);
+        const check = checkBuild(layout, finalWorld);
+        // what stands now is the bot's: mine-blocks leaves it alone
+        protection.add(await dimension(), standing(origin, layout, finalWorld));
         if (check.placed < check.total) {
           const inv = await inventoryCounts();
           const missing = Object.entries(check.missing).map(([n, c]) => `${n} x${c} (have ${inv.counts.get(n) ?? 0})`).join(', ');

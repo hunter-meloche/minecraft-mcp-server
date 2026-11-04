@@ -10,6 +10,7 @@ import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
 import { registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
+import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
 
 const STATUS = {
@@ -18,7 +19,8 @@ const STATUS = {
   difficulty: 'easy', timeOfDay: 11800, process: null, goal: null
 };
 
-function setup(responses: Record<string, unknown | ((p: Record<string, unknown>) => unknown)>) {
+function setup(given: Record<string, unknown | ((p: Record<string, unknown>) => unknown)>, protectionStore?: ProtectionStore) {
+  const responses: Record<string, unknown> = { status: STATUS, ...given };
   const server = { tool: sinon.stub() } as unknown as McpServer;
   const connection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) };
   const request = sinon.spy(async (method: string, params: Record<string, unknown> = {}) => {
@@ -28,7 +30,7 @@ function setup(responses: Record<string, unknown | ((p: Record<string, unknown>)
   });
   const gameDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-client-'));
   const store = new MessageStore();
-  registerClientTools(new ToolFactory(server, connection), { request } as unknown as BridgeClient, store, { gameDir });
+  registerClientTools(new ToolFactory(server, connection), { request } as unknown as BridgeClient, store, { gameDir, protectionStore });
   const tools = (server.tool as sinon.SinonStub).getCalls();
   const run = async (name: string, args: Record<string, unknown> = {}) => {
     const r = await tools.find(c => c.args[0] === name)!.args[3](args);
@@ -86,9 +88,12 @@ test('move-to-position: arrival, and an honest failure with what Baritone said',
 });
 
 test('mine-blocks reports what was gained', async (t) => {
-  const { run, request } = setup({ mine: { reason: 'done', seconds: 33, baritone: ['Mining [acacia_log]', 'Have 14 valid items'], gained: { acacia_log: 8 } } });
+  const { run, request } = setup({
+    'world.findBlocks': { positions: [{ x: 1, y: 64, z: 1 }] },
+    mine: { reason: 'done', seconds: 33, baritone: ['Mining [acacia_log]', 'Have 14 valid items'], gained: { acacia_log: 8 } }
+  });
   t.is((await run('mine-blocks', { block: 'acacia_log', count: 14 })).text, 'Mined for 33s: acacia_log x8. Baritone: Mining [acacia_log] | Have 14 valid items');
-  t.like(request.firstCall.args[1], { block: 'acacia_log', count: 14 });
+  t.like(request.getCalls().find(c => c.args[0] === 'mine')!.args[1], { block: 'acacia_log', count: 14 });
 });
 
 /** world.region answers: all air the first time (the materials check), then `blocks` (the check after building). */
@@ -121,16 +126,16 @@ test('build-structure checks materials, writes the schematic, and builds it', as
   const rich = setup({
     status: STATUS,
     inventory: { items: [{ slot: 1, name: 'oak_log', count: 9 }], selectedSlot: 0, held: null },
-    build: { reason: 'done', seconds: 30, baritone: ['Done building'], used: { oak_log: 4 } },
+    build: { reason: 'done', seconds: 30, baritone: ['Done building'], used: { oak_log: 4, stone_pickaxe: 1 } },
     // the world afterwards (x, then z, then y): both posts stand, the gap is grass
     'world.region': afterBuild(['oak_log[axis=y]', 'short_grass', 'oak_log[axis=y]', 'oak_log[axis=y]', 'air', 'oak_log[axis=y]'])
   });
   const r = await rich.run('build-structure', { x: -706.4, y: 73, z: -336, spec, name: 'posts' });
-  t.is(r.text, 'Built posts at (-707, 73, -336) in 30s: all 4 blocks in place. Used: oak_log x4. Baritone: Done building');
+  t.is(r.text, 'Built posts at (-707, 73, -336) in 30s: all 4 blocks in place. Used: oak_log x4; wore out: stone_pickaxe. Baritone: Done building');
   const file = path.join(rich.gameDir, 'schematics', 'posts.schem');
   const buildCall = rich.request.getCalls().find(c => c.args[0] === 'build')!;
   t.like(buildCall.args[1], { file, x: -707, y: 73, z: -336 });
-  t.like(rich.request.lastCall.args, ['world.region', { x: -707, y: 73, z: -336, width: 3, height: 2, length: 1 }]);
+  t.like(rich.request.getCalls().filter(c => c.args[0] === 'world.region').at(-1)!.args, ['world.region', { x: -707, y: 73, z: -336, width: 3, height: 2, length: 1 }]);
   const parsed = nbt.simplify((await nbt.parse(zlib.gunzipSync(fs.readFileSync(file)))).parsed) as Record<string, unknown>;
   t.like(parsed, { Width: 3, Height: 2, Length: 1 });
 });
@@ -199,7 +204,7 @@ test('place-block selects the item, walks closer when too far, and reports the f
     goto: { arrived: true, reason: 'done', seconds: 3, baritone: [], at: { x: 0, y: 64, z: 2 }, distance: 2 }
   });
   t.is((await run('place-block', { x: 0, y: 64, z: 0, item: 'cobblestone' })).text, 'Placed cobblestone at (0, 64, 0) using down face');
-  t.deepEqual(request.getCalls().map(c => c.args[0]), ['item.select', 'place', 'goto', 'place']);
+  t.deepEqual(request.getCalls().map(c => c.args[0]).filter(m => m !== 'status' && m !== 'protect.set'), ['item.select', 'place', 'goto', 'place']);
   const occupied = setup({ place: { placed: false, reason: 'occupied by stone' } });
   t.is((await occupied.run('place-block', { x: 0, y: 64, z: 0 })).text, "There's already a block (stone) at (0, 64, 0)");
 });
@@ -322,4 +327,32 @@ test('build-structure stops a stalled Baritone and places the rest by hand, faci
   const r = await pending;
   t.is(r.text, 'Built step at (0, 64, 0) in 61s: all 2 blocks in place (1 placed by hand after Baritone stalled). Used: nothing.');
   t.like(request.getCalls().find(c => c.args[0] === 'place')!.args[1], { x: 1, y: 64, z: 0, facing: 'south' });
+});
+
+test('blocks the bot built are remembered per world, and mine-blocks digs around them', async (t) => {
+  const saved: Record<string, string[]> = {};
+  const store: ProtectionStore = { load: w => saved[w] ?? [], save: (w, keys) => { saved[w] = keys; } };
+  const status = { ...STATUS, hashedSeed: '-42' };
+  // place-block remembers the cabin wall log
+  const builder = setup({ status, 'item.select': { held: 'oak_log' }, place: { placed: true, block: 'oak_log', face: 'down' } }, store);
+  await builder.run('place-block', { x: 0, y: 65, z: 0, item: 'oak_log' });
+  t.deepEqual(saved['seed:-42'], ['overworld:0,65,0']);
+
+  // a later session in the same world: the wall is the nearest oak log, a tree is further
+  let logs = 2;
+  const digs: unknown[] = [];
+  const miner = setup({
+    status,
+    'world.findBlocks': () => ({ positions: [{ x: 0, y: 65, z: 0 }, { x: 8, y: 64, z: 3 }] }),
+    inventory: () => ({ items: [{ slot: 1, name: 'oak_log', count: logs }], selectedSlot: 0, held: null }),
+    dig: (p: Record<string, unknown>) => { digs.push(p); logs++; return { dug: true, block: 'oak_log', reason: 'done' }; },
+    'world.entities': { entities: [] }
+  }, store);
+  const r = await miner.run('mine-blocks', { block: 'oak_log', count: 3 });
+  t.like(digs, [{ x: 8, y: 64, z: 3 }]);
+  t.is(digs.length, 1);
+  t.false(miner.request.getCalls().some(c => c.args[0] === 'mine')); // not Baritone's mine process
+  // the game client got the list (it becomes Baritone's no-break list near the builds)
+  t.deepEqual(miner.request.getCalls().find(c => c.args[0] === 'protect.set')?.args[1], { positions: [[0, 65, 0]] });
+  t.regex(r.text, /^Mined 1 oak_log one by one in [\d.]+s, leaving 1 that belong to your builds: oak_log x1\.$/);
 });
