@@ -61,6 +61,17 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
         } else {
           await gotoPromise;
         }
+        // pathfinder's goto also resolves when it finds no way to get any closer (an empty path), so check
+        // the goal the same way pathfinder does before claiming success
+        const here = bot.entity?.position?.floored();
+        // typed as taking a Move, but pathfinder itself calls it with a floored position
+        const reached = (p: Vec3) => goal.isEnd(p as unknown as Parameters<typeof goal.isEnd>[0]);
+        if (here && !reached(here) && !reached(here.offset(0, 1, 0))) {
+          const away = here.distanceTo(new Vec3(x, y, z)).toFixed(1);
+          throw new Error(
+            `Could not reach (${x}, ${y}, ${z}): no path found. Stopped at (${here.x}, ${here.y}, ${here.z}), ${away} blocks away.`
+          );
+        }
         return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z})`);
       } catch (error) {
         if (timedOut) {

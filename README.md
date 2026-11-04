@@ -88,7 +88,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 
 ### Movement
 - `get-position` - Get the current position of the bot
-- `move-to-position` - Move to specific coordinates
+- `move-to-position` - Move to specific coordinates; reports an error with where the bot stopped if no path reaches them
 - `look-at` - Make the bot look at specific coordinates
 - `jump` - Make the bot jump
 - `move-in-direction` - Move in a specific direction for a duration
@@ -102,16 +102,21 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `equip-item` - Equip a specific item
 
 ### Block Interaction
-- `place-block` - Place a block at specified coordinates
-- `dig-block` - Dig a block at specified coordinates
+- `place-block` - Place a block at specified coordinates; optional `item` picks what to place (equipped first). Builds over grass, leaf litter and other replaceable blocks, and pathfinding won't dig through blocks placed this way. The list of placed blocks is saved per world (keyed by the world's hashed seed) in `~/.minecraft-mcp-server/placed-blocks.json`, so it survives restarts; a block is dropped from it once the bot sees it removed
+- `dig-block` - Dig a block at specified coordinates, equipping the best tool for it first
 - `get-block-info` - Get information about a block
 - `find-blocks` - Find one or more nearby blocks of a specific type
 
 ### Furnace
-- `smelt-item` - Smelt items using a furnace-like block
+- `smelt-item` - Smelt items using a furnace-like block; waits for and collects all the output (and collects what a furnace already holds when no input is given)
 
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type
+- `attack-entity` - Attack the nearest matching entity (a name like `zombie`, or `hostile` / `mob`) until it dies: equips the best weapon, chases it, stops at low health (`minHealth`, default 6) and picks up the drops
+
+### Survival
+- `eat` - Eat the best safe food in the inventory, or the named `item`; reports hunger and health before and after
+- `get-status` - Health, hunger, saturation, time of day and minutes until night (or dawn), dimension, game mode and difficulty
 
 ### Communication
 - `send-chat` - Send a chat message in-game

@@ -24,7 +24,7 @@ test('registerBlockTools registers place-block tool', (t) => {
   const placeBlockCall = toolCalls.find(call => call.args[0] === 'place-block');
 
   t.truthy(placeBlockCall);
-  t.is(placeBlockCall!.args[1], 'Place a block at the specified position');
+  t.true(String(placeBlockCall!.args[1]).startsWith('Place a block at the specified position'));
 });
 
 test('registerBlockTools registers dig-block tool', (t) => {

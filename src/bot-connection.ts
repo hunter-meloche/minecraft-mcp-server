@@ -2,6 +2,9 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
+import type { Block } from 'prismarine-block';
+import { bestHarvestTool } from './best-tool.js';
+import { installBuildProtection, jsonFileStore, worldIdFromSeed } from './build-protection.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '1.21.11';
 
@@ -65,6 +68,21 @@ export class BotConnection {
   }
 
   private registerEventHandlers(bot: mineflayer.Bot): void {
+    // the login packet carries the world's hashed seed, which keys the saved list of blocks the bot built
+    let worldId: string | undefined;
+    bot._client?.once('login', (packet: { worldState?: { hashedSeed?: unknown }; hashedSeed?: unknown }) => {
+      worldId = worldIdFromSeed(packet.worldState?.hashedSeed ?? packet.hashedSeed);
+    });
+
+    // Since 1.21.4 the protocol maps difficulty to a name ('easy'), but mineflayer indexes its name array with it
+    // and stores undefined. Its listener is attached later (plugins load after a timeout), so set the name in a
+    // microtask, after every listener for this packet has run.
+    bot._client?.on('difficulty', (packet: { difficulty?: unknown }) => {
+      if (typeof packet.difficulty !== 'string') return;
+      const name = packet.difficulty as typeof bot.game.difficulty;
+      queueMicrotask(() => { bot.game.difficulty = name; });
+    });
+
     bot.once('spawn', async () => {
       this.state = 'connected';
       this.callbacks.onLog('info', 'Bot spawned in world');
@@ -72,6 +90,12 @@ export class BotConnection {
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
       bot.pathfinder.setMovements(defaultMove);
+      // pathfinder equips its bestHarvestTool before digging along a path; its version picks the first
+      // inventory item when nothing digs faster, which swapped e.g. an apple into the hand
+      bot.pathfinder.bestHarvestTool = (block: Block) => bestHarvestTool(bot, block);
+      // never dig through blocks the bot placed itself (it walked into a fresh hut through the wall)
+      installBuildProtection(bot, defaultMove as unknown as Parameters<typeof installBuildProtection>[1],
+        { store: jsonFileStore(), world: worldId });
 
       bot.chat('LLM-powered bot ready to receive instructions!');
       this.callbacks.onLog('info', `Bot connected successfully. Username: ${this.config.username}, Server: ${this.config.host}:${this.config.port}`);

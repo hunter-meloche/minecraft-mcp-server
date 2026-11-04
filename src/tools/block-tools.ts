@@ -7,6 +7,8 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { equipBestTool } from '../best-tool.js';
+import { isReplaceable, protectPlacedBlock } from '../build-protection.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -19,14 +21,15 @@ interface FaceOption {
 export function registerBlockTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   factory.registerTool(
     "place-block",
-    "Place a block at the specified position",
+    "Place a block at the specified position. Pass `item` to choose what to place (it is equipped first); otherwise the held item is used. Grass, leaf litter and similar replaceable blocks are built over.",
     {
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
       z: z.coerce.number().describe("Z coordinate"),
-      faceDirection: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional().describe("Direction to place against (default: 'down')")
+      faceDirection: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional().describe("Direction to place against (default: 'down')"),
+      item: z.string().trim().min(1).optional().describe("Item to place, e.g. 'oak_planks' (default: the held item)")
     },
-    async ({ x, y, z, faceDirection = 'down' }: { x: number, y: number, z: number, faceDirection?: FaceDirection }) => {
+    async ({ x, y, z, faceDirection = 'down', item }: { x: number, y: number, z: number, faceDirection?: FaceDirection, item?: string }) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -40,8 +43,20 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
 
       const blockAtPos = bot.blockAt(placePos);
 
-      if (blockAtPos && blockAtPos.name !== 'air') {
+      if (blockAtPos && !isReplaceable(blockAtPos)) {
         return factory.createResponse(`There's already a block (${blockAtPos.name}) at (${x}, ${y}, ${z})`);
+      }
+
+      if (item) {
+        const wanted = item.toLowerCase().replace(/^minecraft:/, '');
+        const stack = bot.inventory.items().find(i => i.name === wanted) ?? bot.inventory.items().find(i => i.name.includes(wanted));
+        if (!stack) return factory.createResponse(`No ${item} in inventory to place`);
+        if (bot.heldItem?.type !== stack.type) await bot.equip(stack, 'hand');
+      }
+      const held = bot.heldItem;
+      const placeable = held && minecraftData(bot.version).blocksByName[held.name];
+      if (!held || !placeable) {
+        return factory.createResponse(`Can't place: holding ${held ? held.name : 'nothing'}, which isn't a block. Pass item=<block name>.`);
       }
 
       const possibleFaces: FaceOption[] = [
@@ -64,17 +79,25 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         const referencePos = placePos.plus(face.vector);
         const referenceBlock = bot.blockAt(referencePos);
 
-        if (referenceBlock && referenceBlock.name !== 'air') {
+        if (referenceBlock && !isReplaceable(referenceBlock)) {
           if (!bot.canSeeBlock(referenceBlock)) {
             const goal = new goals.GoalNear(referencePos.x, referencePos.y, referencePos.z, 2);
             await bot.pathfinder.goto(goal);
+          }
+
+          // pathfinding may have switched the held item (tools for digging, scaffolding for climbing)
+          if (bot.heldItem?.type !== held.type) {
+            const again = bot.inventory.items().find(i => i.type === held.type);
+            if (!again) return factory.createResponse(`Ran out of ${held.name} while moving to place it`);
+            await bot.equip(again, 'hand');
           }
 
           await bot.lookAt(placePos, true);
 
           try {
             await bot.placeBlock(referenceBlock, face.vector.scaled(-1));
-            return factory.createResponse(`Placed block at (${x}, ${y}, ${z}) using ${face.direction} face`);
+            protectPlacedBlock(bot, placePos);
+            return factory.createResponse(`Placed ${held.name} at (${x}, ${y}, ${z}) using ${face.direction} face`);
           } catch (placeError) {
             log('warn', `Failed to place using ${face.direction} face: ${placeError}`);
             continue;
@@ -110,8 +133,9 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         await bot.pathfinder.goto(goal);
       }
 
+      const tool = await equipBestTool(bot, block);
       await bot.dig(block);
-      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z})`);
+      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z})${tool ? ` with ${tool.name}` : ''}`);
     }
   );
 

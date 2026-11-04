@@ -10,7 +10,7 @@ const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
 export function registerFurnaceTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   factory.registerTool(
     "smelt-item",
-    "Smelt items using a furnace-like block",
+    "Smelt items using a furnace-like block. Waits for and collects all the output. If no matching input is in the inventory, collects what the furnace is already smelting.",
     {
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
@@ -55,18 +55,13 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       }
 
       const items = bot.inventory.items();
-      const input = items.find((item) => item.name.includes(inputItem.toLowerCase()));
-      if (!input) {
-        return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
-      }
-
-      const fuel = items.find((item) => item.name.includes(fuelItem.toLowerCase()));
-      if (!fuel) {
-        return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
-      }
-
-      const resolvedInputCount = Math.min(inputCount, input.count);
-      const resolvedFuelCount = Math.min(fuelCount, fuel.count);
+      // exact name first: a substring match let "coal" pick charcoal
+      const pick = (query: string) => {
+        const q = query.toLowerCase().replace(/^minecraft:/, '');
+        return items.find((item) => item.name === q) ?? items.find((item) => item.name.includes(q));
+      };
+      const input = pick(inputItem);
+      const fuel = pick(fuelItem);
 
       const furnace = await bot.openFurnace(furnaceBlock);
       const cleanup = () => {
@@ -79,31 +74,65 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
 
       try {
         const existingInput = furnace.inputItem();
-        if (existingInput && existingInput.name !== input.name) {
+        const existingOutput = furnace.outputItem();
+        // No matching input left in the inventory: collect what this furnace is already smelting
+        const collecting = !input && (!!existingInput || !!existingOutput);
+        if (!input && !collecting) {
+          return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
+        }
+        if (input && existingInput && existingInput.name !== input.name) {
           return factory.createResponse(`Furnace input slot is occupied by ${existingInput.name}`);
         }
 
         const existingFuel = furnace.fuelItem();
-        if (existingFuel && existingFuel.name !== fuel.name) {
-          return factory.createResponse(`Furnace fuel slot is occupied by ${existingFuel.name}`);
+        const burning = (furnace as unknown as { fuel?: number }).fuel ?? 0;
+        if (!fuel && !existingFuel && burning <= 0 && (input || existingInput)) {
+          return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
         }
+        // a different fuel already in the slot: use it rather than refusing (it can't be stacked with ours)
+        const addFuel = fuel && !(existingFuel && existingFuel.name !== fuel.name) ? fuel : null;
 
-        await furnace.putFuel(fuel.type, fuel.metadata ?? null, resolvedFuelCount);
-        await furnace.putInput(input.type, input.metadata ?? null, resolvedInputCount);
+        let resolvedInputCount = 0;
+        if (input) {
+          resolvedInputCount = Math.min(inputCount, input.count);
+          if (addFuel) await furnace.putFuel(addFuel.type, addFuel.metadata ?? null, Math.min(fuelCount, addFuel.count));
+          await furnace.putInput(input.type, input.metadata ?? null, resolvedInputCount);
+        }
 
         if (!takeOutput) {
           return factory.createResponse(
-            `Started smelting ${resolvedInputCount} ${input.name} with ${resolvedFuelCount} ${fuel.name}`
+            `Started smelting ${resolvedInputCount} ${input?.name ?? existingInput?.name}${addFuel ? ` with ${Math.min(fuelCount, addFuel.count)} ${addFuel.name}` : ''}`
           );
         }
 
-        const output = await waitForOutput(furnace, timeoutMs);
-        if (!output) {
-          return factory.createResponse(`No output after ${timeoutMs}ms`);
+        // Keep collecting until the input slot is empty: each item takes ~10 s, and the furnace holds the
+        // results back in its output slot (before, only the first finished item was returned).
+        const total = Math.max(1, resolvedInputCount + (existingInput?.count ?? 0));
+        const waitMs = Math.max(timeoutMs, total * 10500 + 5000);
+        const deadline = Date.now() + waitMs;
+        const countInInventory = (name: string) => bot.inventory.items().filter(i => i.name === name).reduce((n, i) => n + i.count, 0);
+        const pause = (ticks: number) => typeof bot.waitForTicks === 'function' ? bot.waitForTicks(ticks) : Promise.resolve();
+        let takenName = '';
+        let before = 0;
+        let reported = 0;
+        while (Date.now() < deadline) {
+          const output = await waitForOutput(furnace, deadline - Date.now());
+          if (!output) break;
+          if (!takenName) { takenName = output.name; before = countInInventory(takenName); }
+          const taken = await furnace.takeOutput();
+          reported += taken.count;
+          // let the server's slot update arrive, or the stack just taken is still in the model and gets "taken" twice
+          await pause(2);
+          if (!furnace.inputItem()) break;
         }
-
-        const taken = await furnace.takeOutput();
-        return factory.createResponse(`Smelted ${taken.count} ${taken.name}`);
+        // report what actually arrived in the inventory; takeOutput() can count a stack the server already moved
+        const arrived = takenName ? countInInventory(takenName) - before : 0;
+        const takenCount = arrived > 0 ? arrived : reported;
+        if (takenCount === 0) {
+          return factory.createResponse(`No output after ${waitMs}ms`);
+        }
+        const left = furnace.inputItem();
+        return factory.createResponse(`Smelted ${takenCount} ${takenName}${left ? ` (${left.count} ${left.name} still in the furnace; out of time or fuel)` : ''}`);
       } finally {
         cleanup();
       }

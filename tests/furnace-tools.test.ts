@@ -30,7 +30,7 @@ test('registerFurnaceTools registers smelt-item tool', (t) => {
   const toolCalls = (mockServer.tool as sinon.SinonStub).getCalls();
   const smeltCall = toolCalls.find(call => call.args[0] === 'smelt-item');
   t.truthy(smeltCall);
-  t.is(smeltCall!.args[1], 'Smelt items using a furnace-like block');
+  t.true(String(smeltCall!.args[1]).startsWith('Smelt items using a furnace-like block'));
 });
 
 test('smelt-item returns error when no furnace block found', async (t) => {
