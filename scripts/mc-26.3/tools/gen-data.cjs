@@ -91,7 +91,7 @@ const blocks = D.blocks.map(d => {
     hardness: d.hardness,
     resistance: d.resistance,
     stackSize: hasItem ? item.stackSize : 64,
-    diggable: b ? b.diggable : d.hardness >= 0 && d.name !== 'air',
+    diggable: (b ? b.diggable : d.hardness >= 0) && !['air', 'water', 'lava'].includes(d.name), // fluids can't be mined
     material: b ? b.material : materialFor(d.name),
     transparent: !d.canOcclude,
     emitLight: d.emitLight,

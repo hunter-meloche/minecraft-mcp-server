@@ -110,6 +110,11 @@ function buildProtocol (p261) {
     waxed: 'void',
     'cushion/color': 'DyeColor'
   })
+  // PotDecorations: was a list of item ids, now four Optional<ItemStackTemplate> (back, left, right, front)
+  comp.pot_decorations = ['container', ['back', 'left', 'right', 'front'].map(name => ({ name, type: ['option', 'ItemStackTemplate'] }))]
+  // StatePropertiesPredicate$RangedMatcher: min/max are Optional<String> (already so in 26.1.2; minecraft-data had plain strings)
+  const ranged = T.ItemBlockProperty[1].find(f => f.name === 'value').type[1].fields.false[1]
+  for (const f of ranged) if (f.name === 'minValue' || f.name === 'maxValue') f.type = ['option', 'string']
   insertBefore(T.InstrumentData, 'description', { name: 'durabilityDamage', type: 'varint' })
   T.ArmorTrimMaterial = ['container', [{ name: 'assetName', type: 'string' }, { name: 'description', type: 'anonymousNbt' }]]
   C.SlotDisplay[1][1].type[1].fields.tag = 'IDSet'

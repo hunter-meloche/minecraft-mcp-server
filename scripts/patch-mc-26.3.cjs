@@ -131,6 +131,11 @@ for (const pkg of findPackages('minecraft-protocol')) {
     `for (const [n, [r, w, s]] of Object.entries(require('./mc-26.3-datatypes'))) { ${MARK}\n` +
     "  module.exports.Read[n] = ['native', r]; module.exports.Write[n] = ['native', w]; module.exports.SizeOf[n] = ['native', s]\n}")
   if (p1 || p2) { console.log(`[mc-26.3] minecraft-protocol: added 26.3 datatypes -> ${rel(pkg)}`); changed++ }
+  // lpVec3's continued scale is an unsigned var-int (vanilla masks it with 0xffffffff); see
+  // PrismarineJS/node-minecraft-protocol#1542. Read as signed, large velocities flipped sign.
+  if (patchFile(path.join(dt, 'lpVec3.js'), 'varIntVal >>> 0', [
+    ['    scale = (varIntVal * 4) + scale', '    scale = ((varIntVal >>> 0) * 4) + scale']
+  ])) { console.log(`[mc-26.3] minecraft-protocol: lpVec3 unsigned scale -> ${rel(pkg)}`); changed++ }
 }
 
 // ---------------------------------------------------------------- mineflayer
@@ -173,7 +178,29 @@ for (const pkg of findPackages('mineflayer')) {
     ["  bot._client.on('animation', (packet) => {",
       "  bot._client.on('swing_animation', (packet) => {\n    bot.emit('entitySwingArm', fetchEntity(packet.entityId))\n  })\n\n  bot._client.on('animation', (packet) => {"]
   ])
-  if (a || a2 || b) { console.log(`[mc-26.3] mineflayer: adapted plugins to the 26.3 packets -> ${rel(pkg)}`); changed++ }
+  // Second round, cross-checked against the 26.3 jar after comparing with the upstream 26.3 PRs
+  // (PrismarineJS/mineflayer#4146, #4206):
+  const is263 = "bot.registry.version['>=']('26.3')"
+  // ServerboundPlayerActionPacket$Action gained CHANGE_DESTROY_DIRECTION at id 1: abort 1->2, stop 2->3, release use 5->6
+  const c1 = patchFile(path.join(plugins, 'digging.js'), 'mc-26.3 player actions', [
+    ['status: 2, // finish digging', `status: ${is263} ? 3 : 2, // finish digging (mc-26.3 player actions)`],
+    ['status: 1, // cancel digging', `status: ${is263} ? 2 : 1, // cancel digging`]
+  ])
+  const c2 = patchFile(path.join(plugins, 'inventory.js'), 'mc-26.3 player actions', [
+    ['      status: 5,\n', `      status: ${is263} ? 6 : 5, // release use item (mc-26.3 player actions)\n`]
+  ])
+  // Only the newest of several unanswered teleports is confirmed: a stale confirm (with its old position)
+  // followed by the new one puts two position packets in one tick, which 26.3 kicks for.
+  const c3 = patchFile(path.join(plugins, 'physics.js'), 'mc-26.3 newest teleport', [
+    ['    reply.teleport = true\n',
+      `    reply.teleport = true\n    if (${is263}) { // mc-26.3 newest teleport\n      for (let i = pendingReplies.length - 1; i >= 0; i--) if (pendingReplies[i].teleport) pendingReplies.splice(i, 1)\n    }\n`]
+  ])
+  // 26.3 servers no longer send entity_status 2 when a player leaves a bed; the pose leaving SLEEPING is the signal
+  const c4 = patchFile(path.join(plugins, 'entities.js'), 'mc-26.3 wake', [
+    ['      if (metas.sleeping_pos || metas.pose === 2) {\n        bot.emit(\'entitySleep\', entity)\n      }\n',
+      `      if (metas.sleeping_pos || metas.pose === 2) {\n        bot.emit('entitySleep', entity)\n      }\n      if (metas.pose !== undefined && ${is263}) { // mc-26.3 wake\n        if (metas.pose === 2) entity._asleep263 = true\n        else if (entity._asleep263) { entity._asleep263 = false; bot.emit('entityWake', entity) }\n      }\n`]
+  ])
+  if (a || a2 || b || c1 || c2 || c3 || c4) { console.log(`[mc-26.3] mineflayer: adapted plugins to the 26.3 packets -> ${rel(pkg)}`); changed++ }
 }
 
 // ---------------------------------------------------------------- prismarine-chunk / prismarine-physics

@@ -1436,13 +1436,31 @@
                   "container",
                   [
                     {
-                      "name": "decorations",
+                      "name": "back",
                       "type": [
-                        "array",
-                        {
-                          "countType": "varint",
-                          "type": "varint"
-                        }
+                        "option",
+                        "ItemStackTemplate"
+                      ]
+                    },
+                    {
+                      "name": "left",
+                      "type": [
+                        "option",
+                        "ItemStackTemplate"
+                      ]
+                    },
+                    {
+                      "name": "right",
+                      "type": [
+                        "option",
+                        "ItemStackTemplate"
+                      ]
+                    },
+                    {
+                      "name": "front",
+                      "type": [
+                        "option",
+                        "ItemStackTemplate"
                       ]
                     }
                   ]
@@ -1859,11 +1877,17 @@
                   [
                     {
                       "name": "minValue",
-                      "type": "string"
+                      "type": [
+                        "option",
+                        "string"
+                      ]
                     },
                     {
                       "name": "maxValue",
-                      "type": "string"
+                      "type": [
+                        "option",
+                        "string"
+                      ]
                     }
                   ]
                 ]
