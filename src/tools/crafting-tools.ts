@@ -314,6 +314,16 @@ export async function walkWithinReachOf(bot: mineflayer.Bot, block: unknown, rea
   await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
 }
 
+/** Would the inventory be enough for `query` if a crafting table were in reach? */
+export function craftableWithTable(bot: mineflayer.Bot, mcData: unknown, query: string): boolean {
+  const itemsByName = (mcData as { itemsByName?: Record<string, { id?: unknown }> }).itemsByName;
+  const id = itemsByName?.[normalizeItemName(query)]?.id;
+  const recipesFor = (bot as unknown as { recipesFor?: (...args: unknown[]) => unknown[] }).recipesFor;
+  if (typeof id !== 'number' || typeof recipesFor !== 'function') return false;
+  // mineflayer only checks the table argument for truthiness when matching recipes
+  return recipesFor.call(bot, id, null, 1, true).length > 0;
+}
+
 function findNearbyCraftingTable(bot: mineflayer.Bot, mcData: unknown): unknown | null {
   const data = mcData as Record<string, unknown>;
   const blocksByName = data.blocksByName as Record<string, { id?: unknown }> | undefined;
@@ -439,6 +449,14 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
       const candidatesFromBotNoTable = collectCandidateRecipesFromBot(bot, mcData, outputQuery, itemsById, null);
       const candidatesFromBotWithTable = table ? collectCandidateRecipesFromBot(bot, mcData, outputQuery, itemsById, table) : [];
       const candidatesFromBot = candidatesFromBotNoTable.length > 0 ? candidatesFromBotNoTable : candidatesFromBotWithTable;
+      if (!table && candidatesFromBot.length === 0 && craftableWithTable(bot, mcData, outputQuery)) {
+        // otherwise the fallback below reports some wood variant as "missing" (e.g. cherry_planks for a pickaxe)
+        const hasTable = bot.inventory.items().some(i => i.name === 'crafting_table');
+        return factory.createErrorResponse(
+          `${outputQuery} needs a crafting table and there is none within 16 blocks. ` +
+          (hasTable ? 'Place the crafting_table from the inventory nearby, then craft again.' : 'Craft a crafting_table (4 planks), place it nearby, then craft again.')
+        );
+      }
       const candidates = candidatesFromBot.length > 0 ? candidatesFromBot : collectCandidateRecipes(recipes, outputQuery, itemsById);
 
       for (let attempt = 0; attempt < amount; attempt++) {

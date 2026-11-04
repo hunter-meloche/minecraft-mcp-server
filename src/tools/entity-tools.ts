@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Bot } from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
+import { matchesTarget } from './survival-tools.js';
 
 type Entity = ReturnType<Bot['nearestEntity']>;
 
@@ -9,15 +10,15 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot): vo
     "find-entity",
     "Find the nearest entity of a specific type",
     {
-      type: z.string().optional().describe("Type of entity to find (empty for any entity)"),
+      type: z.string().optional().describe("Entity to find: a name like 'zombie', or 'hostile', 'mob' (any creature) or 'player' (empty for any entity)"),
       maxDistance: z.coerce.number().finite().optional().describe("Maximum search distance (default: 16)")
     },
     async ({ type = '', maxDistance = 16 }) => {
       const bot = getBot();
       const entityFilter = (entity: NonNullable<Entity>) => {
         if (!type) return true;
-        if (type === 'player') return entity.type === 'player';
-        if (type === 'mob') return entity.type === 'mob';
+        // 'mob' used to test minecraft-data's "mob" category, which holds ghasts and allays but not zombies or cows
+        if (['player', 'mob', 'hostile'].includes(type.toLowerCase())) return matchesTarget(entity, type);
         return Boolean(entity.name && entity.name.includes(type.toLowerCase()));
       };
 

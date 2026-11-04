@@ -9,6 +9,7 @@ import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { equipBestTool } from '../best-tool.js';
 import { isReplaceable, protectPlacedBlock } from '../build-protection.js';
+import { collectDrops, describeGain, inventoryCounts } from '../drops.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -111,13 +112,14 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
 
   factory.registerTool(
     "dig-block",
-    "Dig a block at the specified position",
+    "Dig a block at the specified position and pick up what it drops",
     {
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
       z: z.coerce.number().describe("Z coordinate"),
+      collect: z.boolean().optional().describe("Walk over the drops to pick them up (default: true)"),
     },
-    async ({ x, y, z }) => {
+    async ({ x, y, z, collect = true }: { x: number, y: number, z: number, collect?: boolean }) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -134,8 +136,14 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       }
 
       const tool = await equipBestTool(bot, block);
+      const before = inventoryCounts(bot);
       await bot.dig(block);
-      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z})${tool ? ` with ${tool.name}` : ''}`);
+      if (collect) await collectDrops(bot, blockPos);
+      const gained = describeGain(before, inventoryCounts(bot));
+      return factory.createResponse(
+        `Dug ${block.name} at (${x}, ${y}, ${z})${tool ? ` with ${tool.name}` : ''}` +
+        (gained ? `. Picked up ${gained}` : collect ? '. Nothing picked up' : '')
+      );
     }
   );
 

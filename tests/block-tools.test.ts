@@ -44,7 +44,7 @@ test('registerBlockTools registers dig-block tool', (t) => {
   const digBlockCall = toolCalls.find(call => call.args[0] === 'dig-block');
 
   t.truthy(digBlockCall);
-  t.is(digBlockCall!.args[1], 'Dig a block at the specified position');
+  t.is(digBlockCall!.args[1], 'Dig a block at the specified position and pick up what it drops');
 });
 
 test('registerBlockTools registers get-block-info tool', (t) => {

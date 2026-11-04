@@ -114,6 +114,7 @@ export function registerSurvivalTools(factory: ToolFactory, getBot: () => minefl
       const name = describe(victim);
       const startedAt = Date.now();
       let hits = 0;
+      const swungWith = new Map<string, number>();
       let lastPosition = victim.position.clone();
       let outcome: 'killed' | 'timeout' | 'low_health' | 'lost' = 'timeout';
 
@@ -126,9 +127,17 @@ export function registerSurvivalTools(factory: ToolFactory, getBot: () => minefl
           const distance = bot.entity.position.distanceTo(victim.position);
           if (distance > maxDistance * 2) { outcome = 'lost'; break; }
           if (distance <= 3.2) {
+            // chasing digs and climbs, and pathfinder equips a pickaxe or scaffolding blocks for that: take the
+            // weapon back before every swing (in a cave fight 8 hits with dirt in hand didn't kill a zombie)
+            if (weapon && bot.heldItem?.name !== weapon.item.name) {
+              const again = bot.inventory.items().find(i => i.name === weapon.item.name);
+              if (again) await bot.equip(again, 'hand');
+            }
             await bot.lookAt(victim.position.offset(0, (victim.height ?? 1) * 0.8, 0), true);
+            const held = bot.heldItem?.name ?? 'fist';
             bot.attack(victim);
             hits++;
+            swungWith.set(held, (swungWith.get(held) ?? 0) + 1);
             await sleep(cooldownMs);
           } else {
             await sleep(100);
@@ -139,6 +148,7 @@ export function registerSurvivalTools(factory: ToolFactory, getBot: () => minefl
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const hitText = `${hits} hit(s)` + (hits ? ` (${[...swungWith].map(([n, c]) => `${n} x${c}`).join(', ')})` : '');
       if (outcome === 'killed') {
         // walk over the spot so the drops get picked up
         try {
@@ -148,15 +158,22 @@ export function registerSurvivalTools(factory: ToolFactory, getBot: () => minefl
           ]);
           await sleep(500);
         } catch { /* drops out of reach: leave them */ }
-        return factory.createResponse(`Killed ${name} with ${hits} hit(s) in ${seconds}s. ${vitals(bot)}`);
+        return factory.createResponse(`Killed ${name} with ${hitText} in ${seconds}s. ${vitals(bot)}`);
       }
       if (outcome === 'low_health') {
-        return factory.createResponse(`Stopped attacking ${name} after ${hits} hit(s): health is low. ${vitals(bot)}`);
+        // standing still here got the bot shot by a skeleton it wasn't fighting: say what else is around
+        const threats = Object.values(bot.entities)
+          .filter(e => e !== bot.entity && e.isValid !== false && isHostile(e) && e.position.distanceTo(bot.entity.position) <= 16)
+          .map(e => `${describe(e)} ${e.position.distanceTo(bot.entity.position).toFixed(0)} blocks away`);
+        return factory.createResponse(
+          `Stopped attacking ${name} after ${hitText}: health is low. ${vitals(bot)}. ` +
+          (threats.length ? `Hostiles nearby: ${threats.join(', ')}. Retreat or wall yourself in, then eat.` : 'No other hostiles within 16 blocks.')
+        );
       }
       if (outcome === 'lost') {
-        return factory.createResponse(`Lost track of ${name} after ${hits} hit(s). ${vitals(bot)}`);
+        return factory.createResponse(`Lost track of ${name} after ${hitText}. ${vitals(bot)}`);
       }
-      return factory.createResponse(`${name} still alive after ${seconds}s and ${hits} hit(s). ${vitals(bot)}`);
+      return factory.createResponse(`${name} still alive after ${seconds}s and ${hitText}. ${vitals(bot)}`);
     }
   );
 
