@@ -92,10 +92,26 @@ public final class Guardian {
             if (Combat.equipShield() && !shieldWorn) { put.add("shield"); }
             shieldWorn = Combat.hasShield();
             if (!put.isEmpty()) note("put on " + String.join(", ", put));
+            keepFed(p, melee);
         }
     }
 
     private static boolean shieldWorn;
+    private static boolean eating;
+
+    /**
+     * Eat when calm (no Baritone job, nothing to fight) and it matters: hurt with food below 18 means no healing at all
+     * (the bot sat at 3 HP for minutes with food 17), and food at 6 or less means no sprinting.
+     */
+    private static void keepFed(LocalPlayer p, Entity melee) {
+        int food = p.getFoodData().getFoodLevel();
+        boolean hurt = p.getHealth() < p.getMaxHealth() - 1;
+        if (eating || Interact.using || melee != null || Processes.active() != null) return;
+        if (!((hurt && food < 18) || food <= 6)) return;
+        if (Combat.chooseFood(false) == null) return;
+        eating = true;
+        eatThen("", r -> { eating = false; note((hurt ? "ate to heal: " : "ate (hungry): ") + r); });
+    }
 
     static boolean recentAttacker(Entity e) {
         Long t = attackers.get(e.getId());
