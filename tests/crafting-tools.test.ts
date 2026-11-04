@@ -300,3 +300,35 @@ test('walkWithinReachOf stays put when the table is already within reach', async
   await walkWithinReachOf(bot, { position: new Vec3(-961, 113, -389) });
   t.false(goto.called);
 });
+
+function craftItemWithoutTable (inventory: { name: string; count: number }[]) {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const craft = sinon.stub().resolves();
+  const mockBot = {
+    version: '1.21.8',
+    inventory: { items: () => inventory },
+    // like mineflayer: table recipes only match when a (truthy) table is passed
+    recipesFor: (_id: number, _meta: unknown, _n: number, table: unknown) => (table ? [{ requiresTable: true }] : []),
+    findBlock: () => null,
+    craft
+  } as unknown as mineflayer.Bot;
+  registerCraftingTools(new ToolFactory(mockServer, mockConnection), () => mockBot);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'craft-item')!.args[3];
+  return { executor, craft };
+}
+
+test('craft-item says a crafting table is needed instead of naming a wood variant as missing', async (t) => {
+  const { executor, craft } = craftItemWithoutTable([{ name: 'oak_planks', count: 10 }, { name: 'stick', count: 4 }, { name: 'crafting_table', count: 1 }]);
+  const result = await executor({ outputItem: 'wooden_pickaxe' });
+  t.true(result.isError);
+  t.regex(result.content[0].text, /wooden_pickaxe needs a crafting table and there is none within 16 blocks\. Place the crafting_table from the inventory/);
+  t.notRegex(result.content[0].text, /cherry/);
+  t.false(craft.called);
+});
+
+test('craft-item suggests crafting a table when the bot has none', async (t) => {
+  const { executor } = craftItemWithoutTable([{ name: 'oak_planks', count: 10 }, { name: 'stick', count: 4 }]);
+  const result = await executor({ outputItem: 'wooden_pickaxe' });
+  t.regex(result.content[0].text, /Craft a crafting_table \(4 planks\)/);
+});

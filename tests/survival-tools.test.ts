@@ -51,7 +51,7 @@ test('chooseFood picks the most filling safe food and skips harmful or precious 
   t.is(chooseFood([item('stick')], FOODS, 8), null);
 });
 
-function fightBot (opts: { hitsToKill: number; health?: number; victimAt?: Vec3 }) {
+function fightBot (opts: { hitsToKill: number; health?: number; victimAt?: Vec3; pathfinderSwaps?: boolean }) {
   const victim = Object.assign(new EventEmitter(), {
     id: 7, type: 'hostile', name: 'zombie', height: 1.95, isValid: true,
     position: opts.victimAt ?? new Vec3(2, 64, 0)
@@ -61,10 +61,11 @@ function fightBot (opts: { hitsToKill: number; health?: number; victimAt?: Vec3 
     entities: { 7: victim } as Record<number, unknown>,
     health: opts.health ?? 20,
     food: 20,
-    heldItem: null,
-    inventory: { items: () => [item('stone_pickaxe'), item('iron_sword')] },
-    equip: sinon.stub().resolves(),
-    lookAt: sinon.stub().resolves(),
+    heldItem: null as Item | null,
+    inventory: { items: () => [item('stone_pickaxe'), item('iron_sword'), item('dirt', 5)] },
+    equip: sinon.stub().callsFake(async (i: Item) => { bot.heldItem = i; }),
+    // stands in for pathfinder switching to scaffolding while chasing
+    lookAt: sinon.stub().callsFake(async () => { if (opts.pathfinderSwaps) bot.heldItem = item('dirt', 5); }),
     attack: sinon.stub().callsFake(() => {
       if (bot.attack.callCount >= opts.hitsToKill) { victim.isValid = false; delete bot.entities[7]; }
     }),
@@ -138,4 +139,26 @@ test('get-status reports vitals and time until night', async (t) => {
   t.regex(text, /difficulty easy/);
   bot.time.timeOfDay = 18000;
   t.regex((await executor(bot, 'get-status')({})).content[0].text, /night; dawn in 4\.2 min/);
+});
+
+test('attack-entity takes the weapon back when chasing put something else in hand', async (t) => {
+  const { bot } = fightBot({ hitsToKill: 3, pathfinderSwaps: true });
+  // the swap happens in lookAt, after the re-equip check: re-equip again on the next swing
+  bot.lookAt = sinon.stub().resolves();
+  bot.attack.callsFake(() => {
+    bot.heldItem = item('dirt', 5);
+    if (bot.attack.callCount >= 3) delete bot.entities[7];
+  });
+  const result = await executor(bot, 'attack-entity')({ target: 'zombie' });
+  t.regex(result.content[0].text, /Killed zombie with 3 hit\(s\) \(iron_sword x3\)/);
+  t.is(bot.equip.callCount, 3);
+});
+
+test('attack-entity names the other hostiles around when it stops at low health', async (t) => {
+  const { bot } = fightBot({ hitsToKill: 99, health: 5 });
+  bot.entities[8] = { id: 8, type: 'hostile', name: 'skeleton', isValid: true, position: new Vec3(6, 64, 0) };
+  bot.entities[9] = { id: 9, type: 'animal', name: 'cow', isValid: true, position: new Vec3(3, 64, 0) };
+  const result = await executor(bot, 'attack-entity')({ target: 'zombie' });
+  t.regex(result.content[0].text, /Hostiles nearby: zombie 2 blocks away, skeleton 6 blocks away\. Retreat/);
+  t.notRegex(result.content[0].text, /cow/);
 });

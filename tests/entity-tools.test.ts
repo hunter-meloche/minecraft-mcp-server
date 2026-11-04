@@ -189,3 +189,23 @@ test('find-entity searches any entity when type not specified', async (t) => {
 
   t.true(result.content[0].text.includes('cow'));
 });
+
+test('find-entity understands hostile and mob with the categories minecraft-data uses', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const entities = [
+    { name: 'item', type: 'other', position: new Vec3(1, 64, 0) },
+    { name: 'cow', type: 'animal', position: new Vec3(2, 64, 0) },
+    { name: 'zombie', type: 'hostile', position: new Vec3(3, 64, 0) }
+  ];
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    nearestEntity: (filter: (e: unknown) => boolean) => entities.find(filter) ?? null
+  } as unknown as mineflayer.Bot;
+  registerEntityTools(new ToolFactory(mockServer, mockConnection), () => mockBot);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'find-entity')!.args[3];
+
+  t.regex((await executor({ type: 'hostile' })).content[0].text, /Found zombie/);
+  t.regex((await executor({ type: 'mob' })).content[0].text, /Found cow/);
+  t.regex((await executor({ type: 'zomb' })).content[0].text, /Found zombie/);
+});
