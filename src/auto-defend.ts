@@ -10,6 +10,9 @@ import { countCover, describeShelter, wallIn } from './bunker.js';
 
 const REACH = 3.2;
 const ATTACKER_MEMORY_MS = 10000;
+/** How far away a mob that shot us may be for the shield guard to face it. */
+const GUARD_RANGE = 24;
+const SHOT_MEMORY_MS = 6000;
 /** At or below this health, still being hurt, and with blocks to spare: wall in. */
 const EMERGENCY_HEALTH = 6;
 
@@ -23,6 +26,7 @@ interface DefendState {
   lastHurtAt: number;
   shelteredAt: string | null; // feet cell of the last emergency shelter, so it isn't rebuilt every tick
   notes: string[]; // since the last alert was taken
+  shieldUp: boolean; // raised by the shield guard
 }
 
 const states = new WeakMap<mineflayer.Bot, DefendState>();
@@ -30,7 +34,7 @@ const states = new WeakMap<mineflayer.Bot, DefendState>();
 function stateOf(bot: mineflayer.Bot): DefendState {
   let s = states.get(bot);
   if (!s) {
-    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [] };
+    s = { enabled: true, busy: false, lastSwing: 0, attackers: new Map(), hurts: [], hitsByReflex: new Map(), lastHurtAt: 0, shelteredAt: null, notes: [], shieldUp: false };
     states.set(bot, s);
   }
   return s;
@@ -70,7 +74,7 @@ export async function defendTick(bot: mineflayer.Bot, now = Date.now()): Promise
   const s = stateOf(bot);
   if (!s.enabled || s.busy || fighting.has(bot) || !bot.entity) return null;
   if (bot.game?.gameMode === 'creative' || bot.game?.gameMode === 'spectator') return null;
-  if (bot.usingHeldItem) return null; // eating or blocking: swinging would cancel it
+  if (bot.usingHeldItem && !s.shieldUp) return null; // eating: swinging would cancel it
   const weapon = bestWeapon(bot.inventory.items());
   if (now - s.lastSwing < (weapon?.cooldownMs ?? FIST_COOLDOWN_MS)) return null;
   const target = reflexTarget(bot, now);
@@ -78,6 +82,7 @@ export async function defendTick(bot: mineflayer.Bot, now = Date.now()): Promise
 
   s.busy = true;
   try {
+    if (s.shieldUp) { bot.deactivateItem(); s.shieldUp = false; }
     // don't swap tools in the middle of digging; otherwise take the weapon
     if (!bot.targetDigBlock && weapon && bot.heldItem?.name !== weapon.item.name) {
       const stack = bot.inventory.items().find(i => i.name === weapon.item.name);
@@ -89,6 +94,47 @@ export async function defendTick(bot: mineflayer.Bot, now = Date.now()): Promise
     const name = describe(target);
     s.hitsByReflex.set(name, (s.hitsByReflex.get(name) ?? 0) + 1);
     return name;
+  } finally {
+    s.busy = false;
+  }
+}
+
+/**
+ * Shield guard while the bot is idle (not walking or digging): face the nearest threat and hold the shield up. The
+ * threat is a hostile in reach, or failing that whoever shot us in the last few seconds from up to 24 blocks (a
+ * skeleton at 10+ blocks). Between melee swings the shield stays up; it comes down only when a swing is ready (the
+ * reflex then swings) or when there is no threat or the bot gets busy. Exported for tests; installAutoDefend runs it
+ * before the reflex.
+ */
+export async function shieldTick(bot: mineflayer.Bot, now = Date.now()): Promise<'up' | 'down' | null> {
+  const s = stateOf(bot);
+  if (s.busy || !bot.entity) return null;
+  const lower = () => { bot.deactivateItem(); s.shieldUp = false; return 'down' as const; };
+  if (!s.enabled || fighting.has(bot)) return s.shieldUp ? lower() : null;
+  if (bot.usingHeldItem && !s.shieldUp) return null; // eating
+  const hasShield = bot.inventory.slots?.[45]?.name === 'shield';
+  const pf = bot.pathfinder as unknown as { isMoving?: () => boolean } | undefined;
+  const idle = !pf?.isMoving?.() && !bot.targetDigBlock;
+  const me = bot.entity.position;
+  const melee = reflexTarget(bot, now);
+  const shooter = Object.values(bot.entities)
+    .filter(e => (s.attackers.get(e.id) ?? 0) > now - SHOT_MEMORY_MS && e.isValid !== false)
+    .filter(e => { const d = e.position.distanceTo(me); return d > REACH && d <= GUARD_RANGE; })
+    .sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0];
+  const threat = melee ?? shooter;
+  if (!hasShield || !idle || !threat) return s.shieldUp ? lower() : null;
+  const cooldown = bestWeapon(bot.inventory.items())?.cooldownMs ?? FIST_COOLDOWN_MS;
+  if (melee && now - s.lastSwing >= cooldown) return null; // the reflex swings next and lowers it
+
+  s.busy = true;
+  try {
+    await bot.lookAt(threat.position.offset(0, (threat.height ?? 1) * 0.8, 0), true);
+    if (s.shieldUp) return null;
+    bot.activateItem(true);
+    s.shieldUp = true;
+    const note = `raised shield against ${describe(threat)}`;
+    if (!s.notes.includes(note)) s.notes.push(note);
+    return 'up';
   } finally {
     s.busy = false;
   }
@@ -149,7 +195,8 @@ export function installAutoDefend(bot: mineflayer.Bot, onError?: (err: unknown) 
   const timer = setInterval(() => {
     if (++ticks % 20 === 0) { gearTick(bot).catch(err => onError?.(err)); return; }
     emergencyTick(bot)
-      .then(sheltered => (sheltered ? null : defendTick(bot)))
+      .then(sheltered => (sheltered ? null : shieldTick(bot)))
+      .then(() => defendTick(bot))
       .catch(err => onError?.(err));
   }, 100);
   bot.once('end', () => clearInterval(timer));

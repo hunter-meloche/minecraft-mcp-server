@@ -1,6 +1,6 @@
 import test from 'ava';
 import sinon from 'sinon';
-import { defendTick, gearTick, noteHurt, reflexTarget, setAutoDefend, takeAlerts } from '../src/auto-defend.js';
+import { defendTick, gearTick, noteHurt, reflexTarget, setAutoDefend, shieldTick, takeAlerts } from '../src/auto-defend.js';
 import { fighting } from '../src/combat.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -77,4 +77,44 @@ test('gearTick leaves a torch in the off-hand alone', async (t) => {
   const { bot, asBot } = arena({ items: [item('shield')] });
   bot.inventory.slots[45] = item('torch');
   t.deepEqual(await gearTick(asBot), []);
+});
+
+test('shieldTick faces a skeleton that shot the idle bot and holds the shield up, then lowers it', async (t) => {
+  const skeleton = mob('skeleton', 12);
+  const { bot, asBot } = arena({ mobs: [skeleton], items: [] });
+  bot.inventory.slots[45] = item('shield');
+  Object.assign(bot.pathfinder, { isMoving: () => false });
+  t.is(await shieldTick(asBot, 10_000), null); // nobody shot us
+  noteHurt(asBot, asBot.entity, skeleton as never);
+  t.is(await shieldTick(asBot), 'up');
+  t.true(bot.activateItem.calledOnceWith(true));
+  t.is(await shieldTick(asBot), null); // stays up, keeps facing it
+  Object.assign(bot.pathfinder, { isMoving: () => true }); // a tool starts walking: lower it
+  t.is(await shieldTick(asBot), 'down');
+  t.false(bot.usingHeldItem);
+});
+
+test('the melee reflex lowers the guard shield to swing', async (t) => {
+  const zombie = mob('zombie', 2);
+  const skeleton = mob('skeleton', 12);
+  const { bot, asBot } = arena({ mobs: [skeleton], items: [item('stone_sword')], damage: 1 });
+  bot.inventory.slots[45] = item('shield');
+  Object.assign(bot.pathfinder, { isMoving: () => false });
+  noteHurt(asBot, asBot.entity, skeleton as never);
+  t.is(await shieldTick(asBot), 'up');
+  (asBot.entities as Record<number, unknown>)[zombie.id] = zombie; // a zombie walks up
+  t.is(await defendTick(asBot, Date.now() + 10_000), 'zombie');
+  t.true(bot.deactivateItem.called);
+});
+
+test('the shield guard also blocks melee between swings, and leaves the ready swing to the reflex', async (t) => {
+  const zombie = mob('zombie', 2);
+  const { bot, asBot } = arena({ mobs: [zombie], items: [item('stone_sword')], damage: 1 });
+  bot.inventory.slots[45] = item('shield');
+  Object.assign(bot.pathfinder, { isMoving: () => false });
+  t.is(await shieldTick(asBot, 10_000), null); // swing ready: no shield, the reflex hits
+  t.is(await defendTick(asBot, 10_000), 'zombie');
+  t.is(await shieldTick(asBot), 'up'); // right after the swing: block until the next one
+  t.is(await defendTick(asBot), null); // still cooling down
+  t.true(bot.usingHeldItem);
 });

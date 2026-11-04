@@ -1,7 +1,7 @@
 import type mineflayer from 'mineflayer';
 import type { Item } from 'prismarine-item';
 import { Vec3 } from 'vec3';
-import { isReplaceable } from './build-protection.js';
+import { canPlaceAgainst, isReplaceable } from './build-protection.js';
 
 /** Cheap blocks worth spending on cover, best first. Falling blocks (sand, gravel) are left out. */
 const COVER_BLOCKS = [
@@ -36,6 +36,29 @@ export function shelterCells(feet: Vec3): Vec3[] {
   ];
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Step to the middle of the cell the bot stands in. The bot is 0.6 wide: standing near an edge its body pokes into
+ * the next cell, and the server refuses to place a wall block there (seen live: a two-block gap on one side). Short
+ * one-tick steps so it doesn't overshoot; if the middle is over a hole it drops in, and the next cell down is used.
+ */
+export async function centerInCell(bot: mineflayer.Bot, maxSteps = 30): Promise<void> {
+  if (typeof bot.setControlState !== 'function') return;
+  for (let i = 0; i < maxSteps; i++) {
+    const p = bot.entity.position;
+    const c = p.floored().offset(0.5, 0, 0.5);
+    if (Math.hypot(c.x - p.x, c.z - p.z) < 0.12) break;
+    await bot.lookAt(new Vec3(c.x, p.y + 1.62, c.z), true);
+    bot.setControlState('forward', true);
+    await sleep(50);
+    bot.setControlState('forward', false);
+    await sleep(50);
+  }
+  bot.clearControlStates();
+  await sleep(250); // land, if it stepped into a hole
+}
+
 export interface ShelterResult { placed: number; alreadySolid: number; gaps: Vec3[]; at: Vec3 }
 
 /**
@@ -46,19 +69,26 @@ export interface ShelterResult { placed: number; alreadySolid: number; gaps: Vec
 export async function wallIn(bot: mineflayer.Bot): Promise<ShelterResult> {
   bot.pathfinder?.setGoal(null);
   bot.clearControlStates?.();
+  await centerInCell(bot);
   const feet = bot.entity.position.floored();
   const result: ShelterResult = { placed: 0, alreadySolid: 0, gaps: [], at: feet };
   const solid = (p: Vec3) => { const b = bot.blockAt(p); return !!b && !isReplaceable(b); };
 
-  /** Fill one cell; true when it ends up solid. */
-  const fill = async (cell: Vec3): Promise<boolean> => {
+  const hasReference = (cell: Vec3) => REFERENCE_DIRS.some(dir => canPlaceAgainst(bot.blockAt(cell.plus(dir))));
+
+  /** Fill one cell; true when it ends up solid. `support`: may first fill the cell below to have a face. */
+  const fill = async (cell: Vec3, support = true): Promise<boolean> => {
     if (solid(cell)) { result.alreadySolid++; return true; }
+    // nothing to place against (e.g. the ground under it was mined out): put a block under it first
+    if (support && !hasReference(cell) && !cell.offset(0, -1, 0).equals(feet.offset(0, -1, 0))) {
+      await fill(cell.offset(0, -1, 0), false);
+    }
     const block = coverBlocks(bot.inventory.items())[0];
     if (!block) return false;
     if (bot.heldItem?.name !== block.name) await bot.equip(block, 'hand');
     for (const dir of REFERENCE_DIRS) {
       const ref = bot.blockAt(cell.plus(dir));
-      if (!ref || isReplaceable(ref)) continue;
+      if (!canPlaceAgainst(ref)) continue;
       try {
         await bot.placeBlock(ref, dir.scaled(-1));
         result.placed++;
@@ -75,7 +105,7 @@ export async function wallIn(bot: mineflayer.Bot): Promise<ShelterResult> {
 
   // the roof needs a neighbour at its own height: put one on top of any side that got filled
   const roof = feet.offset(0, 2, 0);
-  if (!solid(roof) && !SIDES.some(d => solid(roof.plus(d)))) {
+  if (!solid(roof) && !SIDES.some(d => canPlaceAgainst(bot.blockAt(roof.plus(d))))) {
     for (const d of SIDES) {
       if (solid(feet.plus(d).offset(0, 1, 0)) && await fill(roof.plus(d))) break;
     }

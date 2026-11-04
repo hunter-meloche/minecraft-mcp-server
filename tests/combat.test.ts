@@ -98,3 +98,14 @@ test('hostilesNear lists every hostile in range, nearest first', (t) => {
   const { asBot } = arena({ mobs: [mob('skeleton', 9), mob('zombie', 3), mob('cow', 1, { type: 'animal' }), mob('enderman', 5)] });
   t.deepEqual(hostilesNear(asBot, 8).map(e => e.name), ['zombie', 'enderman']);
 });
+
+test('fight counts only its own hits as landed, not arrows or blasts from others', async (t) => {
+  const zombie = mob('zombie', 2);
+  const skeleton = mob('skeleton', 15);
+  const { bot, asBot } = arena({ mobs: [zombie, skeleton], items: [item('iron_sword')], damage: 10 });
+  const swing = bot.attack;
+  bot.attack = ((target: never) => { bot.emit('entityHurt', zombie, skeleton); swing(target); }) as typeof bot.attack;
+  const r = await fight(asBot, 'zombie');
+  t.is(r.hits, 2);
+  t.is(r.landed, 2);
+});

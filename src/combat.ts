@@ -176,7 +176,10 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
   const startedAt = Date.now();
   let shieldUp = false;
   const lowerShield = () => { if (shieldUp) { bot.deactivateItem(); shieldUp = false; } };
-  const onHurt = (e: Entity | undefined) => { if (e && victim && e.id === victim.id) result.landed++; };
+  // only our hits: arrows from other skeletons and creeper blasts hurt the target too
+  const onHurt = (e: Entity | undefined, source: Entity | undefined) => {
+    if (e && victim && e.id === victim.id && source?.id === bot.entity.id) result.landed++;
+  };
   bot.on('entityHurt', onHurt);
   let dropsAt: Vec3 | null = null;
 
