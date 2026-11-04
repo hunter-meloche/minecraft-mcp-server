@@ -6,6 +6,7 @@ import type { Block } from 'prismarine-block';
 import { bestHarvestTool } from './best-tool.js';
 import { installBuildProtection, jsonFileStore, worldIdFromSeed } from './build-protection.js';
 import { installAutoDefend, rememberRegistry } from './auto-defend.js';
+import { applyMovementSafety } from './movement-safety.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.3';
 
@@ -97,6 +98,8 @@ export class BotConnection {
 
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
+      // no digging next to lava, short drops only, no parkour, both sides clear on diagonals
+      applyMovementSafety(bot, defaultMove as unknown as Parameters<typeof applyMovementSafety>[1]);
       bot.pathfinder.setMovements(defaultMove);
       // pathfinder equips its bestHarvestTool before digging along a path; its version picks the first
       // inventory item when nothing digs faster, which swapped e.g. an apple into the hand

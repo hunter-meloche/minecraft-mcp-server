@@ -22,7 +22,7 @@
     "test": "ava",
     "lint": "eslint \"{src,tests}/**/*.ts\"",
     "lint:fix": "eslint \"{src,tests}/**/*.ts\" --fix",
-    "postinstall": "node scripts/patch-mc-26.3.cjs",
+    "postinstall": "node scripts/patch-mc-26.3.cjs && node scripts/patch-pathfinder.cjs",
     "smoke:26.3": "node scripts/smoke-26.3.mjs"
   },
   "dependencies": {

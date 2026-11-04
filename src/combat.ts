@@ -47,6 +47,21 @@ export function describe(entity: { name?: string; type: string }): string {
   return entity.name ?? entity.type;
 }
 
+/**
+ * Can the bot see (and so hit) `e`? A ray from the eyes to its upper body must not hit a block first; swinging at a
+ * mob behind a wall or around a corner does nothing. Bots without a world (tests) count as seeing.
+ */
+export function canSee(bot: mineflayer.Bot, e: { position: Vec3; height?: number }): boolean {
+  const world = bot.world as unknown as { raycast?: (from: Vec3, dir: Vec3, range: number) => unknown } | undefined;
+  if (typeof world?.raycast !== 'function') return true;
+  const from = bot.entity.position.offset(0, 1.62, 0);
+  const to = e.position.offset(0, Math.min(1.4, (e.height ?? 1.8) * 0.8), 0);
+  const delta = to.minus(from);
+  const distance = delta.norm();
+  if (distance < 0.01) return true;
+  return !world.raycast(from, delta.scaled(1 / distance), distance);
+}
+
 const alive = (bot: mineflayer.Bot, e: Entity) => !!bot.entities[e.id] && e.isValid !== false;
 
 /** Hostiles within `range`, nearest first. */
@@ -252,8 +267,10 @@ export async function fight(bot: mineflayer.Bot, query: string, opts: FightOptio
         newTarget(next);
         continue;
       }
-      if (distance > 3.2) {
+      if (distance > 3.2 || !canSee(bot, victim)) {
+        // out of reach, or behind a block: keep closing in instead of swinging at the wall
         lowerShield();
+        if (distance <= 3.2) chaseMode = null; // close but blocked: re-plan toward it
         chase(victim);
         await sleep(100);
         continue;
