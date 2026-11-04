@@ -15,7 +15,19 @@
 ___
 
 > [!IMPORTANT]
-> Currently supports Minecraft version 1.21.11. Newer versions may not work with this MCP server, but we will add support as soon as possible.
+> **This branch (`mc-26.3`) adds Minecraft Java 26.3 support** ahead of upstream releases. See [26.3 support](#263-support) below.
+
+## 26.3 support
+
+Upstream Prismarine releases (mineflayer 4.39.0, minecraft-data 3.119.0) cannot join 26.3 yet. This branch:
+
+- Pins mineflayer to a `master` commit that sends `tick_end` every client tick (PRs #4137/#4162). 26.3 servers kick clients that don't, about 1.5 s after joining. The `pc26_3` branch alone does **not** include this fix; it was cut before it landed.
+- Runs `scripts/patch-mc-26.3.cjs` on `npm install` to register 26.3 in minecraft-data, mineflayer, minecraft-protocol, prismarine-chunk and prismarine-physics. Upstream's own 26.3 data shows the wire protocol is identical to 26.1 (only the protocol number, 777, changes), so 26.3 reuses the 26.1 data.
+- Adds `--mc-version <v>` (default: auto-detect) and `--auth offline|microsoft` (default `offline`; use `microsoft` for online-mode servers).
+
+`npm run smoke:26.3` starts a mock 26.3 server that kicks clients missing `tick_end`, connects the bot, and walks it with pathfinder.
+
+Drop the pin, overrides and postinstall script once mineflayer > 4.39.0 and minecraft-data with 26.3 are on npm.
 
 https://github.com/user-attachments/assets/6f17f329-3991-4bc7-badd-7cde9aacb92f
 

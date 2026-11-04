@@ -3,7 +3,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
 
-const SUPPORTED_MINECRAFT_VERSION = '1.21.11';
+const SUPPORTED_MINECRAFT_VERSION = '26.3';
 
 type ConnectionState = 'connected' | 'connecting' | 'disconnected';
 
@@ -11,6 +11,8 @@ interface BotConfig {
   host: string;
   port: number;
   username: string;
+  mcVersion?: string;
+  auth?: 'offline' | 'microsoft';
 }
 
 interface ConnectionCallbacks {
@@ -54,6 +56,8 @@ export class BotConnection {
       host: this.config.host,
       port: this.config.port,
       username: this.config.username,
+      auth: this.config.auth ?? 'offline',
+      ...(this.config.mcVersion ? { version: this.config.mcVersion } : {}),
       plugins: { pathfinder },
     };
 
