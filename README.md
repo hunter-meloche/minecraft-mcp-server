@@ -126,6 +126,19 @@ It offers the same tools (all except fly-to; combat and the auto-defend reflexes
 - `build-structure` - Build a structure from a text spec (palette + layers) or a .schem/.litematic file with Baritone
 - `stop` - Stop walking, mining or building
 
+## Lab scenarios (regression tests in a live world)
+
+`scripts/lab/` runs repeatable survival scenarios in a world opened to LAN with **Allow Commands** on. A game-master
+player sets each scene up with commands (`/summon`, `/give`, `/damage`, `/fill`); the bot under test only uses its
+normal tools, and a death in the server log fails the scenario.
+
+```bash
+node scripts/lab/mcp-http.mjs ClaudeFresh 7777                                  # game master (mineflayer)
+MCP_EXTRA_ARGS="--backend client" node scripts/lab/mcp-http.mjs ClaudeBot 7778  # bot under test
+node scripts/lab/lab.mjs setup    # once per world: sky arena, water tank, frozen night, no natural spawns
+node scripts/lab/lab.mjs all      # creeper, shield guard, emergency cover, drowning, lava
+```
+
 ### Movement
 - `get-position` - Get the current position of the bot
 - `move-to-position` - Move to specific coordinates; reports an error with where the bot stopped if no path reaches them

@@ -37,7 +37,6 @@ public final class Guardian {
     private static boolean shieldRaised;  // by the shield guard
     private static String escaping;       // "water" | "lava" | null
     private static long lastHurtTick = -1000;
-    private static BlockPos shelteredAt;
     private static final Map<Integer, Long> attackers = new HashMap<>(); // entity id -> tick it last hurt us
     private static final Map<String, Long> recentNotes = new HashMap<>();
 
@@ -66,13 +65,14 @@ public final class Guardian {
         if (Combat.fighting || busy || Interact.using) return;
 
         // emergency: low and still being hurt -> wall in (or run) and eat
-        if (p.getHealth() <= 6 && Ticker.ticks() - lastHurtTick < 60 && !p.blockPosition().equals(shelteredAt)) {
+        // (checks for a standing shelter, not where one was: the lab found a bot back in its old cell with the
+        // shelter gone, and the reflex did nothing)
+        if (p.getHealth() <= 6 && Ticker.ticks() - lastHurtTick < 60 && !sheltered(mc, p.blockPosition())) {
             busy = true;
             shieldGuardDown();
             float h = p.getHealth();
             takeCover(result -> {
                 busy = false;
-                shelteredAt = Minecraft.getInstance().player.blockPosition();
                 note("health " + round(h) + " and under attack: " + result);
             });
             return;
@@ -145,8 +145,39 @@ public final class Guardian {
             note(hazard.equals("water") ? "out of air under water (" + air + "/20): swimming up" : "in lava: jumping out");
         } else if (hazard == null && escaping != null) {
             mc.options.keyJump.setDown(false);
+            mc.options.keyUp.setDown(false);
+            mc.options.keySprint.setDown(false);
+        }
+        if ("lava".equals(hazard)) {
+            // jumping alone doesn't climb out of a pit (seen in the lab): head for the nearest dry ground too
+            BlockPos dry = nearestDryGround(mc, p, 4);
+            if (dry != null) {
+                Vec3 c = Vec3.atBottomCenterOf(dry);
+                p.lookAt(EntityAnchorArgument.Anchor.EYES, new Vec3(c.x, p.getEyeY(), c.z));
+                mc.options.keyUp.setDown(true);
+                mc.options.keySprint.setDown(true);
+            }
         }
         escaping = hazard;
+    }
+
+    /** The closest cell a player can stand in (solid below, two free non-liquid cells) that isn't lava, or null. */
+    static BlockPos nearestDryGround(Minecraft mc, LocalPlayer p, int radius) {
+        BlockPos feet = p.blockPosition();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int dx = -radius; dx <= radius; dx++) for (int dz = -radius; dz <= radius; dz++) for (int dy = -1; dy <= 2; dy++) {
+            BlockPos c = feet.offset(dx, dy, dz);
+            var below = mc.level.getBlockState(c.below());
+            var at = mc.level.getBlockState(c);
+            var head = mc.level.getBlockState(c.above());
+            if (below.isAir() || !below.getFluidState().isEmpty() || Interact.replaceable(below)) continue;
+            if (!at.getFluidState().isEmpty() || !head.getFluidState().isEmpty()) continue;
+            if (!Interact.replaceable(at) || !Interact.replaceable(head)) continue;
+            double d = Vec3.atBottomCenterOf(c).distanceTo(p.position());
+            if (d < bestD) { bestD = d; best = c; }
+        }
+        return best;
     }
 
     // ---------------------------------------------------------------- cover
@@ -247,6 +278,14 @@ public final class Guardian {
                 return true;
             }
         });
+    }
+
+    /** Is the bot already closed in at {@code feet}: four sides at feet and head height and a roof? */
+    static boolean sheltered(Minecraft m, BlockPos feet) {
+        for (Direction d : SIDES) {
+            if (Interact.replaceable(m.level.getBlockState(feet.relative(d))) || Interact.replaceable(m.level.getBlockState(feet.relative(d).above()))) return false;
+        }
+        return !Interact.replaceable(m.level.getBlockState(feet.above(2)));
     }
 
     static boolean hasReference(Minecraft m, BlockPos cell) {

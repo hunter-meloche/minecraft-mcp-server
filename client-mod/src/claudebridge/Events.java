@@ -31,10 +31,17 @@ public final class Events {
         Guardian.onSelfHurt(packet.sourceCauseId());
         String cause = packet.sourceType().getRegisteredName().replace("minecraft:", "");
         Entity source = packet.sourceCauseId() >= 0 && mc.level != null ? mc.level.getEntity(packet.sourceCauseId()) : null;
-        server().emit("hurt", Json.obj(
-            "cause", cause,
-            "source", source == null ? null : Names.entity(source),
-            "health", Json.round(mc.player.getHealth())));
+        String sourceName = source == null ? null : Names.entity(source);
+        // the health update arrives just after the damage event: report the health a couple of ticks later
+        Ticker.add(new Ticker.Task() {
+            int wait = 2;
+            @Override public boolean tick(Minecraft m) {
+                if (--wait > 0) return false;
+                server().emit("hurt", Json.obj("cause", cause, "source", sourceName,
+                    "health", m.player == null ? null : Json.round(m.player.getHealth())));
+                return true;
+            }
+        });
     }
 
     /** The bot died. Respawn right away (as mineflayer does) and report where and why. */
