@@ -1,9 +1,13 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
+import pathfinderPkg from 'mineflayer-pathfinder';
+import type { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { settleInventory } from '../inventory-sync.js';
+
+const { goals } = pathfinderPkg;
 
 interface RecipeIngredient {
   name: string;
@@ -298,6 +302,18 @@ function collectCandidateRecipesFromBot(
   return partial;
 }
 
+/**
+ * bot.craft can only use a crafting table within reach; from farther away the window never opens and the craft
+ * fails after a 20 s "windowOpen did not fire" timeout. Walk up to the table first.
+ */
+export async function walkWithinReachOf(bot: mineflayer.Bot, block: unknown, reach = 4): Promise<void> {
+  const pos = (block as { position?: Vec3 } | null)?.position;
+  const here = bot.entity?.position;
+  if (!pos || !here || !bot.pathfinder) return;
+  if (here.distanceTo(pos.offset(0.5, 0.5, 0.5)) <= reach) return;
+  await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+}
+
 function findNearbyCraftingTable(bot: mineflayer.Bot, mcData: unknown): unknown | null {
   const data = mcData as Record<string, unknown>;
   const blocksByName = data.blocksByName as Record<string, { id?: unknown }> | undefined;
@@ -446,6 +462,7 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
 
           try {
             if (candidate.craftingTable) {
+              await walkWithinReachOf(bot, candidate.craftingTable);
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1, candidate.craftingTable as Parameters<typeof bot.craft>[2]);
             } else {
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);

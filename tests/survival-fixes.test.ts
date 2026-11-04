@@ -132,8 +132,8 @@ test('a protected block that turns into air is forgotten, also in the saved file
   installBuildProtection(bot, { exclusionAreasBreak: [] as Rule[] }, { store: jsonFileStore(file), world: 'seed:42' });
   protectPlacedBlock(bot, new Vec3(5, 64, 5));
   protectPlacedBlock(bot, new Vec3(6, 64, 5));
-  bot.emit('blockUpdate', { name: 'cobblestone', position: new Vec3(5, 64, 5) }, { name: 'air', position: new Vec3(5, 64, 5) });
-  bot.emit('blockUpdate', null, { name: 'stone', position: new Vec3(6, 64, 5) }); // still solid: keep it
+  bot.emit('blockUpdate', { name: 'cobblestone', position: new Vec3(5, 64, 5) } as never, { name: 'air', position: new Vec3(5, 64, 5) } as never);
+  bot.emit('blockUpdate', null, { name: 'stone', position: new Vec3(6, 64, 5) } as never); // still solid: keep it
   t.false(isProtected(bot, new Vec3(5, 64, 5)));
   t.true(isProtected(bot, new Vec3(6, 64, 5)));
   t.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { 'seed:42': ['overworld:6,64,5'] });

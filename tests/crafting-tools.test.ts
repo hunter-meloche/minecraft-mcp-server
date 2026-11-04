@@ -1,6 +1,7 @@
 import test from 'ava';
 import sinon from 'sinon';
-import { registerCraftingTools } from '../src/tools/crafting-tools.js';
+import { registerCraftingTools, walkWithinReachOf } from '../src/tools/crafting-tools.js';
+import { Vec3 } from 'vec3';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
@@ -282,4 +283,20 @@ test('uses real minecraft-data recipes for version 1.21.8', async (t) => {
   t.truthy(mcData.recipes);
   const isValid = mcData.recipes && (Array.isArray(mcData.recipes) || typeof mcData.recipes === 'object');
   t.true(isValid);
+});
+
+test('walkWithinReachOf walks to a crafting table that is out of reach', async (t) => {
+  const goto = sinon.stub().resolves();
+  const bot = { entity: { position: new Vec3(-951.5, 115, -384.5) }, pathfinder: { goto } } as unknown as mineflayer.Bot;
+  await walkWithinReachOf(bot, { position: new Vec3(-961, 113, -389) });
+  t.true(goto.calledOnce);
+  const goal = goto.firstCall.args[0];
+  t.like(goal, { x: -961, y: 113, z: -389, rangeSq: 4 });
+});
+
+test('walkWithinReachOf stays put when the table is already within reach', async (t) => {
+  const goto = sinon.stub().resolves();
+  const bot = { entity: { position: new Vec3(-959.5, 113, -388.5) }, pathfinder: { goto } } as unknown as mineflayer.Bot;
+  await walkWithinReachOf(bot, { position: new Vec3(-961, 113, -389) });
+  t.false(goto.called);
 });
