@@ -1,5 +1,6 @@
 import test from 'ava';
 import sinon from 'sinon';
+import { EventEmitter } from 'events';
 import { BotConnection } from '../src/bot-connection.js';
 
 test('constructor initializes with correct state', (t) => {
@@ -171,4 +172,16 @@ test('cleanup does not throw when no bot exists', (t) => {
   t.notThrows(() => {
     connection.cleanup();
   });
+});
+
+test('a connection that drops before spawn ends up disconnected, so the next tool call reconnects', (t) => {
+  const connection = new BotConnection({ host: 'localhost', port: 25565, username: 'TestBot' }, { onLog: sinon.stub(), onChatMessage: sinon.stub() });
+  const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter(), game: {} });
+  const internals = connection as unknown as { bot: unknown; state: string; registerEventHandlers(b: unknown): void };
+  internals.bot = bot;
+  internals.state = 'connecting';
+  internals.registerEventHandlers(bot);
+  bot.emit('end', 'socketClosed'); // e.g. the server refused the login
+  t.is(connection.getState(), 'disconnected');
+  t.is(connection.getBot(), null);
 });
