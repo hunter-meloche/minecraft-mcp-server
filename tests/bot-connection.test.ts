@@ -1,5 +1,6 @@
 import test from 'ava';
 import sinon from 'sinon';
+import { EventEmitter } from 'events';
 import { BotConnection } from '../src/bot-connection.js';
 
 test('constructor initializes with correct state', (t) => {
@@ -171,4 +172,16 @@ test('cleanup does not throw when no bot exists', (t) => {
   t.notThrows(() => {
     connection.cleanup();
   });
+});
+
+test('difficulty names from 1.21.4+ servers are kept instead of becoming undefined', async (t) => {
+  const connection = new BotConnection({ host: 'localhost', port: 25565, username: 'TestBot' }, { onLog: sinon.stub(), onChatMessage: sinon.stub() });
+  const client = new EventEmitter();
+  const bot = Object.assign(new EventEmitter(), { _client: client, game: { difficulty: undefined as string | undefined } });
+  (connection as unknown as { registerEventHandlers(b: unknown): void }).registerEventHandlers(bot);
+  // mineflayer's own listener is attached later (plugins load after a timeout) and indexes a name array with the name
+  client.on('difficulty', (p: { difficulty: unknown }) => { bot.game.difficulty = (['peaceful', 'easy', 'normal', 'hard'] as unknown as Record<string, string>)[p.difficulty as string]; });
+  client.emit('difficulty', { difficulty: 'easy', difficultyLocked: false });
+  await Promise.resolve();
+  t.is(bot.game.difficulty, 'easy');
 });

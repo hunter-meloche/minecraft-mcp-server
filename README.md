@@ -129,6 +129,11 @@ Once connected to a Minecraft server, Claude can use these commands:
 
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type
+- `attack-entity` - Attack the nearest matching entity (a name like `zombie`, or `hostile` / `mob`) until it dies: equips the best weapon, chases it, stops at low health (`minHealth`, default 6) and picks up the drops
+
+### Survival
+- `eat` - Eat the best safe food in the inventory, or the named `item`; reports hunger and health before and after
+- `get-status` - Health, hunger, saturation, time of day and minutes until night (or dawn), dimension, game mode and difficulty
 
 ### Communication
 - `send-chat` - Send a chat message in-game

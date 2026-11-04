@@ -78,6 +78,15 @@ export class BotConnection {
       worldId = worldIdFromSeed(packet.worldState?.hashedSeed ?? packet.hashedSeed);
     });
 
+    // Since 1.21.4 the protocol maps difficulty to a name ('easy'), but mineflayer indexes its name array with it
+    // and stores undefined. Its listener is attached later (plugins load after a timeout), so set the name in a
+    // microtask, after every listener for this packet has run.
+    bot._client?.on('difficulty', (packet: { difficulty?: unknown }) => {
+      if (typeof packet.difficulty !== 'string') return;
+      const name = packet.difficulty as typeof bot.game.difficulty;
+      queueMicrotask(() => { bot.game.difficulty = name; });
+    });
+
     bot.once('spawn', async () => {
       this.state = 'connected';
       this.callbacks.onLog('info', 'Bot spawned in world');
