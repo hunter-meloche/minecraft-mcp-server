@@ -567,20 +567,24 @@ test('explore walks legs in a direction until the target shows up', async (t) =>
   t.deepEqual(request.getCalls().filter(c => c.args[0] === 'goto').map(c => [c.args[1]?.z, c.args[1]?.xz]), [[100, true], [200, true]]);
 });
 
-test('level-area cuts first when it lacks the fill blocks, then fills', async (t) => {
+test('level-area works in tiles: cuts, then fills when it has the blocks', async (t) => {
   // 2 x 3 x 1 box from y 63 (level 64): a 1-high bump at x=0 (dirt at y 65), a dip at x=1 (ground y 63)
-  let regionReads = 0;
-  const before = ['stone', 'stone', 'dirt', 'air', 'dirt', 'air'];   // y63: stone stone; y64: dirt air; y65: dirt air
-  const after = ['stone', 'stone', 'dirt', 'air', 'air', 'air'];     // the bump is cut
+  let world = ['stone', 'stone', 'dirt', 'air', 'dirt', 'air'];   // y63: stone stone; y64: dirt air; y65: dirt air
   let dirt = 0;
-  const builds: unknown[] = [];
+  const builds: string[] = [];
   const { run } = setup({
-    'world.region': () => ({ blocks: regionReads++ === 0 ? before : after }),
+    'world.region': () => ({ blocks: world }),
     inventory: () => ({ items: dirt ? [{ slot: 1, name: 'dirt', count: dirt }] : [], selectedSlot: 0, held: null }),
-    build: (p: Record<string, unknown>) => { builds.push(p); dirt = 1; return { reason: 'done', seconds: 2, baritone: [], used: {} }; }
+    build: (p: Record<string, unknown>) => {
+      const file = String(p.file);
+      builds.push(file.replace(/^.*[\\/]/, ''));
+      if (/cut/.test(file)) { world = ['stone', 'stone', 'dirt', 'air', 'air', 'air']; dirt = 1; } // the bump comes off as dirt
+      else world = ['stone', 'stone', 'dirt', 'dirt', 'air', 'air'];                                     // the dip is filled
+      return { reason: 'done', seconds: 2, baritone: [], used: {} };
+    }
   });
   const r = await run('level-area', { x1: 0, z1: 0, x2: 1, z2: 0, level: 64, above: 1, below: 1 });
-  t.is(builds.length, 2);
+  t.deepEqual(builds, ['level_tile_cut.schem', 'level_tile_fill.schem']);
   t.regex(r.text, /^Level \(0, 0\)\.\.\(1, 0\) to ground y 64: cut 1 block\(s\) \(ground 1\), fill 1 dirt \+ 0 cobblestone/);
-  t.regex(r.text, /Cut first \(not enough fill blocks yet\)/);
+  t.regex(r.text, /Worked 1\/1 tile\(s\) of 8x8 in \d+s\. Now level\.$/);
 });

@@ -862,34 +862,65 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         `left alone: ${plan.kept.water} water column(s), ${plan.kept.built} column(s) with builds, crops or furniture.`;
       if (!plan.spec) return factory.createResponse(`${summary} Already level.`);
       if (dryRun) return factory.createResponse(summary);
-      const textOf = (r: ReturnType<ToolFactory['createResponse']>) => r.content.map(c => (c as { text?: string }).text ?? '').join('\n');
+      // Baritone's builder chokes on one big schematic (a 34 x 26 area cut ~170 blocks in 7 minutes, then stalled),
+      // while small ones go fast (22 blocks in a minute): work in tiles, nearest first, in a serpentine sweep
+      const TILE = 8;
       const started = Date.now();
-      const counts = (await inventoryCounts()).counts;
-      const short = (counts.get('dirt') ?? 0) < plan.dirt || (counts.get('cobblestone') ?? 0) < plan.cobblestone;
-      const notes: string[] = [summary];
-      let spec = plan.spec;
-      let origin = plan.origin;
-      if (short) {
-        // cut first (no blocks needed; cutting hills yields dirt), then plan the fill again
-        const cutOnly = { ...spec, layers: spec.layers.map(rows => rows.map(r => r.replace(/[CD]/g, ' '))) };
-        const r1 = await buildStructure({ ...origin, spec: cutOnly, name: 'level_area_cut', timeoutMs });
-        notes.push(`Cut first (not enough fill blocks yet): ${textOf(r1)}`);
-        const again: (string | null)[] = [];
-        for (let y = 0; y < box.height; y += step) {
-          const part = await call<{ blocks: (string | null)[] }>('world.region', { ...box, y: box.y + y, height: Math.min(step, box.height - y) }, 60_000);
-          again.push(...part.blocks);
+      const textOf = (r: ReturnType<ToolFactory['createResponse']>) => r.content.map(c => (c as { text?: string }).text ?? '').join(' ');
+      const readBox = async (b: typeof box) => {
+        const out: (string | null)[] = [];
+        const per = Math.max(1, Math.floor(65_536 / (b.width * b.length)));
+        for (let y = 0; y < b.height; y += per) {
+          const part = await call<{ blocks: (string | null)[] }>('world.region', { ...b, y: b.y + y, height: Math.min(per, b.height - y) }, 60_000);
+          out.push(...part.blocks);
         }
-        const refill = planLevel(box, again, level, p => protection.has(dim, p));
-        if (!refill.spec) return factory.createResponse(`${notes.join('\n')}\nNow level.`);
-        const have = (await inventoryCounts()).counts;
-        if ((have.get('dirt') ?? 0) < refill.dirt || (have.get('cobblestone') ?? 0) < refill.cobblestone) {
-          return factory.createErrorResponse(`${notes.join('\n')}\nStill to fill: ${refill.dirt} dirt (have ${have.get('dirt') ?? 0}), ${refill.cobblestone} cobblestone (have ${have.get('cobblestone') ?? 0}), ${refill.cut} block(s) left to cut. Gather them and run level-area again.`);
+        return out;
+      };
+      const tiles: (typeof box)[] = [];
+      for (let tz = 0; tz < box.length; tz += TILE) {
+        const row: (typeof box)[] = [];
+        for (let tx = 0; tx < box.width; tx += TILE) {
+          row.push({ ...box, x: box.x + tx, z: box.z + tz, width: Math.min(TILE, box.width - tx), length: Math.min(TILE, box.length - tz) });
         }
-        spec = refill.spec;
-        origin = refill.origin;
+        tiles.push(...((tz / TILE) % 2 ? row.reverse() : row));
       }
-      const r = await buildStructure({ ...origin, spec, name: 'level_area', timeoutMs: Math.max(60_000, timeoutMs - (Date.now() - started)) });
-      return { ...r, content: [{ type: 'text' as const, text: `${notes.join('\n')}\n${textOf(r)}` }] };
+      const me = (await status()).position!;
+      // start from the tile nearest the bot, then follow the sweep from there round to the beginning
+      const first = tiles.reduce((best, t, i) => (Math.hypot(t.x + t.width / 2 - me.x, t.z + t.length / 2 - me.z) <
+        Math.hypot(tiles[best].x + tiles[best].width / 2 - me.x, tiles[best].z + tiles[best].length / 2 - me.z) ? i : best), 0);
+      const order = [...tiles.slice(first), ...tiles.slice(0, first)];
+      let tilesDone = 0, shortTiles = 0;
+      for (const t of order) {
+        if (Date.now() - started > timeoutMs) break;
+        let p = planLevel(t, await readBox(t), level, q => protection.has(dim, q));
+        if (!p.spec) { tilesDone++; continue; }
+        const left = () => Math.max(30_000, timeoutMs - (Date.now() - started));
+        if (p.cut) {
+          const cutOnly = { ...p.spec, layers: p.spec.layers.map(rows => rows.map(r => r.replace(/[CD]/g, ' '))) };
+          await buildStructure({ ...p.origin, spec: cutOnly, name: 'level_tile_cut', timeoutMs: Math.min(180_000, left()) });
+          p = planLevel(t, await readBox(t), level, q => protection.has(dim, q));
+        }
+        if (p.spec && (p.dirt || p.cobblestone)) {
+          const have = (await inventoryCounts()).counts;
+          if ((have.get('dirt') ?? 0) >= p.dirt && (have.get('cobblestone') ?? 0) >= p.cobblestone) {
+            const fillOnly = { ...p.spec, layers: p.spec.layers.map(rows => rows.map(r => r.replace(/\./g, ' '))) };
+            const r = await buildStructure({ ...p.origin, spec: fillOnly, name: 'level_tile_fill', timeoutMs: Math.min(180_000, left()) });
+            if (r.isError && !/blocks in place/.test(textOf(r))) shortTiles++;
+          } else {
+            shortTiles++;
+          }
+        }
+        tilesDone++;
+      }
+      const after = planLevel(box, await readBox(box), level, p => protection.has(dim, p));
+      const have = (await inventoryCounts()).counts;
+      const secs = Math.round((Date.now() - started) / 1000);
+      const rest = after.spec
+        ? `Still to do: cut ${after.cut}, fill ${after.dirt} dirt (have ${have.get('dirt') ?? 0}) + ${after.cobblestone} cobblestone (have ${have.get('cobblestone') ?? 0}).` +
+          (shortTiles ? ` ${shortTiles} tile(s) were short of fill blocks.` : '') + ' Run level-area again to continue.'
+        : 'Now level.';
+      const text = `${summary}\nWorked ${tilesDone}/${tiles.length} tile(s) of ${TILE}x${TILE} in ${secs}s. ${rest}`;
+      return after.spec ? factory.createErrorResponse(text) : factory.createResponse(text);
     }
   );
 
