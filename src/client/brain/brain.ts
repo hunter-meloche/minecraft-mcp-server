@@ -53,6 +53,9 @@ export class Brain {
   private memory: BrainMemory;
   private goals: Goal[];
   private last?: Snapshot;
+  /** the running goal's latest step, and the status line the game client shows */
+  private step?: string;
+  private shown?: string;
   private worldId?: string;
   private readonly now: () => number;
   private readonly tickMs: number;
@@ -70,6 +73,7 @@ export class Brain {
     this.enabled = on;
     if (on) this.leaseUntil = 0; // handed back on purpose: no waiting out the LLM's quiet time
     this.note(on ? 'autonomy on' : 'autonomy off');
+    void this.show();
     if (on && !this.timer) {
       this.timer = setInterval(() => { void this.tick(); }, this.tickMs);
       this.timer.unref?.();
@@ -91,6 +95,7 @@ export class Brain {
   async manual(tool: string): Promise<void> {
     this.leaseUntil = this.now() + this.leaseMs;
     this.leaseTool = tool;
+    void this.show();
     if (this.running) await this.stopRunning(`the LLM took over (${tool})`);
   }
 
@@ -122,6 +127,7 @@ export class Brain {
       this.note(`tick failed: ${(e as Error).message}`);
     } finally {
       this.ticking = false;
+      await this.show();
     }
   }
 
@@ -147,6 +153,26 @@ export class Brain {
     if (waiting.length) lines.push(`Retrying later: ${waiting.join(', ')}.`);
     if (this.log.length) lines.push('Recent:', ...this.log.slice(-20).map(l => `- ${l}`));
     return lines.join('\n');
+  }
+
+  /** One line for the bot's own window: what the autopilot is doing right now. */
+  statusLine(): string {
+    if (!this.enabled) return 'Autopilot off';
+    const lease = this.leaseUntil - this.now();
+    if (lease > 0) return `Autopilot paused: LLM in control (${this.leaseTool}), back in ${Math.ceil(lease / 60_000)} min`;
+    const r = this.running;
+    if (r) return `Autopilot: ${r.goal.name} - ${this.step ?? r.reason}`;
+    if (this.last?.sleeping) return 'Autopilot: asleep';
+    return `Autopilot: idle${this.last ? ` (${this.last.activity === 'work' ? 'day' : this.last.activity === 'return' ? 'evening' : 'night'})` : ''}`;
+  }
+
+  /** Send the status line to the game client when it changed (shown on its HUD and window title). */
+  private async show(): Promise<void> {
+    const text = this.statusLine();
+    if (text === this.shown) return;
+    this.shown = text;
+    // outside any goal's run: an aborted run's bridge calls fail on purpose, this one must not
+    await brainRun.exit(() => this.rt.call('hud.set', { text })).catch(() => { this.shown = undefined; });
   }
 
   private note(text: string): void {
@@ -220,7 +246,7 @@ export class Brain {
       },
       call: (m, p, t) => this.rt.call(m, p, t),
       status: () => this.rt.status(),
-      progress: text => this.note(`${goal.name}: ${text}`)
+      progress: text => { this.step = text; this.note(`${goal.name}: ${text}`); void this.show(); }
     };
     this.note(`start ${goal.name}: ${reason}`);
     const started = this.now();
@@ -236,9 +262,12 @@ export class Brain {
       })
       .finally(() => {
         if (this.running?.abort === abort) this.running = undefined;
+        void this.show();
         this.memory.save(); // chest contents and chore times it learned
       });
     this.running = { goal, reason, started, abort, done };
+    this.step = undefined;
+    void this.show();
   }
 
   private async stopRunning(why: string): Promise<void> {

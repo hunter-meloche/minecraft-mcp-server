@@ -9,7 +9,9 @@
     "ChatComponentMixin",
     "MouseHandlerMixin",
     "KeyboardHandlerMixin",
-    "WindowMixin"
+    "WindowMixin",
+    "HudMixin",
+    "TitleMixin"
   ],
   "injectors": { "defaultRequire": 1 }
 }

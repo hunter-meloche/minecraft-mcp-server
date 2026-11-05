@@ -106,7 +106,7 @@ test('the brain walks home in the evening, goes to bed at night and gets up in t
   calls.length = 0;
   await brain.tick();
   await settle();
-  t.deepEqual(calls.filter(c => c !== 'inventory' && c !== 'world.region'), ['move-to-position 0,64,0', 'bed.sleep']); // onto the home cell, then the bed is in reach
+  t.deepEqual(calls.filter(c => !['inventory', 'world.region', 'hud.set'].includes(c)), ['move-to-position 0,64,0', 'bed.sleep']); // onto the home cell, then the bed is in reach
   t.regex(brain.status(), /asleep in the bed at \(1, 64, 0\)/);
   t.regex(brain.status(), /Landmarks: bed \(1, 64, 0\)/);
 
@@ -176,4 +176,34 @@ test('closeDoors: shuts open doors near home that no plate holds open, not one t
   } as unknown as GoalContext;
   t.is(await closeDoors(ctx, { x: 0, y: 64, z: 0 }), 1);
   t.deepEqual(used, ['use-item-on-block 0,64,2']);
+});
+
+test('the status line for the bot\'s window: off, the goal and its step, paused for the LLM, idle, asleep', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 60, y: 64, z: 0 }, time: 11_500 };
+  const { rt } = fakeRuntime(state);
+  const shown: string[] = [];
+  const call = rt.call;
+  rt.call = (async (m: string, p?: Record<string, unknown>) => {
+    if (m === 'hud.set') { shown.push(String(p?.text)); return {}; }
+    return call(m, p);
+  }) as ClientRuntime['call'];
+  const brain = new Brain(rt, { tickMs: 1e9, leaseMs: 60_000, now: () => now });
+  t.is(brain.statusLine(), 'Autopilot off');
+  brain.setEnabled(true);
+  await brain.tick();
+  await settle();
+  t.true(shown.includes('Autopilot: shelter - evening: head home before dark'));
+  t.is(shown.at(-1), 'Autopilot: idle (evening)');
+  await brain.manual('dig-block');
+  t.is(shown.at(-1), 'Autopilot paused: LLM in control (dig-block), back in 1 min');
+  now = 61_000;
+  state.time = 13_000;
+  await brain.tick();
+  await settle();
+  await brain.tick();
+  t.is(shown.at(-1), 'Autopilot: asleep');
+  brain.setEnabled(false);
+  await settle();
+  t.is(shown.at(-1), 'Autopilot off');
 });

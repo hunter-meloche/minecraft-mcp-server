@@ -39,6 +39,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Combat.register(server);
         Guardian.register(server);
         Protection.register(server);
+        BrainHud.register(server);
         Passive.register();
         Processes.baritone().getPathingControlManager().registerProcess(new DefendProcess());
         Processes.baritone().getPathingControlManager().registerProcess(new EatPause());
