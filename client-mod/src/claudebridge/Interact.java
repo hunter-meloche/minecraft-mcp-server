@@ -113,15 +113,26 @@ public final class Interact {
     }
 
     /** Put the item in the main hand (moving it to the hotbar if needed); returns the inventory index now held. */
+    /**
+     * A hotbar slot for an item we want in hand, never 0 or 8: with allowInventory Baritone keeps its best pickaxe in
+     * slot 0 and building blocks in slot 8, swapping them back every tick (a hoe put in slot 0 was a pickaxe again two
+     * ticks later, so tilling did nothing). Prefers an empty slot, then the one in hand.
+     */
+    static int freeHotbarSlot(Inventory inv) {
+        for (int k = 1; k <= 7; k++) if (inv.getItem(k).isEmpty()) return k;
+        int sel = inv.getSelectedSlot();
+        return sel >= 1 && sel <= 7 ? sel : 7;
+    }
+
     public static int select(String name) {
         LocalPlayer p = player();
         Inventory inv = p.getInventory();
         int i = find(inv, name);
         if (i < 0) throw new IllegalArgumentException("no " + name + " in inventory");
-        if (i < 9) { inv.setSelectedSlot(i); return i; }
+        if (i < 9) { inv.setSelectedSlot(i); return i; } // in slot 0 or 8 it is Baritone's own pick: it stays there
         if (i > 35) throw new IllegalArgumentException(name + " is worn; take it off first");
         if (p.containerMenu != p.inventoryMenu) p.closeContainer();
-        int h = inv.getSuitableHotbarSlot();
+        int h = freeHotbarSlot(inv);
         click(p.inventoryMenu, inventoryMenuSlot(i), h, ContainerInput.SWAP);
         inv.setSelectedSlot(h);
         return h;
@@ -226,14 +237,23 @@ public final class Interact {
             BlockHitResult click = new BlockHitResult(hit, face, at, false);
             Ticker.add(new Ticker.Task() {
                 int wait = 5;
+                String result = "", held = "";
                 @Override public boolean tick(Minecraft m) {
                     wait--;
-                    if (wait == 3) m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click); // after the rotation is sent
+                    if (wait == 3) {
+                        // after the rotation is sent; buckets (and other aimed items) act through "use", along the look
+                        // direction at the same point, when the block click does nothing
+                        held = m.player.getMainHandItem().isEmpty() ? "nothing" : Names.item(m.player.getMainHandItem());
+                        var r = m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click);
+                        result = r.toString();
+                        if (!r.consumesAction()) result += " / use: " + m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
+                    }
                     if (wait > 0) return false;
                     var now = m.level.getBlockState(at);
                     JsonObject props = new JsonObject();
                     for (var prop : now.getProperties()) props.addProperty(prop.getName(), Handlers.valueName(now, prop));
-                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "properties", props));
+                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "properties", props, "held", held, "result", result,
+                        "sneaking", m.player.isShiftKeyDown()));
                     return true;
                 }
             });

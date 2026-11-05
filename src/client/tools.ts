@@ -696,7 +696,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (item) {
         try { await call('item.select', { name: item }); } catch { return factory.createErrorResponse(`No ${item} in inventory`); }
       }
-      type Used = { used: boolean; reason?: string; before?: string; after?: string; properties?: Record<string, string> };
+      type Used = { used: boolean; reason?: string; before?: string; after?: string; properties?: Record<string, string>; held?: string; result?: string };
       let r = await call<Used>('useOn', { ...at, face });
       if (!r.used && r.reason === 'too far') {
         await goNear(at, 3);
@@ -707,7 +707,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const props = Object.entries(r.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
       const after = `${r.after}${props ? `[${props}]` : ''}`;
       return factory.createResponse(r.before === r.after
-        ? `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}; it is now ${after}`
+        ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; it is now ${after} (no change${r.result ? `: ${r.result}` : ''})`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
     }
   );
