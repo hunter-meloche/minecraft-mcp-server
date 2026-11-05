@@ -1223,13 +1223,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!(await inventoryCounts()).counts.get('fishing_rod')) return factory.createErrorResponse('No fishing_rod in the inventory (3 sticks and 2 string)');
       let water: Pos | undefined = x !== undefined && y !== undefined && zz !== undefined ? floorPos({ x, y, z: zz }) : undefined;
       if (!water) {
-        // nearest pond, not a puddle: still water with still water on (nearly) all 8 sides and air above, since a cast
+        // nearest pond, not a puddle: still water with still water on at least 6 of its 8 sides and air above, since a cast
         // flies a few blocks and overshot a 1x1 farm hole 59 times
         const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'water', maxDistance: 48, count: 256 });
         for (const p of found.positions) {
           const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', { x: p.x - 1, y: p.y, z: p.z - 1, width: 3, height: 2, length: 3 });
           const still = blocks.slice(0, 9).filter(b => b === 'water[level=0]').length;
-          if (still >= 8 && blocks[13] === 'air') { water = p; break; }
+          if (still >= 6 && blocks[4] === 'water[level=0]' && blocks[13] === 'air') { water = p; break; }
         }
       }
       if (!water) return factory.createErrorResponse('No pond (open still water, 3x3 or bigger) within 48 blocks');
