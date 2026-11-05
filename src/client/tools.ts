@@ -315,6 +315,34 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   const region = async (origin: Pos, layout: Schematic) => (await call<{ blocks: (string | null)[] }>('world.region',
     { ...origin, width: layout.width, height: layout.height, length: layout.length }, 30_000)).blocks;
 
+  /** Seeds for each crop, in planting preference. */
+  const SEEDS = ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds'];
+
+  /** Plant seeds from the inventory on bare farmland within `range` of the bot (counts what it planted and what stayed bare). */
+  const replant = async (range: number) => {
+    const s = await status();
+    const me = floorPos(s.position!);
+    const r = Math.min(range, 16);
+    const box = { x: me.x - r, y: me.y - 2, z: me.z - r, width: 2 * r + 1, height: 4, length: 2 * r + 1 };
+    const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', box, 30_000);
+    const w = box.width, l = box.length;
+    const bare: Pos[] = [];
+    for (let y = 0; y < box.height - 1; y++) for (let z = 0; z < l; z++) for (let x = 0; x < w; x++) {
+      const i = x + z * w + y * w * l;
+      if (/^farmland/.test(blocks[i] ?? '') && blocks[i + w * l] === 'air') bare.push({ x: box.x + x, y: box.y + y + 1, z: box.z + z });
+    }
+    bare.sort((a, b) => Math.hypot(a.x - me.x, a.z - me.z) - Math.hypot(b.x - me.x, b.z - me.z));
+    const what: string[] = [];
+    let count = 0;
+    for (const at of bare) {
+      const counts = (await inventoryCounts()).counts;
+      const seed = SEEDS.find(n => (counts.get(n) ?? 0) > 0);
+      if (!seed) break;
+      if (!(await placeFacing(at, seed))) { count++; if (!what.includes(seed)) what.push(seed); }
+    }
+    return { count, what, empty: bare.length - count };
+  };
+
   /** Place `item` at `at` while facing `look` (clearing a wrong block first); returns why not, or undefined when placed. */
   const placeFacing = async (at: Pos, item: string, look?: string): Promise<string | undefined> => {
     type Placed = { placed: boolean; block?: string; reason?: string };
@@ -885,11 +913,14 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const r = await call<ProcessResult & { gained: Record<string, number> }>('farm', { range, timeoutMs }, timeoutMs + 15_000);
       // harvested items take a moment to fly to the bot: counted right away, a harvest read "nothing ripe"
       await new Promise(res => setTimeout(res, FARM_SETTLE_MS));
+      // Baritone harvested but left the farmland bare ("Farm failed"): plant what seeds there are on empty farmland
+      const planted = await replant(range);
       const after = (await inventoryCounts()).counts;
       const gained = gainedText(before, after);
       const full = fullWarning((await call<Inventory>('inventory').catch(() => ({ items: [] }))).items);
       const head = r.reason === 'timeout' ? `Farmed for ${r.seconds}s (time limit)` : `Farmed for ${r.seconds}s`;
-      return factory.createResponse(`${head}: ${gained || 'nothing ripe to harvest'}.${full}${baritoneSaid(r.baritone)}`);
+      const sown = planted.count ? ` Planted ${planted.count} (${planted.what.join(', ')}).` : planted.empty ? ` ${planted.empty} farmland left bare: no seeds.` : '';
+      return factory.createResponse(`${head}: ${gained || 'nothing ripe to harvest'}.${sown}${full}${baritoneSaid(r.baritone)}`);
     }
   );
 

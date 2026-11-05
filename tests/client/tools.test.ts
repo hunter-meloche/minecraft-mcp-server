@@ -433,7 +433,9 @@ test('farm reports what it gathered, counted once the items have arrived', async
   const { run, request } = setup({
     // before the job, then after it (the harvest flew in after the process ended)
     inventory: () => ({ items: n++ < 1 ? [] : [{ slot: 3, name: 'wheat', count: 9 }, { slot: 4, name: 'wheat_seeds', count: 4 }], selectedSlot: 0, held: null }),
-    farm: { reason: 'timeout', seconds: 60, baritone: [], gained: {} }
+    farm: { reason: 'timeout', seconds: 60, baritone: [], gained: {} },
+    // no farmland around: nothing to replant
+    'world.region': { blocks: [] }
   });
   t.is((await run('farm', { range: 16, timeoutMs: 60000 })).text, 'Farmed for 60s (time limit): wheat x9, wheat_seeds x4.');
   t.like(request.getCalls().find(c => c.args[0] === 'farm')!.args[1], { range: 16, timeoutMs: 60000 });
@@ -506,4 +508,27 @@ test('collect-items walks onto drops near a point and swims to unreachable ones'
 
 test('packSlotsUsed counts hotbar and backpack slots only', (t) => {
   t.is(packSlotsUsed([{ slot: 0 }, { slot: 35 }, { slot: 36 }, { slot: 39 }, { slot: 40 }, { slot: 35 }]), 2);
+});
+
+test('farm replants bare farmland with seeds from the inventory', async (t) => {
+  setFarmSettle(1);
+  t.teardown(() => setFarmSettle(1500));
+  let seeds = 2;
+  const placed: unknown[] = [];
+  // range 4 around the bot at (10, 64, -4): a 9 x 4 x 9 box from (6, 62, -8)
+  const w = 9, l = 9;
+  const blocks = Array(w * l * 4).fill('air');
+  for (let y = 0; y < 2; y++) for (let i = 0; i < w * l; i++) blocks[i + y * w * l] = 'dirt';
+  // three farmland cells at y 63 with air above; there are only two seeds
+  for (const x of [5, 6, 7]) blocks[x + 4 * w + 1 * w * l] = 'farmland[moisture=7]';
+  const { run } = setup({
+    inventory: () => ({ items: seeds ? [{ slot: 3, name: 'wheat_seeds', count: seeds }] : [], selectedSlot: 0, held: null }),
+    farm: { reason: 'done', seconds: 4, baritone: ['Farm failed'], gained: {} },
+    'world.region': { blocks },
+    'item.select': { held: 'wheat_seeds' },
+    place: (p: Record<string, unknown>) => { placed.push(p); seeds--; return { placed: true, block: 'wheat', face: 'down' }; }
+  });
+  const r = await run('farm', { range: 4 });
+  t.is(placed.length, 2);
+  t.regex(r.text, /Planted 2 \(wheat_seeds\)\./);
 });
