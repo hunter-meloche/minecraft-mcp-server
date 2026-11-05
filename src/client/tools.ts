@@ -57,6 +57,21 @@ export function processName(raw: string): string {
   return blocks.length ? `${raw.split(' ')[0]} ${blocks.join(', ')}` : raw;
 }
 
+/** How long farm waits for harvested items to reach the bot before counting them. */
+let FARM_SETTLE_MS = 1500;
+/** For tests. */
+export function setFarmSettle(ms: number): void { FARM_SETTLE_MS = ms; }
+
+/** Inventory slots in use among the 36 that hold items (hotbar and backpack; not armor or off-hand). */
+export function packSlotsUsed(items: { slot: number }[]): number {
+  return new Set(items.filter(i => i.slot >= 0 && i.slot <= 35).map(i => i.slot)).size;
+}
+
+/** A warning when every slot is taken: drops are then left on the ground. */
+function fullWarning(items: { slot: number }[]): string {
+  return packSlotsUsed(items) >= 36 ? ' The inventory is full: further drops stay on the ground (store or drop-item some).' : '';
+}
+
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
 
@@ -173,7 +188,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         `Health ${s.health}/20, food ${s.food}/20, saturation ${s.saturation}`,
         timeLine(s.timeOfDay ?? 0),
         `Dimension ${s.dimension}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
-        `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}`,
+        `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}` +
+          await call<Inventory>('inventory').then(inv => `; inventory ${packSlotsUsed(inv.items)}/36 slots used`, () => ''),
         `Backend: game client with Baritone (${s.process ? `busy: ${processName(s.process)}` : 'idle'})` +
           (s.windowMinimized !== undefined ? `; window ${s.windowMinimized ? 'minimized' : 'shown'}${s.mouseGrabbed ? ', mouse captured' : ''}` : '') +
           (s.underWater ? `; under water, air ${s.air}/20` : '') + (s.inLava ? '; IN LAVA' : '')
@@ -587,7 +603,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
       const head = r.reason === 'timeout' ? `Stopped after ${r.seconds}s (time limit)` : `Mined for ${r.seconds}s`;
-      return factory.createResponse(`${head}: ${gained || 'nothing gained'}.${baritoneSaid(r.baritone)}`);
+      const full = fullWarning((await call<Inventory>('inventory').catch(() => ({ items: [] }))).items);
+      return factory.createResponse(`${head}: ${gained || 'nothing gained'}.${full}${baritoneSaid(r.baritone)}`);
     }
   );
 
@@ -729,7 +746,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (item) {
         try { await call('item.select', { name: item }); } catch { return factory.createErrorResponse(`No ${item} in inventory`); }
       }
-      type Used = { used: boolean; reason?: string; before?: string; after?: string; properties?: Record<string, string>; held?: string; result?: string };
+      type Used = { used: boolean; reason?: string; before?: string; after?: string; changed?: boolean; properties?: Record<string, string>; held?: string; result?: string };
       let r = await call<Used>('useOn', { ...at, face });
       if (!r.used && r.reason === 'too far') {
         await goNear(at, 3);
@@ -738,7 +755,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       if (!r.used) return factory.createErrorResponse(`Could not use ${item ?? 'the held item'} on ${fmt(at)}: ${r.reason}`);
       // a hoe only tills with air above: grass or leaf litter on top makes it do nothing, so clear that and try again
-      if (r.before === r.after && /_hoe$/.test(r.held ?? item ?? '') && /^(grass_block|dirt|coarse_dirt|rooted_dirt|dirt_path)$/.test(r.before ?? '')) {
+      if ((r.changed === false || (r.changed === undefined && r.before === r.after)) && /_hoe$/.test(r.held ?? item ?? '') && /^(grass_block|dirt|coarse_dirt|rooted_dirt|dirt_path)$/.test(r.before ?? '')) {
         const above = { ...at, y: at.y + 1 };
         const top = await call<{ name?: string }>('world.block', { ...above });
         if (top.name && top.name !== 'air' && /grass|fern|flower|leaf_litter|petals|bush|snow|dandelion|poppy|tulip|daisy|bluet|allium|cornflower|lily_of_the_valley|wildflowers/.test(top.name)) {
@@ -749,8 +766,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       const props = Object.entries(r.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
       const after = `${r.after}${props ? `[${props}]` : ''}`;
-      return factory.createResponse(r.before === r.after
-        ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; it is now ${after} (no change${r.result ? `: ${r.result}` : ''})`
+      const unchanged = r.changed === undefined ? r.before === r.after : !r.changed;
+      // the game's answer only helps when nothing happened (Pass / Fail), not the long Success[...] record
+      const answer = r.result && !/^Success/.test(r.result) ? `: ${r.result}` : '';
+      return factory.createResponse(unchanged
+        ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; nothing changed, it is ${after}${answer}`
+        : r.before === r.after
+          ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it is now ${after}`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
     }
   );
@@ -859,10 +881,15 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       timeoutMs: z.number().int().min(5000).optional().describe('Stop after this long (default: 120000)')
     },
     async ({ range = 32, timeoutMs = 120_000 }: { range?: number; timeoutMs?: number }) => {
+      const before = (await inventoryCounts()).counts;
       const r = await call<ProcessResult & { gained: Record<string, number> }>('farm', { range, timeoutMs }, timeoutMs + 15_000);
-      const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
+      // harvested items take a moment to fly to the bot: counted right away, a harvest read "nothing ripe"
+      await new Promise(res => setTimeout(res, FARM_SETTLE_MS));
+      const after = (await inventoryCounts()).counts;
+      const gained = gainedText(before, after);
+      const full = fullWarning((await call<Inventory>('inventory').catch(() => ({ items: [] }))).items);
       const head = r.reason === 'timeout' ? `Farmed for ${r.seconds}s (time limit)` : `Farmed for ${r.seconds}s`;
-      return factory.createResponse(`${head}: ${gained || 'nothing ripe to harvest'}.${baritoneSaid(r.baritone)}`);
+      return factory.createResponse(`${head}: ${gained || 'nothing ripe to harvest'}.${full}${baritoneSaid(r.baritone)}`);
     }
   );
 

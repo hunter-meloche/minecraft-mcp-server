@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { blockDrops, missingIngredients, processName, registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
+import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -426,8 +426,15 @@ test('blockDrops: what mine-blocks counts for a block', (t) => {
   t.deepEqual(blockDrops('sweet_berry_bush'), ['sweet_berry_bush']);
 });
 
-test('farm reports what it gathered', async (t) => {
-  const { run, request } = setup({ farm: { reason: 'timeout', seconds: 60, baritone: [], gained: { wheat: 9, wheat_seeds: 4 } } });
+test('farm reports what it gathered, counted once the items have arrived', async (t) => {
+  setFarmSettle(5);
+  t.teardown(() => setFarmSettle(1500));
+  let n = 0;
+  const { run, request } = setup({
+    // before the job, then after it (the harvest flew in after the process ended)
+    inventory: () => ({ items: n++ < 1 ? [] : [{ slot: 3, name: 'wheat', count: 9 }, { slot: 4, name: 'wheat_seeds', count: 4 }], selectedSlot: 0, held: null }),
+    farm: { reason: 'timeout', seconds: 60, baritone: [], gained: {} }
+  });
   t.is((await run('farm', { range: 16, timeoutMs: 60000 })).text, 'Farmed for 60s (time limit): wheat x9, wheat_seeds x4.');
   t.like(request.getCalls().find(c => c.args[0] === 'farm')!.args[1], { range: 16, timeoutMs: 60000 });
 });
@@ -495,4 +502,8 @@ test('collect-items walks onto drops near a point and swims to unreachable ones'
   });
   t.is((await run('collect-items', { x: 10, y: 64, z: -3 })).text, 'Collected around (10, 64, -3): diamond_sword x1.');
   t.true(request.getCalls().some(c => c.args[0] === 'steer'));
+});
+
+test('packSlotsUsed counts hotbar and backpack slots only', (t) => {
+  t.is(packSlotsUsed([{ slot: 0 }, { slot: 35 }, { slot: 36 }, { slot: 39 }, { slot: 40 }, { slot: 35 }]), 2);
 });

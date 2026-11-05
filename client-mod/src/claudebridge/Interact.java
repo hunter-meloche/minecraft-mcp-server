@@ -236,6 +236,7 @@ public final class Interact {
             if (pl.getEyePosition().distanceTo(hit) > 4.5) return obj("used", false, "reason", "too far", "distance", round(pl.getEyePosition().distanceTo(hit)));
             pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
             String before = Names.block(mc.level.getBlockState(at));
+            final net.minecraft.world.level.block.state.BlockState beforeState = mc.level.getBlockState(at);
             BlockHitResult click = new BlockHitResult(hit, face, at, false);
             Ticker.add(new Ticker.Task() {
                 int wait = 5;
@@ -254,7 +255,7 @@ public final class Interact {
                     var now = m.level.getBlockState(at);
                     JsonObject props = new JsonObject();
                     for (var prop : now.getProperties()) props.addProperty(prop.getName(), Handlers.valueName(now, prop));
-                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "properties", props, "held", held, "result", result,
+                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "changed", !now.equals(beforeState), "properties", props, "held", held, "result", result,
                         "sneaking", m.player.isShiftKeyDown()));
                     return true;
                 }
