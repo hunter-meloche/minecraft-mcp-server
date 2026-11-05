@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { blockDrops, processName, registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
+import { blockDrops, missingIngredients, processName, registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'farm', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'drop-item', 'farm', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -453,4 +453,18 @@ test('use-item-on-block clears grass on top before tilling again', async (t) => 
   });
   t.is((await run('use-item-on-block', { x: 1, y: 64, z: 2, item: 'stone_hoe' })).text, 'Used stone_hoe on grass_block at (1, 64, 2): it became farmland[moisture=0]');
   t.like(request.getCalls().find(c => c.args[0] === 'dig')!.args[1], { x: 1, y: 65, z: 2 });
+});
+
+test('missingIngredients names what a craft is short of', (t) => {
+  t.is(missingIngredients('diamond_sword', 1, new Map([['diamond', 2]])), 'stick x1 (have 0)');
+  t.is(missingIngredients('diamond_sword', 1, new Map([['diamond', 2], ['stick', 1]])), '');
+});
+
+test('drop-item throws items out', async (t) => {
+  const { run } = setup({
+    inventory: { items: [{ slot: 9, name: 'diorite', count: 16 }], selectedSlot: 0, held: null },
+    'item.drop': { dropped: 16 }
+  });
+  t.is((await run('drop-item', { item: 'diorite' })).text, 'Dropped 16 diorite');
+  t.true((await run('drop-item', { item: 'gold_ingot' })).isError);
 });

@@ -462,6 +462,23 @@ public final class Interact {
             return r;
         });
 
+        // throw items out of the inventory (whole stacks, or one at a time for an exact count)
+        s.register("item.drop", true, (p, c) -> {
+            LocalPlayer pl = player();
+            if (pl.containerMenu != pl.inventoryMenu) pl.closeContainer();
+            String name = required(p, "name").replace("minecraft:", "");
+            int want = intParam(p, "count", Integer.MAX_VALUE);
+            int dropped = 0;
+            for (int i = 0; i < 36 && dropped < want; i++) {
+                ItemStack st = pl.getInventory().getItem(i);
+                if (st.isEmpty() || !Names.item(st).equals(name)) continue;
+                int slot = inventoryMenuSlot(i);
+                if (want - dropped >= st.getCount()) { dropped += st.getCount(); click(pl.inventoryMenu, slot, 1, ContainerInput.THROW); }
+                else while (dropped < want && !pl.getInventory().getItem(i).isEmpty()) { click(pl.inventoryMenu, slot, 0, ContainerInput.THROW); dropped++; }
+            }
+            return obj("dropped", dropped);
+        });
+
         s.register("furnace.status", true, (p, c) -> furnaceStatus());
         s.register("furnace.put", true, (p, c) -> {
             LocalPlayer pl = player();

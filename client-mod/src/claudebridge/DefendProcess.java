@@ -19,6 +19,19 @@ import net.minecraft.world.entity.Entity;
  */
 public final class DefendProcess implements IBaritoneProcess {
     private Entity target;
+    /** after a kill: walk over its drops (spider string for a bed, bones, ...) for a few seconds before handing back */
+    private net.minecraft.world.phys.Vec3 lootAt;
+    private int lootTicks;
+
+    private net.minecraft.world.entity.item.ItemEntity lootNear(LocalPlayer p) {
+        if (lootAt == null) return null;
+        net.minecraft.world.entity.item.ItemEntity best = null;
+        for (Entity e : Minecraft.getInstance().level.entitiesForRendering()) {
+            if (e instanceof net.minecraft.world.entity.item.ItemEntity it && it.isAlive() && it.position().distanceTo(lootAt) < 3
+                && (best == null || it.distanceTo(p) < best.distanceTo(p))) best = it;
+        }
+        return best;
+    }
 
     private static boolean recentlyHitUs(Entity e) {
         return Guardian.recentAttacker(e);
@@ -44,13 +57,23 @@ public final class DefendProcess implements IBaritoneProcess {
         if (!Guardian.enabled || Combat.fighting || p == null || mc.level == null || mc.gameMode == null) { target = null; return false; }
         String mode = mc.gameMode.getPlayerMode().name();
         if (mode.equals("CREATIVE") || mode.equals("SPECTATOR") || p.getHealth() <= 6) { target = null; return false; }
+        if (target != null && target.isRemoved() && (target instanceof net.minecraft.world.entity.LivingEntity le) && le.isDeadOrDying()) {
+            lootAt = target.position(); lootTicks = 60;
+        } else if (target != null && !target.isAlive()) { lootAt = target.position(); lootTicks = 60; }
         target = pick(p);
-        return target != null;
+        if (target != null) return true;
+        if (lootTicks > 0 && --lootTicks > 0 && lootNear(p) != null) return true;
+        lootAt = null;
+        return false;
     }
 
     @Override
     public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
         LocalPlayer p = Minecraft.getInstance().player;
+        if (target == null && p != null) {
+            var item = lootNear(p);
+            if (item != null) return new PathingCommand(new baritone.api.pathing.goals.GoalBlock(item.blockPosition()), PathingCommandType.SET_GOAL_AND_PATH);
+        }
         if (target == null || p == null) return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
         String name = Names.entity(target);
         if (name.equals("creeper")) {
@@ -67,5 +90,5 @@ public final class DefendProcess implements IBaritoneProcess {
     @Override public boolean isTemporary() { return true; }
     @Override public void onLostControl() { target = null; }
     @Override public double priority() { return 100; }
-    @Override public String displayName0() { return target == null ? "Defend" : "Defend against " + Names.entity(target); }
+    @Override public String displayName0() { return target == null ? (lootAt != null ? "Defend: picking up drops" : "Defend") : "Defend against " + Names.entity(target); }
 }

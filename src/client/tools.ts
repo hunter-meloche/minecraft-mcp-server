@@ -71,6 +71,31 @@ export function mineflayerSlot(clientSlot: number): number {
   return 45;
 }
 
+/**
+ * What's short for `times` crafts of `item`, by its closest recipe (minecraft-data 26.3), as "stick x1 (have 0)";
+ * empty when every recipe is covered or there is none. Tags (any planks) aren't resolved, so a recipe is judged
+ * by the exact items it lists.
+ */
+export function missingIngredients(item: string, times: number, have: Map<string, number>): string {
+  const data = minecraftData('26.3') as unknown as {
+    itemsByName: Record<string, { id: number }>; items: Record<number, { name: string }>;
+    recipes: Record<number, { inShape?: (number | null)[][]; ingredients?: (number | null)[]; result: { count: number } }[]>
+  };
+  const recipes = data.recipes[data.itemsByName[item]?.id ?? -1] ?? [];
+  let best: string[] | undefined;
+  for (const r of recipes) {
+    const need = new Map<string, number>();
+    for (const id of [...(r.inShape?.flat() ?? []), ...(r.ingredients ?? [])]) {
+      if (id === null || id === undefined) continue;
+      const n = data.items[id]?.name;
+      if (n) need.set(n, (need.get(n) ?? 0) + times);
+    }
+    const short = [...need].filter(([n, c]) => (have.get(n) ?? 0) < c).map(([n, c]) => `${n} x${c - (have.get(n) ?? 0)} (have ${have.get(n) ?? 0})`);
+    if (!best || short.length < best.length) best = short;
+  }
+  return best?.join(', ') ?? '';
+}
+
 /** Item names a block drops (minecraft-data 26.3), or the block's own name when it lists none. */
 export function blockDrops(block: string): string[] {
   const data = minecraftData('26.3') as unknown as { blocksByName: Record<string, { drops?: number[] }>; items: Record<number, { name: string }> };
@@ -407,6 +432,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         r = await call<Crafted>('craft', { item, count: amount }, 60_000);
       } catch (e) {
         const msg = (e as Error).message;
+        if (msg.startsWith('missing ingredients')) {
+          const short = missingIngredients(item, Number(amount), (await inventoryCounts()).counts);
+          return factory.createErrorResponse(`${msg}${short ? `: needs ${short}` : ''}`);
+        }
         if (!msg.startsWith('needs_table')) return factory.createErrorResponse(msg);
         // Baritone walks well, so look further than arm's reach plus a few steps (the mineflayer backend's 16)
         const tables = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'crafting_table', maxDistance: TABLE_SEARCH, count: 1 });
@@ -719,6 +748,21 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       return factory.createResponse(r.before === r.after
         ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; it is now ${after} (no change${r.result ? `: ${r.result}` : ''})`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+    }
+  );
+
+  factory.registerTool(
+    'drop-item',
+    'Throw items out of the inventory (to make room: Baritone picks up everything it digs). All of that item unless `count` is given.',
+    {
+      item: z.string().describe("Item to drop, e.g. 'diorite'"),
+      count: z.coerce.number().int().positive().optional().describe('How many (default: all)')
+    },
+    async ({ item, count }: { item: string; count?: number }) => {
+      const name = item.replace(/^minecraft:/, '');
+      if (!((await inventoryCounts()).counts.get(name))) return factory.createErrorResponse(`No ${name} in the inventory`);
+      const r = await call<{ dropped: number }>('item.drop', { name, ...(count ? { count } : {}) });
+      return factory.createResponse(`Dropped ${r.dropped} ${name}`);
     }
   );
 
