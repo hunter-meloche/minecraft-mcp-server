@@ -682,6 +682,52 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   );
 
   factory.registerTool(
+    'use-item-on-block',
+    "Right-click a block, holding `item` if given (else what's in hand): till grass or dirt with a hoe, open or close a door or trapdoor, flip a lever, press a button, use bone meal, fill or empty a bucket. Walks closer if needed. Reports the block before and after.",
+    {
+      x: z.coerce.number().describe('X of the block'),
+      y: z.coerce.number().describe('Y of the block'),
+      z: z.coerce.number().describe('Z of the block'),
+      item: z.string().optional().describe("Item to hold, e.g. 'wooden_hoe' (default: whatever is in hand)"),
+      face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional().describe("Which face to click (default: 'up')")
+    },
+    async ({ x, y, z: zz, item, face = 'up' }: { x: number; y: number; z: number; item?: string; face?: string }) => {
+      const at = floorPos({ x, y, z: zz });
+      if (item) {
+        try { await call('item.select', { name: item }); } catch { return factory.createErrorResponse(`No ${item} in inventory`); }
+      }
+      type Used = { used: boolean; reason?: string; before?: string; after?: string; properties?: Record<string, string> };
+      let r = await call<Used>('useOn', { ...at, face });
+      if (!r.used && r.reason === 'too far') {
+        await goNear(at, 3);
+        if (item) await call('item.select', { name: item });
+        r = await call<Used>('useOn', { ...at, face });
+      }
+      if (!r.used) return factory.createErrorResponse(`Could not use ${item ?? 'the held item'} on ${fmt(at)}: ${r.reason}`);
+      const props = Object.entries(r.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
+      const after = `${r.after}${props ? `[${props}]` : ''}`;
+      return factory.createResponse(r.before === r.after
+        ? `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}; it is now ${after}`
+        : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+    }
+  );
+
+  factory.registerTool(
+    'farm',
+    'Harvest ripe crops around the bot (wheat, carrots, potatoes, beetroot, sweet berry bushes, melons, pumpkins, cocoa, nether wart) without destroying the plants, and replant with seeds from the inventory. Runs until nothing is left to do or the time limit. Reports what was gathered.',
+    {
+      range: z.coerce.number().int().min(4).max(128).optional().describe('How far around the bot to farm (default: 32)'),
+      timeoutMs: z.number().int().min(5000).optional().describe('Stop after this long (default: 120000)')
+    },
+    async ({ range = 32, timeoutMs = 120_000 }: { range?: number; timeoutMs?: number }) => {
+      const r = await call<ProcessResult & { gained: Record<string, number> }>('farm', { range, timeoutMs }, timeoutMs + 15_000);
+      const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
+      const head = r.reason === 'timeout' ? `Farmed for ${r.seconds}s (time limit)` : `Farmed for ${r.seconds}s`;
+      return factory.createResponse(`${head}: ${gained || 'nothing ripe to harvest'}.${baritoneSaid(r.baritone)}`);
+    }
+  );
+
+  factory.registerTool(
     'store-in-chest',
     'Put items from the inventory into a chest (or barrel) at x,y,z, walking to it first. Reports what the chest holds afterwards.',
     {

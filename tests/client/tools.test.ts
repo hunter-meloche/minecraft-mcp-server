@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'farm', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -424,4 +424,19 @@ test('blockDrops: what mine-blocks counts for a block', (t) => {
   t.deepEqual(blockDrops('iron_ore'), ['raw_iron']);
   t.deepEqual(blockDrops('oak_log'), ['oak_log']);
   t.deepEqual(blockDrops('sweet_berry_bush'), ['sweet_berry_bush']);
+});
+
+test('farm reports what it gathered', async (t) => {
+  const { run, request } = setup({ farm: { reason: 'timeout', seconds: 60, baritone: [], gained: { wheat: 9, wheat_seeds: 4 } } });
+  t.is((await run('farm', { range: 16, timeoutMs: 60000 })).text, 'Farmed for 60s (time limit): wheat x9, wheat_seeds x4.');
+  t.like(request.getCalls().find(c => c.args[0] === 'farm')!.args[1], { range: 16, timeoutMs: 60000 });
+});
+
+test('use-item-on-block tills with a hoe and reports the change', async (t) => {
+  const { run, request } = setup({
+    'item.select': { held: 'wooden_hoe' },
+    useOn: { used: true, before: 'grass_block', after: 'farmland', properties: { moisture: '0' } }
+  });
+  t.is((await run('use-item-on-block', { x: 1, y: 64, z: 2, item: 'wooden_hoe' })).text, 'Used wooden_hoe on grass_block at (1, 64, 2): it became farmland[moisture=0]');
+  t.like(request.getCalls().find(c => c.args[0] === 'useOn')!.args[1], { x: 1, y: 64, z: 2, face: 'up' });
 });

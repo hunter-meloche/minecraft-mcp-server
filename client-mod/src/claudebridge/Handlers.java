@@ -226,6 +226,12 @@ public final class Handlers {
                 String why = Interact.cannotHarvest(new baritone.api.utils.BlockOptionalMeta(n).getBlock().defaultBlockState());
                 if (why != null) throw new IllegalStateException(why);
             }
+            // what we came to mine can't be on the avoid list (berry bushes are: "Unable to find any path")
+            var avoid = baritone.api.BaritoneAPI.getSettings().blocksToAvoid;
+            List<net.minecraft.world.level.block.Block> avoidBefore = new java.util.ArrayList<>(avoid.value);
+            List<net.minecraft.world.level.block.Block> avoidNow = new java.util.ArrayList<>(avoid.value);
+            for (String n : names) avoidNow.remove(new baritone.api.utils.BlockOptionalMeta(n).getBlock());
+            avoid.value = avoidNow;
             Processes.baritone().getMineProcess().mineByName(count, names);
             // Baritone counts a block's drops from its loot table and misses some (a berry bush's berries: it harvested
             // 78 when asked for 12). Also stop once the inventory holds `count` of the block's own item (the same "have
@@ -234,9 +240,30 @@ public final class Handlers {
                 .map(n -> Names.item(new net.minecraft.world.item.ItemStack(new baritone.api.utils.BlockOptionalMeta(n).getBlock().asItem()))).toList();
             Processes.watch(c, seq, timeoutTicks,
                 () -> { var inv = Processes.inventoryCounts(Minecraft.getInstance()); return own.stream().mapToInt(n -> inv.getOrDefault(n, 0)).sum() >= count; },
-                reason ->
-                obj("gained", Processes.gained(before, Processes.inventoryCounts(Minecraft.getInstance())),
-                    "at", pos(Minecraft.getInstance().player.blockPosition())));
+                reason -> {
+                    avoid.value = avoidBefore;
+                    return obj("gained", Processes.gained(before, Processes.inventoryCounts(Minecraft.getInstance())),
+                        "at", pos(Minecraft.getInstance().player.blockPosition()));
+                });
+            return BridgeServer.LATER;
+        });
+
+        // harvest ripe crops and berry bushes around the bot without destroying them, and replant (Baritone's farm process)
+        s.register("farm", true, (p, c) -> {
+            int range = intParam(p, "range", 32);
+            int timeoutTicks = intParam(p, "timeoutMs", 120_000) / 50;
+            Map<String, Integer> before = Processes.inventoryCounts(Minecraft.getInstance());
+            long seq = Events.baritoneLogSeq();
+            var avoid = baritone.api.BaritoneAPI.getSettings().blocksToAvoid;
+            List<net.minecraft.world.level.block.Block> avoidBefore = new java.util.ArrayList<>(avoid.value);
+            avoid.value = new java.util.ArrayList<>(avoidBefore);
+            avoid.value.remove(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH); // farming walks up to them
+            Processes.baritone().getFarmProcess().farm(range, player().blockPosition());
+            Processes.watch(c, seq, timeoutTicks, reason -> {
+                avoid.value = avoidBefore;
+                return obj("gained", Processes.gained(before, Processes.inventoryCounts(Minecraft.getInstance())),
+                    "at", pos(Minecraft.getInstance().player.blockPosition()));
+            });
             return BridgeServer.LATER;
         });
 
@@ -277,7 +304,7 @@ public final class Handlers {
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private static String valueName(BlockState st, Property prop) {
+    static String valueName(BlockState st, Property prop) {
         return prop.getName(st.getValue(prop));
     }
 }

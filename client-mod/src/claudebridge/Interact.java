@@ -212,6 +212,34 @@ public final class Interact {
             return BridgeServer.LATER;
         });
 
+        // right-click a block with whatever is held: till with a hoe, open/close a door, flip a lever, bone meal, buckets
+        s.register("useOn", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            BlockPos at = blockPos(p);
+            Direction face = Direction.byName(strParam(p, "face", "up"));
+            if (face == null) face = Direction.UP;
+            Vec3 hit = faceCenter(at, face);
+            if (pl.getEyePosition().distanceTo(hit) > 4.5) return obj("used", false, "reason", "too far", "distance", round(pl.getEyePosition().distanceTo(hit)));
+            pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
+            String before = Names.block(mc.level.getBlockState(at));
+            BlockHitResult click = new BlockHitResult(hit, face, at, false);
+            Ticker.add(new Ticker.Task() {
+                int wait = 5;
+                @Override public boolean tick(Minecraft m) {
+                    wait--;
+                    if (wait == 3) m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click); // after the rotation is sent
+                    if (wait > 0) return false;
+                    var now = m.level.getBlockState(at);
+                    JsonObject props = new JsonObject();
+                    for (var prop : now.getProperties()) props.addProperty(prop.getName(), Handlers.valueName(now, prop));
+                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "properties", props));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
+        });
+
         s.register("place", true, (p, c) -> {
             Minecraft mc = Minecraft.getInstance();
             LocalPlayer pl = player();
