@@ -688,7 +688,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           // only what is not standing yet: a second run continues a build
           const before = checkBuild(layout, now);
           protection.add(dim, standing(origin, layout, now)); // what stands of it is the bot's, even if it stops here
-          if (!before.total || before.placed === before.total) {
+          // done only when every block stands and every '.' cell is empty (a clearing-only plan has no blocks at all)
+          const toClear = layout.blocks.filter((b, i) => b === 0 && !!now[i] && !/^(minecraft:)?(air|cave_air|void_air)$/.test(now[i]!) &&
+            !protection.has(dim, cellPos(origin, box, i))).length;
+          if (before.placed === before.total && !toClear) {
             return factory.createResponse(`${name} is already built at ${fmt(origin)}: all ${before.total} blocks in place.`);
           }
           const { counts: have } = await inventoryCounts();
@@ -858,8 +861,34 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         `left alone: ${plan.kept.water} water column(s), ${plan.kept.built} column(s) with builds, crops or furniture.`;
       if (!plan.spec) return factory.createResponse(`${summary} Already level.`);
       if (dryRun) return factory.createResponse(summary);
-      const r = await buildStructure({ ...plan.origin, spec: plan.spec, name: 'level_area', timeoutMs });
-      return { ...r, content: [{ type: 'text' as const, text: `${summary}\n${r.content.map(c => (c as { text?: string }).text ?? '').join('\n')}` }] };
+      const textOf = (r: ReturnType<ToolFactory['createResponse']>) => r.content.map(c => (c as { text?: string }).text ?? '').join('\n');
+      const started = Date.now();
+      const counts = (await inventoryCounts()).counts;
+      const short = (counts.get('dirt') ?? 0) < plan.dirt || (counts.get('cobblestone') ?? 0) < plan.cobblestone;
+      const notes: string[] = [summary];
+      let spec = plan.spec;
+      let origin = plan.origin;
+      if (short) {
+        // cut first (no blocks needed; cutting hills yields dirt), then plan the fill again
+        const cutOnly = { ...spec, layers: spec.layers.map(rows => rows.map(r => r.replace(/[CD]/g, ' '))) };
+        const r1 = await buildStructure({ ...origin, spec: cutOnly, name: 'level_area_cut', timeoutMs });
+        notes.push(`Cut first (not enough fill blocks yet): ${textOf(r1)}`);
+        const again: (string | null)[] = [];
+        for (let y = 0; y < box.height; y += step) {
+          const part = await call<{ blocks: (string | null)[] }>('world.region', { ...box, y: box.y + y, height: Math.min(step, box.height - y) }, 60_000);
+          again.push(...part.blocks);
+        }
+        const refill = planLevel(box, again, level, p => protection.has(dim, p));
+        if (!refill.spec) return factory.createResponse(`${notes.join('\n')}\nNow level.`);
+        const have = (await inventoryCounts()).counts;
+        if ((have.get('dirt') ?? 0) < refill.dirt || (have.get('cobblestone') ?? 0) < refill.cobblestone) {
+          return factory.createErrorResponse(`${notes.join('\n')}\nStill to fill: ${refill.dirt} dirt (have ${have.get('dirt') ?? 0}), ${refill.cobblestone} cobblestone (have ${have.get('cobblestone') ?? 0}), ${refill.cut} block(s) left to cut. Gather them and run level-area again.`);
+        }
+        spec = refill.spec;
+        origin = refill.origin;
+      }
+      const r = await buildStructure({ ...origin, spec, name: 'level_area', timeoutMs: Math.max(60_000, timeoutMs - (Date.now() - started)) });
+      return { ...r, content: [{ type: 'text' as const, text: `${notes.join('\n')}\n${textOf(r)}` }] };
     }
   );
 

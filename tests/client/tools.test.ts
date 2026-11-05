@@ -566,3 +566,21 @@ test('explore walks legs in a direction until the target shows up', async (t) =>
   t.regex(r.text, /^Found sheep at \(5, 66, 250\), 250 blocks south of where the search began; the bot is at \(0, 64, 200\)\. No home set\.$/);
   t.deepEqual(request.getCalls().filter(c => c.args[0] === 'goto').map(c => [c.args[1]?.z, c.args[1]?.xz]), [[100, true], [200, true]]);
 });
+
+test('level-area cuts first when it lacks the fill blocks, then fills', async (t) => {
+  // 2 x 3 x 1 box from y 63 (level 64): a 1-high bump at x=0 (dirt at y 65), a dip at x=1 (ground y 63)
+  let regionReads = 0;
+  const before = ['stone', 'stone', 'dirt', 'air', 'dirt', 'air'];   // y63: stone stone; y64: dirt air; y65: dirt air
+  const after = ['stone', 'stone', 'dirt', 'air', 'air', 'air'];     // the bump is cut
+  let dirt = 0;
+  const builds: unknown[] = [];
+  const { run } = setup({
+    'world.region': () => ({ blocks: regionReads++ === 0 ? before : after }),
+    inventory: () => ({ items: dirt ? [{ slot: 1, name: 'dirt', count: dirt }] : [], selectedSlot: 0, held: null }),
+    build: (p: Record<string, unknown>) => { builds.push(p); dirt = 1; return { reason: 'done', seconds: 2, baritone: [], used: {} }; }
+  });
+  const r = await run('level-area', { x1: 0, z1: 0, x2: 1, z2: 0, level: 64, above: 1, below: 1 });
+  t.is(builds.length, 2);
+  t.regex(r.text, /^Level \(0, 0\)\.\.\(1, 0\) to ground y 64: cut 1 block\(s\), fill 1 dirt \+ 0 cobblestone/);
+  t.regex(r.text, /Cut first \(not enough fill blocks yet\)/);
+});
