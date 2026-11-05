@@ -36,7 +36,7 @@ test('planLevel leaves water, farmland and the bot\'s builds alone, but not torc
   set(3, 4, 0, 'dirt'); set(3, 5, 0, 'torch'); // a torch on a bump (protected, but it goes with its block)
   const p = planLevel(box, b, 63, q => q.z === 20 && (q.x === 12 || (q.x === 13 && q.y === 65)));
   t.deepEqual(p.kept, { water: 1, built: 2 });
-  t.is(p.cut, 2); // the bump and the torch
+  t.is(p.cut, 1); // the bump; the torch drops with it
   t.deepEqual(p.spec!.layers[0][0], '   .');
 });
 

@@ -107,14 +107,26 @@ public final class Guardian {
     private static void keepFed(LocalPlayer p, Entity melee) {
         int food = p.getFoodData().getFoodLevel();
         boolean hurt = p.getHealth() < p.getMaxHealth() - 1;
-        if (eating || Interact.using || Interact.handsBusy || melee != null || Processes.active() != null) return;
+        if (eating || Interact.using || Interact.handsBusy || melee != null) return;
+        // during a Baritone job only when it matters (hurt): the job is paused for the bite (EatPause)
+        boolean job = Processes.active() != null && !"Eating".equals(Processes.active());
+        if (job && !hurt) return;
         if (!((hurt && food < 18) || food <= 6)) return;
         String choice = Combat.chooseFood(false);
         if (choice == null) return;
         // raw meat and fish give a third of what cooked does: keep them for the furnace unless really hungry
         if (food > 6 && RAW.contains(choice)) return;
         eating = true;
-        eatThen("", r -> { eating = false; note((hurt ? "ate to heal: " : "ate (hungry): ") + r); });
+        if (job) EatPause.eating = true;
+        // give Baritone a tick to pause before taking the hand
+        Ticker.add(new Ticker.Task() {
+            int w = job ? 3 : 1;
+            @Override public boolean tick(Minecraft m) {
+                if (--w > 0) return false;
+                eatThen("", r -> { eating = false; EatPause.eating = false; note((hurt ? "ate to heal: " : "ate (hungry): ") + r); });
+                return true;
+            }
+        });
     }
 
     static boolean recentAttacker(Entity e) {

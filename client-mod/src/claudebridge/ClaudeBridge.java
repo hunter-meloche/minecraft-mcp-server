@@ -41,6 +41,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Protection.register(server);
         Passive.register();
         Processes.baritone().getPathingControlManager().registerProcess(new DefendProcess());
+        Processes.baritone().getPathingControlManager().registerProcess(new EatPause());
         configureBaritone();
         server.start();
     }

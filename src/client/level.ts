@@ -60,6 +60,8 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
       if (y > L) {
         if (AIR.test(n)) continue;
         if (/_leaves$/.test(n) && !/persistent=true/.test(raw(x, y, z))) { leaves++; continue; }
+        // plants pop off with the block under them, or get tilled away: cutting them one by one only costs time
+        if (NOT_GROUND.test(n) && !/_log$|_leaves$/.test(n)) continue;
         cell[i] = '.'; cut++; lo = Math.min(lo, y); hi = Math.max(hi, y);
         const kind = /_log$|_wood$/.test(n) ? 'logs' : /_leaves$/.test(n) ? 'placed leaves' : NOT_GROUND.test(n) ? 'plants' : 'ground';
         cutKinds[kind] = (cutKinds[kind] ?? 0) + 1;
