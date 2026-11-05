@@ -1037,10 +1037,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       below: z.coerce.number().int().min(1).max(20).optional().describe('How deep below the level to look for ground (default: 8)'),
       dryRun: z.boolean().optional().describe('Only report the plan'),
       cutLeaves: z.boolean().optional().describe('Also cut natural leaves (by default they are left to decay once their trunks are gone)'),
+      fillWater: z.boolean().optional().describe('Fill ponds and other open water too, down to the ground under them (by default water columns are left alone); give `below` deep enough to reach the bottom'),
       timeoutMs: z.number().int().min(10000).optional().describe('Give up after this long (default: 1200000)')
     },
-    async ({ x1, z1, x2, z2, level, above = 20, below = 8, dryRun = false, cutLeaves = false, timeoutMs = 1_200_000 }: {
-      x1: number; z1: number; x2: number; z2: number; level: number; above?: number; below?: number; dryRun?: boolean; cutLeaves?: boolean; timeoutMs?: number
+    async ({ x1, z1, x2, z2, level, above = 20, below = 8, dryRun = false, cutLeaves = false, fillWater = false, timeoutMs = 1_200_000 }: {
+      x1: number; z1: number; x2: number; z2: number; level: number; above?: number; below?: number; dryRun?: boolean; cutLeaves?: boolean; fillWater?: boolean; timeoutMs?: number
     }) => {
       const box = { x: Math.min(x1, x2), y: level - below, z: Math.min(z1, z2), width: Math.abs(x2 - x1) + 1, height: below + above + 1, length: Math.abs(z2 - z1) + 1 };
       if (box.width * box.length > 128 * 128) return factory.createErrorResponse('Area too large (at most 128 x 128)');
@@ -1053,7 +1054,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       if (blocks.some(b => b === null)) return factory.createErrorResponse('Part of the area is not loaded; move closer to it first');
       const dim = await dimension();
-      const plan = planLevel(box, blocks, level, p => protection.has(dim, p), cutLeaves);
+      const plan = planLevel(box, blocks, level, p => protection.has(dim, p), cutLeaves, fillWater);
       const summary = `Level (${box.x}, ${box.z})..(${box.x + box.width - 1}, ${box.z + box.length - 1}) to ground y ${level}: ` +
         `cut ${plan.cut} block(s)${plan.cut ? ` (${Object.entries(plan.cutKinds).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''}, fill ${plan.dirt} dirt + ${plan.cobblestone} cobblestone; ` +
         (plan.leaves ? `${plan.leaves} natural leaves left to decay once their trunks are gone; ` : '') +
@@ -1141,13 +1142,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       let tilesDone = 0, shortTiles = 0;
       for (const t of order) {
         if (Date.now() - started > timeoutMs) break;
-        let p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves);
+        let p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves, fillWater);
         if (!p.spec) { tilesDone++; continue; }
         const left = () => Math.max(30_000, timeoutMs - (Date.now() - started));
         if (p.cut) {
           const cutOnly = { ...p.spec, layers: p.spec.layers.map(rows => rows.map(r => r.replace(/[CD]/g, ' '))) };
           await buildStructure({ ...p.origin, spec: cutOnly, name: 'level_tile_cut', timeoutMs: Math.min(180_000, left()) });
-          p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves);
+          p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves, fillWater);
         }
         if (p.spec && (p.dirt || p.cobblestone)) {
           const have = (await inventoryCounts()).counts;
@@ -1162,7 +1163,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         tilesDone++;
         await repair();
       }
-      const after = planLevel(box, await readBox(box), level, p => protection.has(dim, p), cutLeaves);
+      const after = planLevel(box, await readBox(box), level, p => protection.has(dim, p), cutLeaves, fillWater);
       const have = (await inventoryCounts()).counts;
       const secs = Math.round((Date.now() - started) / 1000);
       const rest = after.spec
@@ -1396,14 +1397,21 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!water) {
         // nearest pond, not a puddle: still water with still water on at least 6 of its 8 sides and air above, since a cast
         // flies a few blocks and overshot a 1x1 farm hole 59 times
-        const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'water', maxDistance: 48, count: 256 });
+        const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'water', maxDistance: 64, count: 256, openAbove: true });
+        // the middle of open water first (5x5 of still water: a cast that falls a little short still lands in it; a
+        // 3x3 pool by the yard had the hook on the bank 17 casts in a row), then any small pond
+        let small: Pos | undefined;
         for (const p of found.positions) {
-          const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', { x: p.x - 1, y: p.y, z: p.z - 1, width: 3, height: 2, length: 3 });
-          const still = blocks.slice(0, 9).filter(b => b === 'water[level=0]').length;
-          if (still >= 6 && blocks[4] === 'water[level=0]' && blocks[13] === 'air') { water = p; break; }
+          const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', { x: p.x - 2, y: p.y, z: p.z - 2, width: 5, height: 2, length: 5 });
+          if (blocks[12 + 25] !== 'air' || blocks[12] !== 'water[level=0]') continue;
+          const still = blocks.slice(0, 25).filter(b => b === 'water[level=0]').length;
+          const inner = [6, 7, 8, 11, 13, 16, 17, 18].filter(i => blocks[i] === 'water[level=0]').length;
+          if (still === 25) { water = p; break; }
+          if (!small && inner >= 6) small = p;
         }
+        water ??= small;
       }
-      if (!water) return factory.createErrorResponse('No pond (open still water, 3x3 or bigger) within 48 blocks');
+      if (!water) return factory.createErrorResponse('No pond (open still water, 3x3 or bigger) within 64 blocks');
       // stand on the shore, not in the pond (walking "near" the water put the bot in it: it ran out of air and the
       // casts failed): a dry block 2-4 blocks from the target with two air blocks above
       const box = { x: water.x - 4, y: water.y - 1, z: water.z - 4, width: 9, height: 4, length: 9 };

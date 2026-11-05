@@ -193,12 +193,16 @@ public final class Handlers {
             String name = required(p, "block").replace("minecraft:", "");
             int maxDistance = Math.min(intParam(p, "maxDistance", 32), 128);
             int count = Math.min(intParam(p, "count", 1), 256);
+            // openAbove: only blocks with air right above (surface water, not an aquifer's: underground water filled
+            // the nearest 256 and hid the lake), with a bigger scan budget since most hits are thrown away
+            boolean openAbove = p.has("openAbove") && p.get("openAbove").getAsBoolean();
             List<BlockPos> found = baritone.api.BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
-                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), 4096, -1, (maxDistance >> 4) + 1);
+                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), openAbove ? 65536 : 4096, -1, (maxDistance >> 4) + 1);
             Vec3 eye = pl.position();
             JsonArray out = new JsonArray();
             found.stream()
                 .filter(bp -> Vec3.atCenterOf(bp).distanceTo(eye) <= maxDistance)
+                .filter(bp -> !openAbove || mc.level.getBlockState(bp.above()).isAir())
                 .sorted(Comparator.comparingDouble(bp -> Vec3.atCenterOf(bp).distanceTo(eye)))
                 .limit(count)
                 .forEach(bp -> out.add(pos(bp)));

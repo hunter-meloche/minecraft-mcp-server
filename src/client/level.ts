@@ -24,7 +24,8 @@ const NOT_GROUND = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fe
 /** Columns to leave whole: water, crops and farmland, furniture and doors. */
 const KEEP = /^(water|farmland|wheat|carrots|potatoes|beetroots|crafting_table|furnace|chest|barrel|.*_bed|.*_door|.*_pressure_plate|.*_trapdoor|ladder)$/;
 
-export function planLevel(box: Box, blocks: (string | null)[], level: number, isProtected: (p: Pos) => boolean = () => false, cutLeaves = false): LevelPlan {
+export function planLevel(box: Box, blocks: (string | null)[], level: number, isProtected: (p: Pos) => boolean = () => false, cutLeaves = false,
+  fillWater = false): LevelPlan {
   const { width: w, length: l, height: h } = box;
   const at = (x: number, y: number, z: number) => name(blocks[x + z * w + y * w * l]);
   const raw = (x: number, y: number, z: number) => blocks[x + z * w + y * w * l] ?? '';
@@ -45,7 +46,8 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
       // water reached from above, before any ground, is open water (a pond, however far below the level): keep it.
       // Water with ground over it never gets here (the scan stops at the ground). Filling "low" water buried the
       // fishing pond under a dirt lid.
-      if (n === 'water') { skip[c] = true; water++; break; }
+      // fillWater: water is just a hole to fill, down to the ground under it
+      if (n === 'water') { if (fillWater) continue; skip[c] = true; water++; break; }
       if (KEEP.test(n) || (isProtected({ x: box.x + x, y: box.y + y, z: box.z + z }) && !/torch$/.test(n))) {
         if (y >= L) { skip[c] = true; built++; break; }
         ground[c] = y; // below the level: it is the ground

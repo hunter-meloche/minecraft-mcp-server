@@ -74,3 +74,12 @@ test('planLevel cuts natural leaves when asked', (t) => {
   t.is(p.leaves, 0);
   t.deepEqual(p.cutKinds, { leaves: 1 });
 });
+
+test('planLevel fills a pond when asked: cobblestone down to the ground under the water, dirt on top', (t) => {
+  const { box, b, set } = world();
+  for (const x of [1, 2]) { set(x, 3, 1, 'air'); set(x, 2, 1, 'air'); set(x, 1, 1, 'water'); } // open water 2 below the ground
+  const p = planLevel(box, b, 63, () => false, false, true);
+  t.is(p.kept.water, 0);
+  t.is(p.dirt, 2);
+  t.is(p.cobblestone, 4); // the water cells and the air above them, below the level
+});

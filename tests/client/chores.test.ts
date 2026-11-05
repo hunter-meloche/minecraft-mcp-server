@@ -1,6 +1,6 @@
 import test from 'ava';
 import { farm, kit, lightArea, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
-import { food, readyFoodPoints } from '../../src/client/brain/food.js';
+import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 import type { InventoryItem } from '../../src/client/tools.js';
@@ -157,4 +157,29 @@ test('lightArea: a torch that lights nothing dark is taken back up', async (t) =
   t.deepEqual(r.undone, [{ x: 0, y: 61, z: 0 }]);
   t.deepEqual(r.left, [{ x: 0, y: 61, z: 0 }]);
   t.deepEqual((await lightArea(io, { x: 0, y: 64, z: 0 }, 16, { place: false, max: 5, ignore: new Set(['0,61,0']) })).dark, []);
+});
+
+test('makeRod: string and sticks from the chest, then a fishing rod', async (t) => {
+  const inv = new Map<string, number>([['oak_planks', 4]]);
+  const acts: string[] = [];
+  const chest: Record<string, number> = { string: 12, stick: 1 };
+  const w = world({ chestItems: { '1,64,0': { ...chest } } });
+  const ctx = {
+    world: w, s: snap([]), signal: new AbortController().signal, progress: () => undefined,
+    call: (async () => ({ items: [...inv].map(([name, count], slot) => ({ slot, name, count })) })) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      acts.push(`${tool} ${a.item ?? a.outputItem} ${a.count ?? a.amount}`);
+      if (tool === 'take-from-chest') {
+        const item = String(a.item), n = Math.min(Number(a.count), chest[item] ?? 0);
+        chest[item] -= n;
+        inv.set(item, (inv.get(item) ?? 0) + n);
+        return { ok: true, text: `Took ${n} ${item} from the chest at (1, 64, 0). It holds: ${Object.entries(chest).filter(([, k]) => k > 0).map(([k, v]) => `${k} x${v}`).join(', ')}.` };
+      }
+      if (a.outputItem === 'stick') inv.set('stick', (inv.get('stick') ?? 0) + 4);
+      return { ok: true, text: 'Successfully crafted' };
+    }
+  } as unknown as GoalContext;
+  t.true(await makeRod(ctx));
+  // one stick in the chest: the other two come from planks
+  t.deepEqual(acts, ['take-from-chest string 2', 'take-from-chest stick 3', 'craft-item stick 1', 'craft-item fishing_rod 1']);
 });

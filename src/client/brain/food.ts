@@ -2,7 +2,7 @@ import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { farmCentre, type Pos } from './memory.js';
-import { peekChest, rememberReply } from './chests.js';
+import { peekChest, rememberReply, takeFromChests } from './chests.js';
 
 /**
  * Food: keep enough ready-to-eat food on the bot that the Guardian can always heal it, the cheapest way first:
@@ -130,7 +130,11 @@ export const food: Goal = {
       }
     }
 
-    // 5. fish
+    // 5. fish (a rod wears out: make another from string and sticks, the chests' included)
+    if (!enough() && working && !(have.get('fishing_rod') ?? 0)) {
+      if (await makeRod(ctx)) say('made a fishing rod');
+      await refresh();
+    }
     if (!enough() && working && (have.get('fishing_rod') ?? 0) > 0) {
       const r = await ctx.act('fish', { times: 8, timeoutMs: 240_000 });
       if (r.ok) say(`fished (${r.text.slice(0, 80)})`);
@@ -156,6 +160,17 @@ export const food: Goal = {
     return `${did.join('; ')}; now carrying ${points} food points`;
   }
 };
+
+/** Craft a fishing rod (3 sticks, 2 string) from what's carried and in the home chests; true when it has one. */
+export async function makeRod(ctx: GoalContext): Promise<boolean> {
+  const count = async (n: string) => (await ctx.call<{ items: { name: string; count: number }[] }>('inventory')).items
+    .filter(i => i.name === n).reduce((a, i) => a + i.count, 0);
+  if ((await count('string')) < 2) await takeFromChests(ctx, 'string', 2 - (await count('string')));
+  if ((await count('stick')) < 3) await takeFromChests(ctx, 'stick', 3 - (await count('stick')));
+  if ((await count('stick')) < 3) await ctx.act('craft-item', { outputItem: 'stick', amount: 1 });
+  if ((await count('string')) < 2 || (await count('stick')) < 3) return false;
+  return (await ctx.act('craft-item', { outputItem: 'fishing_rod', amount: 1 })).ok;
+}
 
 /** Died a moment ago: go back for the drops while they last (5 minutes), by day and when the spot is safe enough. */
 export function recoverGoal(lastDeath: () => { at: Pos; time: number } | undefined): Goal {

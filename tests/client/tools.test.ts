@@ -535,18 +535,21 @@ test('drop-item throws items out', async (t) => {
 });
 
 test('fish finds open water, walks there and reports the catch', async (t) => {
+  // the nearest surface water is a 3x3 pool at (1, 62, 1); the middle of a lake is at (9, 62, 1): the lake wins
+  const pool = (p: Record<string, unknown>) => Number(p.x) + 2 === 1;
   const { run, request } = setup({
     inventory: { items: [{ slot: 2, name: 'fishing_rod', count: 1 }], selectedSlot: 0, held: null },
-    'world.findBlocks': { positions: [{ x: 1, y: 62, z: 1 }] },
-    // the pond check (3x2x3), then the shore search (9x4x9): grass all around at the water's level, air above
-    'world.region': (p: Record<string, unknown>) => (p.width === 3
-      ? { blocks: [...Array(9).fill('water[level=0]'), ...Array(9).fill('air')] }
+    'world.findBlocks': { positions: [{ x: 1, y: 62, z: 1 }, { x: 9, y: 62, z: 1 }] },
+    // the open-water check (5x2x5), then the shore search (9x4x9): grass all around at the water's level, air above
+    'world.region': (p: Record<string, unknown>) => (p.width === 5
+      ? { blocks: [...Array(25).fill(null).map((_, i) => (!pool(p) || [6, 7, 8, 11, 12, 13, 16, 17, 18].includes(i) ? 'water[level=0]' : 'dirt')), ...Array(25).fill('air')] }
       : { blocks: [...Array(81).fill('dirt'), ...Array(81).fill('grass_block'), ...Array(162).fill('air')] }),
     goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 3, y: 63, z: 1 }, distance: 2 },
     fish: { bites: 3, casts: 4, gained: { cod: 2, salmon: 1 }, seconds: 70 }
   });
-  t.is((await run('fish', { times: 3 })).text, 'Fished at (1, 62, 1) for 70s: 3 bite(s) in 4 cast(s), caught cod x2, salmon x1.');
-  t.like(request.getCalls().find(c => c.args[0] === 'fish')!.args[1], { x: 1, y: 62, z: 1, times: 3 });
+  t.is((await run('fish', { times: 3 })).text, 'Fished at (9, 62, 1) for 70s: 3 bite(s) in 4 cast(s), caught cod x2, salmon x1.');
+  t.like(request.getCalls().find(c => c.args[0] === 'fish')!.args[1], { x: 9, y: 62, z: 1, times: 3 });
+  t.like(request.getCalls().find(c => c.args[0] === 'world.findBlocks')!.args[1], { block: 'water', openAbove: true });
 });
 
 test('collect-items walks onto drops near a point and swims to unreachable ones', async (t) => {
