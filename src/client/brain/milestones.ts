@@ -3,7 +3,7 @@ import type { MilestoneState, Step, StepResult } from './progress.js';
 import { prepareBill } from './project.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
-import type { StructureSpec } from '../schematic.js';
+import type { Blueprint } from './blueprints.js';
 
 /**
  * Building blocks for milestones: find room in the yard (growing it when there is none), get the materials together,
@@ -14,13 +14,7 @@ const MINUTE = 60_000;
 export interface Yard extends Area { y: number }
 
 /** What a blueprint gives a build step (see blueprints.ts). */
-export interface BuildPlan {
-  name: string;
-  spec: StructureSpec;
-  size: { width: number; height: number; length: number };
-  bill: Record<string, number>;
-  landmarks: { kind: string; at: { x: number; y: number; z: number } }[];
-}
+export type BuildPlan = Pick<Blueprint, 'name' | 'spec' | 'size' | 'bill' | 'landmarks' | 'groundOffset'>;
 
 const ok = (text: string): StepResult => ({ status: 'done', text });
 const going = (text: string): StepResult => ({ status: 'progress', text });
@@ -121,7 +115,7 @@ async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number
  * A step that builds a blueprint on the milestone's site: materials first (from the chests, crafted, or left to the
  * stock trips), then build-structure, which only places what's missing, so a stopped build picks up where it was.
  */
-export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan, opts: { lift?: number } = {}): Step {
+export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan): Step {
   return {
     name: `build the ${kind}`,
     bill: () => ({}),
@@ -133,7 +127,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       if (Object.keys(short).length) {
         return blocked(`gathering for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
       }
-      const origin = { x: site.x, y: site.y + (opts.lift ?? 1), z: site.z };
+      const origin = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
       const r = await ctx.act('build-structure', { ...origin, spec: bp.spec, name: bp.name, timeoutMs: 8 * MINUTE });
       if (/all \d+ blocks in place/.test(r.text)) {
         for (const l of bp.landmarks) addZone(ctx.world, `${kind}:${l.kind}`, { x: origin.x + l.at.x, y: origin.y + l.at.y, z: origin.z + l.at.z });

@@ -71,6 +71,9 @@ public class ClaudeBridge implements ClientModInitializer {
         // build-structure writes structure_void where a directional block goes (stairs facing out over a wall can't be
         // placed from where Baritone stands) and places those itself afterwards; Baritone leaves those cells alone
         s.buildSkipBlocks.value.add(net.minecraft.world.level.block.Blocks.STRUCTURE_VOID);
+        // fence and wall connections follow the neighbours, gates open and doors swing: compare the block, not those
+        // (a fence that would connect never matched its unconnected schematic state, and the builder stalled on it)
+        s.buildIgnoreProperties.value.addAll(java.util.List.of("north", "south", "east", "west", "waterlogged", "open", "in_wall", "powered", "hinge"));
         s.chatControl.value = false; // only this bridge controls the bot, not chat from other players
         Consumer<Component> previous = s.logger.value;
         s.logger.value = message -> {

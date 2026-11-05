@@ -33,6 +33,10 @@ export interface WorldMemory {
   progress?: import('./progress.js').ProgressMemory;
   /** places the projects made: storage, plots, pens, tree farm, mine entrance ... (kind -> boxes or points) */
   zones?: Record<string, { x: number; y: number; z: number; width?: number; length?: number }[]>;
+  /** which home chest ("x,y,z") holds which kind of thing (storage.ts categories) */
+  chestAssign?: Record<string, string>;
+  /** kinds of things with no room left in their chests: the storage needs another chest */
+  storageFull?: string[];
   /** the yard as it grows (x1..x2, z1..z2 at ground y) */
   yard?: { x1: number; z1: number; x2: number; z2: number; y: number };
 }

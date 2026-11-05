@@ -1,5 +1,5 @@
 import test from 'ava';
-import { farm, kit, lightArea, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
+import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stock, stockShort } from '../../src/client/brain/chores.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -182,4 +182,31 @@ test('makeRod: string and sticks from the chest, then a fishing rod', async (t) 
   t.true(await makeRod(ctx));
   // one stick in the chest: the other two come from planks
   t.deepEqual(acts, ['take-from-chest string 2', 'take-from-chest stick 3', 'craft-item stick 1', 'craft-item fishing_rod 1']);
+});
+
+test('sort: things in the wrong chest go to their own', async (t) => {
+  const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
+  const contents: Record<string, Record<string, number>> = { '1,64,0': { cobblestone: 64, oak_log: 10 }, '2,64,0': { oak_planks: 5 }, '3,64,0': {} };
+  const w = world({ landmarks: { chests, farmland: [] }, chestItems: contents, chestAssign: { '1,64,0': 'stone', '2,64,0': 'wood', '3,64,0': 'ores' } });
+  t.regex(sortStorage.wants(snap(gear()), w) ?? '', /wrong chest/);
+  const acts: string[] = [];
+  const reply = (k: string) => `It holds: ${Object.entries(contents[k]).filter(([, v]) => v > 0).map(([n, v]) => `${n} x${v}`).join(', ') || 'nothing'}.`;
+  const ctx = {
+    s: snap(gear()), world: w, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    call: (async (m: string, p: Record<string, number>) => {
+      if (m === 'chest.open') return { items: contents[`${p.x},${p.y},${p.z}`] };
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      const k = `${a.x},${a.y},${a.z}`, item = String(a.item), n = Number(a.count);
+      acts.push(`${tool} ${k} ${item} ${n}`);
+      if (tool === 'take-from-chest') { contents[k][item] -= n; return { ok: true, text: `Took ${n} ${item} from the chest. ${reply(k)}` }; }
+      contents[k][item] = (contents[k][item] ?? 0) + n;
+      return { ok: true, text: `Stored ${n} ${item} in the chest. ${reply(k)}` };
+    }
+  } as unknown as GoalContext;
+  t.is(await sortStorage.run(ctx), 'moved 1 kind(s) of things to their own chest');
+  t.deepEqual(acts, ['take-from-chest 1,64,0 oak_log 10', 'store-in-chest 2,64,0 oak_log 10']);
+  t.is(sortStorage.wants(snap(gear()), w), null);
 });

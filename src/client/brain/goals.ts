@@ -144,7 +144,9 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
   let shut = 0;
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i] ?? '';
-    if (!/_door\[/.test(b) || /iron_door/.test(b) || !/half=lower/.test(b) || !/open=true/.test(b) || /powered=true/.test(b)) continue;
+    // doors (their lower half) and fence gates
+    const door = /_door\[/.test(b) && !/iron_door/.test(b) && /half=lower/.test(b);
+    if (!(door || /_fence_gate\[/.test(b)) || !/open=true/.test(b) || /powered=true/.test(b)) continue;
     const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
     if (me && me.x === at.x && me.z === at.z && Math.abs(me.y - at.y) <= 1) continue; // standing in it
     const r = await ctx.act('use-item-on-block', { ...at, face: 'up' });

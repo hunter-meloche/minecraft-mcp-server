@@ -6,8 +6,11 @@ import { activityAt } from './schedule.js';
 import { BrainMemory, findLandmarks, type WorldMemory } from './memory.js';
 import { returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { food, recoverGoal, retreat } from './food.js';
-import { farm, kit, lights, smelt, stash, stock } from './chores.js';
+import { farm, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
+import { readBox } from './milestones.js';
+import { projectGoal } from './project.js';
+import { TREE } from './tree.js';
 
 /**
  * The bot's own low-level AI for the client backend, built like a mob's goal selector on a villager's schedule: every
@@ -70,7 +73,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, repairGoal(rt), lights, returnIdle];
+    this.goals = opts.goals ?? [wake, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, repairGoal(rt), lights, sortStorage, projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -259,8 +262,14 @@ export class Brain {
   private async discover(s: Snapshot, world: WorldMemory): Promise<void> {
     if (!s.home || s.distHome > 48) return;
     if (world.landmarks.foundAt && this.now() - world.landmarks.foundAt < 10 * 60_000) return;
-    const box = { x: s.home.x - 12, y: s.home.y - 4, z: s.home.z - 12, width: 25, height: 11, length: 25 };
-    const { blocks } = await this.rt.call<{ blocks: (string | null)[] }>('world.region', box, 30_000);
+    // around home, or the whole yard once it's known (a storage house can stand further out than 12 blocks)
+    const y = world.yard;
+    const box = y
+      ? { x: Math.min(y.x1, s.home.x - 12), y: Math.min(y.y, s.home.y) - 3, z: Math.min(y.z1, s.home.z - 12),
+        width: Math.max(y.x2, s.home.x + 12) - Math.min(y.x1, s.home.x - 12) + 1, height: 10,
+        length: Math.max(y.z2, s.home.z + 12) - Math.min(y.z1, s.home.z - 12) + 1 }
+      : { x: s.home.x - 12, y: s.home.y - 4, z: s.home.z - 12, width: 25, height: 11, length: 25 };
+    const blocks = await readBox({ call: (m, p, t) => this.rt.call(m, p, t) }, box);
     const before = JSON.stringify({ ...world.landmarks, foundAt: 0 });
     world.landmarks = { ...findLandmarks(box, blocks, s.home), foundAt: this.now() };
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {

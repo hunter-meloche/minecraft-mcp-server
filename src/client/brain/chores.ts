@@ -2,7 +2,8 @@ import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import type { Goal, GoalContext, Snapshot } from './goals.js';
 import { COOKS_TO } from './food.js';
-import { chestTotals, key, peekChest, storeInChests, takeFromChests } from './chests.js';
+import { chestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
+import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign } from './storage.js';
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { daylightLeft } from './schedule.js';
@@ -56,10 +57,24 @@ export const stash: Goal = {
     const plan = stashPlan(ctx.s.items, { foods: foods() });
     const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
     let stored = 0;
-    for (const e of plan.deposit) {
-      // a worse duplicate of a kept tool shares its name: store-in-chest can't tell them apart, so leave it
-      if (e.slot !== undefined && names(e.name) > 1) continue;
-      stored += await storeInChests(ctx, e.name, e.count);
+    const deposit = plan.deposit.filter(e => e.slot === undefined || names(e.name) <= 1);
+    // a worse duplicate of a kept tool shares its name: store-in-chest can't tell them apart, so it stays carried
+    if (ctx.world.landmarks.chests.length >= 3) {
+      // sorted: each kind of thing to its own chest
+      const assign = chestAssignment(ctx.world);
+      const want = new Map(deposit.map(e => [e.name, e.count] as const));
+      const total = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
+      const sorted = depositPlan(ctx.s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, ctx.world.chestItems ?? {});
+      for (const m of sorted.moves) {
+        const [x, y, z] = m.chest.split(',').map(Number);
+        const r = await ctx.act('store-in-chest', { x, y, z, item: m.name, count: m.count });
+        rememberReply(ctx.world, { x, y, z }, r.text);
+        stored += Number(/^Stored (\d+)/.exec(r.text)?.[1] ?? 0);
+      }
+      ctx.world.storageFull = sorted.full;
+      for (const u of sorted.unplaced) stored += await storeInChests(ctx, u.name, u.count);
+    } else {
+      for (const e of deposit) stored += await storeInChests(ctx, e.name, e.count);
     }
     done(ctx.world, 'stash', ctx.s.now);
     let dropped = 0;
@@ -81,6 +96,42 @@ export const stash: Goal = {
     }
     ctx.progress(`stored ${stored}, dropped ${dropped}`);
     return `put ${stored} item(s) in the chests${dropped ? `, threw away ${dropped} junk` : ''}`;
+  }
+};
+
+/** Which home chest holds which kind of thing: kept, extended to new chests. */
+export function chestAssignment(world: WorldMemory): ChestAssign {
+  world.chestAssign = assignChests(world.landmarks.chests, CATEGORIES, world.chestItems ?? {}, world.chestAssign ?? {});
+  return world.chestAssign;
+}
+
+/** Now and then, by day at home: move things sitting in the wrong chest to their own. */
+export const sortStorage: Goal = {
+  name: 'sort',
+  priority: 20,
+  timeoutMs: 6 * MINUTE,
+  retryMs: 20 * MINUTE,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || !awakeAtHome(s) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
+    if (since(world, 'sort', s.now) < 30 * MINUTE) return null;
+    const moves = misplaced(chestAssignment(world), world.chestItems ?? {});
+    return moves.length ? `${moves.length} kind(s) of things in the wrong chest` : null;
+  },
+  run: async ctx => {
+    done(ctx.world, 'sort', ctx.s.now);
+    await refreshChests(ctx, 0);
+    let moved = 0;
+    for (const m of misplaced(chestAssignment(ctx.world), ctx.world.chestItems ?? {})) {
+      const [fx, fy, fz] = m.from.split(',').map(Number);
+      const [tx, ty, tz] = m.to.split(',').map(Number);
+      const t = await ctx.act('take-from-chest', { x: fx, y: fy, z: fz, item: m.name, count: m.count });
+      rememberReply(ctx.world, { x: fx, y: fy, z: fz }, t.text);
+      if (!/^Took/.test(t.text)) continue;
+      const r = await ctx.act('store-in-chest', { x: tx, y: ty, z: tz, item: m.name, count: m.count });
+      rememberReply(ctx.world, { x: tx, y: ty, z: tz }, r.text);
+      if (/^Stored/.test(r.text)) moved++;
+    }
+    return `moved ${moved} kind(s) of things to their own chest`;
   }
 };
 
