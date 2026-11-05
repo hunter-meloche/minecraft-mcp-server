@@ -16,13 +16,16 @@ test('planLevel cuts a hill and a tree, fills a dip with cobblestone and dirt on
   set(1, 4, 1, 'oak_log'); set(1, 5, 1, 'oak_log'); set(1, 6, 1, 'oak_leaves'); // a tree
   set(3, 3, 2, 'air'); set(3, 2, 2, 'air'); // a 2-deep dip
   const p = planLevel(box, b, 63);
-  t.is(p.cut, 5);
+  t.is(p.cut, 4); // the hill and the trunk; the natural leaves decay by themselves
+  t.is(p.leaves, 1);
+  t.deepEqual(p.cutKinds, { ground: 2, logs: 2 });
   t.is(p.dirt, 1);
   t.is(p.cobblestone, 1);
   t.deepEqual(p.origin, { x: 10, y: 62, z: 20 });
   t.deepEqual(p.spec!.layers[0], ['    ', '    ', '   C']); // y 62
   t.deepEqual(p.spec!.layers[1], ['    ', '    ', '   D']); // y 63
   t.deepEqual(p.spec!.layers[2], ['.   ', ' .  ', '    ']); // y 64
+  t.is(p.spec!.layers.length, 4); // up to the top log at y 65
 });
 
 test('planLevel leaves water, farmland and the bot\'s builds alone, but not torches', (t) => {

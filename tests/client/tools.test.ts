@@ -581,6 +581,6 @@ test('level-area cuts first when it lacks the fill blocks, then fills', async (t
   });
   const r = await run('level-area', { x1: 0, z1: 0, x2: 1, z2: 0, level: 64, above: 1, below: 1 });
   t.is(builds.length, 2);
-  t.regex(r.text, /^Level \(0, 0\)\.\.\(1, 0\) to ground y 64: cut 1 block\(s\), fill 1 dirt \+ 0 cobblestone/);
+  t.regex(r.text, /^Level \(0, 0\)\.\.\(1, 0\) to ground y 64: cut 1 block\(s\) \(ground 1\), fill 1 dirt \+ 0 cobblestone/);
   t.regex(r.text, /Cut first \(not enough fill blocks yet\)/);
 });

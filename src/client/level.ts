@@ -10,6 +10,10 @@ export interface LevelPlan {
   origin: Pos;
   spec: { palette: Record<string, string>; layers: string[][] } | null;
   cut: number; dirt: number; cobblestone: number;
+  /** what is cut, by kind: logs, ground (dirt, stone...), plants and other */
+  cutKinds: Record<string, number>;
+  /** natural leaves left to decay by themselves once the trunks are gone (cutting them one by one took most of the time) */
+  leaves: number;
   kept: { water: number; built: number };
 }
 
@@ -23,6 +27,9 @@ const KEEP = /^(water|farmland|wheat|carrots|potatoes|beetroots|crafting_table|f
 export function planLevel(box: Box, blocks: (string | null)[], level: number, isProtected: (p: Pos) => boolean = () => false): LevelPlan {
   const { width: w, length: l, height: h } = box;
   const at = (x: number, y: number, z: number) => name(blocks[x + z * w + y * w * l]);
+  const raw = (x: number, y: number, z: number) => blocks[x + z * w + y * w * l] ?? '';
+  const cutKinds: Record<string, number> = {};
+  let leaves = 0;
   const L = level - box.y; // the level as a layer index
   const ground: number[] = new Array(w * l).fill(-1);
   const skip: boolean[] = new Array(w * l).fill(false);
@@ -51,7 +58,11 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
       const i = c + y * w * l;
       const n = at(x, y, z);
       if (y > L) {
-        if (!AIR.test(n)) { cell[i] = '.'; cut++; lo = Math.min(lo, y); hi = Math.max(hi, y); }
+        if (AIR.test(n)) continue;
+        if (/_leaves$/.test(n) && !/persistent=true/.test(raw(x, y, z))) { leaves++; continue; }
+        cell[i] = '.'; cut++; lo = Math.min(lo, y); hi = Math.max(hi, y);
+        const kind = /_log$|_wood$/.test(n) ? 'logs' : /_leaves$/.test(n) ? 'placed leaves' : NOT_GROUND.test(n) ? 'plants' : 'ground';
+        cutKinds[kind] = (cutKinds[kind] ?? 0) + 1;
       } else if (g >= 0 && y > g) {
         cell[i] = y === L ? 'D' : 'C';
         if (y === L) dirt++; else cobblestone++;
@@ -62,7 +73,7 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
       }
     }
   }
-  if (lo === Infinity) return { origin: { x: box.x, y: level, z: box.z }, spec: null, cut, dirt, cobblestone, kept: { water, built } };
+  if (lo === Infinity) return { origin: { x: box.x, y: level, z: box.z }, spec: null, cut, dirt, cobblestone, cutKinds, leaves, kept: { water, built } };
   const layers: string[][] = [];
   for (let y = lo; y <= hi; y++) {
     const rows: string[] = [];
@@ -72,6 +83,6 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
   return {
     origin: { x: box.x, y: box.y + lo, z: box.z },
     spec: { palette: { C: 'cobblestone', D: 'dirt' }, layers },
-    cut, dirt, cobblestone, kept: { water, built }
+    cut, dirt, cobblestone, cutKinds, leaves, kept: { water, built }
   };
 }

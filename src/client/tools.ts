@@ -857,7 +857,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const dim = await dimension();
       const plan = planLevel(box, blocks, level, p => protection.has(dim, p));
       const summary = `Level (${box.x}, ${box.z})..(${box.x + box.width - 1}, ${box.z + box.length - 1}) to ground y ${level}: ` +
-        `cut ${plan.cut} block(s), fill ${plan.dirt} dirt + ${plan.cobblestone} cobblestone; ` +
+        `cut ${plan.cut} block(s)${plan.cut ? ` (${Object.entries(plan.cutKinds).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''}, fill ${plan.dirt} dirt + ${plan.cobblestone} cobblestone; ` +
+        (plan.leaves ? `${plan.leaves} natural leaves left to decay once their trunks are gone; ` : '') +
         `left alone: ${plan.kept.water} water column(s), ${plan.kept.built} column(s) with builds, crops or furniture.`;
       if (!plan.spec) return factory.createResponse(`${summary} Already level.`);
       if (dryRun) return factory.createResponse(summary);
