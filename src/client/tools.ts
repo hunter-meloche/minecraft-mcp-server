@@ -704,6 +704,16 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         r = await call<Used>('useOn', { ...at, face });
       }
       if (!r.used) return factory.createErrorResponse(`Could not use ${item ?? 'the held item'} on ${fmt(at)}: ${r.reason}`);
+      // a hoe only tills with air above: grass or leaf litter on top makes it do nothing, so clear that and try again
+      if (r.before === r.after && /_hoe$/.test(r.held ?? item ?? '') && /^(grass_block|dirt|coarse_dirt|rooted_dirt|dirt_path)$/.test(r.before ?? '')) {
+        const above = { ...at, y: at.y + 1 };
+        const top = await call<{ name?: string }>('world.block', { ...above });
+        if (top.name && top.name !== 'air' && /grass|fern|flower|leaf_litter|petals|bush|snow|dandelion|poppy|tulip|daisy|bluet|allium|cornflower|lily_of_the_valley|wildflowers/.test(top.name)) {
+          await call('dig', { ...above, timeoutMs: 15_000 }, 30_000).catch(() => undefined);
+          await call('item.select', { name: r.held ?? item });
+          r = await call<Used>('useOn', { ...at, face });
+        }
+      }
       const props = Object.entries(r.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
       const after = `${r.after}${props ? `[${props}]` : ''}`;
       return factory.createResponse(r.before === r.after

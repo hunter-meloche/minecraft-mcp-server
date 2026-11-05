@@ -440,3 +440,17 @@ test('use-item-on-block tills with a hoe and reports the change', async (t) => {
   t.is((await run('use-item-on-block', { x: 1, y: 64, z: 2, item: 'wooden_hoe' })).text, 'Used wooden_hoe on grass_block at (1, 64, 2): it became farmland[moisture=0]');
   t.like(request.getCalls().find(c => c.args[0] === 'useOn')!.args[1], { x: 1, y: 64, z: 2, face: 'up' });
 });
+
+test('use-item-on-block clears grass on top before tilling again', async (t) => {
+  let tills = 0;
+  const { run, request } = setup({
+    'item.select': { held: 'stone_hoe' },
+    useOn: () => (tills++ === 0
+      ? { used: true, before: 'grass_block', after: 'grass_block', properties: {}, held: 'stone_hoe', result: 'Pass[]' }
+      : { used: true, before: 'grass_block', after: 'farmland', properties: { moisture: '0' }, held: 'stone_hoe' }),
+    'world.block': { loaded: true, name: 'leaf_litter' },
+    dig: { dug: true, block: 'leaf_litter', reason: 'done' }
+  });
+  t.is((await run('use-item-on-block', { x: 1, y: 64, z: 2, item: 'stone_hoe' })).text, 'Used stone_hoe on grass_block at (1, 64, 2): it became farmland[moisture=0]');
+  t.like(request.getCalls().find(c => c.args[0] === 'dig')!.args[1], { x: 1, y: 65, z: 2 });
+});
