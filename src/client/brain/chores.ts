@@ -53,6 +53,10 @@ export const stash: Goal = {
   wants: (s, world) => {
     if (!awakeAtHome(s) || !world.landmarks.chests.length) return null;
     const plan = stashPlan(s.items, { foods: foods(), keep: projectCarry(world) });
+    // only what can really go: a worse duplicate of a kept tool can't be told apart, and a project's materials stay
+    // (a full pocket of planks for the storage house had the stash stop the build over and over, storing nothing)
+    const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
+    plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
     if (!plan.deposit.length && !plan.drop.length) return null;
     if (s.slotsUsed >= 27) return `${s.slotsUsed}/36 slots used`;
     if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
@@ -100,6 +104,7 @@ export const stash: Goal = {
       await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 });
     }
     ctx.progress(`stored ${stored}, dropped ${dropped}`);
+    if (!stored && !dropped) throw new Error('nothing could be put away');
     return `put ${stored} item(s) in the chests${dropped ? `, threw away ${dropped} junk` : ''}`;
   }
 };
