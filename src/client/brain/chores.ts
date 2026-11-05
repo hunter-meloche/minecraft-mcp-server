@@ -58,7 +58,8 @@ export const stash: Goal = {
     const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
     plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
     if (!plan.deposit.length && !plan.drop.length) return null;
-    if (s.slotsUsed >= 27) return `${s.slotsUsed}/36 slots used`;
+    // a project carrying its materials fills the pockets on purpose: only stop it when really full
+    if (s.slotsUsed >= (world.progress?.carry ? 33 : 27)) return `${s.slotsUsed}/36 slots used`;
     if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
     return null;
   },
