@@ -313,10 +313,10 @@ public final class Interact {
             BlockState before = mc.level.getBlockState(target);
             if (before.isAir()) return obj("dug", false, "reason", "air");
             long seq = Events.baritoneLogSeq();
-            Protection.suspend(); // breaking this one is the point (it may be a protected block the user asked to dig)
+            Protection.suspend(before.getBlock()); // breaking this one is the point (it may be a protected block the user asked to dig)
             Processes.baritone().getBuilderProcess().clearArea(target, target); // walks into reach, picks the tool, digs
             Processes.watch(c, seq, intParam(p, "timeoutMs", 60_000) / 50, reason -> {
-                Protection.resume();
+                Protection.resume(before.getBlock());
                 BlockState now = Minecraft.getInstance().level.getBlockState(target);
                 ItemStack held = Minecraft.getInstance().player.getMainHandItem();
                 return obj("dug", replaceable(now), "block", Names.block(before), "tool", held.isEmpty() ? null : Names.item(held));

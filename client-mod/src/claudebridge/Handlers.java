@@ -313,9 +313,9 @@ public final class Handlers {
             long seq = Events.baritoneLogSeq();
             boolean loaded = Processes.baritone().getBuilderProcess().build(file.getName(), file, origin);
             if (!loaded) throw new IllegalStateException("Baritone could not load the schematic " + file.getName());
-            Protection.suspend(); // the builder replaces wrong blocks inside its own box
+            Protection.suspend(null); // the builder replaces wrong blocks inside its own box (furniture excepted)
             Processes.watch(c, seq, timeoutTicks, reason -> {
-                Protection.resume();
+                Protection.resume(null);
                 Map<String, Integer> after = Processes.inventoryCounts(Minecraft.getInstance());
                 Map<String, Integer> used = Processes.gained(after, before); // what went down
                 return obj("used", used, "at", pos(Minecraft.getInstance().player.blockPosition()));

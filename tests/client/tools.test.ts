@@ -96,6 +96,41 @@ test('mine-blocks reports what was gained', async (t) => {
   t.like(request.getCalls().find(c => c.args[0] === 'mine')!.args[1], { block: 'acacia_log', count: 14 });
 });
 
+test('mine-blocks never digs up the home area: from home it walks out to ore beyond the zone first', async (t) => {
+  let pos = { x: 0.5, y: 64, z: 0.5 };
+  const status = () => ({ ...STATUS, hashedSeed: '7', position: pos, block: { x: Math.floor(pos.x), y: pos.y, z: Math.floor(pos.z) } });
+  const zones: Record<string, unknown>[] = [];
+  const gotos: Record<string, unknown>[] = [];
+  let ores = [{ x: 3, y: 50, z: 0 }, { x: 0, y: 40, z: 45 }, { x: 60, y: 30, z: 0 }]; // under the lawn, then two outside
+  const { run, request } = setup({
+    status,
+    'protect.zone': (p: Record<string, unknown>) => { zones.push(p); return { set: true }; },
+    'world.findBlocks': () => ({ positions: ores }),
+    goto: (p: Record<string, unknown>) => {
+      gotos.push(p);
+      pos = { x: Number(p.x), y: 64, z: Number(p.z) };
+      return { arrived: true, reason: 'done', seconds: 9, baritone: [], at: { x: p.x, y: 64, z: p.z }, distance: 0 };
+    },
+    mine: { reason: 'done', seconds: 20, baritone: [], gained: { coal: 3 } }
+  });
+  await run('set-home');
+  await run('get-position');
+  t.deepEqual(zones.at(-1), { x: 0, z: 0, radius: 24 });
+  t.regex((await run('mine-blocks', { block: 'coal_ore', count: 3 })).text, /^Mined for 20s: coal x3/);
+  t.like(gotos[0], { x: 0, z: 45, xz: true }); // the nearest one outside the zone, not the one under the lawn
+  // away from home it mines where it is
+  gotos.length = 0;
+  await run('mine-blocks', { block: 'coal_ore', count: 3 });
+  t.is(gotos.length, 0);
+  // nothing outside the zone in sight: says so, no mining
+  pos = { x: 0.5, y: 64, z: 0.5 };
+  ores = [{ x: 3, y: 50, z: 0 }];
+  const r = await run('mine-blocks', { block: 'coal_ore', count: 3 });
+  t.true(r.isError);
+  t.regex(r.text, /No coal_ore in sight outside the home area/);
+  t.is(request.getCalls().filter(c => c.args[0] === 'mine').length, 2);
+});
+
 /** world.region answers: all air the first time (the materials check), then `blocks` (the check after building). */
 function afterBuild(blocks: string[]) {
   let calls = 0;

@@ -216,7 +216,7 @@ export const stock: Goal = {
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
     const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 64), timeoutMs: budget });
     ctx.progress(r.text.slice(0, 160));
-    if (/nothing gained/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
+    if (/nothing gained|in sight outside the home area/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
     const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
     if (!back.ok) throw new Error(`mined, but could not get home: ${back.text}`);
     if (!r.ok) throw new Error(r.text);

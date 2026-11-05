@@ -7,6 +7,9 @@ import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+
+import static claudebridge.Json.intParam;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -32,13 +35,45 @@ public final class Protection {
         return POSITIONS.size();
     }
 
-    public static void suspend() {
+    /** Blocks an explicit dig is after: the one kind of furniture that may be broken while the rule is lifted. */
+    private static final List<Block> digging = new ArrayList<>();
+
+    /**
+     * Lift the rule for our own dig or build. Furniture the bot built (doors, beds, chests, ...) stays unbreakable
+     * anyway, except the block a dig is after: with the outside pressure plate gone, Baritone broke the cabin door
+     * to get through while a level-area had the rule lifted, instead of opening it.
+     */
+    public static void suspend(Block target) {
         suspended++;
-        apply(List.of());
+        if (target != null) digging.add(target);
+        apply(furnitureNear(Minecraft.getInstance()));
     }
 
-    public static void resume() {
+    public static void resume(Block target) {
         if (suspended > 0) suspended--;
+        if (target != null) digging.remove(target);
+        if (suspended == 0) digging.clear();
+    }
+
+    static boolean furniture(Block b) {
+        return b instanceof net.minecraft.world.level.block.DoorBlock || b instanceof net.minecraft.world.level.block.TrapDoorBlock
+            || b instanceof net.minecraft.world.level.block.FenceGateBlock || b instanceof net.minecraft.world.level.block.BedBlock
+            || b instanceof net.minecraft.world.level.block.AbstractChestBlock<?> || b instanceof net.minecraft.world.level.block.BarrelBlock
+            || b instanceof net.minecraft.world.level.block.CraftingTableBlock || b instanceof net.minecraft.world.level.block.AbstractFurnaceBlock;
+    }
+
+    /** The furniture types among the protected blocks near the bot, less what a dig is after. */
+    private static List<Block> furnitureNear(Minecraft mc) {
+        if (mc.player == null || mc.level == null) return List.of();
+        BlockPos me = mc.player.blockPosition();
+        Set<Block> types = new LinkedHashSet<>();
+        for (long l : POSITIONS) {
+            BlockPos p = BlockPos.of(l);
+            if (p.distManhattan(me) > RADIUS * 2 || p.distSqr(me) > RADIUS * RADIUS || !mc.level.isLoaded(p)) continue;
+            Block b = mc.level.getBlockState(p).getBlock();
+            if (furniture(b) && !digging.contains(b)) types.add(b);
+        }
+        return new ArrayList<>(types);
     }
 
     private static void apply(List<Block> types) {
@@ -49,6 +84,31 @@ public final class Protection {
         if (!value.equals(setting.value)) setting.value = value;
     }
 
+    /**
+     * The home zone: a column of radius `zoneRadius` around (zoneX, zoneZ), any depth. Baritone's miner goes for the
+     * nearest ore it knows of, and it knows them all (the client sees every block in loaded chunks), so it kept digging
+     * holes in the lawn. While the bot is in or near the zone, the ground and ore types can't be broken at all: the
+     * miner then ignores them (it prunes what it may not break) and mines somewhere else.
+     */
+    private static boolean zoneSet;
+    private static int zoneX, zoneZ, zoneRadius;
+    /** How far past the zone's edge the rule still holds (Baritone breaks up to about 5 blocks away). */
+    private static final int ZONE_MARGIN = 6;
+    private static final List<Block> GROUND = List.of(
+        Blocks.GRASS_BLOCK, Blocks.DIRT, Blocks.COARSE_DIRT, Blocks.ROOTED_DIRT, Blocks.PODZOL, Blocks.MYCELIUM, Blocks.DIRT_PATH,
+        Blocks.FARMLAND, Blocks.MUD, Blocks.CLAY, Blocks.GRAVEL, Blocks.SAND, Blocks.RED_SAND, Blocks.SANDSTONE,
+        Blocks.STONE, Blocks.DEEPSLATE, Blocks.GRANITE, Blocks.DIORITE, Blocks.ANDESITE, Blocks.TUFF, Blocks.CALCITE,
+        Blocks.COAL_ORE, Blocks.DEEPSLATE_COAL_ORE, Blocks.IRON_ORE, Blocks.DEEPSLATE_IRON_ORE, Blocks.COPPER_ORE,
+        Blocks.DEEPSLATE_COPPER_ORE, Blocks.GOLD_ORE, Blocks.DEEPSLATE_GOLD_ORE, Blocks.REDSTONE_ORE, Blocks.DEEPSLATE_REDSTONE_ORE,
+        Blocks.LAPIS_ORE, Blocks.DEEPSLATE_LAPIS_ORE, Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE, Blocks.EMERALD_ORE,
+        Blocks.DEEPSLATE_EMERALD_ORE);
+
+    static boolean nearZone(BlockPos p) {
+        if (!zoneSet) return false;
+        double dx = p.getX() - zoneX, dz = p.getZ() - zoneZ;
+        return dx * dx + dz * dz <= (double) (zoneRadius + ZONE_MARGIN) * (zoneRadius + ZONE_MARGIN);
+    }
+
     private static int idleWhileSuspended = 0;
 
     private static void tick(Minecraft mc) {
@@ -57,7 +117,8 @@ public final class Protection {
             idleWhileSuspended = Processes.active() == null ? idleWhileSuspended + 1 : 0;
             if (idleWhileSuspended >= 5) { suspended = 0; idleWhileSuspended = 0; }
         }
-        if (suspended > 0 || mc.player == null || mc.level == null) return;
+        if (suspended > 0) { apply(furnitureNear(mc)); return; }
+        if (mc.player == null || mc.level == null) return;
         BlockPos me = mc.player.blockPosition();
         Set<Block> types = new LinkedHashSet<>();
         for (long l : POSITIONS) {
@@ -66,6 +127,7 @@ public final class Protection {
             var st = mc.level.getBlockState(p);
             if (!st.isAir()) types.add(st.getBlock());
         }
+        if (nearZone(me)) types.addAll(GROUND);
         apply(new ArrayList<>(types));
     }
 
@@ -84,8 +146,18 @@ public final class Protection {
             r.addProperty("count", POSITIONS.size());
             return r;
         });
+        // the home zone: {x, z, radius}; radius 0 clears it
+        s.register("protect.zone", true, (p, c) -> {
+            zoneRadius = intParam(p, "radius", 0);
+            zoneSet = zoneRadius > 0;
+            if (zoneSet) { zoneX = intParam(p, "x", 0); zoneZ = intParam(p, "z", 0); }
+            JsonObject r = new JsonObject();
+            r.addProperty("set", zoneSet);
+            return r;
+        });
         s.register("protect.status", true, (p, c) -> {
             JsonObject r = new JsonObject();
+            r.addProperty("zone", zoneSet ? zoneX + "," + zoneZ + " r" + zoneRadius : null);
             r.addProperty("count", POSITIONS.size());
             r.addProperty("suspended", suspended);
             JsonArray types = new JsonArray();

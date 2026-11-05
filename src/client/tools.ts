@@ -80,6 +80,14 @@ const SCAFFOLD = /^(minecraft:)?(cobblestone|cobbled_deepslate|netherrack|andesi
 /** How far around a build to look for scaffolding it left. */
 const SCAFFOLD_MARGIN = 6;
 
+/**
+ * The home zone: no ground or ore is broken within this many blocks of home (any depth), so mining leaves the lawn
+ * alone; the game client holds the rule a few blocks past the edge (see Protection.java).
+ */
+export const HOME_ZONE = 24;
+/** Where mining from home starts: ore at least this far from home (the zone, its margin and Baritone's reach). */
+const MINE_FROM = HOME_ZONE + 12;
+
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
 
@@ -231,6 +239,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   const events = bridge as unknown as { on?: (event: string, fn: (e: { type: string; at?: Pos }) => void) => void };
   events.on?.('event', e => { if (e.type === 'death' && e.at) lastDeath = { at: e.at, time: Date.now() }; });
   let syncedVersion = -1;
+  let zoneSent = 'none'; // a client starts without one
   /** the dimension at the last status read */
   let lastDimension = 'overworld';
   /** Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current. */
@@ -245,7 +254,16 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     protection.attach(worldIdFromSeed(s.hashedSeed ?? undefined));
     lastDimension = s.dimension ?? 'overworld';
     // a relaunched client starts with none: resend when its count differs
-    await syncProtection(s.dimension ?? 'overworld', s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length);
+    const relaunched = s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length;
+    await syncProtection(s.dimension ?? 'overworld', relaunched);
+    // the home zone, for the home in the dimension the bot is in (resent when it changes or the client is new)
+    const world = worldIdFromSeed(s.hashedSeed ?? undefined);
+    const home = world ? readHomes()[world]?.home : undefined;
+    const zone = home && home.dimension === (s.dimension ?? 'overworld') ? `${home.x},${home.z}` : 'none';
+    if (zone !== zoneSent || (relaunched && zone !== 'none')) {
+      const [x, z] = zone === 'none' ? [0, 0] : zone.split(',').map(Number);
+      await call('protect.zone', { x, z, radius: zone === 'none' ? 0 : HOME_ZONE }).then(() => { zoneSent = zone; }).catch(() => undefined);
+    }
     return s;
   };
   const dimension = async () => (await status()).dimension ?? 'overworld';
@@ -422,6 +440,38 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!(await placeFacing({ x: box.x + x, y: box.y + y, z: box.z + z }, stone))) placed++;
     }
     return placed;
+  };
+
+  /**
+   * Mining from inside the home zone: the game client won't let Baritone break ground or ore there, so its miner
+   * would find nothing. Walk out first, to above the nearest block of the kind outside the zone. Returns an error
+   * reply when there's none in sight, else undefined (also when the bot isn't in the zone).
+   */
+  const leaveHomeZone = async (names: string[]): Promise<ReturnType<ToolFactory['createResponse']> | undefined> => {
+    const s = await status();
+    const world = worldIdFromSeed(s.hashedSeed ?? undefined);
+    const home = world ? readHomes()[world]?.home : undefined;
+    if (!home || home.dimension !== (s.dimension ?? 'overworld')) return undefined;
+    const me = s.position!;
+    const fromHome = (p: Pos) => Math.hypot(p.x - home.x, p.z - home.z);
+    if (fromHome(me) > HOME_ZONE + 8) return undefined;
+    let best: Pos | undefined;
+    for (const name of names) {
+      const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 96, count: 512 }, 60_000);
+      for (const p of found.positions) {
+        if (fromHome(p) < MINE_FROM) continue;
+        if (!best || Math.hypot(p.x - me.x, p.y - me.y, p.z - me.z) < Math.hypot(best.x - me.x, best.y - me.y, best.z - me.z)) best = p;
+      }
+    }
+    if (!best) {
+      return factory.createErrorResponse(`No ${names.join(' or ')} in sight outside the home area (${MINE_FROM}+ blocks from home ${fmt(home)}); ` +
+        "the bot doesn't mine within " + `${HOME_ZONE} blocks of home. Go further out (explore) and mine from there.`);
+    }
+    const r = await call<ProcessResult & { arrived: boolean }>('goto', { ...best, xz: true, range: 3, timeoutMs: 180_000 }, 195_000);
+    if (!r.arrived && fromHome((await status()).position!) <= HOME_ZONE + 8) {
+      return factory.createErrorResponse(`Could not get out of the home area to the ${names[0]} at ${fmt(best)}${baritoneSaid(r.baritone)}`);
+    }
+    return undefined;
   };
 
   /** Any box, read in slabs that fit a region call. */
@@ -776,6 +826,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         guarded += near.positions.filter(p => protection.has(dim, p)).length;
       }
       if (guarded && names.length === 1) return mineAround(names[0], count, timeoutMs, dim, guarded);
+      const out = await leaveHomeZone(names);
+      if (out) return out;
       let r: ProcessResult & { gained: Record<string, number> };
       try {
         r = await call<ProcessResult & { gained: Record<string, number> }>('mine', { block, count, timeoutMs }, timeoutMs + 15_000);
