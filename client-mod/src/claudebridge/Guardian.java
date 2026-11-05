@@ -104,8 +104,10 @@ public final class Guardian {
     private static boolean eating;
 
     /**
-     * Eat when calm (no Baritone job, nothing to fight) and it matters: hurt with food below 18 means no healing at all
-     * (the bot sat at 3 HP for minutes with food 17), and food at 6 or less means no sprinting.
+     * Eat when it matters: hurt with food below 18 means no healing at all (the bot sat at 3 HP for minutes with food
+     * 17), and food at 6 or less means no sprinting. And top up whenever the bar has room for the food without waste:
+     * waiting for 6 left the bot standing about at food 8 with bread in its pocket, one bad fight from no healing.
+     * A Baritone job is paused for it only when hurt or below 15.
      */
     private static void keepFed(LocalPlayer p, Entity melee) {
         int food = p.getFoodData().getFoodLevel();
@@ -113,10 +115,10 @@ public final class Guardian {
         if (eating || Interact.using || Interact.handsBusy || melee != null) return;
         // during a Baritone job only when it matters (hurt): the job is paused for the bite (EatPause)
         boolean job = Processes.active() != null && !"Eating".equals(Processes.active());
-        if (job && !hurt) return;
-        if (!((hurt && food < 18) || food <= 6)) return;
         String choice = Combat.chooseFood(false);
         if (choice == null) return;
+        boolean room = food <= 20 - Combat.nutrition(choice);
+        if (job ? !(hurt && food < 18) && food > 14 : !((hurt && food < 18) || food <= 6 || room)) return;
         // raw meat and fish give a third of what cooked does: keep them for the furnace unless really hungry
         if (food > 6 && RAW.contains(choice)) return;
         eating = true;
@@ -126,7 +128,7 @@ public final class Guardian {
             int w = job ? 3 : 1;
             @Override public boolean tick(Minecraft m) {
                 if (--w > 0) return false;
-                eatThen("", r -> { eating = false; EatPause.eating = false; note((hurt ? "ate to heal: " : "ate (hungry): ") + r); });
+                eatThen("", r -> { eating = false; EatPause.eating = false; note((hurt ? "ate to heal: " : food <= 6 ? "ate (hungry): " : "ate (topping up): ") + r); });
                 return true;
             }
         });

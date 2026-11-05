@@ -64,7 +64,7 @@ async function main() {
     // the bot's own low-level AI: shelter at night, chores by day; steps back whenever the LLM acts
     const brain = new Brain(runtime, { memoryFile: path.join(dataDir, 'brain.json'), logFile: path.join(dataDir, 'brain.log') });
     runtime.setManualHook(tool => brain.manual(tool));
-    registerBrainTools(factory, brain);
+    registerBrainTools(factory, brain, runtime);
     if (config.autonomy) brain.setEnabled(true);
     cleanup = () => { brain.setEnabled(false); connection.cleanup(); };
   } else {

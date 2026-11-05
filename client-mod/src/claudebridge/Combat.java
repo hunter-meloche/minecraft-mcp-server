@@ -184,6 +184,17 @@ public final class Combat {
         return best;
     }
 
+    /** Hunger points the named food in the inventory restores (0 if none). */
+    static int nutrition(String name) {
+        Inventory inv = Minecraft.getInstance().player.getInventory();
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = inv.getItem(i);
+            var food = s.isEmpty() ? null : s.get(DataComponents.FOOD);
+            if (food != null && Names.item(s).equals(name)) return food.nutrition();
+        }
+        return 0;
+    }
+
     static void attack(LocalPlayer p, Entity e) {
         Minecraft mc = Minecraft.getInstance();
         p.lookAt(EntityAnchorArgument.Anchor.EYES, e.position().add(0, e.getBbHeight() * 0.8, 0));

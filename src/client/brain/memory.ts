@@ -27,6 +27,8 @@ export interface WorldMemory {
   chestItems?: Record<string, Record<string, number>>;
   /** when (ms) daily chores last ran, by chore */
   lastDone?: Record<string, number>;
+  /** dark spots ("x,y,z") no torch of the lights round reached: left out from then on */
+  darkIgnore?: string[];
 }
 
 export const DEFAULT_LEASH = 96;

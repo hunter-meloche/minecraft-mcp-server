@@ -4,9 +4,10 @@ import type { Goal, GoalContext, Snapshot } from './goals.js';
 import { COOKS_TO } from './food.js';
 import { chestTotals, key, peekChest, storeInChests, takeFromChests } from './chests.js';
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
-import { planTorches, yardBox } from './lighting.js';
+import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { daylightLeft } from './schedule.js';
-import { farmCentre, type WorldMemory } from './memory.js';
+import { farmCentre, type Pos, type WorldMemory } from './memory.js';
+import type { Box } from '../survey.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -229,9 +230,51 @@ export const stock: Goal = {
 /** How far around home the yard is kept lit. */
 export const YARD_RADIUS = 16;
 
+type Io = Pick<GoalContext, 'call' | 'act'> & { progress?: (t: string) => void };
+export interface LightReport { box: Box; dark: Pos[]; placed: Pos[]; undone: Pos[]; left: Pos[] }
+const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 /**
- * Once a day: read the block light over the yard and put torches where a monster could spawn (block light 0 since
- * 1.18), as few as the plan needs.
+ * The dark spots (block light 0, where monsters spawn since 1.18) a mob could stand on around a point, and with
+ * `place`, torches for them as the plan puts them, each one checked against the real light: the plan's light model
+ * goes through walls, and the daily round kept putting two torches by an enclosed air pocket that they never lit,
+ * every day. A torch that lights no dark spot is taken back up. `ignore` holds spots to leave out ("x,y,z").
+ */
+export async function lightArea(io: Io, centre: Pos, radius: number, opts: { place: boolean; max: number; ignore: Set<string> }): Promise<LightReport> {
+  const box = yardBox(centre, radius);
+  const mask = (p: Pos) => !opts.ignore.has(key(p));
+  const read = async () => {
+    const { blocks } = await io.call<{ blocks: (string | null)[] }>('world.region', { ...box }, 60_000);
+    const { block } = await io.call<{ block: number[] }>('world.light', { ...box }, 60_000);
+    return { blocks, block, dark: spawnableCells(box, blocks, block, { mask }) };
+  };
+  let now = await read();
+  const report: LightReport = { box, dark: now.dark, placed: [], undone: [], left: now.dark };
+  if (!opts.place || !now.dark.length) return report;
+  const plan = planTorches(box, now.blocks, now.block, { prefer: centre, max: opts.max, mask });
+  for (const t of plan.torches) {
+    if (!now.dark.length) break;
+    const r = await io.act('place-block', { ...t, faceDirection: 'down', item: 'torch' });
+    if (!/^Placed/.test(r.text)) { io.progress?.(`torch at ${key(t)}: ${r.text}`); continue; }
+    await pause(500); // the client relights a moment after the block update
+    const after = await read();
+    if (after.dark.length >= now.dark.length) {
+      await io.act('dig-block', { ...t, collect: true });
+      report.undone.push(t);
+      io.progress?.(`torch at ${key(t)} lit nothing dark: took it back`);
+      now = await read();
+    } else {
+      report.placed.push(t);
+      now = after;
+    }
+  }
+  report.left = now.dark;
+  return report;
+}
+
+/**
+ * Once a day: put torches where a monster could spawn in the yard, as few as do any good. Spots a torch didn't reach
+ * are remembered and left out from then on.
  */
 export const lights: Goal = {
   name: 'lights',
@@ -243,27 +286,14 @@ export const lights: Goal = {
     return since(world, 'lights', s.now) > 20 * MINUTE ? 'daily round: dark spots in the yard' : null;
   },
   run: async ctx => {
-    const home = ctx.s.home!;
-    const box = yardBox(home, YARD_RADIUS);
-    const read = async () => {
-      const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...box }, 60_000);
-      const { block } = await ctx.call<{ block: number[] }>('world.light', { ...box }, 60_000);
-      return { blocks, block };
-    };
-    const { blocks, block } = await read();
-    const torches = ctx.s.counts.get('torch') ?? 0;
-    const plan = planTorches(box, blocks, block, { prefer: home, max: torches });
     done(ctx.world, 'lights', ctx.s.now);
-    if (!plan.torches.length) return plan.dark ? `${plan.dark} dark cell(s) but nowhere to put a torch` : 'the yard is lit';
-    let placed = 0;
-    for (const t of plan.torches) {
-      const r = await ctx.act('place-block', { ...t, faceDirection: 'down', item: 'torch' });
-      if (/^Placed/.test(r.text)) placed++;
-      else ctx.progress(`torch at ${key(t)}: ${r.text}`);
-    }
-    const after = await read();
-    const left = planTorches(box, after.blocks, after.block, { max: 0 }).dark;
-    return `placed ${placed}/${plan.torches.length} torch(es); ${left} dark cell(s) left of ${plan.dark}`;
+    const ignore = new Set(ctx.world.darkIgnore ?? []);
+    const r = await lightArea(ctx, ctx.s.home!, YARD_RADIUS, { place: true, max: ctx.s.counts.get('torch') ?? 0, ignore });
+    // what no torch reached is out of reach for this plan (enclosed, or out of the bot's reach): leave it be
+    ctx.world.darkIgnore = [...new Set([...(ctx.world.darkIgnore ?? []), ...r.left.map(key)])].slice(-500);
+    if (!r.dark.length) return 'the yard is lit';
+    return `placed ${r.placed.length} torch(es)${r.undone.length ? `, took back ${r.undone.length} that lit nothing` : ''}; ` +
+      `${r.left.length} of ${r.dark.length} dark spot(s) left${r.left.length ? ' (left out from now on)' : ''}`;
   }
 };
 

@@ -1,5 +1,5 @@
 import test from 'ava';
-import { farm, kit, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
+import { farm, kit, lightArea, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
 import { food, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -64,24 +64,45 @@ test('stock: the kit\'s gathering first, then the home stock; by day, fit and no
   t.is(stock.wants(snap(gear()), world({ chestItems: {} })), null); // chests not looked in yet
 });
 
-test('lights: places the planned torches and reports what is left dark', async (t) => {
-  // a 33 x 13 x 33 yard: dirt at y 60 (the box starts at y 60 = home 64 - 4), dark everywhere
-  const W = 33, H = 13, L = 33;
+test('lights: torches checked against the real light; one that lit nothing comes back up, and that spot is left out', async (t) => {
+  // a 33 x 13 x 33 yard from (-16, 60, -16): dirt at y 60, dark everywhere; real light comes from placed torches
+  // (14 less the taxicab distance), except one walled-off cell that stays dark whatever is placed
+  const W = 33, H = 13, L = 33, ox = -16, oy = 60, oz = -16;
   const blocks = new Array(W * H * L).fill('air');
   for (let i = 0; i < W * L; i++) blocks[i] = 'dirt';
-  const placed: string[] = [];
+  const torches: { x: number; y: number; z: number }[] = [];
+  const walled = { x: 16, y: 61, z: 16 };
+  const light = () => blocks.map((_, i) => {
+    const x = ox + i % W, y = oy + Math.floor(i / (W * L)), z = oz + Math.floor(i / W) % L;
+    if (x === walled.x && y === walled.y && z === walled.z) return 0;
+    return Math.max(0, ...torches.map(p => 14 - Math.abs(p.x - x) - Math.abs(p.y - y) - Math.abs(p.z - z)));
+  });
+  const acts: string[] = [];
+  const w = world();
   const ctx = {
-    s: snap([{ slot: 0, name: 'torch', count: 10 }]), world: world(), signal: new AbortController().signal,
-    act: async (tool: string, a: Record<string, unknown> = {}) => { placed.push(`${tool} ${a.x},${a.y},${a.z} ${a.item}`); return { ok: true, text: `Placed torch at (${a.x}, ${a.y}, ${a.z})` }; },
-    call: (async (m: string) => (m === 'world.region' ? { blocks } : { block: new Array(W * H * L).fill(0) })) as GoalContext['call'],
+    s: snap([{ slot: 0, name: 'torch', count: 20 }]), world: w, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      const p = { x: Number(a.x), y: Number(a.y), z: Number(a.z) };
+      acts.push(`${tool} ${p.x},${p.y},${p.z}`);
+      if (tool === 'place-block') torches.push(p);
+      if (tool === 'dig-block') torches.splice(torches.findIndex(q => q.x === p.x && q.y === p.y && q.z === p.z), 1);
+      return { ok: true, text: tool === 'place-block' ? `Placed torch at (${p.x}, ${p.y}, ${p.z})` : 'Dug torch' };
+    },
+    call: (async (m: string) => (m === 'world.region' ? { blocks } : { block: light() })) as GoalContext['call'],
     status: async () => ({ inWorld: true, username: 'b', screen: null }),
     progress: () => undefined
   } as GoalContext;
   t.regex(lights.wants(ctx.s, ctx.world) ?? '', /daily round/);
   const r = await lights.run(ctx);
-  t.true(placed.length > 0 && placed.every(p => /^place-block -?\d+,61,-?\d+ torch$/.test(p)));
-  t.regex(r, /^placed \d+\/\d+ torch\(es\)/);
+  t.regex(r, /^placed \d+ torch\(es\); 1 of \d+ dark spot\(s\) left \(left out from now on\)$/);
+  t.true(acts.filter(a => a.startsWith('place-block')).every(a => / -?\d+,61,-?\d+$/.test(a)));
+  t.deepEqual(w.darkIgnore, ['16,61,16']);
   t.is(lights.wants(ctx.s, ctx.world), null); // done for today
+  // the next day: nothing left that a torch could do
+  ctx.s = { ...ctx.s, now: ctx.s.now + 21 * 60_000 };
+  acts.length = 0;
+  t.is(await lights.run(ctx), 'the yard is lit');
+  t.deepEqual(acts, []);
 });
 
 test('farm: a daily round from the middle of the farmland, wheat baked into bread', async (t) => {
@@ -116,4 +137,24 @@ test('stock: a trip that found nothing leaves that resource alone for a while', 
   await stock.run(ctx);
   t.deepEqual(stockShort(s, w), []);
   t.deepEqual(stockShort({ ...s, now: s.now + 31 * 60_000 }, w).map(x => x.name), ['coal']);
+});
+
+test('lightArea: a torch that lights nothing dark is taken back up', async (t) => {
+  // one spot a mob could stand on, walled off from any light; the plan's torch goes on it and does nothing
+  const box = { x: -16, y: 60, z: -16, width: 33, height: 13, length: 33 };
+  const blocks = new Array(box.width * box.height * box.length).fill('air');
+  blocks[16 + 16 * box.width] = 'dirt'; // (0, 60, 0)
+  const acts: string[] = [];
+  const io = {
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      acts.push(`${tool} ${a.x},${a.y},${a.z}`);
+      return { ok: true, text: tool === 'place-block' ? 'Placed torch at (0, 61, 0)' : 'Dug torch' };
+    },
+    call: (async (m: string) => (m === 'world.region' ? { blocks } : { block: new Array(blocks.length).fill(0) })) as GoalContext['call']
+  };
+  const r = await lightArea(io, { x: 0, y: 64, z: 0 }, 16, { place: true, max: 5, ignore: new Set() });
+  t.deepEqual(acts, ['place-block 0,61,0', 'dig-block 0,61,0']);
+  t.deepEqual(r.undone, [{ x: 0, y: 61, z: 0 }]);
+  t.deepEqual(r.left, [{ x: 0, y: 61, z: 0 }]);
+  t.deepEqual((await lightArea(io, { x: 0, y: 64, z: 0 }, 16, { place: false, max: 5, ignore: new Set(['0,61,0']) })).dark, []);
 });
