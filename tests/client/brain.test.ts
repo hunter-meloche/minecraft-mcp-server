@@ -82,7 +82,9 @@ function fakeRuntime(state: { pos: { x: number; y: number; z: number }; time: nu
       dimension: 'overworld', sleeping: !!state.sleeping, health: 20, food: 20 }),
     home: () => ({ x: 0, y: 64, z: 0, dimension: 'overworld' }),
     lastDeath: () => undefined,
-    setManualHook: () => undefined
+    setManualHook: () => undefined,
+    builtNear: () => [],
+    restoreBlock: async () => undefined, adoptStates: () => undefined
   };
   return { rt, calls };
 }

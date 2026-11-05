@@ -6,7 +6,8 @@ import { activityAt } from './schedule.js';
 import { BrainMemory, findLandmarks, type WorldMemory } from './memory.js';
 import { returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { food, recoverGoal, retreat } from './food.js';
-import { kit, lights, smelt, stash, stock } from './chores.js';
+import { farm, kit, lights, smelt, stash, stock } from './chores.js';
+import { repairGoal } from './repair.js';
 
 /**
  * The bot's own low-level AI for the client backend, built like a mob's goal selector on a villager's schedule: every
@@ -59,7 +60,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, stock, lights, returnIdle];
+    this.goals = opts.goals ?? [wake, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, repairGoal(rt), lights, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

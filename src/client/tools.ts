@@ -174,6 +174,20 @@ export interface ClientRuntime {
   lastDeath: () => { at: Pos; time: number } | undefined;
   /** called before any tool the LLM runs that does more than look (the brain steps back) */
   setManualHook: (fn: ((tool: string) => Promise<void>) | undefined) => void;
+  /**
+   * Blocks the bot built (its protected positions) in the dimension it was in at the last status read, within
+   * `radius` blocks of `center` (horizontally, and no further up or down), each with the block state that stood
+   * there when it was built, when that is known (positions protected before states were kept have none).
+   */
+  builtNear: (center: Pos, radius: number) => { at: Pos; state?: string }[];
+  /**
+   * Put `item` back at `at` (selecting it, clearing a wrong block, stepping out of the cell or closer as needed),
+   * turned to `facing` (the way the bot looks while placing: see placerFacing) when given. Resolves to why it could
+   * not, or undefined once placed; the position stays protected, with the state it was built with.
+   */
+  restoreBlock: (at: Pos, item: string, facing?: string) => Promise<string | undefined>;
+  /** Remember the block state of built positions that have none yet (protected before states were kept). */
+  adoptStates: (blocks: { at: Pos; state: string }[]) => void;
 }
 
 export interface ClientToolOptions {
@@ -217,6 +231,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   const events = bridge as unknown as { on?: (event: string, fn: (e: { type: string; at?: Pos }) => void) => void };
   events.on?.('event', e => { if (e.type === 'death' && e.at) lastDeath = { at: e.at, time: Date.now() }; });
   let syncedVersion = -1;
+  /** the dimension at the last status read */
+  let lastDimension = 'overworld';
   /** Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current. */
   const syncProtection = async (dim: string, force = false) => {
     if (!force && syncedVersion === protection.version) return;
@@ -227,6 +243,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     const s = await call<Status>('status');
     if (!s.inWorld) throw new Error(`The bot is not in a world yet (screen: ${s.screen ?? 'none'}). Try again shortly.`);
     protection.attach(worldIdFromSeed(s.hashedSeed ?? undefined));
+    lastDimension = s.dimension ?? 'overworld';
     // a relaunched client starts with none: resend when its count differs
     await syncProtection(s.dimension ?? 'overworld', s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length);
     return s;
@@ -365,15 +382,20 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     z: origin.z + Math.floor(i / layout.width) % layout.length
   });
 
-  /** World positions of the structure's block cells (not air, not leave-as-is) that hold a block now. */
-  const standing = (origin: Pos, layout: Schematic, world: (string | null)[]): Pos[] => {
+  /**
+   * Protect the structure's block cells (not air, not leave-as-is) that hold a block now, remembering the block
+   * that stands in each (a later integrity check puts back what goes missing).
+   */
+  const protectStanding = (dim: string, origin: Pos, layout: Schematic, world: (string | null)[]): void => {
     const leave = layout.palette[LEAVE];
-    const out: Pos[] = [];
+    const at: Pos[] = [];
+    const states: string[] = [];
     layout.blocks.forEach((b, i) => {
       if (b === 0 || b === leave || !world[i] || /^(minecraft:)?(air|cave_air|void_air)$/.test(world[i]!)) return;
-      out.push(cellPos(origin, layout, i));
+      at.push(cellPos(origin, layout, i));
+      states.push(world[i]!.replace(/^minecraft:/, ''));
     });
-    return out;
+    protection.add(dim, at, states);
   };
 
   /** The world's blocks in a structure's box (for checkBuild). */
@@ -576,7 +598,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (r.reason === 'the bot is standing there') return factory.createResponse(`You can't place a block where you're standing or one block above`);
         return factory.createResponse(`Failed to place block at ${fmt(p)}: ${r.reason ?? 'the server did not accept it'}`);
       }
-      protection.add(await dimension(), [p]);
+      protection.add(await dimension(), [p], [r.block?.replace(/^minecraft:/, '')]);
       return factory.createResponse(`Placed ${r.block} at ${fmt(p)} using ${r.face} face`);
     },
 
@@ -802,7 +824,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (s.gameMode !== 'creative') {
           // only what is not standing yet: a second run continues a build
           const before = checkBuild(layout, now);
-          protection.add(dim, standing(origin, layout, now)); // what stands of it is the bot's, even if it stops here
+          protectStanding(dim, origin, layout, now); // what stands of it is the bot's, even if it stops here
           // done only when every block stands and every '.' cell is empty (a clearing-only plan has no blocks at all)
           const toClear = layout.blocks.filter((b, i) => b === 0 && !!now[i] && !/^(minecraft:)?(air|cave_air|void_air)$/.test(now[i]!) &&
             !protection.has(dim, cellPos(origin, box, i))).length;
@@ -887,7 +909,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const finalWorld = await region(origin, layout);
         const check = checkBuild(layout, finalWorld);
         // what stands now is the bot's: mine-blocks leaves it alone
-        protection.add(await dimension(), standing(origin, layout, finalWorld));
+        protectStanding(await dimension(), origin, layout, finalWorld);
         if (check.placed < check.total) {
           const inv = await inventoryCounts();
           const missing = Object.entries(check.missing).map(([n, c]) => `${n} x${c} (have ${inv.counts.get(n) ?? 0})`).join(', ');
@@ -1455,6 +1477,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       return world ? readHomes()[world]?.[name] : undefined;
     },
     lastDeath: () => lastDeath,
-    setManualHook: fn => { manualHook = fn; }
+    setManualHook: fn => { manualHook = fn; },
+    builtNear: (center, radius) => protection.entries(lastDimension).filter(({ at }) =>
+      Math.hypot(at.x - center.x, at.z - center.z) <= radius && Math.abs(at.y - center.y) <= radius),
+    restoreBlock: async (at, item, facing) => {
+      const p = floorPos(at);
+      const why = await placeFacing(p, item, facing);
+      // the bot's again (the state it was built with is kept: a torch put back on the floor is still the wall torch)
+      if (!why) protection.add(await dimension(), [p]);
+      return why;
+    },
+    adoptStates: blocks => {
+      const fresh = blocks.filter(b => !protection.stateOf(lastDimension, b.at));
+      if (fresh.length) protection.add(lastDimension, fresh.map(b => b.at), fresh.map(b => b.state.replace(/^minecraft:/, '')));
+    }
   };
 }

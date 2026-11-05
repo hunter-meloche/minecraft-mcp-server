@@ -6,7 +6,7 @@ import { chestTotals, key, peekChest, storeInChests, takeFromChests } from './ch
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
 import { planTorches, yardBox } from './lighting.js';
 import { daylightLeft } from './schedule.js';
-import type { WorldMemory } from './memory.js';
+import { farmCentre, type WorldMemory } from './memory.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -257,3 +257,33 @@ export const lights: Goal = {
   }
 };
 
+
+// ------------------------------------------------------------------------------------------------ farm
+
+/** Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat. */
+export const farm: Goal = {
+  name: 'farm',
+  priority: 45,
+  timeoutMs: 6 * MINUTE,
+  retryMs: 15 * MINUTE,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || !awakeAtHome(s) || !world.landmarks.farmland.length) return null;
+    return since(world, 'farm', s.now) > 20 * MINUTE ? 'daily round: the farm' : null;
+  },
+  run: async ctx => {
+    done(ctx.world, 'farm', ctx.s.now);
+    const centre = farmCentre(ctx.world)!;
+    await ctx.act('move-to-position', { ...centre, range: 3, timeoutMs: 90_000 });
+    const r = await ctx.act('farm', { range: 16, timeoutMs: 180_000 });
+    ctx.progress(r.text.slice(0, 160));
+    const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
+    const wheat = inv.items.filter(i => i.name === 'wheat').reduce((a, i) => a + i.count, 0);
+    let baked = '';
+    if (wheat >= 3) {
+      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(wheat / 3) });
+      if (b.ok) baked = `; baked ${Math.floor(wheat / 3)} bread`;
+    }
+    if (!r.ok) throw new Error(r.text);
+    return `${r.text.slice(0, 120)}${baked}`;
+  }
+};

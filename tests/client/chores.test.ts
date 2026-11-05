@@ -1,5 +1,5 @@
 import test from 'ava';
-import { kit, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
+import { farm, kit, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
 import { food, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -82,4 +82,22 @@ test('lights: places the planned torches and reports what is left dark', async (
   t.true(placed.length > 0 && placed.every(p => /^place-block -?\d+,61,-?\d+ torch$/.test(p)));
   t.regex(r, /^placed \d+\/\d+ torch\(es\)/);
   t.is(lights.wants(ctx.s, ctx.world), null); // done for today
+});
+
+test('farm: a daily round from the middle of the farmland, wheat baked into bread', async (t) => {
+  const w = world({ landmarks: { chests: [CHEST], farmland: [{ x: 4, y: 63, z: 4 }, { x: 6, y: 63, z: 4 }], furnace: undefined } });
+  const s = snap(gear());
+  t.is(farm.wants(s, w), 'daily round: the farm');
+  const acts: string[] = [];
+  const ctx = {
+    s, world: w, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => { acts.push(`${tool} ${JSON.stringify(a)}`); return { ok: true, text: tool === 'farm' ? 'Harvested wheat x7' : 'ok' }; },
+    call: (async () => ({ items: [{ slot: 3, name: 'wheat', count: 7 }] })) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  } as GoalContext;
+  t.is(await farm.run(ctx), 'Harvested wheat x7; baked 2 bread');
+  t.deepEqual(acts.map(a => a.split(' ')[0]), ['move-to-position', 'farm', 'craft-item']);
+  t.regex(acts[0], /"x":5,"y":64,"z":4/);
+  t.is(farm.wants(s, w), null);
 });

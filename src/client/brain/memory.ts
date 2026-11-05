@@ -31,6 +31,14 @@ export interface WorldMemory {
 
 export const DEFAULT_LEASH = 96;
 
+/** The farm's middle, a block above the farmland. */
+export function farmCentre(world: WorldMemory): { x: number; y: number; z: number } | undefined {
+  const f = world.landmarks.farmland;
+  if (!f.length) return undefined;
+  const x = f.reduce((a, p) => a + p.x, 0) / f.length, z = f.reduce((a, p) => a + p.z, 0) / f.length;
+  return { x: Math.round(x), y: f[0].y + 1, z: Math.round(z) };
+}
+
 export class BrainMemory {
   private data: Record<string, WorldMemory> = {};
 

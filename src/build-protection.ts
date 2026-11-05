@@ -30,27 +30,50 @@ export function canPlaceAgainst<T extends { name: string; getProperties?: () => 
 type BreakRule = (block: { position: Vec3 }) => number;
 interface MovementsWithExclusions { exclusionAreasBreak: BreakRule[] }
 
-/** Where the placed-block list survives MCP restarts: one list of block keys per world. */
+/**
+ * Where the placed-block list survives MCP restarts: one list of block keys ("dim:x,y,z") per world. The client
+ * backend also keeps the block state each key had when built (`states`, by key); a store may ignore them.
+ */
 export interface ProtectionStore {
   load(world: string): string[];
-  save(world: string, keys: string[]): void;
+  /** `states` given: replace the world's remembered block states too; left out: keep them as they are */
+  save(world: string, keys: string[], states?: Record<string, string>): void;
+  /** the block states saved with the keys (none for a file written before states were kept) */
+  loadStates?(world: string): Record<string, string>;
 }
 
 export const DEFAULT_PROTECTION_FILE = path.join(os.homedir(), '.minecraft-mcp-server', 'placed-blocks.json');
 
+/** The file's entry for block states: { [world]: { [key]: state } }, beside the worlds' key lists. */
+const STATES_ENTRY = '$states';
+
+/**
+ * The store as one JSON file: { "seed:123": ["overworld:0,64,0", ...], "$states": { "seed:123": { "overworld:0,64,0":
+ * "oak_log[axis=y]" } } }. A file from before states (key lists only) loads as positions without states.
+ */
 export function jsonFileStore(file = DEFAULT_PROTECTION_FILE): ProtectionStore {
-  const readAll = (): Record<string, string[]> => {
+  type File = Record<string, unknown>;
+  const readAll = (): File => {
     try {
-      return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, string[]>;
+      return JSON.parse(fs.readFileSync(file, 'utf8')) as File;
     } catch {
       return {}; // missing or unreadable file: start empty
     }
   };
+  const statesOf = (all: File) => {
+    const s = all[STATES_ENTRY];
+    return (s && typeof s === 'object' ? s : {}) as Record<string, Record<string, string>>;
+  };
   return {
-    load: (world) => readAll()[world] ?? [],
-    save: (world, keys) => {
+    load: (world) => {
+      const keys = readAll()[world];
+      return Array.isArray(keys) ? keys as string[] : [];
+    },
+    loadStates: (world) => statesOf(readAll())[world] ?? {},
+    save: (world, keys, states) => {
       const all = readAll();
       all[world] = keys;
+      if (states) all[STATES_ENTRY] = { ...statesOf(all), [world]: states };
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, JSON.stringify(all, null, 1));
     }

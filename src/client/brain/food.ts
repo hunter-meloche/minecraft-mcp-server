@@ -1,7 +1,7 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
-import type { Pos } from './memory.js';
+import { farmCentre, type Pos } from './memory.js';
 import { peekChest, rememberReply } from './chests.js';
 
 /**
@@ -117,8 +117,7 @@ export const food: Goal = {
 
     // 4. the farm
     if (!enough() && working && landmarks.farmland.length) {
-      const c = landmarks.farmland.reduce((a, p) => ({ x: a.x + p.x / landmarks.farmland.length, y: p.y, z: a.z + p.z / landmarks.farmland.length }), { x: 0, y: 0, z: 0 });
-      const centre = { x: Math.round(c.x), y: c.y + 1, z: Math.round(c.z) };
+      const centre = farmCentre(ctx.world)!;
       await ctx.act('move-to-position', { ...centre, range: 3, timeoutMs: 90_000 });
       const r = await ctx.act('farm', { range: 16, timeoutMs: 180_000 });
       if (r.ok) say(`farmed (${r.text.slice(0, 80)})`);

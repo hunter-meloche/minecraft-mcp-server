@@ -30,13 +30,13 @@ function setup(given: Record<string, unknown | ((p: Record<string, unknown>) => 
   });
   const gameDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-client-'));
   const store = new MessageStore();
-  registerClientTools(new ToolFactory(server, connection), { request } as unknown as BridgeClient, store, { gameDir, protectionStore });
+  const rt = registerClientTools(new ToolFactory(server, connection), { request } as unknown as BridgeClient, store, { gameDir, protectionStore });
   const tools = (server.tool as sinon.SinonStub).getCalls();
   const run = async (name: string, args: Record<string, unknown> = {}) => {
     const r = await tools.find(c => c.args[0] === name)!.args[3](args);
     return { text: r.content.map((c: { text: string }) => c.text).join('\n'), isError: !!r.isError };
   };
-  return { run, request, gameDir, store, tools };
+  return { run, request, gameDir, store, tools, rt };
 }
 
 test('the client backend offers every mineflayer tool with the same schema, plus its own', (t) => {
@@ -355,6 +355,27 @@ test('blocks the bot built are remembered per world, and mine-blocks digs around
   // the game client got the list (it becomes Baritone's no-break list near the builds)
   t.deepEqual(miner.request.getCalls().find(c => c.args[0] === 'protect.set')?.args[1], { positions: [[0, 65, 0]] });
   t.regex(r.text, /^Mined 1 oak_log one by one in [\d.]+s, leaving 1 that belong to your builds: oak_log x1\.$/);
+});
+
+test('built blocks keep the state they were built with, for the brain to put back what goes missing', async (t) => {
+  const saved: Record<string, string[]> = {};
+  const states: Record<string, Record<string, string>> = {};
+  const store: ProtectionStore = { load: w => saved[w] ?? [], save: (w, keys, st) => { saved[w] = keys; if (st) states[w] = st; }, loadStates: w => states[w] ?? {} };
+  const status = { ...STATUS, hashedSeed: '-42' };
+  const spec = { palette: { L: 'oak_log[axis=y]', S: 'oak_stairs[facing=east]' }, layers: [['LS']] };
+  const { run, rt, request } = setup({
+    status, 'item.select': { held: 'oak_stairs' }, place: { placed: true, block: 'wall_torch', face: 'west' },
+    inventory: { items: [{ slot: 1, name: 'oak_log', count: 1 }, { slot: 2, name: 'oak_stairs', count: 1 }], selectedSlot: 0, held: null },
+    'world.region': (p: Record<string, number>) => ({ blocks: p.width === 2 ? ['oak_log[axis=y]', 'oak_stairs[facing=east,half=bottom]'] : new Array(p.width * p.height * p.length).fill('air') }),
+    build: { reason: 'done', seconds: 3, baritone: [], used: { oak_log: 1, oak_stairs: 1 } }
+  }, store);
+  t.false((await run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'bit' })).isError);
+  await run('place-block', { x: 0, y: 66, z: 1, item: 'torch' });
+  t.deepEqual(states['seed:-42'], { 'overworld:0,64,0': 'oak_log[axis=y]', 'overworld:1,64,0': 'oak_stairs[facing=east,half=bottom]', 'overworld:0,66,1': 'wall_torch' });
+  t.deepEqual(rt.builtNear({ x: 0, y: 64, z: 0 }, 1), [
+    { at: { x: 0, y: 64, z: 0 }, state: 'oak_log[axis=y]' }, { at: { x: 1, y: 64, z: 0 }, state: 'oak_stairs[facing=east,half=bottom]' }]);
+  t.is(await rt.restoreBlock({ x: 1, y: 64, z: 0 }, 'oak_stairs', 'east'), undefined);
+  t.like(request.getCalls().filter(c => c.args[0] === 'place').at(-1)!.args[1], { x: 1, y: 64, z: 0, facing: 'east' });
 });
 
 test('build-structure leaves blocks the bot placed in cells the spec clears (a rebuild cleared the cabin door)', async (t) => {
