@@ -268,8 +268,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
     'move-to-position': async ({ x, y, z, range = 1, timeoutMs = 180_000 }) => {
       const target = floorPos({ x: Number(x), y: Number(y), z: Number(z) });
-      const r = await call<ProcessResult & { arrived: boolean; distance: number }>('goto',
+      const start = (await status()).block!;
+      let r = await call<ProcessResult & { arrived: boolean; distance: number }>('goto',
         { ...target, range, timeoutMs }, Number(timeoutMs) + 15_000);
+      // stuck in flowing water where Baritone can't plan at all (a 1x1 shaft with water running in): block the flow, retry
+      if (!r.arrived && r.at && fmt(floorPos(r.at)) === fmt(start) && await unstickFromWater()) {
+        r = await call<ProcessResult & { arrived: boolean; distance: number }>('goto', { ...target, range, timeoutMs }, Number(timeoutMs) + 15_000);
+      }
       if (r.arrived) return factory.createResponse(`Successfully moved to position near ${fmt(target)}`);
       const why = r.reason === 'timeout' ? `timed out after ${r.seconds}s` : 'no path found';
       throw new Error(`Could not reach ${fmt(target)}: ${why}. Stopped at ${fmt(r.at!)}, ${r.distance} blocks away.${baritoneSaid(r.baritone)}`);
@@ -329,6 +334,28 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   /** The world's blocks in a structure's box (for checkBuild). */
   const region = async (origin: Pos, layout: Schematic) => (await call<{ blocks: (string | null)[] }>('world.region',
     { ...origin, width: layout.width, height: layout.height, length: layout.length }, 30_000)).blocks;
+
+  /**
+   * The bot sat for minutes at the bottom of a 1x1 shaft with water running in: Baritone can't plan out of flowing
+   * water there, and blocking the water fixed it at once. Put cobblestone (or other stone) in the water cells beside
+   * the bot's feet and head; returns how many were placed (0: not in water, or nothing to block).
+   */
+  const unstickFromWater = async (): Promise<number> => {
+    const me = (await status()).block!;
+    const box = { x: me.x - 1, y: me.y, z: me.z - 1, width: 3, height: 2, length: 3 };
+    const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', box);
+    if (!blocks.some(b => /^(minecraft:)?water/.test(b ?? ''))) return 0;
+    const counts = (await inventoryCounts()).counts;
+    const stone = ['cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'diorite', 'granite', 'dirt'].find(n => (counts.get(n) ?? 0) > 0);
+    if (!stone) return 0;
+    let placed = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      const x = i % 3, z = Math.floor(i / 3) % 3, y = Math.floor(i / 9);
+      if ((x === 1 && z === 1) || !/^(minecraft:)?water/.test(blocks[i] ?? '')) continue; // not the bot's own cells
+      if (!(await placeFacing({ x: box.x + x, y: box.y + y, z: box.z + z }, stone))) placed++;
+    }
+    return placed;
+  };
 
   /** Seeds for each crop, in planting preference. */
   const SEEDS = ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds'];
@@ -1063,7 +1090,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const r = await call<ProcessResult & { arrived: boolean }>('goto', { ...stop, xz: true, range: 8, timeoutMs: Math.min(left(), 240_000) }, Math.min(left(), 240_000) + 15_000);
         if (!r.arrived && Math.hypot(home.x - r.at!.x, home.z - r.at!.z) >= d - 4) break; // no progress on this leg
       }
-      if (left() > 5000) await goNear(home, 2, Math.min(left(), 180_000)).catch(() => undefined);
+      if (left() > 5000) {
+        const before = (await status()).block!;
+        const r = await goNear(home, 2, Math.min(left(), 180_000)).catch(() => undefined);
+        if (r && !r.arrived && r.at && fmt(floorPos(r.at)) === fmt(before) && await unstickFromWater() && left() > 5000) {
+          await goNear(home, 2, Math.min(left(), 180_000)).catch(() => undefined);
+        }
+      }
       const at = (await status()).block!;
       const d = Math.hypot(home.x - at.x, home.y - at.y, home.z - at.z);
       const secs = Math.round((Date.now() - started) / 1000);

@@ -80,7 +80,7 @@ test('a bot not yet in the world says so instead of failing oddly', async (t) =>
 test('move-to-position: arrival, and an honest failure with what Baritone said', async (t) => {
   const ok = setup({ goto: { arrived: true, reason: 'done', seconds: 36, baritone: [], at: { x: 9, y: 64, z: 9 }, distance: 0.5 } });
   t.is((await ok.run('move-to-position', { x: 9, y: 64, z: 9 })).text, 'Successfully moved to position near (9, 64, 9)');
-  t.like(ok.request.firstCall.args[1], { x: 9, y: 64, z: 9, range: 1 });
+  t.like(ok.request.getCalls().find(c => c.args[0] === 'goto')!.args[1], { x: 9, y: 64, z: 9, range: 1 });
   const stuck = setup({ goto: { arrived: false, reason: 'done', seconds: 19, baritone: ['Going to: GoalBlock{x=-677,y=59,z=-297}'], at: { x: -679, y: 61, z: -300 }, distance: 4.1 } });
   const r = await stuck.run('move-to-position', { x: -677, y: 59, z: -297 });
   t.true(r.isError);
@@ -587,4 +587,22 @@ test('level-area works in tiles: cuts, then fills when it has the blocks', async
   t.deepEqual(builds, ['level_tile_cut.schem', 'level_tile_fill.schem']);
   t.regex(r.text, /^Level \(0, 0\)\.\.\(1, 0\) to ground y 64: cut 1 block\(s\) \(ground 1\), fill 1 dirt \+ 0 cobblestone/);
   t.regex(r.text, /Worked 1\/1 tile\(s\) of 8x8 in \d+s\. Now level\.$/);
+});
+
+test('move-to-position blocks running water around a bot stuck in it, then tries again', async (t) => {
+  let gotos = 0;
+  const placed: unknown[] = [];
+  const { run } = setup({
+    // the bot stands at (10, 64, -4) with water running in from the north cell at its feet
+    'world.region': { blocks: ['stone', 'water[level=3]', 'stone', 'stone', 'water[level=4]', 'stone', 'stone', 'stone', 'stone', ...Array(9).fill('air')] },
+    goto: () => (gotos++ === 0
+      ? { arrived: false, reason: 'timeout', seconds: 30, baritone: [], at: { x: 10, y: 64, z: -4 }, distance: 7 }
+      : { arrived: true, reason: 'done', seconds: 8, baritone: [], at: { x: 9, y: 70, z: -4 }, distance: 0 }),
+    inventory: { items: [{ slot: 1, name: 'cobblestone', count: 10 }], selectedSlot: 0, held: null },
+    'item.select': { held: 'cobblestone' },
+    place: (p: Record<string, unknown>) => { placed.push(p); return { placed: true, block: 'cobblestone', face: 'down' }; }
+  });
+  t.is((await run('move-to-position', { x: 9, y: 70, z: -4 })).text, 'Successfully moved to position near (9, 70, -4)');
+  t.is(gotos, 2);
+  t.like(placed, [{ x: 10, y: 64, z: -5 }]); // the north cell; not the bot's own
 });
