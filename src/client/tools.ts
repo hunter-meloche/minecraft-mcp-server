@@ -884,6 +884,41 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         }
         tiles.push(...((tz / TILE) % 2 ? row.reverse() : row));
       }
+      // Baritone may break things it walks past while building (protection has to be off for the cut: it works by block
+      // type, and dirt is one): it took the cabin's outside pressure plate and the block under it. Remember every
+      // protected block in the area and the block it stands on, and put back what goes missing.
+      const watched = new Map<string, { at: Pos; state: string }>();
+      blocks.forEach((b, i) => {
+        const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
+        if (!b || /^(minecraft:)?(air|cave_air)$/.test(b) || !protection.has(dim, at)) return;
+        watched.set(fmt(at), { at, state: b });
+        const j = i - box.width * box.length;
+        const under = blocks[j];
+        if (j >= 0 && under && !/^(minecraft:)?(air|cave_air|water)/.test(under)) {
+          const below = { ...at, y: at.y - 1 };
+          if (!watched.has(fmt(below))) watched.set(fmt(below), { at: below, state: under });
+        }
+      });
+      const restored: string[] = [];
+      const lost: string[] = [];
+      const repair = async () => {
+        // one read of the area, compared locally (a lookup per watched block took most of a tile's time)
+        const nowAll = await readBox(box);
+        const idOf = (st: string | null | undefined) => (st ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+        const wanted = [...watched.values()].sort((a, b) => a.at.y - b.at.y); // supports first
+        for (const w of wanted) {
+          const k = (w.at.x - box.x) + (w.at.z - box.z) * box.width + (w.at.y - box.y) * box.width * box.length;
+          const nowName = idOf(nowAll[k]);
+          const id = idOf(w.state);
+          if (nowName === id) continue;
+          if (nowName && !/^(air|cave_air|short_grass|tall_grass|leaf_litter|water)$/.test(nowName)) continue; // something else stands there
+          const item = id === 'wall_torch' ? 'torch' : id === 'grass_block' ? 'dirt' : id;
+          if (/_door$|_bed$/.test(id)) { lost.push(`${id} at ${fmt(w.at)}`); continue; }
+          const facing = /facing=(\w+)/.exec(w.state)?.[1];
+          const why = await placeFacing(w.at, item, facing ? placerFacing(id, facing) : undefined);
+          if (why) lost.push(`${id} at ${fmt(w.at)} (${why})`); else restored.push(`${item} at ${fmt(w.at)}`);
+        }
+      };
       const me = (await status()).position!;
       // start from the tile nearest the bot, then follow the sweep from there round to the beginning
       const first = tiles.reduce((best, t, i) => (Math.hypot(t.x + t.width / 2 - me.x, t.z + t.length / 2 - me.z) <
@@ -911,6 +946,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           }
         }
         tilesDone++;
+        await repair();
       }
       const after = planLevel(box, await readBox(box), level, p => protection.has(dim, p));
       const have = (await inventoryCounts()).counts;
@@ -919,7 +955,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         ? `Still to do: cut ${after.cut}, fill ${after.dirt} dirt (have ${have.get('dirt') ?? 0}) + ${after.cobblestone} cobblestone (have ${have.get('cobblestone') ?? 0}).` +
           (shortTiles ? ` ${shortTiles} tile(s) were short of fill blocks.` : '') + ' Run level-area again to continue.'
         : 'Now level.';
-      const text = `${summary}\nWorked ${tilesDone}/${tiles.length} tile(s) of ${TILE}x${TILE} in ${secs}s. ${rest}`;
+      const fixes = (restored.length ? ` Put back what the work knocked out: ${restored.slice(0, 8).join(', ')}${restored.length > 8 ? ', ...' : ''}.` : '') +
+        (lost.length ? ` Could not put back: ${lost.slice(0, 8).join(', ')}.` : '');
+      const text = `${summary}\nWorked ${tilesDone}/${tiles.length} tile(s) of ${TILE}x${TILE} in ${secs}s. ${rest}${fixes}`;
       return after.spec ? factory.createErrorResponse(text) : factory.createResponse(text);
     }
   );
