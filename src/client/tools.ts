@@ -8,6 +8,7 @@ import { mineflayerToolDefinitions } from '../tools/register-all.js';
 import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
 import { ClientProtection } from './protection.js';
+import { survey, type Cluster } from './survey.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
 import { checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
@@ -818,6 +819,43 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         : r.before === r.after
           ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it is now ${after}`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+    }
+  );
+
+  factory.registerTool(
+    'survey-area',
+    'Look over an area around a point (default: the bot) without moving: surface heights, trees, water, clusters of blocks that look placed rather than natural (scaffolding, emergency walls, leftovers; the bot\'s own builds and furniture excluded) and open pits. Use it before clearing land.',
+    {
+      x: z.coerce.number().optional().describe('X of the centre (default: the bot)'),
+      z: z.coerce.number().optional().describe('Z of the centre'),
+      radius: z.coerce.number().int().min(4).max(64).optional().describe('How far around (default: 32)'),
+      yMin: z.coerce.number().int().optional().describe('Lowest Y to look at (default: 6 below the bot)'),
+      yMax: z.coerce.number().int().optional().describe('Highest Y (default: 20 above the bot)')
+    },
+    async ({ x, z: zz, radius = 32, yMin, yMax }: { x?: number; z?: number; radius?: number; yMin?: number; yMax?: number }) => {
+      const s = await status();
+      const me = s.block!;
+      const cx = x ?? me.x, cz = zz ?? me.z;
+      const y0 = yMin ?? me.y - 6, y1 = yMax ?? me.y + 20;
+      const box = { x: Math.floor(cx) - radius, y: y0, z: Math.floor(cz) - radius, width: 2 * radius + 1, height: y1 - y0 + 1, length: 2 * radius + 1 };
+      // read in slabs of whole layers (a region call holds at most 65536 blocks)
+      const perLayer = box.width * box.length;
+      const layers = Math.max(1, Math.floor(65_536 / perLayer));
+      const blocks: (string | null)[] = [];
+      for (let y = 0; y < box.height; y += layers) {
+        const hgt = Math.min(layers, box.height - y);
+        const part = await call<{ blocks: (string | null)[] }>('world.region', { ...box, y: box.y + y, height: hgt }, 60_000);
+        blocks.push(...part.blocks);
+      }
+      const dim = s.dimension ?? 'overworld';
+      const r = survey(box, blocks, p => protection.has(dim, p));
+      const fmtC = (c: Cluster) => `${c.blocks} block(s) ${fmt(c.min)}..${fmt(c.max)}: ${Object.entries(c.kinds).map(([n, k]) => `${n} x${k}`).join(', ')}`;
+      const lines = [
+        `Area (${box.x}, ${box.z})..(${box.x + box.width - 1}, ${box.z + box.length - 1}), y ${y0}..${y1}: ground ${r.surface.min}..${r.surface.max} (median ${r.surface.median}); ${r.trees} tree column(s), ${r.water} water column(s).`,
+        r.placed.length ? `Placed-looking blocks (${r.placed.length} cluster(s)):\n${r.placed.slice(0, 25).map(c => `- ${fmtC(c)}`).join('\n')}${r.placed.length > 25 ? `\n- ... ${r.placed.length - 25} more` : ''}` : 'No placed-looking blocks.',
+        r.pits.length ? `Open pits (${r.pits.length} column(s)): ${r.pits.slice(0, 20).map(p => `(${p.x}, ${p.surface}, ${p.z}) ${p.around - p.surface} deep`).join('; ')}${r.pits.length > 20 ? ' ...' : ''}` : 'No open pits.'
+      ];
+      return factory.createResponse(lines.join('\n'));
     }
   );
 
