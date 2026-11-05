@@ -19,7 +19,7 @@ export function projectGoal(tree: Milestone[]): Goal {
     wants: (s, world) => {
       if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || !Number.isFinite(s.distHome)) return null;
       if (daylightLeft(s.timeOfDay) < 2400) return null; // two minutes before the evening: not worth starting
-      if (s.health < 12 || s.slotsUsed >= 32) return null;
+      if (s.health < 12 || s.slotsUsed >= 35) return null; // its own materials can fill the pockets
       const m = nextMilestone(tree, s, world);
       if (!m) return null;
       const cur = progressOf(world).current;
