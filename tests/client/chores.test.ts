@@ -101,3 +101,19 @@ test('farm: a daily round from the middle of the farmland, wheat baked into brea
   t.regex(acts[0], /"x":5,"y":64,"z":4/);
   t.is(farm.wants(s, w), null);
 });
+
+test('stock: a trip that found nothing leaves that resource alone for a while', async (t) => {
+  const s = snap(gear());
+  const w = world({ chestItems: { '1,64,0': { oak_log: 40, cobblestone: 64, iron_ingot: 20 } } });
+  t.deepEqual(stockShort(s, w).map(x => x.name), ['coal']);
+  const ctx = {
+    s, world: w, signal: new AbortController().signal,
+    act: async (tool: string) => ({ ok: true, text: tool === 'mine-blocks' ? 'Stopped after 360s (time limit): nothing gained.' : 'Home' }),
+    call: (async () => ({})) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  } as GoalContext;
+  await stock.run(ctx);
+  t.deepEqual(stockShort(s, w), []);
+  t.deepEqual(stockShort({ ...s, now: s.now + 31 * 60_000 }, w).map(x => x.name), ['coal']);
+});

@@ -63,6 +63,7 @@ public final class Guardian {
         if (mode.equals("CREATIVE") || mode.equals("SPECTATOR")) return;
         hazards(mc, p);
         if (Combat.fighting || busy || Interact.using) return;
+        waterFooting(mc, p);
 
         // emergency: low and still being hurt -> wall in (or run) and eat
         // (checks for a standing shelter, not where one was: the lab found a bot back in its old cell with the
@@ -173,7 +174,7 @@ public final class Guardian {
         String hazard = null;
         int air = Math.max(0, p.getAirSupply()) * 20 / Math.max(1, p.getMaxAirSupply());
         if (p.isInLava()) hazard = "lava";
-        else if (p.isUnderWater() && (air <= 12 || "water".equals(escaping))) hazard = p.getAirSupply() >= p.getMaxAirSupply() && !p.isUnderWater() ? null : "water";
+        else if (p.isUnderWater() && (air <= surfaceAt(mc, p) || "water".equals(escaping))) hazard = p.getAirSupply() >= p.getMaxAirSupply() && !p.isUnderWater() ? null : "water";
         if (hazard != null && !hazard.equals(escaping)) {
             mc.options.keyJump.setDown(true);
             note(hazard.equals("water") ? "out of air under water (" + air + "/20): swimming up" : "in lava: jumping out");
@@ -193,6 +194,19 @@ public final class Guardian {
             }
         }
         escaping = hazard;
+    }
+
+    /**
+     * Air (of 20) at which to head up: enough to swim through the water overhead (about 2 blocks a second) with 2 s
+     * to spare. A flat 12 of 20 brought the bot up after 5 s under a 3-deep pond, before it could break the block it
+     * dove for, over and over.
+     */
+    static int surfaceAt(Minecraft mc, LocalPlayer p) {
+        BlockPos at = BlockPos.containing(p.getEyePosition());
+        int depth = 0;
+        while (depth < 24 && !mc.level.getFluidState(at.above(depth)).isEmpty()) depth++;
+        double seconds = depth / 2.0 + 2;
+        return Math.max(4, Math.min(14, (int) Math.ceil(seconds * 20 / 15)));
     }
 
     /** The closest cell a player can stand in (solid below, two free non-liquid cells) that isn't lava, or null. */
@@ -257,6 +271,26 @@ public final class Guardian {
             if (!Interact.replaceable(mc.level.getBlockState(cell))) return true;
         }
         return false;
+    }
+
+    private static int floatingBreak;
+
+    /**
+     * Mining while afloat is hopeless: a block breaks 5 times slower in water and 5 times slower again off the ground,
+     * and the bobbing carries the bot out of reach mid-block, so Baritone keeps starting on another one (the user saw
+     * it switch blocks over and over while it swam; a 6-minute coal trip came back with nothing). After half a second
+     * of breaking afloat, put a block under its feet: standing, it mines at water speed and stays put.
+     */
+    private static void waterFooting(Minecraft mc, LocalPlayer p) {
+        // counted over a window, not in a row: Baritone lets go of the block for a tick now and then while it re-aims
+        if (!p.isInWater() || p.onGround() || !mc.gameMode.isDestroying()) { floatingBreak = Math.max(0, floatingBreak - 1); return; }
+        if ((floatingBreak += 2) < 20) return;
+        floatingBreak = 0;
+        BlockPos below = p.blockPosition().below();
+        // not the block it is digging (down through the floor)
+        if (mc.hitResult instanceof BlockHitResult hit && hit.getBlockPos().equals(below)) return;
+        if (!Interact.replaceable(mc.level.getBlockState(below))) return; // floor there already: just bobbing above it
+        if (placeCover(below)) note("put a block under its feet to mine from (breaking while afloat in water)");
     }
 
     static final Direction[] SIDES = {Direction.EAST, Direction.WEST, Direction.SOUTH, Direction.NORTH};

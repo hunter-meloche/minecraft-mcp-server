@@ -63,9 +63,14 @@ export const stash: Goal = {
     done(ctx.world, 'stash', ctx.s.now);
     let dropped = 0;
     if (plan.drop.length) {
-      // thrown where the bot stands it picks them straight back up: throw them at the edge of the yard and walk off
+      // thrown where the bot stands it picks them straight back up: throw them at the edge of the yard, on the side
+      // away from the farm (the farm round collected the leaf litter thrown by it a minute before), and walk off
       const home = ctx.s.home!;
-      await ctx.act('move-to-position', { x: home.x - 10, y: home.y, z: home.z - 10, range: 2, timeoutMs: 60_000 });
+      const f = farmCentre(ctx.world);
+      const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
+      const len = Math.hypot(dx, dz) || 1;
+      const dump = { x: Math.round(home.x + dx / len * 14), y: home.y, z: Math.round(home.z + dz / len * 14) };
+      await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
       for (const e of plan.drop) {
         const r = await ctx.act('drop-item', { item: e.name, count: e.count });
         const m = /^Dropped (\d+)/.exec(r.text);
@@ -166,6 +171,9 @@ export const STOCK: { name: string; want: number; mine: string; counts: RegExp }
   { name: 'iron_ingot', want: 16, mine: 'iron_ore,deepslate_iron_ore', counts: /^(iron_ingot|raw_iron)$/ }
 ];
 
+/** After a trip that found none of something, leave it this long (try the next thing; what's near may be out of reach). */
+const FRUITLESS_WAIT = 30 * MINUTE;
+
 /** How short the home is of each stock item (kit gathering needs on top), most urgent first. */
 export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp }[] {
   const chest = chestTotals(world);
@@ -175,7 +183,8 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
   for (const n of kitNeeds(s.items, chest)) {
     for (const st of n.plan) if ('gather' in st) for (const [k, v] of Object.entries(st.gather)) extra[k] = (extra[k] ?? 0) + v;
   }
-  const out = STOCK.map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts)) })).filter(t => t.short > 0);
+  const out = STOCK.map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts)) }))
+    .filter(t => t.short > 0 && since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT);
   // what the kit is waiting for first
   return out.sort((a, b) => Number(!!extra[b.name]) - Number(!!extra[a.name]));
 }
@@ -207,6 +216,7 @@ export const stock: Goal = {
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
     const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 64), timeoutMs: budget });
     ctx.progress(r.text.slice(0, 160));
+    if (/nothing gained/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
     const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
     if (!back.ok) throw new Error(`mined, but could not get home: ${back.text}`);
     if (!r.ok) throw new Error(r.text);

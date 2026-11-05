@@ -62,6 +62,8 @@ public final class Handlers {
             r.addProperty("difficulty", mc.level.getLevelData().getDifficulty().getSerializedName());
             r.addProperty("timeOfDay", Math.floorMod(mc.level.getOverworldClockTime(), 24000L));
             r.addProperty("sleeping", pl.isSleeping());
+            r.addProperty("onGround", pl.onGround());
+            r.addProperty("destroying", mc.gameMode != null && mc.gameMode.isDestroying());
             r.addProperty("raining", mc.level.isRaining());
             r.addProperty("thundering", mc.level.isThundering());
             r.addProperty("hashedSeed", hashedSeed(mc));

@@ -68,6 +68,7 @@ export class Brain {
 
   setEnabled(on: boolean): void {
     this.enabled = on;
+    if (on) this.leaseUntil = 0; // handed back on purpose: no waiting out the LLM's quiet time
     this.note(on ? 'autonomy on' : 'autonomy off');
     if (on && !this.timer) {
       this.timer = setInterval(() => { void this.tick(); }, this.tickMs);

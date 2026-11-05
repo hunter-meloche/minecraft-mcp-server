@@ -30,7 +30,7 @@ export interface Status {
   position?: Pos; block?: Pos; health?: number; food?: number; saturation?: number; air?: number;
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
   timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
-  windowMinimized?: boolean; mouseGrabbed?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
+  windowMinimized?: boolean; mouseGrabbed?: boolean; onGround?: boolean; destroying?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
 }
 export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
@@ -269,7 +269,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           await call<Inventory>('inventory').then(inv => `; inventory ${packSlotsUsed(inv.items)}/36 slots used`, () => ''),
         `Backend: game client with Baritone (${s.process ? `busy: ${processName(s.process)}` : 'idle'})` +
           (s.windowMinimized !== undefined ? `; window ${s.windowMinimized ? 'minimized' : 'shown'}${s.mouseGrabbed ? ', mouse captured' : ''}` : '') +
-          (s.underWater ? `; under water, air ${s.air}/20` : '') + (s.inLava ? '; IN LAVA' : '')
+          (s.underWater ? `; under water, air ${s.air}/20${s.onGround === false ? ', afloat' : ''}` : '') + (s.destroying ? '; breaking a block' : '') + (s.inLava ? '; IN LAVA' : '')
       ].join('\n'));
     },
 
