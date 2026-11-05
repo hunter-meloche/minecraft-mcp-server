@@ -74,6 +74,11 @@ function fullWarning(items: { slot: number }[]): string {
   return packSlotsUsed(items) >= 36 ? ' The inventory is full: further drops stay on the ground (store or drop-item some).' : '';
 }
 
+/** Blocks Baritone builds scaffolding with (acceptableThrowawayItems in the bridge mod). */
+const SCAFFOLD = /^(minecraft:)?(cobblestone|cobbled_deepslate|netherrack|andesite|diorite|granite|tuff)$/;
+/** How far around a build to look for scaffolding it left. */
+const SCAFFOLD_MARGIN = 6;
+
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
 
@@ -355,6 +360,49 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!(await placeFacing({ x: box.x + x, y: box.y + y, z: box.z + z }, stone))) placed++;
     }
     return placed;
+  };
+
+  /** Any box, read in slabs that fit a region call. */
+  const readRegion = async (b: { x: number; y: number; z: number; width: number; height: number; length: number }) => {
+    const out: (string | null)[] = [];
+    const per = Math.max(1, Math.floor(65_536 / (b.width * b.length)));
+    for (let y = 0; y < b.height; y += per) {
+      const part = await call<{ blocks: (string | null)[] }>('world.region', { ...b, y: b.y + y, height: Math.min(per, b.height - y) }, 60_000);
+      out.push(...part.blocks);
+    }
+    return out;
+  };
+
+  /**
+   * Take down scaffolding a build left: blocks of Baritone's building materials that were air before the build, in
+   * the box around it, and not a cell the structure wants (left standing, they dotted the cleared land: pillars by
+   * the leveled area, single blocks at its edges). Top down, one pass; returns how many came down.
+   */
+  const removeScaffold = async (box: { x: number; y: number; z: number; width: number; height: number; length: number },
+    before: (string | null)[], origin: Pos, layout: Schematic): Promise<number> => {
+    const after = await readRegion(box).catch(() => undefined);
+    if (!after) return 0;
+    const leave = layout.palette[LEAVE];
+    const wanted = (p: Pos) => {
+      const lx = p.x - origin.x, ly = p.y - origin.y, lz = p.z - origin.z;
+      if (lx < 0 || ly < 0 || lz < 0 || lx >= layout.width || ly >= layout.height || lz >= layout.length) return false;
+      const b = layout.blocks[lx + lz * layout.width + ly * layout.width * layout.length];
+      return b !== 0 && b !== leave;
+    };
+    const found: Pos[] = [];
+    after.forEach((b, i) => {
+      if (!b || !SCAFFOLD.test(b) || !/^(minecraft:)?(air|cave_air|water|short_grass|tall_grass|leaf_litter)/.test(before[i] ?? 'air')) return;
+      const p = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
+      if (!wanted(p)) found.push(p);
+    });
+    found.sort((a, b) => b.y - a.y);
+    let removed = 0;
+    const dim = await dimension();
+    for (const p of found) {
+      const r = await call<{ dug: boolean }>('dig', { ...p, timeoutMs: 20_000 }, 35_000).catch(() => ({ dug: false }));
+      if (r.dug) { removed++; protection.remove(dim, p); }
+    }
+    return removed;
   };
 
   /** Seeds for each crop, in planting preference. */
@@ -739,6 +787,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       } else {
         return factory.createErrorResponse('Give either spec or file');
       }
+      // Baritone pillars up and bridges with its building blocks to reach things and leaves them standing: remember the
+      // surroundings so new ones can be taken down afterwards
+      const around = layout ? { x: origin.x - SCAFFOLD_MARGIN, y: origin.y - 2, z: origin.z - SCAFFOLD_MARGIN,
+        width: layout.width + 2 * SCAFFOLD_MARGIN, height: layout.height + 8, length: layout.length + 2 * SCAFFOLD_MARGIN } : undefined;
+      const aroundBefore = around ? await readRegion(around).catch(() => undefined) : undefined;
       const building = call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs }, timeoutMs + 15_000);
       // Baritone can stand still for minutes when nothing left is placeable from where it can stand (a log over a
       // doorway, a ridge with no stairs under it yet): when the box hasn't changed for STALL_MS, stop it and finish by hand
@@ -787,6 +840,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         }
         handFailures.push(...failures.values());
       }
+      let scaffoldRemoved = 0;
+      if (layout && around && aroundBefore) scaffoldRemoved = await removeScaffold(around, aroundBefore, origin, layout);
       if (layout) {
         // Baritone can call a build done with most of it missing (it did: 19 of 117 blocks), so look at the world
         const finalWorld = await region(origin, layout);
@@ -802,7 +857,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           return factory.createErrorResponse(`Build of ${name} ${why} with ${check.placed}/${check.total} blocks in place. ` +
             `Missing: ${missing}. Used: ${used || 'nothing'}.${hand}${baritoneSaid(r.baritone)} Run build-structure again to continue.`);
         }
-        const hand = placedByHand ? ` (${placedByHand} placed by hand${stalled ? ' after Baritone stalled' : ''})` : '';
+        const hand = (placedByHand ? ` (${placedByHand} placed by hand${stalled ? ' after Baritone stalled' : ''})` : '') +
+          (scaffoldRemoved ? `; took down ${scaffoldRemoved} scaffold block(s) it left` : '');
         return factory.createResponse(`Built ${name} at ${fmt(origin)} in ${r.seconds}s: all ${check.total} blocks in place${hand}. Used: ${used || 'nothing'}.${baritoneSaid(r.baritone)}`);
       }
       const head = r.reason === 'timeout' ? `Build stopped after ${r.seconds}s (time limit)` : `Built ${name} at ${fmt(origin)} in ${r.seconds}s`;

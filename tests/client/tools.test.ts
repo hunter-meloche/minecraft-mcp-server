@@ -606,3 +606,25 @@ test('move-to-position blocks running water around a bot stuck in it, then tries
   t.is(gotos, 2);
   t.like(placed, [{ x: 10, y: 64, z: -5 }]); // the north cell; not the bot's own
 });
+
+test('build-structure takes down scaffolding the build left beside it', async (t) => {
+  // a 1x1x1 structure (one log) at (0, 64, 0); the box around it is 13 x 9 x 13 from (-6, 62, -6)
+  const W = 13, L = 13, H = 9;
+  const idx = (x: number, y: number, z: number) => (x + 6) + (z + 6) * W + (y - 62) * W * L;
+  let phase = 0; // 0: before the build, 1: after
+  const digs: unknown[] = [];
+  const { run } = setup({
+    inventory: { items: [{ slot: 1, name: 'oak_log', count: 1 }], selectedSlot: 0, held: null },
+    'world.region': (p: Record<string, unknown>) => {
+      if (p.width === 1) return { blocks: [phase ? 'oak_log[axis=y]' : 'air'] }; // the structure itself
+      const blocks = Array(W * L * H).fill('air');
+      if (phase) { blocks[idx(2, 64, 0)] = 'cobblestone'; blocks[idx(2, 65, 0)] = 'cobblestone'; } // a 2-high pillar
+      return { blocks };
+    },
+    build: () => { phase = 1; return { reason: 'done', seconds: 3, baritone: [], used: { oak_log: 1 } }; },
+    dig: (p: Record<string, unknown>) => { digs.push(p); return { dug: true, block: 'cobblestone', reason: 'done' }; }
+  });
+  const r = await run('build-structure', { x: 0, y: 64, z: 0, spec: { palette: { L: 'oak_log[axis=y]' }, layers: [['L']] }, name: 'post' });
+  t.regex(r.text, /all 1 blocks in place; took down 2 scaffold block\(s\) it left/);
+  t.like(digs, [{ x: 2, y: 65, z: 0 }, { x: 2, y: 64, z: 0 }]); // top down
+});
