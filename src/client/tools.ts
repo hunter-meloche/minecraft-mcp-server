@@ -9,6 +9,7 @@ import { matchesTarget } from '../combat.js';
 import type { BridgeClient } from './bridge-client.js';
 import { ClientProtection } from './protection.js';
 import { survey, type Cluster } from './survey.js';
+import { planLevel } from './level.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
 import { checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import type { Item } from 'prismarine-item';
@@ -653,6 +654,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
+  // kept as a function so level-area can build its plan the same way (verification, stall recovery, protection)
+  let buildStructure: (args: { x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number }) =>
+    Promise<ReturnType<ToolFactory['createResponse']>>;
   factory.registerTool(
     'build-structure',
     "Build a structure block by block with Baritone (it places blocks from the inventory, clears what's in the way, and scaffolds as needed). Describe it as `spec`: a palette of single characters to blocks and `layers` from the bottom up, each a list of rows along +z whose characters run along +x; '.' is air (cleared, except blocks the bot placed there itself, like a door or furniture), ' ' leaves the cell as it is. Example: {palette:{L:'oak_log[axis=y]',P:'oak_planks'}, layers:[['LPL','P.P','LPL']]}. Or give `file`, a .schem/.litematic path. The structure's minimum corner goes at x,y,z. Checks the inventory has the blocks first (survival).",
@@ -668,7 +672,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       name: z.string().regex(/^[\w-]+$/).optional().describe('Name for the schematic file (default: structure)'),
       timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 600000)')
     },
-    async ({ x, y, z: zz, spec, file, name = 'structure', timeoutMs = 600_000 }: {
+    buildStructure = async ({ x, y, z: zz, spec, file, name = 'structure', timeoutMs = 600_000 }: {
       x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number
     }) => {
       const origin = floorPos({ x, y, z: zz });
@@ -819,6 +823,43 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         : r.before === r.after
           ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it is now ${after}`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+    }
+  );
+
+  factory.registerTool(
+    'level-area',
+    "Level the land in a box to a ground height: cuts hills, trees and leftovers above it, fills dips below it (cobblestone, dirt on top), and leaves whole columns alone where there is water, a crop or farmland, furniture, or something the bot built. dryRun shows what it would do. Needs the fill blocks in the inventory.",
+    {
+      x1: z.coerce.number().describe('One corner X'), z1: z.coerce.number().describe('One corner Z'),
+      x2: z.coerce.number().describe('Other corner X'), z2: z.coerce.number().describe('Other corner Z'),
+      level: z.coerce.number().int().describe('Height of the ground top after leveling (the block you stand on)'),
+      above: z.coerce.number().int().min(1).max(40).optional().describe('How far above the level to cut (default: 20, enough for trees)'),
+      below: z.coerce.number().int().min(1).max(20).optional().describe('How deep below the level to look for ground (default: 8)'),
+      dryRun: z.boolean().optional().describe('Only report the plan'),
+      timeoutMs: z.number().int().min(10000).optional().describe('Give up after this long (default: 1200000)')
+    },
+    async ({ x1, z1, x2, z2, level, above = 20, below = 8, dryRun = false, timeoutMs = 1_200_000 }: {
+      x1: number; z1: number; x2: number; z2: number; level: number; above?: number; below?: number; dryRun?: boolean; timeoutMs?: number
+    }) => {
+      const box = { x: Math.min(x1, x2), y: level - below, z: Math.min(z1, z2), width: Math.abs(x2 - x1) + 1, height: below + above + 1, length: Math.abs(z2 - z1) + 1 };
+      if (box.width * box.length > 128 * 128) return factory.createErrorResponse('Area too large (at most 128 x 128)');
+      const perLayer = box.width * box.length;
+      const step = Math.max(1, Math.floor(65_536 / perLayer));
+      const blocks: (string | null)[] = [];
+      for (let y = 0; y < box.height; y += step) {
+        const part = await call<{ blocks: (string | null)[] }>('world.region', { ...box, y: box.y + y, height: Math.min(step, box.height - y) }, 60_000);
+        blocks.push(...part.blocks);
+      }
+      if (blocks.some(b => b === null)) return factory.createErrorResponse('Part of the area is not loaded; move closer to it first');
+      const dim = await dimension();
+      const plan = planLevel(box, blocks, level, p => protection.has(dim, p));
+      const summary = `Level (${box.x}, ${box.z})..(${box.x + box.width - 1}, ${box.z + box.length - 1}) to ground y ${level}: ` +
+        `cut ${plan.cut} block(s), fill ${plan.dirt} dirt + ${plan.cobblestone} cobblestone; ` +
+        `left alone: ${plan.kept.water} water column(s), ${plan.kept.built} column(s) with builds, crops or furniture.`;
+      if (!plan.spec) return factory.createResponse(`${summary} Already level.`);
+      if (dryRun) return factory.createResponse(summary);
+      const r = await buildStructure({ ...plan.origin, spec: plan.spec, name: 'level_area', timeoutMs });
+      return { ...r, content: [{ type: 'text' as const, text: `${summary}\n${r.content.map(c => (c as { text?: string }).text ?? '').join('\n')}` }] };
     }
   );
 
