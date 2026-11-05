@@ -13,6 +13,8 @@ import os from 'os';
 import path from 'path';
 import { ClientConnection } from './client/client-connection.js';
 import { registerClientTools } from './client/tools.js';
+import { Brain } from './client/brain/brain.js';
+import { registerBrainTools } from './client/brain/brain-tools.js';
 import { jsonFileStore } from './build-protection.js';
 import { defaultMinecraftDir } from './client/install.js';
 import { takeAlerts } from './auto-defend.js';
@@ -55,10 +57,16 @@ async function main() {
     );
     connection.start();
     const factory = new ToolFactory(server, connection, () => (connection.isConnected() ? connection.alerts.take() : null));
-    registerClientTools(factory, connection.bridge, messageStore, {
-      gameDir, protectionStore: jsonFileStore(), homesFile: path.join(os.homedir(), '.minecraft-mcp-server', 'homes.json')
+    const dataDir = path.join(os.homedir(), '.minecraft-mcp-server');
+    const runtime = registerClientTools(factory, connection.bridge, messageStore, {
+      gameDir, protectionStore: jsonFileStore(), homesFile: path.join(dataDir, 'homes.json')
     });
-    cleanup = () => connection.cleanup();
+    // the bot's own low-level AI: shelter at night, chores by day; steps back whenever the LLM acts
+    const brain = new Brain(runtime, { memoryFile: path.join(dataDir, 'brain.json'), logFile: path.join(dataDir, 'brain.log') });
+    runtime.setManualHook(tool => brain.manual(tool));
+    registerBrainTools(factory, brain);
+    if (config.autonomy) brain.setEnabled(true);
+    cleanup = () => { brain.setEnabled(false); connection.cleanup(); };
   } else {
     const connection = new BotConnection(
       config,

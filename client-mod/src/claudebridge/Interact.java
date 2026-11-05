@@ -584,6 +584,58 @@ public final class Interact {
             return obj("took", out.isEmpty() ? null : obj("name", Names.item(out), "count", out.getCount()));
         });
         s.register("container.close", true, (p, c) -> { player().closeContainer(); return obj("ok", true); });
+
+        // right-click a bed and wait for the server to put us in it; a refusal comes back as an action-bar message
+        s.register("bed.sleep", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            BlockPos at = blockPos(p);
+            if (pl.isSleeping()) return obj("sleeping", true);
+            Vec3 hit = Vec3.atBottomCenterOf(at).add(0, 0.5625, 0); // the top of the mattress (beds are 9/16 tall)
+            if (pl.getEyePosition().distanceTo(hit) > 4.5) throw new IllegalStateException("bed too far");
+            pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
+            long seq = Events.systemSeq();
+            mc.gameMode.useItemOn(pl, InteractionHand.MAIN_HAND, new BlockHitResult(hit, Direction.UP, at, false));
+            Ticker.add(new Ticker.Task() {
+                int age = 0;
+                @Override public boolean tick(Minecraft m) {
+                    if (m.player == null) { c.fail("not in a world"); return true; }
+                    if (m.player.isSleeping()) { c.ok(obj("sleeping", true)); return true; }
+                    String reason = null, overlay = null;
+                    for (Events.SystemMessage msg : Events.systemMessagesSince(seq)) {
+                        String r = bedReason(msg.key());
+                        if (r != null) reason = r;
+                        else if (msg.overlay()) overlay = msg.text();
+                    }
+                    if (reason == null && ++age < 40) return false;
+                    c.ok(obj("sleeping", false, "reason", reason != null ? reason : overlay != null && !overlay.isBlank() ? overlay : "unknown"));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
+        });
+
+        // the in-bed screen's "Leave Bed" button: the same packet, so the server wakes us as it would a player
+        s.register("bed.wake", true, (p, c) -> {
+            LocalPlayer pl = player();
+            boolean was = pl.isSleeping();
+            if (was) pl.connection.send(new net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket(pl,
+                net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.Action.STOP_SLEEPING));
+            return obj("wasSleeping", was);
+        });
+    }
+
+    /** Short reason for a vanilla bed refusal, from its translation key (language-independent); null if not one. */
+    static String bedReason(String key) {
+        if (key == null) return null;
+        return switch (key) {
+            case "block.minecraft.bed.no_sleep" -> "not night";
+            case "block.minecraft.bed.not_safe" -> "monsters nearby";
+            case "block.minecraft.bed.obstructed" -> "obstructed";
+            case "block.minecraft.bed.too_far_away" -> "too far";
+            case "block.minecraft.bed.occupied" -> "occupied";
+            default -> null;
+        };
     }
 
     static JsonObject furnaceStatus() {

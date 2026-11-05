@@ -76,6 +76,34 @@ public final class Events {
         server().emit("chat", Json.obj("text", text));
     }
 
+    /** A system message from the server: its translation key (null if not translatable) and text. */
+    public record SystemMessage(long seq, String key, String text, boolean overlay) { }
+
+    private static final int SYSTEM_LOG_LINES = 20;
+    private static final Deque<SystemMessage> SYSTEM_LOG = new ArrayDeque<>();
+    private static long systemSeq;
+
+    /**
+     * Every system message, overlay (action bar) ones included, kept with its translation key: overlay lines never
+     * reach the chat box, and the key says why a bed refused us whatever the client's language.
+     */
+    public static synchronized void onSystemMessage(net.minecraft.network.chat.Component message, boolean overlay) {
+        String key = message.getContents() instanceof net.minecraft.network.chat.contents.TranslatableContents t ? t.getKey() : null;
+        SYSTEM_LOG.addLast(new SystemMessage(++systemSeq, key, message.getString(), overlay));
+        while (SYSTEM_LOG.size() > SYSTEM_LOG_LINES) SYSTEM_LOG.removeFirst();
+    }
+
+    public static synchronized long systemSeq() {
+        return systemSeq;
+    }
+
+    /** System messages that arrived after sequence number {@code since}, oldest first. */
+    public static synchronized List<SystemMessage> systemMessagesSince(long since) {
+        List<SystemMessage> out = new ArrayList<>();
+        for (SystemMessage m : SYSTEM_LOG) if (m.seq() > since) out.add(m);
+        return out;
+    }
+
     /** Baritone's own messages, kept so a finished process can report what Baritone said. */
     public static synchronized void onBaritoneMessage(String text) {
         BARITONE_LOG.addLast(text);

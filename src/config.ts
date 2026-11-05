@@ -15,6 +15,8 @@ export interface ServerConfig {
   bridgePort: number;
   /** client backend: let the user's mouse and keyboard reach the bot's game window (default: passive) */
   interactiveClient: boolean;
+  /** client backend: start the bot's own brain (eats, shelters at night, keeps its home) without waiting for set-autonomy */
+  autonomy: boolean;
 }
 
 export function parseConfig(): ServerConfig {
@@ -70,6 +72,11 @@ export function parseConfig(): ServerConfig {
     .option('interactive-client', {
       type: 'boolean',
       description: "client backend: let your mouse and keyboard control the bot's game window (by default it opens minimized and ignores them)",
+      default: false
+    })
+    .option('autonomy', {
+      type: 'boolean',
+      description: 'client backend: let the bot look after itself between tool calls (shelter at night, food, gear, home upkeep)',
       default: false
     })
     .help()

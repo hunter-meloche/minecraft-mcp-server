@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { AsyncLocalStorage } from 'async_hooks';
 import path from 'path';
 import { z } from 'zod';
 import minecraftData from 'minecraft-data';
@@ -16,7 +17,7 @@ import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
 
-const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByName: Record<string, FoodInfo> }).foodsByName;
+export const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByName: Record<string, FoodInfo> }).foodsByName;
 
 /**
  * The client backend's tools: the same names and parameters as the mineflayer backend (taken from its definitions),
@@ -24,14 +25,14 @@ const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByName: Rec
  */
 
 interface Pos { x: number; y: number; z: number }
-interface Status {
+export interface Status {
   inWorld: boolean; username: string; screen: string | null;
   position?: Pos; block?: Pos; health?: number; food?: number; saturation?: number; air?: number;
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
   timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
-  windowMinimized?: boolean; mouseGrabbed?: boolean;
+  windowMinimized?: boolean; mouseGrabbed?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
 }
-interface InventoryItem { slot: number; name: string; count: number }
+export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
 interface EntityInfo { id: number; name: string; category: string; position: Pos; distance: number; health?: number }
 interface FightResult {
@@ -148,6 +149,33 @@ function baritoneSaid(lines: string[], max = 3): string {
   return said.length ? ` Baritone: ${said.join(' | ')}` : '';
 }
 
+/**
+ * Set while the brain (src/client/brain) runs a tool: once its signal aborts, every further bridge call of that run
+ * fails at once, so a job the brain gave up (an LLM tool call came in, or something more urgent) stops between steps
+ * instead of walking on. Tool calls from the LLM run outside it and are never affected.
+ */
+export const brainRun = new AsyncLocalStorage<{ signal: AbortSignal }>();
+
+/** Tools that only look: an LLM calling them doesn't take control from the brain. */
+const READ_ONLY = new Set(['get-position', 'get-status', 'list-inventory', 'find-item', 'get-block-info', 'find-blocks', 'find-entity',
+  'detect-gamemode', 'read-chat', 'survey-area', 'get-recipe', 'list-recipes', 'can-craft']);
+
+export type ToolReply = ReturnType<ToolFactory['createResponse']>;
+
+/** What the brain gets from the client tools: their handlers by name and a few shared helpers. */
+export interface ClientRuntime {
+  /** every client tool's handler, called directly (no schema parsing: pass complete arguments) */
+  actions: Record<string, (args: Record<string, unknown>) => Promise<ToolReply>>;
+  call: <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>;
+  status: () => Promise<Status>;
+  /** a place saved with set-home in the world the bot is in */
+  home: (s: Status, name?: string) => (Pos & { dimension: string }) | undefined;
+  /** where and when (ms) the bot last died, if it has this session */
+  lastDeath: () => { at: Pos; time: number } | undefined;
+  /** called before any tool the LLM runs that does more than look (the brain steps back) */
+  setManualHook: (fn: ((tool: string) => Promise<void>) | undefined) => void;
+}
+
 export interface ClientToolOptions {
   /** the client's game folder (schematics are written to <gameDir>/schematics) */
   gameDir: string;
@@ -157,9 +185,21 @@ export interface ClientToolOptions {
   homesFile?: string;
 }
 
-export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, messageStore: MessageStore, options: ClientToolOptions): void {
-  const call = <T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number) =>
-    bridge.request<T>(method, params, timeoutMs ? { timeoutMs } : undefined);
+export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, messageStore: MessageStore, options: ClientToolOptions): ClientRuntime {
+  const call = <T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> => {
+    if (brainRun.getStore()?.signal.aborted) return Promise.reject(new Error('aborted: the brain gave this job up'));
+    return bridge.request<T>(method, params, timeoutMs ? { timeoutMs } : undefined);
+  };
+  const handlers: ClientRuntime['actions'] = {};
+  let manualHook: ((tool: string) => Promise<void>) | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const register = (name: string, description: string, schema: Record<string, unknown>, fn: (args: any) => Promise<ToolReply>) => {
+    handlers[name] = fn;
+    factory.registerTool(name, description, schema, async (args: Record<string, unknown>) => {
+      if (manualHook && !READ_ONLY.has(name)) await manualHook(name);
+      return fn(args);
+    });
+  };
   const protection = new ClientProtection(options.protectionStore);
   type Homes = Record<string, Record<string, Pos & { dimension: string }>>;
   let memoryHomes: Homes = {};
@@ -692,12 +732,12 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     'This tool is not available on the client backend yet. Run the server with --backend mineflayer to use it.');
 
   for (const def of mineflayerToolDefinitions()) {
-    factory.registerTool(def.name, def.description, def.schema, impl[def.name] ?? notYet);
+    register(def.name, def.description, def.schema, impl[def.name] ?? notYet);
   }
 
   // ---- tools only the client backend has
 
-  factory.registerTool(
+  register(
     'mine-blocks',
     "Gather blocks with Baritone: it finds the nearest blocks of the type (from its memory of the world and nearby chunks), walks there, mines them with the right tool and picks up the drops, until the inventory has `count` of the item (counting what it already holds). E.g. block 'oak_log', count 16.",
     {
@@ -732,7 +772,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   // kept as a function so level-area can build its plan the same way (verification, stall recovery, protection)
   let buildStructure: (args: { x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number }) =>
     Promise<ReturnType<ToolFactory['createResponse']>>;
-  factory.registerTool(
+  register(
     'build-structure',
     "Build a structure block by block with Baritone (it places blocks from the inventory, clears what's in the way, and scaffolds as needed). Describe it as `spec`: a palette of single characters to blocks and `layers` from the bottom up, each a list of rows along +z whose characters run along +x; '.' is air (cleared, except blocks the bot placed there itself, like a door or furniture), ' ' leaves the cell as it is. Example: {palette:{L:'oak_log[axis=y]',P:'oak_planks'}, layers:[['LPL','P.P','LPL']]}. Or give `file`, a .schem/.litematic path. The structure's minimum corner goes at x,y,z. Checks the inventory has the blocks first (survival).",
     {
@@ -866,7 +906,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'use-item-on-block',
     "Right-click a block, holding `item` if given (else what's in hand): till grass or dirt with a hoe, open or close a door or trapdoor, flip a lever, press a button, use bone meal, fill or empty a bucket. Walks closer if needed. Reports the block before and after.",
     {
@@ -912,7 +952,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'level-area',
     "Level the land in a box to a ground height: cuts hills, trees and leftovers above it, fills dips below it (cobblestone, dirt on top), and leaves whole columns alone where there is water, a crop or farmland, furniture, or something the bot built. dryRun shows what it would do. Needs the fill blocks in the inventory.",
     {
@@ -1062,7 +1102,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'survey-area',
     'Look over an area around a point (default: the bot) without moving: surface heights, trees, water, clusters of blocks that look placed rather than natural (scaffolding, emergency walls, leftovers; the bot\'s own builds and furniture excluded) and open pits. Use it before clearing land.',
     {
@@ -1101,7 +1141,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'set-home',
     'Remember a place as home (default: where the bot stands), per world and across restarts, so go-home can walk back from anywhere.',
     {
@@ -1122,7 +1162,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'go-home',
     "Walk back to a place saved with set-home (default 'home'), however far, in legs over unexplored land. Reports how far it got.",
     {
@@ -1163,7 +1203,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'explore',
     "Travel in a direction looking for something: an entity type ('sheep', 'cow', 'villager') or a block ('sweet_berry_bush', 'water'). Walks in legs of `step` blocks and looks around after each, up to maxDistance. Says where it found it and how far home is. Set home first so go-home can bring the bot back.",
     {
@@ -1216,7 +1256,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'collect-items',
     'Pick up items lying on the ground: walks onto each drop within `radius` of a point (default: where the bot last died, if that was in the last 5 minutes, else around the bot), swimming to ones floating in water. Drops despawn 5 minutes after they fall.',
     {
@@ -1251,7 +1291,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'drop-item',
     'Throw items out of the inventory (to make room: Baritone picks up everything it digs). All of that item unless `count` is given.',
     {
@@ -1266,7 +1306,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'fish',
     'Fish with a fishing rod at open water: walks to the nearest open water source (or the one given), casts, reels in at each bite, and repeats. Fish are food (cook them in a furnace).',
     {
@@ -1312,7 +1352,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'farm',
     'Harvest ripe crops around the bot (wheat, carrots, potatoes, beetroot, sweet berry bushes, melons, pumpkins, cocoa, nether wart) without destroying the plants, and replant with seeds from the inventory. Runs until nothing is left to do or the time limit. Reports what was gathered.',
     {
@@ -1335,7 +1375,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'store-in-chest',
     'Put items from the inventory into a chest (or barrel) at x,y,z, walking to it first. Reports what the chest holds afterwards.',
     {
@@ -1365,7 +1405,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'take-from-chest',
     'Take items out of a chest (or barrel) at x,y,z into the inventory, walking to it first. Reports what the chest holds afterwards.',
     {
@@ -1396,7 +1436,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
-  factory.registerTool(
+  register(
     'stop',
     'Stop whatever the bot is doing (walking, mining, building).',
     {},
@@ -1405,4 +1445,16 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       return factory.createResponse('Stopped');
     }
   );
+
+  return {
+    actions: handlers,
+    call,
+    status,
+    home: (st, name = 'home') => {
+      const world = worldIdFromSeed(st.hashedSeed ?? undefined);
+      return world ? readHomes()[world]?.[name] : undefined;
+    },
+    lastDeath: () => lastDeath,
+    setManualHook: fn => { manualHook = fn; }
+  };
 }

@@ -11,6 +11,8 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.network.chat.Component;
@@ -59,6 +61,9 @@ public final class Handlers {
             r.addProperty("gameMode", mc.gameMode == null ? null : mc.gameMode.getPlayerMode().name().toLowerCase());
             r.addProperty("difficulty", mc.level.getLevelData().getDifficulty().getSerializedName());
             r.addProperty("timeOfDay", Math.floorMod(mc.level.getOverworldClockTime(), 24000L));
+            r.addProperty("sleeping", pl.isSleeping());
+            r.addProperty("raining", mc.level.isRaining());
+            r.addProperty("thundering", mc.level.isThundering());
             r.addProperty("hashedSeed", hashedSeed(mc));
             r.addProperty("protectedCount", Protection.count());
             r.addProperty("windowMinimized", mc.getWindow().isIconified());
@@ -74,13 +79,22 @@ public final class Handlers {
             LocalPlayer pl = player();
             var inv = pl.getInventory();
             JsonArray items = new JsonArray();
+            // 26.x: indices 36-42 are the worn equipment (feet, legs, chest, head, off-hand, body, saddle), so they are listed too
             for (int i = 0; i < inv.getContainerSize(); i++) {
                 var st = inv.getItem(i);
                 if (st.isEmpty()) continue;
-                items.add(obj("slot", i, "name", Names.item(st), "count", st.getCount()));
+                items.add(withDamage(obj("slot", i, "name", Names.item(st), "count", st.getCount()), st));
+            }
+            // the same worn items by name, so Node needn't know the index mapping
+            JsonArray armor = new JsonArray();
+            String[] worn = {"feet", "legs", "chest", "head", "offhand"};
+            for (int k = 0; k < worn.length; k++) {
+                var st = inv.getItem(Inventory.INVENTORY_SIZE + k);
+                if (st.isEmpty()) continue;
+                armor.add(withDamage(obj("slot", worn[k], "name", Names.item(st), "count", st.getCount()), st));
             }
             var held = pl.getMainHandItem();
-            return obj("items", items, "selectedSlot", inv.getSelectedSlot(),
+            return obj("items", items, "armor", armor, "selectedSlot", inv.getSelectedSlot(),
                 "held", held.isEmpty() ? null : obj("name", Names.item(held), "count", held.getCount()));
         });
 
@@ -152,6 +166,23 @@ public final class Handlers {
                 out.add(sb.toString());
             }
             return obj("blocks", out);
+        });
+
+        // block and sky light (0-15) over a box, in world.region's order (x fastest, then z, then y); -1 where unloaded
+        s.register("world.light", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null) throw new IllegalStateException("not in a world");
+            BlockPos o = blockPos(p);
+            int w = intParam(p, "width", 1), h = intParam(p, "height", 1), l = intParam(p, "length", 1);
+            if ((long) w * h * l > 65_536) throw new IllegalArgumentException("region too large (max 65536 blocks)");
+            JsonArray block = new JsonArray(), sky = new JsonArray();
+            for (int y = 0; y < h; y++) for (int z = 0; z < l; z++) for (int x = 0; x < w; x++) {
+                BlockPos at = o.offset(x, y, z);
+                boolean loaded = mc.level.isLoaded(at);
+                block.add(loaded ? mc.level.getBrightness(LightLayer.BLOCK, at) : -1);
+                sky.add(loaded ? mc.level.getBrightness(LightLayer.SKY, at) : -1);
+            }
+            return obj("block", block, "sky", sky);
         });
 
         s.register("world.findBlocks", true, (p, c) -> {
@@ -305,6 +336,15 @@ public final class Handlers {
         } catch (ReflectiveOperationException | RuntimeException e) {
             return null;
         }
+    }
+
+    /** Adds damage/maxDamage for tools and armour, so Node can tell a nearly broken one before it breaks. */
+    static JsonObject withDamage(JsonObject o, net.minecraft.world.item.ItemStack st) {
+        if (st.isDamageableItem()) {
+            o.addProperty("damage", st.getDamageValue());
+            o.addProperty("maxDamage", st.getMaxDamage());
+        }
+        return o;
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
