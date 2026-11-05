@@ -65,3 +65,12 @@ test('planLevel keeps a pond whose surface is well below the level', (t) => {
   t.is(p.kept.water, 2);
   t.is(p.dirt + p.cobblestone, 0);
 });
+
+test('planLevel cuts natural leaves when asked', (t) => {
+  const { box, b, set } = world();
+  set(1, 5, 1, 'oak_leaves[distance=2,persistent=false]');
+  t.is(planLevel(box, b, 63).leaves, 1);
+  const p = planLevel(box, b, 63, () => false, true);
+  t.is(p.leaves, 0);
+  t.deepEqual(p.cutKinds, { leaves: 1 });
+});

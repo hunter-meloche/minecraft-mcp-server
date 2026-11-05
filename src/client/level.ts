@@ -24,7 +24,7 @@ const NOT_GROUND = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fe
 /** Columns to leave whole: water, crops and farmland, furniture and doors. */
 const KEEP = /^(water|farmland|wheat|carrots|potatoes|beetroots|crafting_table|furnace|chest|barrel|.*_bed|.*_door|.*_pressure_plate|.*_trapdoor|ladder)$/;
 
-export function planLevel(box: Box, blocks: (string | null)[], level: number, isProtected: (p: Pos) => boolean = () => false): LevelPlan {
+export function planLevel(box: Box, blocks: (string | null)[], level: number, isProtected: (p: Pos) => boolean = () => false, cutLeaves = false): LevelPlan {
   const { width: w, length: l, height: h } = box;
   const at = (x: number, y: number, z: number) => name(blocks[x + z * w + y * w * l]);
   const raw = (x: number, y: number, z: number) => blocks[x + z * w + y * w * l] ?? '';
@@ -66,11 +66,11 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
       const n = at(x, y, z);
       if (y > L) {
         if (AIR.test(n)) continue;
-        if (/_leaves$/.test(n) && !/persistent=true/.test(raw(x, y, z))) { leaves++; continue; }
+        if (/_leaves$/.test(n) && !/persistent=true/.test(raw(x, y, z)) && !cutLeaves) { leaves++; continue; }
         // plants pop off with the block under them, or get tilled away: cutting them one by one only costs time
-        if (NOT_GROUND.test(n) && !/_log$|_leaves$/.test(n)) continue;
+        if (NOT_GROUND.test(n) && !/_log$|_leaves$/.test(n)) continue; // (leaves reach here only when cutting them)
         cell[i] = '.'; cut++; lo = Math.min(lo, y); hi = Math.max(hi, y);
-        const kind = /_log$|_wood$/.test(n) ? 'logs' : /_leaves$/.test(n) ? 'placed leaves' : NOT_GROUND.test(n) ? 'plants' : 'ground';
+        const kind = /_log$|_wood$/.test(n) ? 'logs' : /_leaves$/.test(n) ? 'leaves' : NOT_GROUND.test(n) ? 'plants' : 'ground';
         cutKinds[kind] = (cutKinds[kind] ?? 0) + 1;
       } else if (g >= 0 && y > g) {
         cell[i] = y === L ? 'D' : 'C';

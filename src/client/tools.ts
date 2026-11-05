@@ -866,10 +866,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       above: z.coerce.number().int().min(1).max(40).optional().describe('How far above the level to cut (default: 20, enough for trees)'),
       below: z.coerce.number().int().min(1).max(20).optional().describe('How deep below the level to look for ground (default: 8)'),
       dryRun: z.boolean().optional().describe('Only report the plan'),
+      cutLeaves: z.boolean().optional().describe('Also cut natural leaves (by default they are left to decay once their trunks are gone)'),
       timeoutMs: z.number().int().min(10000).optional().describe('Give up after this long (default: 1200000)')
     },
-    async ({ x1, z1, x2, z2, level, above = 20, below = 8, dryRun = false, timeoutMs = 1_200_000 }: {
-      x1: number; z1: number; x2: number; z2: number; level: number; above?: number; below?: number; dryRun?: boolean; timeoutMs?: number
+    async ({ x1, z1, x2, z2, level, above = 20, below = 8, dryRun = false, cutLeaves = false, timeoutMs = 1_200_000 }: {
+      x1: number; z1: number; x2: number; z2: number; level: number; above?: number; below?: number; dryRun?: boolean; cutLeaves?: boolean; timeoutMs?: number
     }) => {
       const box = { x: Math.min(x1, x2), y: level - below, z: Math.min(z1, z2), width: Math.abs(x2 - x1) + 1, height: below + above + 1, length: Math.abs(z2 - z1) + 1 };
       if (box.width * box.length > 128 * 128) return factory.createErrorResponse('Area too large (at most 128 x 128)');
@@ -882,7 +883,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       }
       if (blocks.some(b => b === null)) return factory.createErrorResponse('Part of the area is not loaded; move closer to it first');
       const dim = await dimension();
-      const plan = planLevel(box, blocks, level, p => protection.has(dim, p));
+      const plan = planLevel(box, blocks, level, p => protection.has(dim, p), cutLeaves);
       const summary = `Level (${box.x}, ${box.z})..(${box.x + box.width - 1}, ${box.z + box.length - 1}) to ground y ${level}: ` +
         `cut ${plan.cut} block(s)${plan.cut ? ` (${Object.entries(plan.cutKinds).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''}, fill ${plan.dirt} dirt + ${plan.cobblestone} cobblestone; ` +
         (plan.leaves ? `${plan.leaves} natural leaves left to decay once their trunks are gone; ` : '') +
@@ -970,13 +971,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       let tilesDone = 0, shortTiles = 0;
       for (const t of order) {
         if (Date.now() - started > timeoutMs) break;
-        let p = planLevel(t, await readBox(t), level, q => protection.has(dim, q));
+        let p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves);
         if (!p.spec) { tilesDone++; continue; }
         const left = () => Math.max(30_000, timeoutMs - (Date.now() - started));
         if (p.cut) {
           const cutOnly = { ...p.spec, layers: p.spec.layers.map(rows => rows.map(r => r.replace(/[CD]/g, ' '))) };
           await buildStructure({ ...p.origin, spec: cutOnly, name: 'level_tile_cut', timeoutMs: Math.min(180_000, left()) });
-          p = planLevel(t, await readBox(t), level, q => protection.has(dim, q));
+          p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves);
         }
         if (p.spec && (p.dirt || p.cobblestone)) {
           const have = (await inventoryCounts()).counts;
@@ -991,7 +992,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         tilesDone++;
         await repair();
       }
-      const after = planLevel(box, await readBox(box), level, p => protection.has(dim, p));
+      const after = planLevel(box, await readBox(box), level, p => protection.has(dim, p), cutLeaves);
       const have = (await inventoryCounts()).counts;
       const secs = Math.round((Date.now() - started) / 1000);
       const rest = after.spec
