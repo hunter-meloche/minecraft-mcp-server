@@ -906,7 +906,23 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const nowAll = await readBox(box);
         const idOf = (st: string | null | undefined) => (st ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
         const wanted = [...watched.values()].sort((a, b) => a.at.y - b.at.y); // supports first
+        const reTorched = new Set<string>();
         for (const w of wanted) {
+          // ground above the level was meant to go: don't rebuild it; a torch that stood on it goes on the new ground
+          if (!/torch/.test(w.state) && w.at.y > level) continue;
+          if (/torch/.test(w.state) && w.at.y > level + 1) {
+            const k0 = `${w.at.x},${w.at.z}`;
+            if (reTorched.has(k0)) continue;
+            reTorched.add(k0);
+            const spot = { x: w.at.x, y: level + 1, z: w.at.z };
+            const k1 = (spot.x - box.x) + (spot.z - box.z) * box.width + (spot.y - box.y) * box.width * box.length;
+            if (!/^(minecraft:)?(air|short_grass|tall_grass|leaf_litter)/.test(nowAll[k1] ?? '')) continue;
+            const below = nowAll[k1 - box.width * box.length] ?? '';
+            if (/^(minecraft:)?(air|water)/.test(below)) continue;
+            const why = await placeFacing(spot, 'torch');
+            if (why) lost.push(`torch at ${fmt(spot)} (${why})`); else restored.push(`torch at ${fmt(spot)} (moved down to the new ground)`);
+            continue;
+          }
           const k = (w.at.x - box.x) + (w.at.z - box.z) * box.width + (w.at.y - box.y) * box.width * box.length;
           const nowName = idOf(nowAll[k]);
           const id = idOf(w.state);
