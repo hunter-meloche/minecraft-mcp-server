@@ -36,15 +36,22 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
   let water = 0, built = 0;
   for (let z = 0; z < l; z++) for (let x = 0; x < w; x++) {
     const c = x + z * w;
+    // from the top down to the ground: a build, crop or furniture at or above the level, or water at the surface,
+    // keeps the whole column; below the level they are just ground (a protected fill under a scaffold pillar, water
+    // buried under a hill: skipping those left the pillar and the hill standing)
     for (let y = h - 1; y >= 0; y--) {
       const n = at(x, y, z);
       if (AIR.test(n)) continue;
+      if (n === 'water') {
+        if (y >= L - 1) { skip[c] = true; water++; break; }
+        continue;
+      }
       if (KEEP.test(n) || (isProtected({ x: box.x + x, y: box.y + y, z: box.z + z }) && !/torch$/.test(n))) {
-        skip[c] = true;
-        if (n === 'water') water++; else built++;
+        if (y >= L) { skip[c] = true; built++; break; }
+        ground[c] = y; // below the level: it is the ground
         break;
       }
-      if (ground[c] < 0 && !NOT_GROUND.test(n)) ground[c] = y;
+      if (!NOT_GROUND.test(n)) { ground[c] = y; break; }
     }
   }
   let cut = 0, dirt = 0, cobblestone = 0;

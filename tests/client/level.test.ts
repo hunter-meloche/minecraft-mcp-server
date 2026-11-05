@@ -30,7 +30,7 @@ test('planLevel cuts a hill and a tree, fills a dip with cobblestone and dirt on
 
 test('planLevel leaves water, farmland and the bot\'s builds alone, but not torches', (t) => {
   const { box, b, set } = world();
-  set(0, 3, 0, 'water'); set(0, 4, 0, 'dirt');
+  set(0, 3, 0, 'water'); // a pond at the surface
   set(1, 3, 0, 'farmland'); set(1, 4, 0, 'wheat');
   set(2, 4, 0, 'oak_planks'); set(2, 5, 0, 'oak_planks'); // built: protected
   set(3, 4, 0, 'dirt'); set(3, 5, 0, 'torch'); // a torch on a bump (protected, but it goes with its block)
@@ -45,4 +45,15 @@ test('planLevel reports nothing to do on flat ground', (t) => {
   const p = planLevel(box, b, 63);
   t.is(p.spec, null);
   t.is(p.cut + p.dirt + p.cobblestone, 0);
+});
+
+test('planLevel cuts what stands on protected fill or buried water, and keeps surface builds', (t) => {
+  const { box, b, set } = world();
+  set(0, 4, 0, 'cobblestone'); set(0, 5, 0, 'cobblestone'); // scaffold pillar on top of a protected fill at y 63
+  set(1, 1, 0, 'water'); set(1, 4, 0, 'dirt');                // a bump over buried water
+  set(2, 4, 0, 'oak_planks');                                  // a protected build on the surface: kept
+  const p = planLevel(box, b, 63, q => (q.x === 10 && q.y === 63 && q.z === 20) || (q.x === 12 && q.y === 64 && q.z === 20));
+  t.is(p.cut, 3);
+  t.deepEqual(p.kept, { water: 0, built: 1 });
+  t.deepEqual(p.spec!.layers[0][0], '..  ');
 });
