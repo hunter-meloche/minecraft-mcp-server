@@ -75,15 +75,18 @@ const matcher = (item: string) => item === 'log' ? (n: string) => /_log$/.test(n
  * Get `n` of an item into the inventory: from the home chests, else crafted (planks from logs, sticks from planks,
  * and so on down RECIPES). Returns what's still short, as raw materials for the stock trips; {} when all is there.
  */
-export async function prepare(ctx: GoalContext, item: string, n: number, depth = 0): Promise<Record<string, number>> {
+export async function prepare(ctx: GoalContext, item: string, n: number, depth = 0, reserve: Record<string, number> = {}): Promise<Record<string, number>> {
   const match = matcher(item);
-  let have = await count(ctx, match);
+  // what the bill needs as it is (a house's log corners) isn't there to be crafted into something else
+  const held = depth ? reserve[item] ?? 0 : 0;
+  const counted = async () => Math.max(0, (await count(ctx, match)) - held);
+  let have = await counted();
   if (have >= n) return {};
   // from the chests (any kind of log or planks will do)
   for (const [name] of Object.entries(ctx.world.chestItems ?? {}).flatMap(([, items]) => Object.entries(items)).filter(([nm]) => match(nm))) {
     if (have >= n) break;
     await takeFromChests(ctx, name, n - have);
-    have = await count(ctx, match);
+    have = await counted();
   }
   if (have >= n) return {};
   const r = recipeFor(item);
@@ -91,13 +94,14 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   const crafts = Math.ceil((n - have) / r.makes);
   const short: Record<string, number> = {};
   for (const [inp, k] of Object.entries(r.from)) {
-    for (const [sk, sv] of Object.entries(await prepare(ctx, inp, k * crafts, depth + 1))) short[sk] = (short[sk] ?? 0) + sv;
+    for (const [sk, sv] of Object.entries(await prepare(ctx, inp, k * crafts, depth + 1, reserve))) short[sk] = (short[sk] ?? 0) + sv;
   }
   if (Object.keys(short).length) return short;
   const output = item === 'planks' ? await planksFor(ctx) : item;
   const c = await ctx.act('craft-item', { outputItem: output, amount: crafts });
   if (!c.ok) return { [item]: n - have };
-  return (await count(ctx, match)) >= n ? {} : { [item]: n - (await count(ctx, match)) };
+  const now = await counted();
+  return now >= n ? {} : { [item]: n - now };
 }
 
 /** Planks of the kind of log carried most. */
@@ -112,8 +116,11 @@ async function planksFor(ctx: GoalContext): Promise<string> {
 /** Prepare a whole bill; what's short goes to the stock trips (progress.need) and comes back. */
 export async function prepareBill(ctx: GoalContext, bill: Record<string, number>): Promise<Record<string, number>> {
   const short: Record<string, number> = {};
-  for (const [item, n] of Object.entries(bill)) {
-    for (const [k, v] of Object.entries(await prepare(ctx, item, n))) short[k] = (short[k] ?? 0) + v;
+  // raw items first (they can't be crafted), and kept back from the crafting of the rest
+  const raw = Object.entries(bill).filter(([item]) => !recipeFor(item));
+  const reserve = Object.fromEntries(raw);
+  for (const [item, n] of [...raw, ...Object.entries(bill).filter(([item]) => recipeFor(item))]) {
+    for (const [k, v] of Object.entries(await prepare(ctx, item, n, 0, reserve))) short[k] = (short[k] ?? 0) + v;
   }
   progressOf(ctx.world).need = Object.keys(short).length ? short : undefined;
   return short;

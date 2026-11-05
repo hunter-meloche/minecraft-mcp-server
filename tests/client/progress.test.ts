@@ -1,7 +1,7 @@
 import test from 'ava';
 import { mostWood, nextMilestone, progressOf, rawShort, recipeFor, type Milestone } from '../../src/client/brain/progress.js';
 import { inWood } from '../../src/client/brain/milestones.js';
-import { projectGoal, prepare } from '../../src/client/brain/project.js';
+import { projectGoal, prepare, prepareBill } from '../../src/client/brain/project.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 
@@ -92,4 +92,14 @@ test('wooden things of any wood: recipes, the wood there is most of, a blueprint
   const bp = inWood({ name: 'x', spec: { palette: { P: 'oak_planks', D: 'oak_door[facing=south,half=lower]', L: 'oak_log[axis=y]', C: 'chest' }, layers: [] }, size: { width: 1, height: 1, length: 1 }, bill: { oak_planks: 10, oak_door: 1, chest: 2 }, landmarks: [], groundOffset: 1 }, 'birch');
   t.deepEqual(bp.spec.palette, { P: 'birch_planks', D: 'birch_door[facing=south,half=lower]', L: 'birch_log[axis=y]', C: 'chest' });
   t.deepEqual(bp.bill, { birch_planks: 10, birch_door: 1, chest: 2 });
+});
+
+test('prepareBill keeps the logs a bill needs as logs out of the planks', async (t) => {
+  const acts: string[] = [];
+  const inv = new Map([['birch_log', 5]]);
+  const w = world();
+  const short = await prepareBill(ctxFor(w, snap(), acts, inv), { birch_planks: 8, birch_log: 4 });
+  t.deepEqual(short, { birch_log: 1 }); // 4 kept for the corners, 1 left: half the planks
+  t.deepEqual(acts, []);
+  t.deepEqual(progressOf(w).need, { birch_log: 1 });
 });
