@@ -29,6 +29,12 @@ export interface WorldMemory {
   lastDone?: Record<string, number>;
   /** dark spots ("x,y,z") no torch of the lights round reached: left out from then on */
   darkIgnore?: string[];
+  /** the long game: milestones done, the one in hand, its journal */
+  progress?: import('./progress.js').ProgressMemory;
+  /** places the projects made: storage, plots, pens, tree farm, mine entrance ... (kind -> boxes or points) */
+  zones?: Record<string, { x: number; y: number; z: number; width?: number; length?: number }[]>;
+  /** the yard as it grows (x1..x2, z1..z2 at ground y) */
+  yard?: { x1: number; z1: number; x2: number; z2: number; y: number };
 }
 
 export const DEFAULT_LEASH = 96;

@@ -1,0 +1,147 @@
+import type { GoalContext } from './goals.js';
+import type { MilestoneState, Step, StepResult } from './progress.js';
+import { prepareBill } from './project.js';
+import { findSite, growYard, occupancy, type Area } from './site.js';
+import type { WorldMemory } from './memory.js';
+import type { StructureSpec } from '../schematic.js';
+
+/**
+ * Building blocks for milestones: find room in the yard (growing it when there is none), get the materials together,
+ * and build a blueprint there, remembering where it went.
+ */
+
+const MINUTE = 60_000;
+export interface Yard extends Area { y: number }
+
+/** What a blueprint gives a build step (see blueprints.ts). */
+export interface BuildPlan {
+  name: string;
+  spec: StructureSpec;
+  size: { width: number; height: number; length: number };
+  bill: Record<string, number>;
+  landmarks: { kind: string; at: { x: number; y: number; z: number } }[];
+}
+
+const ok = (text: string): StepResult => ({ status: 'done', text });
+const going = (text: string): StepResult => ({ status: 'progress', text });
+const blocked = (text: string, retryMs = 5 * MINUTE): StepResult => ({ status: 'blocked', text, retryMs });
+
+/** Read any box, in slabs that fit one region call. */
+export async function readBox(ctx: Pick<GoalContext, 'call'>, b: { x: number; y: number; z: number; width: number; height: number; length: number }): Promise<(string | null)[]> {
+  const out: (string | null)[] = [];
+  const per = Math.max(1, Math.floor(65_536 / (b.width * b.length)));
+  for (let y = 0; y < b.height; y += per) {
+    const part = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...b, y: b.y + y, height: Math.min(per, b.height - y) }, 60_000);
+    out.push(...part.blocks);
+  }
+  return out;
+}
+
+const SOLID_TOP = /^(minecraft:)?(grass_block|dirt|coarse_dirt|podzol|stone|sand|gravel|clay|andesite|diorite|granite|deepslate|tuff)/;
+
+/**
+ * The yard: remembered once known; at first the square of 16 around home, its ground the most common natural
+ * surface height in it.
+ */
+export async function yardOf(ctx: GoalContext): Promise<Yard> {
+  if (ctx.world.yard) return ctx.world.yard;
+  const home = ctx.s.home!;
+  const box = { x: home.x - 16, y: home.y - 8, z: home.z - 16, width: 33, height: 14, length: 33 };
+  const blocks = await readBox(ctx, box);
+  const heights = new Map<number, number>();
+  for (let z = 0; z < box.length; z++) for (let x = 0; x < box.width; x++) {
+    for (let y = box.height - 1; y >= 0; y--) {
+      const b = blocks[x + z * box.width + y * box.width * box.length] ?? '';
+      if (SOLID_TOP.test(b)) { heights.set(box.y + y, (heights.get(box.y + y) ?? 0) + 1); break; }
+      if (b && !/^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|leaf_litter|.*_leaves|.*_log|torch|.*flower.*|dandelion|poppy)/.test(b)) break;
+    }
+  }
+  const y = [...heights].sort((a, b) => b[1] - a[1])[0]?.[0] ?? home.y - 1;
+  ctx.world.yard = { x1: box.x, z1: box.z, x2: box.x + box.width - 1, z2: box.z + box.length - 1, y };
+  return ctx.world.yard;
+}
+
+/** Remember a place a project made. */
+export function addZone(world: WorldMemory, kind: string, z: { x: number; y: number; z: number; width?: number; length?: number }): void {
+  world.zones ??= {};
+  (world.zones[kind] ??= []).push(z);
+}
+
+/**
+ * A step that finds a free w x l spot in the yard (2 blocks clear of buildings, farmland and water, near home) and
+ * keeps it in the milestone's data as `site`; with no room, levels a strip beside the yard (never over water) and
+ * tries again next time.
+ */
+export function siteStep(kind: string, width: number, length: number): Step {
+  return {
+    name: `find room for the ${kind}`,
+    run: async (ctx, st) => {
+      if (st.data.site) return ok('site chosen');
+      const yard = await yardOf(ctx);
+      const box = { x: yard.x1, y: yard.y - 1, z: yard.z1, width: yard.x2 - yard.x1 + 1, height: 6, length: yard.z2 - yard.z1 + 1 };
+      const grid = occupancy(box, await readBox(ctx, box), yard.y);
+      const avoid = Object.values(ctx.world.zones ?? {}).flat().filter(z => z.width && z.length)
+        .map(z => ({ x: z.x, z: z.z, width: z.width!, length: z.length! }));
+      const site = findSite(grid, width, length, { near: ctx.s.home, clearance: 2, avoidRect: avoid });
+      if (site) {
+        st.data.site = { ...site, y: yard.y };
+        return ok(`${kind} goes at (${site.x}, ${yard.y}, ${site.z})${site.rotated ? ', turned' : ''}`);
+      }
+      return growStep(ctx, yard, { width, length }, kind);
+    }
+  };
+}
+
+async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
+  const m = 24;
+  const box = { x: yard.x1 - m, y: yard.y - 4, z: yard.z1 - m, width: yard.x2 - yard.x1 + 1 + 2 * m, height: 14, length: yard.z2 - yard.z1 + 1 + 2 * m };
+  const blocks = await readBox(ctx, box);
+  const col = (x: number, z: number) => {
+    const ix = x - box.x, iz = z - box.z;
+    if (ix < 0 || iz < 0 || ix >= box.width || iz >= box.length) return { h: null as number | null, water: false };
+    for (let y = box.height - 1; y >= 0; y--) {
+      const b = blocks[ix + iz * box.width + y * box.width * box.length] ?? '';
+      if (/^(minecraft:)?water/.test(b)) return { h: box.y + y, water: true };
+      if (SOLID_TOP.test(b)) return { h: box.y + y, water: false };
+    }
+    return { h: null, water: false };
+  };
+  const g = growYard(yard, footprint, { isWater: (x, z) => col(x, z).water, heightAt: (x, z) => col(x, z).h, level: yard.y });
+  if (!g) return blocked(`no room in the yard for the ${kind}, and no dry land beside it to grow into`, 60 * MINUTE);
+  ctx.progress(`growing the yard to the ${g.side} for the ${kind}`);
+  const r = await ctx.act('level-area', { x1: g.strip.x1, z1: g.strip.z1, x2: g.strip.x2, z2: g.strip.z2, level: yard.y, timeoutMs: 8 * MINUTE });
+  if (/Now level|Already level/.test(r.text)) {
+    ctx.world.yard = { ...g.newYard, y: yard.y };
+    return going(`grew the yard to the ${g.side} (${g.strip.x1}..${g.strip.x2}, ${g.strip.z1}..${g.strip.z2})`);
+  }
+  return going(`leveling ground to the ${g.side} for the ${kind}: ${r.text.split('\n').pop()?.slice(0, 100)}`);
+}
+
+/**
+ * A step that builds a blueprint on the milestone's site: materials first (from the chests, crafted, or left to the
+ * stock trips), then build-structure, which only places what's missing, so a stopped build picks up where it was.
+ */
+export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan, opts: { lift?: number } = {}): Step {
+  return {
+    name: `build the ${kind}`,
+    bill: () => ({}),
+    run: async (ctx, st) => {
+      const site = st.data.site as { x: number; z: number; y: number } | undefined;
+      if (!site) return blocked('no site chosen', MINUTE);
+      const bp = plan(st);
+      const short = await prepareBill(ctx, bp.bill);
+      if (Object.keys(short).length) {
+        return blocked(`gathering for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+      }
+      const origin = { x: site.x, y: site.y + (opts.lift ?? 1), z: site.z };
+      const r = await ctx.act('build-structure', { ...origin, spec: bp.spec, name: bp.name, timeoutMs: 8 * MINUTE });
+      if (/all \d+ blocks in place/.test(r.text)) {
+        for (const l of bp.landmarks) addZone(ctx.world, `${kind}:${l.kind}`, { x: origin.x + l.at.x, y: origin.y + l.at.y, z: origin.z + l.at.z });
+        addZone(ctx.world, kind, { x: site.x, y: site.y, z: site.z, width: bp.size.width, length: bp.size.length });
+        ctx.world.landmarks.foundAt = 0; // look for the new chests, beds and tables
+        return ok(`${kind} built at (${origin.x}, ${origin.y}, ${origin.z})`);
+      }
+      return going(r.text.split('\n')[0].slice(0, 140));
+    }
+  };
+}

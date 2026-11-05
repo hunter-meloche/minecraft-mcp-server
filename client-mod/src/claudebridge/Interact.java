@@ -623,6 +623,69 @@ public final class Interact {
                 net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.Action.STOP_SLEEPING));
             return obj("wasSleeping", was);
         });
+
+        // right-click an entity the way the use key does: feed/breed an animal, shear a sheep, milk a cow, put on a lead,
+        // trade (opens the menu). No walking: the entity must already be in reach.
+        s.register("entity.use", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            int id = Integer.parseInt(required(p, "id"));
+            net.minecraft.world.entity.Entity e = mc.level.getEntity(id);
+            if (e == null || e.isRemoved()) throw new IllegalArgumentException("no entity with id " + id + " nearby");
+            String item = strParam(p, "item", null);
+            if (item != null) select(item);
+            Vec3 eye = pl.getEyePosition();
+            var box = e.getBoundingBox();
+            double dist = Math.sqrt(box.distanceToSqr(eye));
+            if (dist > 4.5) throw new IllegalStateException("too far: " + round(dist) + " blocks to the " + Names.entity(e) + " (max 4.5)");
+            Vec3 center = box.getCenter();
+            pl.lookAt(EntityAnchorArgument.Anchor.EYES, center);
+            Ticker.add(new Ticker.Task() {
+                int wait = 3;
+                @Override public boolean tick(Minecraft m) {
+                    if (--wait > 0) return false; // after the rotation and the selected slot have gone out
+                    if (m.player == null) { c.fail("not in a world"); return true; }
+                    if (e.isRemoved()) { c.fail("the " + Names.entity(e) + " is gone"); return true; }
+                    Vec3 from = m.player.getEyePosition();
+                    var bb = e.getBoundingBox();
+                    Vec3 hitAt = bb.contains(from) ? from : bb.clip(from, bb.getCenter()).orElse(bb.getCenter());
+                    var hit = new net.minecraft.world.phys.EntityHitResult(e, hitAt);
+                    // as Minecraft.startUseItem: main hand first, then the off hand, stopping at the first Success (and
+                    // swinging when the result says the client predicts the swing). Unlike the use key it never falls
+                    // through to using the held item on its own (that would throw an egg or a snowball).
+                    String heldBefore = m.player.getMainHandItem().isEmpty() ? null : Names.item(m.player.getMainHandItem());
+                    net.minecraft.world.InteractionResult mainResult = null, r = null;
+                    InteractionHand used = null;
+                    for (InteractionHand hand : InteractionHand.values()) {
+                        ItemStack inHand = m.player.getItemInHand(hand);
+                        r = m.gameMode.interact(m.player, e, hit, hand);
+                        if (mainResult == null) mainResult = r;
+                        if (r instanceof net.minecraft.world.InteractionResult.Success ok) {
+                            if (ok.swingSource() == net.minecraft.world.InteractionResult.SwingSource.PREDICTED) {
+                                m.player.swing(hand, inHand.getInteractAnimation(), false);
+                            }
+                            used = hand;
+                            break;
+                        }
+                    }
+                    if (used == null) r = mainResult; // neither hand did anything: report the main hand's answer
+                    c.ok(obj("result", r.getClass().getSimpleName(), "success", used != null, "hand", used == null ? null : used == InteractionHand.MAIN_HAND ? "main" : "off",
+                        "held", heldBefore, "entity", Names.entity(e), "id", e.getId()));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
+        });
+
+        // Baritone's sprinting on paths: off to lure animals holding food (they can't keep up with a sprinting player)
+        s.register("sprint.set", true, (p, c) -> {
+            if (!p.has("allowed") || p.get("allowed").isJsonNull()) throw new IllegalArgumentException("missing parameter: allowed");
+            var setting = baritone.api.BaritoneAPI.getSettings().allowSprint;
+            boolean previous = setting.value;
+            setting.value = p.get("allowed").getAsBoolean();
+            if (!setting.value) player().setSprinting(false);
+            return obj("allowed", setting.value, "previous", previous);
+        });
     }
 
     /** Short reason for a vanilla bed refusal, from its translation key (language-independent); null if not one. */

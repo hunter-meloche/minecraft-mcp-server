@@ -184,7 +184,9 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
   for (const n of kitNeeds(s.items, chest)) {
     for (const st of n.plan) if ('gather' in st) for (const [k, v] of Object.entries(st.gather)) extra[k] = (extra[k] ?? 0) + v;
   }
-  const out = STOCK.map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts)) }))
+  // what the project in hand is short of (its bill broken down to raw materials)
+  const project = world.progress?.need ?? {};
+  const out = STOCK.map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
     .filter(t => t.short > 0 && since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT);
   // what the kit is waiting for first
   return out.sort((a, b) => Number(!!extra[b.name]) - Number(!!extra[a.name]));

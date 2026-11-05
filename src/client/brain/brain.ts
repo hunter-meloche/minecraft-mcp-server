@@ -56,6 +56,13 @@ export class Brain {
   /** the running goal's latest step, and the status line the game client shows */
   private step?: string;
   private shown?: string;
+  /** consecutive failures per goal */
+  private fails = new Map<string, number>();
+  /** where the bot has stood still since when, while a Baritone process runs (the stuck watchdog) */
+  private stillAt = '';
+  private stillSince = 0;
+  /** today's daytime ticks, and how many of them had nothing to do */
+  private day = { tod: 0, work: 0, idle: 0, lastIdle: 0 };
   private worldId?: string;
   private readonly now: () => number;
   private readonly tickMs: number;
@@ -109,8 +116,18 @@ export class Brain {
       if (!s || !this.worldId) return;
       const world = this.memory.world(this.worldId);
       await this.discover(s, world);
+      this.countDay(s);
       const r = this.running;
       if (r) {
+        // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
+        const here = `${Math.floor(s.position.x)},${Math.floor(s.position.y)},${Math.floor(s.position.z)}`;
+        if (here !== this.stillAt || !s.process) { this.stillAt = here; this.stillSince = this.now(); }
+        if (s.process && this.now() - this.stillSince > 3 * 60_000) {
+          this.stillSince = this.now();
+          await this.stopRunning(`${r.goal.name} looks stuck (no movement for 3 min at ${here})`);
+          this.retryAt.set(r.goal.name, this.now() + 3 * 60_000);
+          return;
+        }
         if (this.now() - r.started > r.goal.timeoutMs) {
           await this.stopRunning(`${r.goal.name} ran out of time`);
           this.retryAt.set(r.goal.name, this.now() + r.goal.retryMs);
@@ -151,8 +168,28 @@ export class Brain {
     }
     const waiting = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
     if (waiting.length) lines.push(`Retrying later: ${waiting.join(', ')}.`);
+    const prog = world?.progress;
+    if (prog) {
+      lines.push(`Progress: ${prog.done.length ? `done ${prog.done.join(', ')}` : 'nothing finished yet'}` +
+        `${prog.current ? `; working on ${prog.current.id} (step ${prog.current.step + 1})` : ''}` +
+        `${prog.need ? `; short of ${Object.entries(prog.need).map(([k, v]) => `${v} ${k}`).join(', ')}` : ''}.`);
+      for (const j of prog.journal.slice(-6)) lines.push(`  ${new Date(j.at).toISOString().slice(11, 16)} ${j.text}`);
+    }
+    if (this.day.work) lines.push(`Today: idle ${Math.round(100 * this.day.idle / this.day.work)}% of daytime${this.day.lastIdle ? ` (yesterday ${this.day.lastIdle}%)` : ''}.`);
     if (this.log.length) lines.push('Recent:', ...this.log.slice(-20).map(l => `- ${l}`));
     return lines.join('\n');
+  }
+
+  /** Count today's daytime ticks and the idle ones (a new day starts when the clock wraps). */
+  private countDay(s: Snapshot): void {
+    if (s.timeOfDay < this.day.tod - 12_000) {
+      if (this.day.work) this.day.lastIdle = Math.round(100 * this.day.idle / this.day.work);
+      this.day.work = this.day.idle = 0;
+    }
+    this.day.tod = s.timeOfDay;
+    if (s.activity !== 'work' || s.sleeping) return;
+    this.day.work++;
+    if (!this.running) this.day.idle++;
   }
 
   /** One line for the bot's own window: what the autopilot is doing right now. */
@@ -253,11 +290,24 @@ export class Brain {
     const done = brainRun.run({ signal: abort.signal }, () => goal.run(ctx))
       .then(text => {
         this.retryAt.delete(goal.name);
+        this.fails.delete(goal.name);
         this.note(`done ${goal.name} in ${Math.round((this.now() - started) / 1000)}s: ${text}`);
       })
       .catch((e: Error) => {
         // stopped for something more urgent (or the LLM) is no failure: it may go again as soon as it's wanted
-        if (!abort.signal.aborted) this.retryAt.set(goal.name, this.now() + goal.retryMs);
+        if (!abort.signal.aborted) {
+          this.retryAt.set(goal.name, this.now() + goal.retryMs);
+          // three failures in a row: something is in the way today; leave it until the next morning
+          const n = (this.fails.get(goal.name) ?? 0) + 1;
+          this.fails.set(goal.name, n);
+          if (n >= 3 && s) {
+            const tod = this.last?.timeOfDay ?? s.timeOfDay;
+            const toMorning = (((24_000 - tod) % 24_000) || 24_000) * 50;
+            this.retryAt.set(goal.name, this.now() + toMorning);
+            this.fails.delete(goal.name);
+            this.note(`${goal.name} failed 3 times in a row: left until the morning`);
+          }
+        }
         this.note(`${abort.signal.aborted ? 'stopped' : 'failed'} ${goal.name}: ${e.message}`);
       })
       .finally(() => {

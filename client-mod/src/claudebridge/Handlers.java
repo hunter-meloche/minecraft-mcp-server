@@ -225,7 +225,20 @@ public final class Handlers {
             for (Entity e : list) {
                 JsonObject o = obj("id", e.getId(), "name", Names.entity(e), "category", e.getType().getCategory().getName(),
                     "position", pos(e.position()), "distance", round(e.distanceTo(pl)), "height", round(e.getBbHeight()));
-                if (e instanceof LivingEntity le) o.addProperty("health", round(le.getHealth()));
+                if (e instanceof LivingEntity le) {
+                    o.addProperty("health", round(le.getHealth()));
+                    o.addProperty("baby", le.isBaby()); // synced (AgeableMob's DATA_BABY_ID, zombies' own flag)
+                }
+                // sheared and colour are synced entity data. Whether an animal is in love is not: the client only gets a
+                // one-off heart burst (entity event 18) and its own inLove counter stays 0, so it is left out.
+                if (e instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep) {
+                    o.addProperty("sheared", sheep.isSheared());
+                    o.addProperty("color", sheep.getColor().getSerializedName());
+                }
+                if (e instanceof net.minecraft.world.entity.item.ItemEntity ie && !ie.getItem().isEmpty()) {
+                    o.addProperty("item", Names.item(ie.getItem()));
+                    o.addProperty("count", ie.getItem().getCount());
+                }
                 out.add(o);
             }
             return obj("entities", out);

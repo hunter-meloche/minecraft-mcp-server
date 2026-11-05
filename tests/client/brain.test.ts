@@ -207,3 +207,41 @@ test('the status line for the bot\'s window: off, the goal and its step, paused 
   await settle();
   t.is(shown.at(-1), 'Autopilot off');
 });
+
+test('three failures in a row leave a goal until the next morning', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let runs = 0;
+  const flaky: Goal = { name: 'flaky', priority: 10, wants: () => 'test', run: async () => { runs++; throw new Error('no'); }, timeoutMs: 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [flaky], now: () => now });
+  brain.setEnabled(true);
+  for (let i = 0; i < 3; i++) { await brain.tick(); await settle(); now += 2000; }
+  t.is(runs, 3);
+  t.regex(brain.status(), /flaky failed 3 times in a row: left until the morning/);
+  now += 60_000;
+  await brain.tick(); await settle();
+  t.is(runs, 3); // 18000 ticks to the morning = 15 minutes
+  now += 15 * 60_000;
+  await brain.tick(); await settle();
+  t.is(runs, 4);
+  brain.setEnabled(false);
+});
+
+test('the watchdog stops a Baritone job that has not moved the bot in 3 minutes', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const stuck: Goal = { name: 'stuck', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [stuck], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 60_000; await brain.tick();
+  t.false(calls.includes('cancel'));
+  now += 3.1 * 60_000; await brain.tick(); await settle(); // 3 minutes since it was first seen standing there
+  t.true(calls.includes('cancel'));
+  t.regex(brain.status(), /stuck looks stuck \(no movement for 3 min at 0,64,0\)/);
+  brain.setEnabled(false);
+});

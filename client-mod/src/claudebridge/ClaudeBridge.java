@@ -36,6 +36,7 @@ public class ClaudeBridge implements ClientModInitializer {
         server = new BridgeServer(port, token);
         Handlers.register(server);
         Interact.register(server);
+        Enchanting.register(server);
         Combat.register(server);
         Guardian.register(server);
         Protection.register(server);
