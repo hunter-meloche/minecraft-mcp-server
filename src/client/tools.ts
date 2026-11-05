@@ -137,6 +137,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   const call = <T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number) =>
     bridge.request<T>(method, params, timeoutMs ? { timeoutMs } : undefined);
   const protection = new ClientProtection(options.protectionStore);
+  // where the bot last died, for collect-items (its drops lie there for 5 minutes)
+  let lastDeath: { at: Pos; time: number } | undefined;
+  const events = bridge as unknown as { on?: (event: string, fn: (e: { type: string; at?: Pos }) => void) => void };
+  events.on?.('event', e => { if (e.type === 'death' && e.at) lastDeath = { at: e.at, time: Date.now() }; });
   let syncedVersion = -1;
   /** Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current. */
   const syncProtection = async (dim: string, force = false) => {
@@ -748,6 +752,41 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       return factory.createResponse(r.before === r.after
         ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; it is now ${after} (no change${r.result ? `: ${r.result}` : ''})`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+    }
+  );
+
+  factory.registerTool(
+    'collect-items',
+    'Pick up items lying on the ground: walks onto each drop within `radius` of a point (default: where the bot last died, if that was in the last 5 minutes, else around the bot), swimming to ones floating in water. Drops despawn 5 minutes after they fall.',
+    {
+      x: z.coerce.number().optional().describe('X of the centre (default: last death spot, else the bot)'),
+      y: z.coerce.number().optional().describe('Y of the centre'),
+      z: z.coerce.number().optional().describe('Z of the centre'),
+      radius: z.coerce.number().min(1).max(32).optional().describe('How far around the centre (default: 8)'),
+      timeoutMs: z.number().int().min(5000).optional().describe('Give up after this long (default: 90000)')
+    },
+    async ({ x, y, z: zz, radius = 8, timeoutMs = 90_000 }: { x?: number; y?: number; z?: number; radius?: number; timeoutMs?: number }) => {
+      const s = await status();
+      const recentDeath = lastDeath && Date.now() - lastDeath.time < 5 * 60_000 ? lastDeath.at : undefined;
+      const centre: Pos = x !== undefined && y !== undefined && zz !== undefined ? { x, y, z: zz } : recentDeath ?? s.position!;
+      const why = x !== undefined ? '' : recentDeath ? ' (where the bot died)' : ' (around the bot)';
+      const before = (await inventoryCounts()).counts;
+      const started = Date.now();
+      const tried = new Map<number, number>();
+      if (Math.hypot(centre.x - s.position!.x, centre.z - s.position!.z) > radius) await goNear(centre, 2, 120_000).catch(() => undefined);
+      while (Date.now() - started < timeoutMs) {
+        const { entities } = await call<{ entities: EntityInfo[] }>('world.entities', { maxDistance: 64, type: 'item' });
+        const next = entities.filter(e => Math.hypot(e.position.x - centre.x, e.position.y - centre.y, e.position.z - centre.z) <= radius && (tried.get(e.id) ?? 0) < 3)[0];
+        if (!next) break;
+        tried.set(next.id, (tried.get(next.id) ?? 0) + 1);
+        const r = await goNear(next.position, 0, 15_000).catch(() => undefined);
+        if (!r?.arrived) await call('steer', { ...next.position, timeoutMs: 6000 }, 12_000).catch(() => undefined);
+      }
+      const { entities: left } = await call<{ entities: EntityInfo[] }>('world.entities', { maxDistance: 64, type: 'item' });
+      const remaining = left.filter(e => Math.hypot(e.position.x - centre.x, e.position.y - centre.y, e.position.z - centre.z) <= radius).length;
+      const gained = gainedText(before, (await inventoryCounts()).counts);
+      return factory.createResponse(`Collected around ${fmt(floorPos(centre))}${why}: ${gained || 'nothing'}.` +
+        (remaining ? ` ${remaining} drop(s) there could not be reached.` : ''));
     }
   );
 

@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'drop-item', 'farm', 'fish', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'farm', 'fish', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -482,4 +482,17 @@ test('fish finds open water, walks there and reports the catch', async (t) => {
   });
   t.is((await run('fish', { times: 3 })).text, 'Fished at (1, 62, 1) for 70s: 3 bite(s) in 4 cast(s), caught cod x2, salmon x1.');
   t.like(request.getCalls().find(c => c.args[0] === 'fish')!.args[1], { x: 1, y: 62, z: 1, times: 3 });
+});
+
+test('collect-items walks onto drops near a point and swims to unreachable ones', async (t) => {
+  let invCalls = 0;
+  let listed = 0;
+  const { run, request } = setup({
+    inventory: () => ({ items: invCalls++ === 0 ? [] : [{ slot: 1, name: 'diamond_sword', count: 1 }], selectedSlot: 0, held: null }),
+    'world.entities': () => ({ entities: listed++ === 0 ? [{ id: 5, name: 'item', category: 'misc', position: { x: 11, y: 64, z: -3 }, distance: 1 }] : [] }),
+    goto: { arrived: false, reason: 'done', seconds: 1, baritone: [], at: { x: 10, y: 64, z: -4 }, distance: 1 },
+    steer: { reached: true, distance: 0.3, at: { x: 11, y: 64, z: -3 } }
+  });
+  t.is((await run('collect-items', { x: 10, y: 64, z: -3 })).text, 'Collected around (10, 64, -3): diamond_sword x1.');
+  t.true(request.getCalls().some(c => c.args[0] === 'steer'));
 });

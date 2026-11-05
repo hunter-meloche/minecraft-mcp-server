@@ -97,6 +97,7 @@ public final class Guardian {
     }
 
     private static boolean shieldWorn;
+    private static final java.util.Set<String> RAW = java.util.Set.of("cod", "salmon", "beef", "porkchop", "chicken", "mutton", "rabbit", "potato");
     private static boolean eating;
 
     /**
@@ -108,7 +109,10 @@ public final class Guardian {
         boolean hurt = p.getHealth() < p.getMaxHealth() - 1;
         if (eating || Interact.using || Interact.handsBusy || melee != null || Processes.active() != null) return;
         if (!((hurt && food < 18) || food <= 6)) return;
-        if (Combat.chooseFood(false) == null) return;
+        String choice = Combat.chooseFood(false);
+        if (choice == null) return;
+        // raw meat and fish give a third of what cooked does: keep them for the furnace unless really hungry
+        if (food > 6 && RAW.contains(choice)) return;
         eating = true;
         eatThen("", r -> { eating = false; note((hurt ? "ate to heal: " : "ate (hungry): ") + r); });
     }
