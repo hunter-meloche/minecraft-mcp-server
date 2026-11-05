@@ -36,7 +36,8 @@ interface Running { goal: Goal; reason: string; started: number; abort: AbortCon
 
 /** The most urgent goal that wants to run (and isn't waiting out a failure), with its reason. */
 export function decide(s: Snapshot, world: WorldMemory, goals: Goal[], retryAt: Map<string, number>): { goal: Goal; reason: string } | undefined {
-  for (const goal of [...goals].sort((a, b) => b.priority - a.priority)) {
+  const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
+  for (const goal of [...goals].sort((a, b) => p(b) - p(a))) {
     if ((retryAt.get(goal.name) ?? 0) > s.now || (s.sleeping && !goal.whileAsleep)) continue;
     const reason = goal.wants(s, world);
     if (reason) return { goal, reason };
@@ -137,7 +138,8 @@ export class Brain {
           return;
         }
         if (r.goal.interruptible === false) return;
-        const next = decide(s, world, this.goals.filter(g => g.priority > r.goal.priority), this.retryAt);
+        const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
+        const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal)), this.retryAt);
         if (next) await this.stopRunning(`${next.goal.name} is more urgent (${next.reason})`);
         return;
       }

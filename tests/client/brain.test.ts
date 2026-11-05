@@ -245,3 +245,11 @@ test('the watchdog stops a Baritone job that has not moved the bot in 3 minutes'
   t.regex(brain.status(), /stuck looks stuck \(no movement for 3 min at 0,64,0\)/);
   brain.setEnabled(false);
 });
+
+test('decide uses a goal\'s urgency when it has one', (t) => {
+  const world = { landmarks: { chests: [], farmland: [] }, leash: 96 };
+  const chores = goal('chores', 40, true);
+  const late: Goal = { ...goal('project', 25, true), urgency: s => (s.now > 5000 ? 52 : 25) };
+  t.is(decide(snap({ now: 1000 }), world, [chores, late], new Map())?.goal.name, 'chores');
+  t.is(decide(snap({ now: 9000 }), world, [chores, late], new Map())?.goal.name, 'project');
+});

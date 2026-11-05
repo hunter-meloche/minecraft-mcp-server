@@ -46,6 +46,8 @@ export interface Goal {
   name: string;
   /** higher runs first and may interrupt lower */
   priority: number;
+  /** a priority that changes with the state (a project waiting too long moves up); default: priority */
+  urgency?: (s: Snapshot, world: WorldMemory) => number;
   /** why it should run now, or null */
   wants: (s: Snapshot, world: WorldMemory) => string | null;
   /** does the work; returns what it did, throws when it failed */
