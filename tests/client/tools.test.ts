@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { processName, registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
+import { blockDrops, processName, registerClientTools, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -407,4 +407,21 @@ test('take-from-chest takes what was asked and says when the chest has none', as
 test('processName makes Baritone process names readable', (t) => {
   t.is(processName('Mine BlockOptionalMetaLookup{[BlockOptionalMeta{block=Block{minecraft:iron_ore},properties={}}, BlockOptionalMeta{block=Block{minecraft:deepslate_iron_ore},properties={}}]}'), 'Mine iron_ore, deepslate_iron_ore');
   t.is(processName('Defend against husk'), 'Defend against husk');
+});
+
+test('mine-blocks says so when nothing in the inventory can harvest the block', async (t) => {
+  const { run } = setup({
+    'world.findBlocks': { positions: [] },
+    mine: () => { throw new Error('needs_tool: stone drops nothing without the right tool (usually a pickaxe), and there is none in the inventory'); }
+  });
+  const r = await run('mine-blocks', { block: 'stone', count: 8 });
+  t.true(r.isError);
+  t.is(r.text, 'Failed: stone drops nothing without the right tool (usually a pickaxe), and there is none in the inventory. Craft one first.');
+});
+
+test('blockDrops: what mine-blocks counts for a block', (t) => {
+  t.deepEqual(blockDrops('stone'), ['cobblestone']);
+  t.deepEqual(blockDrops('iron_ore'), ['raw_iron']);
+  t.deepEqual(blockDrops('oak_log'), ['oak_log']);
+  t.deepEqual(blockDrops('sweet_berry_bush'), ['sweet_berry_bush']);
 });

@@ -222,6 +222,10 @@ public final class Handlers {
             long seq = Events.baritoneLogSeq();
             // several names at once ("iron_ore,deepslate_iron_ore"); counted together, as Baritone does
             String[] names = java.util.Arrays.stream(block.split(",")).map(String::trim).filter(n -> !n.isEmpty()).toArray(String[]::new);
+            for (String n : names) {
+                String why = Interact.cannotHarvest(new baritone.api.utils.BlockOptionalMeta(n).getBlock().defaultBlockState());
+                if (why != null) throw new IllegalStateException(why);
+            }
             Processes.baritone().getMineProcess().mineByName(count, names);
             // Baritone counts a block's drops from its loot table and misses some (a berry bush's berries: it harvested
             // 78 when asked for 12). Also stop once the inventory holds `count` of the block's own item (the same "have

@@ -74,6 +74,23 @@ public final class Interact {
     }
 
     /** Slot of an inventory index in a container menu with {@code containerSlots} slots of its own before the player's. */
+    /**
+     * Null if something in the inventory (or the bare hand) can harvest the block so that it drops; otherwise why not.
+     * Stone mined by hand drops nothing, and Baritone mines on anyway (240 s, nothing gained).
+     */
+    static String cannotHarvest(net.minecraft.world.level.block.state.BlockState st) {
+        if (!st.requiresCorrectToolForDrops()) return null;
+        var inv = player().getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            if (!inv.getItem(i).isEmpty() && inv.getItem(i).isCorrectToolForDrops(st)) return null;
+        }
+        String name = Names.block(st);
+        String tool = name.contains("diamond") || name.contains("gold") || name.contains("redstone") || name.contains("emerald") ? "an iron pickaxe or better"
+            : name.contains("iron") || name.contains("lapis") || name.contains("copper") ? "a stone pickaxe or better"
+            : name.contains("obsidian") || name.contains("ancient_debris") ? "a diamond pickaxe or better" : "the right tool (usually a pickaxe)";
+        return "needs_tool: " + name + " drops nothing without " + tool + ", and there is none in the inventory";
+    }
+
     static JsonObject chestContents(net.minecraft.world.inventory.ChestMenu menu) {
         JsonObject items = new JsonObject();
         int own = menu.getRowCount() * 9, free = 0;

@@ -71,6 +71,13 @@ export function mineflayerSlot(clientSlot: number): number {
   return 45;
 }
 
+/** Item names a block drops (minecraft-data 26.3), or the block's own name when it lists none. */
+export function blockDrops(block: string): string[] {
+  const data = minecraftData('26.3') as unknown as { blocksByName: Record<string, { drops?: number[] }>; items: Record<number, { name: string }> };
+  const names = (data.blocksByName[block]?.drops ?? []).map(id => data.items[id]?.name).filter((n): n is string => !!n);
+  return names.length ? [...new Set(names)] : [block];
+}
+
 const entityTypes = (() => {
   const data = minecraftData('26.3') as unknown as { entitiesByName?: Record<string, { type: string }> };
   return data.entitiesByName ?? {};
@@ -220,9 +227,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     const started = Date.now();
     const before = (await inventoryCounts()).counts;
     const skip = new Set<string>();
-    let drop: string | undefined;
     let dug = 0;
-    const have = async () => (await inventoryCounts()).counts.get(drop ?? block) ?? 0;
+    // what the block drops (minecraft-data), else the block's own item: count that (the first dig's pickup was sticks once)
+    const drops = blockDrops(block);
+    const have = async () => { const c = (await inventoryCounts()).counts; return Math.max(...drops.map(d => c.get(d) ?? 0)); };
     while (Date.now() - started < timeoutMs && (await have()) < count) {
       const found = await call<{ positions: Pos[] }>('world.findBlocks', { block, maxDistance: 64, count: 256 });
       const next = found.positions.find(p => !protection.has(dim, p) && !skip.has(fmt(p)));
@@ -232,10 +240,6 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!r.dug) continue;
       dug++;
       await collectDropsNear(next);
-      if (!drop) {
-        const g = [...(await inventoryCounts()).counts].filter(([n, c]) => c > (before.get(n) ?? 0)).sort((a, b) => b[1] - a[1]);
-        drop = g.find(([n]) => n === block)?.[0] ?? g[0]?.[0];
-      }
     }
     const seconds = Math.round((Date.now() - started) / 100) / 10;
     const gained = gainedText(before, (await inventoryCounts()).counts);
@@ -540,7 +544,14 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         guarded += near.positions.filter(p => protection.has(dim, p)).length;
       }
       if (guarded && names.length === 1) return mineAround(names[0], count, timeoutMs, dim, guarded);
-      const r = await call<ProcessResult & { gained: Record<string, number> }>('mine', { block, count, timeoutMs }, timeoutMs + 15_000);
+      let r: ProcessResult & { gained: Record<string, number> };
+      try {
+        r = await call<ProcessResult & { gained: Record<string, number> }>('mine', { block, count, timeoutMs }, timeoutMs + 15_000);
+      } catch (e) {
+        const msg = (e as Error).message;
+        if (msg.startsWith('needs_tool: ')) return factory.createErrorResponse(msg.slice(12) + '. Craft one first.');
+        throw e;
+      }
       const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
       const head = r.reason === 'timeout' ? `Stopped after ${r.seconds}s (time limit)` : `Mined for ${r.seconds}s`;
       return factory.createResponse(`${head}: ${gained || 'nothing gained'}.${baritoneSaid(r.baritone)}`);
