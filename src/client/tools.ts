@@ -830,9 +830,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       z: z.coerce.number().optional().describe('Z of the centre'),
       radius: z.coerce.number().int().min(4).max(64).optional().describe('How far around (default: 32)'),
       yMin: z.coerce.number().int().optional().describe('Lowest Y to look at (default: 6 below the bot)'),
-      yMax: z.coerce.number().int().optional().describe('Highest Y (default: 20 above the bot)')
+      yMax: z.coerce.number().int().optional().describe('Highest Y (default: 20 above the bot)'),
+      map: z.boolean().optional().describe('Also draw a map, one row per z north to south: T tree, ~ water, B builds, x leftovers, 0 ground at the median height, 1-9 higher, a-i lower')
     },
-    async ({ x, z: zz, radius = 32, yMin, yMax }: { x?: number; z?: number; radius?: number; yMin?: number; yMax?: number }) => {
+    async ({ x, z: zz, radius = 32, yMin, yMax, map = false }: { x?: number; z?: number; radius?: number; yMin?: number; yMax?: number; map?: boolean }) => {
       const s = await status();
       const me = s.block!;
       const cx = x ?? me.x, cz = zz ?? me.z;
@@ -855,6 +856,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         r.placed.length ? `Placed-looking blocks (${r.placed.length} cluster(s)):\n${r.placed.slice(0, 25).map(c => `- ${fmtC(c)}`).join('\n')}${r.placed.length > 25 ? `\n- ... ${r.placed.length - 25} more` : ''}` : 'No placed-looking blocks.',
         r.pits.length ? `Open pits (${r.pits.length} column(s)): ${r.pits.slice(0, 20).map(p => `(${p.x}, ${p.surface}, ${p.z}) ${p.around - p.surface} deep`).join('; ')}${r.pits.length > 20 ? ' ...' : ''}` : 'No open pits.'
       ];
+      if (map) lines.push(`Map, x ${box.x}..${box.x + box.width - 1} left to right, z ${box.z} at the top:\n${r.map.join('\n')}`);
       return factory.createResponse(lines.join('\n'));
     }
   );

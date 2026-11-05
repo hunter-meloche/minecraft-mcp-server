@@ -34,3 +34,12 @@ test("survey leaves the bot's builds and furniture out, and finds pits", (t) => 
   t.is(r.pits.length, 1);
   t.like(r.pits[0], { x: 106, z: 202, surface: 60, around: 63 });
 });
+
+test('survey draws a map of what tops each column', (t) => {
+  const { box, b, set } = world();
+  set(0, 4, 0, 'oak_log'); set(8, 3, 8, 'water'); set(4, 4, 0, 'cobblestone'); set(2, 3, 0, 'air');
+  const r = survey(box, b);
+  t.is(r.map.length, 9);
+  t.is(r.map[0], 'T0a0x0000');
+  t.is(r.map[8], '00000000~');
+});

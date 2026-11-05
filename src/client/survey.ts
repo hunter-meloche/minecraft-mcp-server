@@ -14,6 +14,8 @@ export interface Survey {
   water: number; // columns topped by water
   placed: Cluster[];
   pits: Pit[];
+  /** one row per z (north to south), one character per x: what tops each column */
+  map: string[];
 }
 
 const name = (state: string | null | undefined) => (state ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
@@ -102,5 +104,26 @@ export function survey(box: Box, blocks: (string | null)[], isProtected: (p: Pos
     for (let y = g + 1; y < h && open; y++) if (!AIRY.test(at(x, y, z))) open = false;
     if (open && m - g >= 3) pits.push({ x: box.x + x, z: box.z + z, surface: box.y + g, around: box.y + m });
   }
-  return { surface: { min: box.y + (known[0] ?? 0), max: box.y + (known.at(-1) ?? 0), median: box.y + median }, trees, water, placed, pits };
+  // the map: T tree, ~ water, B the bot's builds and furniture, x placed-looking, else the ground height against the
+  // median: 0 level, 1..9 higher, a..i lower (a = 1 below)
+  const flaggedCols = new Set([...flagged].map(i => i % (w * l)));
+  const map: string[] = [];
+  for (let z = 0; z < l; z++) {
+    let row = '';
+    for (let x = 0; x < w; x++) {
+      let top = '';
+      let ty = -1;
+      for (let y = h - 1; y >= 0 && !top; y--) { const n = at(x, y, z); if (!AIRY.test(n)) { top = n; ty = y; } }
+      const prot = ty >= 0 && isProtected({ x: box.x + x, y: box.y + ty, z: box.z + z });
+      const g = ground[x + z * w];
+      if (/_log$|_leaves$/.test(top)) row += 'T';
+      else if (top === 'water') row += '~';
+      else if (prot || KEEP.test(top)) row += 'B';
+      else if (flaggedCols.has(x + z * w)) row += 'x';
+      else if (g < 0) row += '?';
+      else { const d = g - median; row += d === 0 ? '0' : d > 0 ? String(Math.min(9, d)) : String.fromCharCode(96 + Math.min(9, -d)); }
+    }
+    map.push(row);
+  }
+  return { surface: { min: box.y + (known[0] ?? 0), max: box.y + (known.at(-1) ?? 0), median: box.y + median }, trees, water, placed, pits, map };
 }
