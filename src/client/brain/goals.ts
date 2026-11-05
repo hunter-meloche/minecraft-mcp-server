@@ -108,6 +108,12 @@ export function shelterGoal(): Goal {
         }
         did.push('walked home');
       }
+      // onto the home cell itself: go-home stops within 2 blocks, which can be the doorway, with the door left open
+      // (Baritone opens doors by hand and walks on; crossing the inside pressure plate is what shuts them again)
+      const home = ctx.s.home!;
+      await ctx.act('move-to-position', { x: home.x, y: home.y, z: home.z, range: 0, timeoutMs: 30_000 });
+      const shut = await closeDoors(ctx, home);
+      if (shut) did.push(`shut ${shut} door(s)`);
       const bed = ctx.world.landmarks.bed;
       if (ctx.s.activity === 'rest' && bed) {
         const sleep = () => ctx.call<{ sleeping: boolean; reason?: string }>('bed.sleep', { ...bed }, 15_000);
@@ -124,6 +130,27 @@ export function shelterGoal(): Goal {
       return did.join(', ') || 'home';
     }
   };
+}
+
+/**
+ * Shut the doors around home that stand open with nothing holding them open (a pressure plate keeps them powered:
+ * those close by themselves). Monsters walk in through an open door; the bot once died to a zombie in its own cabin.
+ */
+export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
+  const box = { x: home.x - 8, y: home.y - 2, z: home.z - 8, width: 17, height: 6, length: 17 };
+  const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', box);
+  // a door still powered by the plate the bot just stepped off shuts by itself when the plate lets go
+  const me = (await ctx.status()).block;
+  let shut = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i] ?? '';
+    if (!/_door\[/.test(b) || /iron_door/.test(b) || !/half=lower/.test(b) || !/open=true/.test(b) || /powered=true/.test(b)) continue;
+    const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
+    if (me && me.x === at.x && me.z === at.z && Math.abs(me.y - at.y) <= 1) continue; // standing in it
+    const r = await ctx.act('use-item-on-block', { ...at, face: 'up' });
+    if (r.ok && /open=false|closed/.test(r.text)) shut++;
+  }
+  return shut;
 }
 
 /** Wandered off with nothing to do (after an LLM job, say): come back to the yard. */
