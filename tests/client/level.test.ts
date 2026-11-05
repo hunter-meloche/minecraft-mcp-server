@@ -57,3 +57,11 @@ test('planLevel cuts what stands on protected fill or buried water, and keeps su
   t.deepEqual(p.kept, { water: 0, built: 1 });
   t.deepEqual(p.spec!.layers[0][0], '..  ');
 });
+
+test('planLevel keeps a pond whose surface is well below the level', (t) => {
+  const { box, b, set } = world();
+  for (const x of [1, 2]) { set(x, 3, 1, 'air'); set(x, 2, 1, 'air'); set(x, 1, 1, 'water'); } // open water 2 below the ground
+  const p = planLevel(box, b, 63);
+  t.is(p.kept.water, 2);
+  t.is(p.dirt + p.cobblestone, 0);
+});
