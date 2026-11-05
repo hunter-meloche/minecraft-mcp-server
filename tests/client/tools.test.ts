@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'farm', 'fish', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'mine-blocks', 'set-home', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -531,4 +531,38 @@ test('farm replants bare farmland with seeds from the inventory', async (t) => {
   const r = await run('farm', { range: 4 });
   t.is(placed.length, 2);
   t.regex(r.text, /Planted 2 \(wheat_seeds\)\./);
+});
+
+test('set-home and go-home: saved per world, walked back to in legs', async (t) => {
+  let pos = { x: 10.5, y: 64, z: -3.2 };
+  const status = () => ({ ...STATUS, hashedSeed: '7', position: pos, block: { x: Math.floor(pos.x), y: pos.y, z: Math.floor(pos.z) } });
+  const legs: Record<string, unknown>[] = [];
+  const { run } = setup({
+    status,
+    goto: (p: Record<string, unknown>) => {
+      legs.push(p);
+      pos = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+      return { arrived: true, reason: 'done', seconds: 5, baritone: [], at: { x: p.x, y: p.y, z: p.z }, distance: 0 };
+    }
+  });
+  t.true((await run('go-home')).isError); // none saved yet
+  t.is((await run('set-home')).text, "Home 'home' set at (10, 64, -4) (overworld)");
+  pos = { x: 10, y: 70, z: 500 }; // wandered 500 blocks south
+  const r = await run('go-home');
+  t.regex(r.text, /^Home: at \(10, 64, -4\)/);
+  t.true(legs.filter(l => l.xz).length >= 2); // long way: legs at any height first
+  t.like(legs.at(-1), { x: 10, y: 64, z: -4, range: 2 });
+});
+
+test('explore walks legs in a direction until the target shows up', async (t) => {
+  let pos = { x: 0, y: 64, z: 0 };
+  let looks = 0;
+  const { run, request } = setup({
+    status: () => ({ ...STATUS, hashedSeed: '7', position: pos, block: pos }),
+    goto: (p: Record<string, unknown>) => { pos = { x: Number(p.x), y: 64, z: Number(p.z) }; return { arrived: true, reason: 'done', seconds: 20, baritone: [], at: pos, distance: 3 }; },
+    'world.entities': () => ({ entities: looks++ < 2 ? [] : [{ id: 3, name: 'sheep', category: 'passive', position: { x: 5, y: 66, z: 250 }, distance: 40 }] })
+  });
+  const r = await run('explore', { target: 'sheep', direction: 'south', step: 100 });
+  t.regex(r.text, /^Found sheep at \(5, 66, 250\), 250 blocks south of where the search began; the bot is at \(0, 64, 200\)\. No home set\.$/);
+  t.deepEqual(request.getCalls().filter(c => c.args[0] === 'goto').map(c => [c.args[1]?.z, c.args[1]?.xz]), [[100, true], [200, true]]);
 });

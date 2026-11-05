@@ -202,12 +202,16 @@ public final class Handlers {
             long seq = Events.baritoneLogSeq();
             // away: at least `away` blocks from the point (step out of a cell to place a block there)
             int awayFrom = intParam(p, "away", 0);
-            Processes.baritone().getCustomGoalProcess().setGoalAndPath(awayFrom > 0 ? new baritone.api.pathing.goals.GoalRunAway(awayFrom, target)
+            // xz: any height at that x/z (long trips over land the bot hasn't seen, where the ground height is unknown)
+            boolean xz = p.has("xz") && p.get("xz").getAsBoolean();
+            Processes.baritone().getCustomGoalProcess().setGoalAndPath(xz ? new baritone.api.pathing.goals.GoalXZ(target.getX(), target.getZ())
+                : awayFrom > 0 ? new baritone.api.pathing.goals.GoalRunAway(awayFrom, target)
                 : range <= 0 ? new GoalBlock(target) : new GoalNear(target, range));
             Processes.watch(c, seq, timeoutTicks, reason -> {
                 LocalPlayer now = Minecraft.getInstance().player;
                 BlockPos at = now == null ? pl.blockPosition() : now.blockPosition();
-                double away = Math.sqrt(at.distSqr(target));
+                double away = xz ? Math.hypot(at.getX() - target.getX(), at.getZ() - target.getZ()) : Math.sqrt(at.distSqr(target));
+                if (xz) return obj("arrived", away <= Math.max(range, 2) + 0.01, "at", pos(at), "distance", round(away));
                 return obj("arrived", awayFrom > 0 ? away >= awayFrom - 0.01 : away <= Math.max(range, 0) + 0.01 || (range <= 0 && at.equals(target)),
                     "at", pos(at), "distance", round(away));
             });

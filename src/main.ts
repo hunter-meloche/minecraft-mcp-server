@@ -55,7 +55,9 @@ async function main() {
     );
     connection.start();
     const factory = new ToolFactory(server, connection, () => (connection.isConnected() ? connection.alerts.take() : null));
-    registerClientTools(factory, connection.bridge, messageStore, { gameDir, protectionStore: jsonFileStore() });
+    registerClientTools(factory, connection.bridge, messageStore, {
+      gameDir, protectionStore: jsonFileStore(), homesFile: path.join(os.homedir(), '.minecraft-mcp-server', 'homes.json')
+    });
     cleanup = () => connection.cleanup();
   } else {
     const connection = new BotConnection(

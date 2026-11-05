@@ -146,12 +146,25 @@ export interface ClientToolOptions {
   gameDir: string;
   /** where the list of blocks the bot built is kept (default: memory only) */
   protectionStore?: ProtectionStore;
+  /** the JSON file set-home writes (default: none, homes kept in memory) */
+  homesFile?: string;
 }
 
 export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, messageStore: MessageStore, options: ClientToolOptions): void {
   const call = <T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number) =>
     bridge.request<T>(method, params, timeoutMs ? { timeoutMs } : undefined);
   const protection = new ClientProtection(options.protectionStore);
+  type Homes = Record<string, Record<string, Pos & { dimension: string }>>;
+  let memoryHomes: Homes = {};
+  const readHomes = (): Homes => {
+    if (!options.homesFile) return memoryHomes;
+    try { return JSON.parse(fs.readFileSync(options.homesFile, 'utf8')) as Homes; } catch { return {}; }
+  };
+  const writeHomes = (h: Homes) => {
+    if (!options.homesFile) { memoryHomes = h; return; }
+    fs.mkdirSync(path.dirname(options.homesFile), { recursive: true });
+    fs.writeFileSync(options.homesFile, JSON.stringify(h, null, 1));
+  };
   // where the bot last died, for collect-items (its drops lie there for 5 minutes)
   let lastDeath: { at: Pos; time: number } | undefined;
   const events = bridge as unknown as { on?: (event: string, fn: (e: { type: string; at?: Pos }) => void) => void };
@@ -802,6 +815,115 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         : r.before === r.after
           ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it is now ${after}`
         : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+    }
+  );
+
+  factory.registerTool(
+    'set-home',
+    'Remember a place as home (default: where the bot stands), per world and across restarts, so go-home can walk back from anywhere.',
+    {
+      name: z.string().regex(/^[\w-]+$/).optional().describe("Name of the place (default: 'home')"),
+      x: z.coerce.number().optional().describe('X (default: the bot)'),
+      y: z.coerce.number().optional().describe('Y'),
+      z: z.coerce.number().optional().describe('Z')
+    },
+    async ({ name = 'home', x, y, z: zz }: { name?: string; x?: number; y?: number; z?: number }) => {
+      const s = await status();
+      const world = worldIdFromSeed(s.hashedSeed ?? undefined);
+      if (!world) return factory.createErrorResponse('Cannot tell which world this is (no seed from the server)');
+      const at = x !== undefined && y !== undefined && zz !== undefined ? floorPos({ x, y, z: zz }) : s.block!;
+      const homes = readHomes();
+      homes[world] = { ...(homes[world] ?? {}), [name]: { ...at, dimension: s.dimension ?? 'overworld' } };
+      writeHomes(homes);
+      return factory.createResponse(`Home '${name}' set at ${fmt(at)} (${s.dimension ?? 'overworld'})`);
+    }
+  );
+
+  factory.registerTool(
+    'go-home',
+    "Walk back to a place saved with set-home (default 'home'), however far, in legs over unexplored land. Reports how far it got.",
+    {
+      name: z.string().optional().describe("Which saved place (default: 'home')"),
+      timeoutMs: z.number().int().min(10000).optional().describe('Give up after this long (default: 900000)')
+    },
+    async ({ name = 'home', timeoutMs = 900_000 }: { name?: string; timeoutMs?: number }) => {
+      const s = await status();
+      const world = worldIdFromSeed(s.hashedSeed ?? undefined);
+      const home = world ? readHomes()[world]?.[name] : undefined;
+      if (!home) return factory.createErrorResponse(`No home '${name}' saved in this world. Use set-home first.`);
+      if (home.dimension !== (s.dimension ?? 'overworld')) return factory.createErrorResponse(`Home '${name}' is in ${home.dimension}; the bot is in ${s.dimension}`);
+      const started = Date.now();
+      const left = () => timeoutMs - (Date.now() - started);
+      // far away: legs of up to 200 blocks toward it at any height (Baritone plans over loaded chunks), then the exact spot
+      for (let leg = 0; leg < 50 && left() > 5000; leg++) {
+        const me = (await status()).position!;
+        const d = Math.hypot(home.x - me.x, home.z - me.z);
+        if (d <= 48) break;
+        const k = Math.min(1, 200 / d);
+        const stop = { x: Math.round(me.x + (home.x - me.x) * k), y: home.y, z: Math.round(me.z + (home.z - me.z) * k) };
+        const r = await call<ProcessResult & { arrived: boolean }>('goto', { ...stop, xz: true, range: 8, timeoutMs: Math.min(left(), 240_000) }, Math.min(left(), 240_000) + 15_000);
+        if (!r.arrived && Math.hypot(home.x - r.at!.x, home.z - r.at!.z) >= d - 4) break; // no progress on this leg
+      }
+      if (left() > 5000) await goNear(home, 2, Math.min(left(), 180_000)).catch(() => undefined);
+      const at = (await status()).block!;
+      const d = Math.hypot(home.x - at.x, home.y - at.y, home.z - at.z);
+      const secs = Math.round((Date.now() - started) / 1000);
+      return d <= 3
+        ? factory.createResponse(`Home: at ${fmt(at)}, by '${name}' ${fmt(home)}, after ${secs}s`)
+        : factory.createErrorResponse(`Stopped ${Math.round(d)} blocks from home '${name}' ${fmt(home)} at ${fmt(at)} after ${secs}s. Run go-home again to keep going.`);
+    }
+  );
+
+  factory.registerTool(
+    'explore',
+    "Travel in a direction looking for something: an entity type ('sheep', 'cow', 'villager') or a block ('sweet_berry_bush', 'water'). Walks in legs of `step` blocks and looks around after each, up to maxDistance. Says where it found it and how far home is. Set home first so go-home can bring the bot back.",
+    {
+      target: z.string().describe("Entity type or block to look for, e.g. 'sheep'"),
+      direction: z.enum(['north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest']).describe('Which way to go (south is +z, east is +x)'),
+      maxDistance: z.coerce.number().int().min(16).max(4000).optional().describe('How far to go at most (default: 1000)'),
+      step: z.coerce.number().int().min(16).max(256).optional().describe('Blocks per leg (default: 96)'),
+      timeoutMs: z.number().int().min(10000).optional().describe('Give up after this long (default: 900000)')
+    },
+    async ({ target, direction, maxDistance = 1000, step = 96, timeoutMs = 900_000 }: { target: string; direction: string; maxDistance?: number; step?: number; timeoutMs?: number }) => {
+      const name = target.replace(/^minecraft:/, '');
+      const dirs: Record<string, [number, number]> = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0], northeast: [1, -1], northwest: [-1, -1], southeast: [1, 1], southwest: [-1, 1] };
+      const [dx, dz] = dirs[direction];
+      const norm = Math.hypot(dx, dz);
+      const s0 = await status();
+      const start = s0.position!;
+      const world = worldIdFromSeed(s0.hashedSeed ?? undefined);
+      const home = world ? readHomes()[world]?.home : undefined;
+      const isEntity = !!entityTypes[name];
+      const started = Date.now();
+      const look = async (): Promise<Pos | undefined> => {
+        if (isEntity) {
+          const r = await call<{ entities: EntityInfo[] }>('world.entities', { maxDistance: 96, type: name });
+          return r.entities[0]?.position;
+        }
+        const r = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 96, count: 1 });
+        return r.positions[0];
+      };
+      let found = await look();
+      let travelled = 0;
+      while (!found && travelled < maxDistance && Date.now() - started < timeoutMs) {
+        travelled = Math.min(maxDistance, travelled + step);
+        const stop = { x: Math.round(start.x + (dx / norm) * travelled), y: Math.round(start.y), z: Math.round(start.z + (dz / norm) * travelled) };
+        const left = timeoutMs - (Date.now() - started);
+        const r = await call<ProcessResult & { arrived: boolean; at: Pos }>('goto', { ...stop, xz: true, range: 8, timeoutMs: Math.min(left, 240_000) }, Math.min(left, 240_000) + 15_000);
+        found = await look();
+        if (!r.arrived && !found) {
+          const here = (await status()).position!;
+          const gone = Math.hypot(here.x - start.x, here.z - start.z);
+          if (gone < travelled - step) { // stuck (ocean, cliff): stop rather than wander
+            return factory.createErrorResponse(`Explored ${Math.round(gone)} blocks ${direction} and could not get further (stopped at ${fmt(floorPos(here))}); no ${name} seen.${home ? ` Home is ${Math.round(Math.hypot(home.x - here.x, home.z - here.z))} blocks away.` : ''}`);
+          }
+        }
+      }
+      const here = (await status()).position!;
+      const homeNote = home ? ` Home is ${Math.round(Math.hypot(home.x - here.x, home.z - here.z))} blocks away (go-home).` : ' No home set.';
+      if (!found) return factory.createResponse(`No ${name} within ${maxDistance} blocks ${direction} (now at ${fmt(floorPos(here))}).${homeNote}`);
+      const dist = Math.round(Math.hypot(found.x - start.x, found.z - start.z));
+      return factory.createResponse(`Found ${name} at ${fmt(floorPos(found))}, ${dist} blocks ${direction} of where the search began; the bot is at ${fmt(floorPos(here))}.${homeNote}`);
     }
   );
 
