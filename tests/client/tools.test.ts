@@ -61,7 +61,7 @@ test('read tools answer in the mineflayer wording', async (t) => {
     'world.entities': { entities: [{ id: 1, name: 'cow', category: 'creature', position: { x: 1.5, y: 64, z: 2.5 }, distance: 3 }, { id: 2, name: 'zombie', category: 'monster', position: { x: -4.2, y: 64, z: 0 }, distance: 6 }] }
   });
   t.is((await run('get-position')).text, 'Current position: (10, 64, -4)');
-  t.regex((await run('get-status')).text, /^Health 18\/20, food 17\/20, saturation 2.5\nTime of day 11800 \(day; night in 1.0 min\)\nDimension overworld, game mode survival, difficulty easy\nArmor: iron_boots, shield; auto-defend on\nBackend: game client with Baritone \(idle\)$/);
+  t.regex((await run('get-status')).text, /^Health 18\/20, food 17\/20, saturation 2.5\nTime of day 11800 \(day; night in 1.0 min\)\nDimension overworld, game mode survival, difficulty easy\nArmor: iron_boots, shield; auto-defend on; inventory 2\/36 slots used\nBackend: game client with Baritone \(idle\)$/);
   t.is((await run('list-inventory')).text, 'Found 3 items in inventory:\n\n- stone_pickaxe (x1) in slot 36\n- oak_log (x5) in slot 12\n- shield (x1) in slot 45\n');
   t.is((await run('find-item', { nameOrType: 'log' })).text, 'Found 5 oak_log in inventory (slot 12)');
   t.is((await run('find-blocks', { blockType: 'oak_log', count: 5 })).text, 'Found 2 oak_log block(s) within 16 blocks:\n1. (1, 2, 3)\n2. (4, 5, 6)');
