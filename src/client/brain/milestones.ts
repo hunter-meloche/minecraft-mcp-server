@@ -1,6 +1,7 @@
 import type { GoalContext } from './goals.js';
 import type { MilestoneState, Step, StepResult } from './progress.js';
 import { prepareBill } from './project.js';
+import { allItems, mostWood, progressOf } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
 import type { Blueprint } from './blueprints.js';
@@ -19,6 +20,17 @@ export type BuildPlan = Pick<Blueprint, 'name' | 'spec' | 'size' | 'bill' | 'lan
 const ok = (text: string): StepResult => ({ status: 'done', text });
 const going = (text: string): StepResult => ({ status: 'progress', text });
 const blocked = (text: string, retryMs = 5 * MINUTE): StepResult => ({ status: 'blocked', text, retryMs });
+
+/** A blueprint in another wood: oak planks, logs, doors, fences and gates become the given wood's. */
+export function inWood(bp: BuildPlan, wood: string): BuildPlan {
+  if (wood === 'oak') return bp;
+  const swap = (s: string) => s.replace(/^(minecraft:)?oak_(planks|log|door|fence_gate|fence|stairs|slab)(?=$|\[)/, `$1${wood}_$2`);
+  return {
+    ...bp,
+    spec: { ...bp.spec, palette: Object.fromEntries(Object.entries(bp.spec.palette).map(([k, v]) => [k, swap(v)])) },
+    bill: Object.fromEntries(Object.entries(bp.bill).map(([k, v]) => [swap(k), v]))
+  };
+}
 
 /** Read any box, in slabs that fit one region call. */
 export async function readBox(ctx: Pick<GoalContext, 'call'>, b: { x: number; y: number; z: number; width: number; height: number; length: number }): Promise<(string | null)[]> {
@@ -122,7 +134,11 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan)
     run: async (ctx, st) => {
       const site = st.data.site as { x: number; z: number; y: number } | undefined;
       if (!site) return blocked('no site chosen', MINUTE);
-      const bp = plan(st);
+      // one wood for the whole build (the kind there's most of when it starts; a half-built house stays one wood)
+      st.data.wood ??= mostWood(allItems(ctx.s, ctx.world));
+      const bp = inWood(plan(st), st.data.wood as string);
+      const wood = st.data.wood as string;
+      progressOf(ctx.world).carry = [...Object.keys(bp.bill), `${wood}_log`, `${wood}_planks`, 'stick'];
       const short = await prepareBill(ctx, bp.bill);
       if (Object.keys(short).length) {
         return blocked(`gathering for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
@@ -133,6 +149,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan)
         for (const l of bp.landmarks) addZone(ctx.world, `${kind}:${l.kind}`, { x: origin.x + l.at.x, y: origin.y + l.at.y, z: origin.z + l.at.z });
         addZone(ctx.world, kind, { x: site.x, y: site.y, z: site.z, width: bp.size.width, length: bp.size.length });
         ctx.world.landmarks.foundAt = 0; // look for the new chests, beds and tables
+        progressOf(ctx.world).carry = undefined;
         return ok(`${kind} built at (${origin.x}, ${origin.y}, ${origin.z})`);
       }
       return going(r.text.split('\n')[0].slice(0, 140));

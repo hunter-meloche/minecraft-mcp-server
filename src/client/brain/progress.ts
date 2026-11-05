@@ -41,6 +41,8 @@ export interface ProgressMemory {
   current?: { id: string } & MilestoneState;
   /** raw materials the current step is short of, for the stock trips */
   need?: Record<string, number>;
+  /** items the current step builds with (and their logs): not put away by the stash */
+  carry?: string[];
   /** a step that failed: not before (ms) */
   blockedUntil?: Record<string, number>;
   journal: { at: number; text: string }[];
@@ -102,6 +104,30 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   enchanting_table: { makes: 1, from: { book: 1, diamond: 2, obsidian: 4 } },
   ladder: { makes: 3, from: { stick: 7 } }
 };
+const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab)$/;
+
+/** The recipe for an item: wooden things of any wood (birch_fence from birch_planks, birch_planks from birch_log). */
+export function recipeFor(item: string): { makes: number; from: Record<string, number> } | undefined {
+  const m = WOODEN.exec(item);
+  if (m) {
+    const [, wood, kind] = m;
+    if (kind === 'planks') return { makes: 4, from: { [`${wood}_log`]: 1 } };
+    const r = RECIPES[`oak_${kind}`];
+    return r && { makes: r.makes, from: Object.fromEntries(Object.entries(r.from).map(([k, v]) => [k === 'planks' ? `${wood}_planks` : k, v])) };
+  }
+  return RECIPES[item];
+}
+
+/** The wood the bot has most of, carried and in the chests (logs, and planks at a quarter). */
+export function mostWood(items: Record<string, number>): string {
+  const woods = new Map<string, number>();
+  for (const [n, k] of Object.entries(items)) {
+    const m = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(log|planks)$/.exec(n);
+    if (m) woods.set(m[1], (woods.get(m[1]) ?? 0) + (m[2] === 'log' ? k : k / 4));
+  }
+  return [...woods].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'oak';
+}
+
 /** What the item names in recipes stand for. */
 const GROUPS: Record<string, RegExp> = { log: /_log$/, planks: /_planks$/, coal: /^(coal|charcoal)$/, cobblestone: /^(cobblestone|cobbled_deepslate)$/ };
 const generic = (item: string) => /_log$/.test(item) ? 'log' : /_planks$/.test(item) ? 'planks' : item === 'charcoal' ? 'coal' : item === 'cobbled_deepslate' ? 'cobblestone' : item;

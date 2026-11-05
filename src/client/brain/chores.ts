@@ -30,6 +30,11 @@ function foods(): Set<string> {
   return foodNames;
 }
 
+/** What the project in hand is gathering and building with: stays carried (the stash put a trip's logs away). */
+function projectCarry(world: WorldMemory): Set<string> {
+  return new Set(world.progress?.carry ?? []);
+}
+
 /** Look in every home chest not looked in for a while (plans use what they hold). */
 async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<void> {
   if (since(ctx.world, 'chests', ctx.s.now) < maxAgeMs && ctx.world.landmarks.chests.every(c => ctx.world.chestItems?.[key(c)])) return;
@@ -47,14 +52,14 @@ export const stash: Goal = {
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
     if (!awakeAtHome(s) || !world.landmarks.chests.length) return null;
-    const plan = stashPlan(s.items, { foods: foods() });
+    const plan = stashPlan(s.items, { foods: foods(), keep: projectCarry(world) });
     if (!plan.deposit.length && !plan.drop.length) return null;
     if (s.slotsUsed >= 27) return `${s.slotsUsed}/36 slots used`;
     if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
     return null;
   },
   run: async ctx => {
-    const plan = stashPlan(ctx.s.items, { foods: foods() });
+    const plan = stashPlan(ctx.s.items, { foods: foods(), keep: projectCarry(ctx.world) });
     const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
     let stored = 0;
     const deposit = plan.deposit.filter(e => e.slot === undefined || names(e.name) <= 1);
@@ -237,7 +242,9 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
   }
   // what the project in hand is short of (its bill broken down to raw materials)
   const project = world.progress?.need ?? {};
-  const out = STOCK.map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
+  // a project short of a particular wood's logs mines that wood
+  const woods = Object.keys(project).filter(k => /_log$/.test(k)).map(k => ({ name: k, want: 0, mine: k, counts: new RegExp(`^${k}$`) }));
+  const out = [...STOCK, ...woods].map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
     .filter(t => t.short > 0 && since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT);
   // what the kit is waiting for first
   return out.sort((a, b) => Number(!!extra[b.name]) - Number(!!extra[a.name]));

@@ -1,5 +1,6 @@
 import test from 'ava';
-import { nextMilestone, progressOf, rawShort, type Milestone } from '../../src/client/brain/progress.js';
+import { mostWood, nextMilestone, progressOf, rawShort, recipeFor, type Milestone } from '../../src/client/brain/progress.js';
+import { inWood } from '../../src/client/brain/milestones.js';
 import { projectGoal, prepare } from '../../src/client/brain/project.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -79,4 +80,16 @@ test('the project goal works a milestone step by step, by day, and records it', 
   t.deepEqual(progressOf(w).done, ['storage']);
   t.is(goal.wants(snap(), w), null);
   t.deepEqual(progressOf(w).journal.map(j => j.text), ['started: storage house', 'storage house: site done (site at (5, 64, 5))', 'storage house: walls done (walls up)', 'done: storage house']);
+});
+
+test('wooden things of any wood: recipes, the wood there is most of, a blueprint in that wood', (t) => {
+  t.deepEqual(recipeFor('birch_planks'), { makes: 4, from: { birch_log: 1 } });
+  t.deepEqual(recipeFor('spruce_fence'), { makes: 3, from: { spruce_planks: 4, stick: 2 } });
+  t.deepEqual(recipeFor('chest'), { makes: 1, from: { planks: 8 } });
+  t.is(mostWood({ oak_log: 3, birch_log: 10, birch_planks: 8, oak_planks: 40 }), 'oak'); // 13 vs 12
+  t.is(mostWood({ birch_log: 20, oak_planks: 8 }), 'birch');
+  t.is(mostWood({}), 'oak');
+  const bp = inWood({ name: 'x', spec: { palette: { P: 'oak_planks', D: 'oak_door[facing=south,half=lower]', L: 'oak_log[axis=y]', C: 'chest' }, layers: [] }, size: { width: 1, height: 1, length: 1 }, bill: { oak_planks: 10, oak_door: 1, chest: 2 }, landmarks: [], groundOffset: 1 }, 'birch');
+  t.deepEqual(bp.spec.palette, { P: 'birch_planks', D: 'birch_door[facing=south,half=lower]', L: 'birch_log[axis=y]', C: 'chest' });
+  t.deepEqual(bp.bill, { birch_planks: 10, birch_door: 1, chest: 2 });
 });

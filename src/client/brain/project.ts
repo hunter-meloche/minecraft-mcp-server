@@ -1,6 +1,6 @@
 import type { Goal, GoalContext } from './goals.js';
 import { daylightLeft } from './schedule.js';
-import { journal, nextMilestone, progressOf, RECIPES, type Milestone } from './progress.js';
+import { journal, nextMilestone, progressOf, recipeFor, type Milestone } from './progress.js';
 import { takeFromChests } from './chests.js';
 
 /**
@@ -86,7 +86,7 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
     have = await count(ctx, match);
   }
   if (have >= n) return {};
-  const r = RECIPES[item];
+  const r = recipeFor(item);
   if (!r || depth > 6) return { [item]: n - have };
   const crafts = Math.ceil((n - have) / r.makes);
   const short: Record<string, number> = {};
