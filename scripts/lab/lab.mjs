@@ -155,13 +155,21 @@ async function defend() {
   const job = bot('mine-blocks', { block: 'glass', count: 200, timeoutMs: 40000 });
   await sleep(4000);
   await gm(`execute at ${BOTNAME} run summon husk ~4 ~ ~`);
+  // poll every second: with a sword the fight is over in a few seconds
   const seen = [];
-  for (let i = 0; i < 6; i++) { await sleep(5000); seen.push((await bot('get-status', {})).split(NL).find(l => l.startsWith('Backend'))); }
+  let alerts = '';
+  for (let i = 0; i < 30; i++) {
+    await sleep(1000);
+    const st = (await bot('get-status', {})).split(NL);
+    seen.push(st.find(l => l.startsWith('Backend')) ?? '');
+    alerts += st.filter(l => l.startsWith('[!]')).join(' ');
+  }
   await job;
   const husk = await bot('find-entity', { type: 'husk', maxDistance: 32 });
   const deaths = deathsIn(logSince(mark).lines);
-  report('defend during a job (husk while mining)', !deaths.length && /No husk/.test(husk) && seen.some(l => /Defend/.test(l)) && /Mine glass/.test(seen.at(-1)),
-    [...seen, husk, ...deaths].join(NL));
+  const fought = seen.some(l => /Defend/.test(l)) || /hit husk/.test(alerts);
+  report('defend during a job (husk while mining)', !deaths.length && /No husk/.test(husk) && fought && /Mine glass/.test(seen.at(-1)),
+    [...new Set(seen), alerts, husk, ...deaths].join(NL));
 }
 
 const scenarios = { creeper, shield, emergency, drown, lava, defend };
