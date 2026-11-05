@@ -591,7 +591,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const s = await status();
       lines.push(`Health ${s.health}/20, food ${s.food}/20.`);
       if (r.threats) lines.push(`Hostiles nearby: ${r.threats}.` + (r.outcome === 'low_health' ? ' Wall yourself in or keep away until health recovers.' : ''));
-      if (r.kills.length && r.outcome !== 'low_health' && !r.threats) await collectDropsNear(r.dropsAt).catch(() => undefined);
+      // pick up the drops unless a hostile is close: at night there is always one within 16 blocks, which left the
+      // wool of 3 of 4 sheep on the ground (the defend process handles ones further off)
+      const nearest = Math.min(...[...(r.threats ?? '').matchAll(/(\d+) blocks away/g)].map(m => Number(m[1])));
+      if (r.kills.length && r.outcome !== 'low_health' && !(nearest <= 6)) await collectDropsNear(r.dropsAt).catch(() => undefined);
       return factory.createResponse(lines.join(' '));
     },
 
