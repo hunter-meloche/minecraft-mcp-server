@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'drop-item', 'farm', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'drop-item', 'farm', 'fish', 'mine-blocks', 'stop', 'store-in-chest', 'take-from-chest', 'use-item-on-block']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -467,4 +467,19 @@ test('drop-item throws items out', async (t) => {
   });
   t.is((await run('drop-item', { item: 'diorite' })).text, 'Dropped 16 diorite');
   t.true((await run('drop-item', { item: 'gold_ingot' })).isError);
+});
+
+test('fish finds open water, walks there and reports the catch', async (t) => {
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 2, name: 'fishing_rod', count: 1 }], selectedSlot: 0, held: null },
+    'world.findBlocks': { positions: [{ x: 1, y: 62, z: 1 }] },
+    // the pond check (3x2x3), then the shore search (9x4x9): grass all around at the water's level, air above
+    'world.region': (p: Record<string, unknown>) => (p.width === 3
+      ? { blocks: [...Array(9).fill('water[level=0]'), ...Array(9).fill('air')] }
+      : { blocks: [...Array(81).fill('dirt'), ...Array(81).fill('grass_block'), ...Array(162).fill('air')] }),
+    goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 3, y: 63, z: 1 }, distance: 2 },
+    fish: { bites: 3, casts: 4, gained: { cod: 2, salmon: 1 }, seconds: 70 }
+  });
+  t.is((await run('fish', { times: 3 })).text, 'Fished at (1, 62, 1) for 70s: 3 bite(s) in 4 cast(s), caught cod x2, salmon x1.');
+  t.like(request.getCalls().find(c => c.args[0] === 'fish')!.args[1], { x: 1, y: 62, z: 1, times: 3 });
 });

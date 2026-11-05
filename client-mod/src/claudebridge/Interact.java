@@ -50,6 +50,8 @@ public final class Interact {
 
     /** An item is being used through the bridge ("use"/eating): reflexes keep their hands off the use key. */
     static volatile boolean using;
+    /** a job holds an item in hand for a while (fishing): calm-time eating must not swap it out */
+    static volatile boolean handsBusy;
 
     static boolean isActivatable(String blockName) {
         return ACTIVATABLE.matcher(blockName).matches();
@@ -477,6 +479,84 @@ public final class Interact {
                 else while (dropped < want && !pl.getInventory().getItem(i).isEmpty()) { click(pl.inventoryMenu, slot, 0, ContainerInput.THROW); dropped++; }
             }
             return obj("dropped", dropped);
+        });
+
+        // fish at a water block: cast, reel in when a fish bites, repeat `times` (recast after 45 s without a bite)
+        s.register("fish", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (find(player().getInventory(), "fishing_rod") < 0) throw new IllegalArgumentException("no fishing_rod in inventory");
+            BlockPos water = blockPos(p);
+            Vec3 aim = Vec3.atCenterOf(water).add(0, 0.5, 0);
+            int times = intParam(p, "times", 5);
+            int timeout = intParam(p, "timeoutMs", 300_000) / 50;
+            Map<String, Integer> before = Processes.inventoryCounts(mc);
+            java.lang.reflect.Field bitingField;
+            try {
+                bitingField = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("biting");
+                bitingField.setAccessible(true);
+            } catch (ReflectiveOperationException e) { throw new IllegalStateException("cannot read the fishing hook: " + e); }
+            final java.lang.reflect.Field biting = bitingField;
+            handsBusy = true;
+            Ticker.add(new Ticker.Task() {
+                int age = 0, castAt = -1, wait = 0, caught = 0, casts = 0;
+                final java.util.ArrayDeque<String> stale = new java.util.ArrayDeque<>(); // where recalled hooks were
+                @Override public boolean tick(Minecraft m) {
+                    LocalPlayer pl = m.player;
+                    if (pl == null) { c.fail("not in a world"); return true; }
+                    if (++age > timeout || caught >= times) return finish(m);
+                    if (wait > 0) { wait--; return false; }
+                    if (!Names.item(pl.getMainHandItem()).equals("fishing_rod")) {
+                        if (find(pl.getInventory(), "fishing_rod") < 0) return finish(m); // it broke
+                        select("fishing_rod");
+                        wait = 2;
+                        return false;
+                    }
+                    var hook = pl.fishing;
+                    if (hook == null) {
+                        pl.lookAt(EntityAnchorArgument.Anchor.EYES, aim);
+                        // cast two ticks later, once the rotation has gone out
+                        Ticker.add(new Ticker.Task() {
+                            int w = 2;
+                            @Override public boolean tick(Minecraft m2) {
+                                if (--w > 0) return false;
+                                m2.gameMode.useItem(m2.player, InteractionHand.MAIN_HAND);
+                                return true;
+                            }
+                        });
+                        wait = 4;
+                        castAt = age + 2;
+                        casts++;
+                        return false;
+                    }
+                    boolean bite;
+                    try { bite = biting.getBoolean(hook); } catch (IllegalAccessException e) { bite = false; }
+                    // a bobbing hook floats on top (y 62.9 on a y 62 water block), where its own isInWater() says no, so
+                    // look for water just under it; every good cast was reeled back after 3 s before
+                    boolean onWater = hook.isInWater() || m.level.getFluidState(BlockPos.containing(hook.getX(), hook.getY() - 0.3, hook.getZ()))
+                        .is(net.minecraft.tags.FluidTags.WATER);
+                    boolean expired = age - castAt > 900 || (age - castAt > 60 && !onWater);
+                    if (bite || expired) {
+                        if (!bite) {
+                            if (stale.size() >= 3) stale.removeFirst();
+                            stale.addLast(String.format("hook at (%.1f, %.1f, %.1f)%s%s, %d ticks", hook.getX(), hook.getY(), hook.getZ(),
+                                onWater ? " on water" : "", hook.onGround() ? " on ground" : "", age - castAt));
+                        }
+                        m.gameMode.useItem(pl, InteractionHand.MAIN_HAND); // reel in
+                        if (bite) caught++;
+                        wait = 15;
+                    }
+                    return false;
+                }
+
+                boolean finish(Minecraft m) {
+                    handsBusy = false;
+                    if (m.player != null && m.player.fishing != null) m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
+                    Map<String, Integer> gained = Processes.gained(before, Processes.inventoryCounts(m));
+                    c.ok(obj("bites", caught, "casts", casts, "gained", gained, "seconds", Json.round(age / 20.0), "recalled", String.join("; ", stale)));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
         });
 
         s.register("furnace.status", true, (p, c) -> furnaceStatus());

@@ -106,7 +106,7 @@ public final class Guardian {
     private static void keepFed(LocalPlayer p, Entity melee) {
         int food = p.getFoodData().getFoodLevel();
         boolean hurt = p.getHealth() < p.getMaxHealth() - 1;
-        if (eating || Interact.using || melee != null || Processes.active() != null) return;
+        if (eating || Interact.using || Interact.handsBusy || melee != null || Processes.active() != null) return;
         if (!((hurt && food < 18) || food <= 6)) return;
         if (Combat.chooseFood(false) == null) return;
         eating = true;
@@ -353,20 +353,28 @@ public final class Guardian {
             done.accept(before.isEmpty() ? (p.getFoodData().getFoodLevel() >= 20 ? "not hungry" : "no safe food to eat") : before + (p.getFoodData().getFoodLevel() >= 20 ? "" : ", no safe food to eat"));
             return;
         }
+        int foodBefore = p.getFoodData().getFoodLevel();
         Interact.select(food);
         Interact.using = true;
         mc.gameMode.useItem(p, InteractionHand.MAIN_HAND);
         mc.options.keyUse.setDown(true);
         Ticker.add(new Ticker.Task() {
-            int age = 0;
+            int age = 0, settle = -1;
             boolean started;
             @Override public boolean tick(Minecraft m) {
                 age++;
-                if (m.player.isUsingItem()) started = true;
-                if (!(started && !m.player.isUsingItem()) && age < 80) return false;
-                m.options.keyUse.setDown(false);
-                Interact.using = false;
-                done.accept((before.isEmpty() ? "" : before + ", ") + "ate " + food);
+                if (settle < 0) {
+                    if (m.player.isUsingItem()) started = true;
+                    if (!(started && !m.player.isUsingItem()) && age < 80) return false;
+                    m.options.keyUse.setDown(false);
+                    Interact.using = false;
+                    settle = 6; // the server's food update arrives a few ticks after the bite
+                    return false;
+                }
+                if (--settle > 0 && m.player.getFoodData().getFoodLevel() <= foodBefore) return false;
+                // say "ate" only when food went up: interrupted bites (item swapped, swimming) were reported as eaten
+                boolean ate = m.player.getFoodData().getFoodLevel() > foodBefore;
+                done.accept((before.isEmpty() ? "" : before + ", ") + (ate ? "ate " + food : "tried to eat " + food + " but was interrupted"));
                 return true;
             }
         });

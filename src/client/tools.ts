@@ -767,6 +767,52 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   );
 
   factory.registerTool(
+    'fish',
+    'Fish with a fishing rod at open water: walks to the nearest open water source (or the one given), casts, reels in at each bite, and repeats. Fish are food (cook them in a furnace).',
+    {
+      times: z.coerce.number().int().min(1).max(64).optional().describe('How many bites to reel in (default: 5)'),
+      x: z.coerce.number().optional().describe('X of a water block to fish in (default: nearest open water)'),
+      y: z.coerce.number().optional().describe('Y of that water block'),
+      z: z.coerce.number().optional().describe('Z of that water block'),
+      timeoutMs: z.number().int().min(10000).optional().describe('Stop after this long (default: 300000)')
+    },
+    async ({ times = 5, x, y, z: zz, timeoutMs = 300_000 }: { times?: number; x?: number; y?: number; z?: number; timeoutMs?: number }) => {
+      if (!(await inventoryCounts()).counts.get('fishing_rod')) return factory.createErrorResponse('No fishing_rod in the inventory (3 sticks and 2 string)');
+      let water: Pos | undefined = x !== undefined && y !== undefined && zz !== undefined ? floorPos({ x, y, z: zz }) : undefined;
+      if (!water) {
+        // nearest pond, not a puddle: still water with still water on (nearly) all 8 sides and air above, since a cast
+        // flies a few blocks and overshot a 1x1 farm hole 59 times
+        const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'water', maxDistance: 48, count: 256 });
+        for (const p of found.positions) {
+          const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', { x: p.x - 1, y: p.y, z: p.z - 1, width: 3, height: 2, length: 3 });
+          const still = blocks.slice(0, 9).filter(b => b === 'water[level=0]').length;
+          if (still >= 8 && blocks[13] === 'air') { water = p; break; }
+        }
+      }
+      if (!water) return factory.createErrorResponse('No pond (open still water, 3x3 or bigger) within 48 blocks');
+      // stand on the shore, not in the pond (walking "near" the water put the bot in it: it ran out of air and the
+      // casts failed): a dry block 2-4 blocks from the target with two air blocks above
+      const box = { x: water.x - 4, y: water.y - 1, z: water.z - 4, width: 9, height: 4, length: 9 };
+      const { blocks: around } = await call<{ blocks: (string | null)[] }>('world.region', box);
+      const at = (dx: number, dy: number, dz: number) => around[dx + dz * 9 + dy * 81] ?? '';
+      let shore: Pos | undefined;
+      let best = Infinity;
+      for (let dz = 0; dz < 9; dz++) for (let dx = 0; dx < 9; dx++) for (let dy = 0; dy < 2; dy++) {
+        const ground = at(dx, dy, dz), feet = at(dx, dy + 1, dz), head = at(dx, dy + 2, dz);
+        if (!ground || /water|lava|air|leaves|^short_grass|^tall_grass/.test(ground) || !/^(air|short_grass|leaf_litter)/.test(feet) || !/^air/.test(head)) continue;
+        const d = Math.hypot(dx - 4, dz - 4);
+        if (d < 2 || d > 4) continue;
+        if (d < best) { best = d; shore = { x: box.x + dx, y: box.y + dy + 1, z: box.z + dz }; }
+      }
+      await goNear(shore ?? water, shore ? 0 : 3).catch(() => undefined);
+      const r = await call<{ bites: number; casts: number; gained: Record<string, number>; seconds: number; recalled?: string }>('fish', { ...water, times, timeoutMs }, timeoutMs + 15_000);
+      const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
+      const missed = r.casts > r.bites * 2 + 2 && r.recalled ? ` Casts that missed the water: ${r.recalled}.` : '';
+      return factory.createResponse(`Fished at ${fmt(water)} for ${r.seconds}s: ${r.bites} bite(s) in ${r.casts} cast(s), caught ${gained || 'nothing'}.${missed}`);
+    }
+  );
+
+  factory.registerTool(
     'farm',
     'Harvest ripe crops around the bot (wheat, carrots, potatoes, beetroot, sweet berry bushes, melons, pumpkins, cocoa, nether wart) without destroying the plants, and replant with seeds from the inventory. Runs until nothing is left to do or the time limit. Reports what was gathered.',
     {
