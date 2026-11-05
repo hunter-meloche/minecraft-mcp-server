@@ -23,6 +23,10 @@ export interface WorldMemory {
   landmarks: Landmarks;
   /** how far from home a trip may go */
   leash: number;
+  /** what each home chest held when last opened, by "x,y,z" */
+  chestItems?: Record<string, Record<string, number>>;
+  /** when (ms) daily chores last ran, by chore */
+  lastDone?: Record<string, number>;
 }
 
 export const DEFAULT_LEASH = 96;

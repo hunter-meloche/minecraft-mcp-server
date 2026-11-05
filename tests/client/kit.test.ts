@@ -45,7 +45,7 @@ test('a worn diamond pickaxe with diamonds in the chest: craft a new one', (t) =
   const items = kit().map(i => (i.name === 'diamond_pickaxe' ? { ...i, damage: 1500 } : i));
   items.push({ slot: 8, name: 'stick', count: 2 });
   t.deepEqual(kitNeeds(items, { diamond: 3 }), [{
-    kind: 'pickaxe', have: 'diamond_pickaxe', why: 'worn', bestPossible: 'diamond_pickaxe',
+    kind: 'pickaxe', spare: true, have: 'diamond_pickaxe', why: 'worn', bestPossible: 'diamond_pickaxe', // the sound stone one is the main pickaxe now
     plan: [{ craft: 'diamond_pickaxe', times: 1, materials: { stick: 2, diamond: 3 }, fromChest: { diamond: 3 } }]
   }]);
 });
@@ -167,4 +167,16 @@ test('stashPlan keeps the kit, food and torches, deposits the rest and drops jun
 
 test('slotsUsed counts the main inventory only', (t) => {
   t.is(slotsUsed(kit()), 8);
+});
+
+test('a sound pickaxe beats a worn-out better one, so the need is met once a sound one is carried', (t) => {
+  const items = [
+    { slot: 0, name: 'diamond_pickaxe', count: 1, damage: 1550, maxDamage: 1561 },
+    { slot: 1, name: 'stone_pickaxe', count: 1, damage: 0, maxDamage: 131 },
+    { slot: 2, name: 'stone_pickaxe', count: 1, damage: 3, maxDamage: 131 }
+  ];
+  const { best, spare } = carriedKit(items);
+  t.is(best.pickaxe?.slot, 1);
+  t.is(spare?.slot, 2);
+  t.false(kitNeeds(items, {}).some(n => n.kind === 'pickaxe'));
 });

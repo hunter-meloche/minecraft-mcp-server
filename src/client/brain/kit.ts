@@ -64,12 +64,16 @@ export function isWorn(item: InventoryItem): boolean {
 /** Best first: higher tier, then more durability left. */
 const better = (a: InventoryItem, b: InventoryItem) => tier(b.name) - tier(a.name) || left(b) - left(a);
 
-/** The kit items carried (anywhere, worn armour and off-hand included): the best of each kind, and the spare pickaxe (the next best). */
+/**
+ * The kit items carried (anywhere, worn armour and off-hand included): the best of each kind, and the spare pickaxe
+ * (the next best). Sound items come before worn-out ones whatever their tier: a nearly broken diamond pickaxe counted
+ * as the best one made the bot fetch a stone pickaxe from the chest over and over, each still "not the best".
+ */
 export function carriedKit(items: InventoryItem[]): { best: Partial<Record<GearKind, InventoryItem>>; spare?: InventoryItem } {
   const best: Partial<Record<GearKind, InventoryItem>> = {};
   let spare: InventoryItem | undefined;
   for (const kind of KIT.gear) {
-    const ofKind = items.filter(i => gearKind(i.name) === kind).sort(better);
+    const ofKind = items.filter(i => gearKind(i.name) === kind).sort((a, b) => Number(isWorn(a)) - Number(isWorn(b)) || better(a, b));
     if (ofKind[0]) best[kind] = ofKind[0];
     if (kind === KIT.spare) spare = ofKind[1];
   }

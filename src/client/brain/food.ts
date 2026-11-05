@@ -2,6 +2,7 @@ import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos } from './memory.js';
+import { peekChest, rememberReply } from './chests.js';
 
 /**
  * Food: keep enough ready-to-eat food on the bot that the Guardian can always heal it, the cheapest way first:
@@ -42,20 +43,6 @@ async function counts(ctx: GoalContext): Promise<Map<string, number>> {
   return m;
 }
 
-/** What's in a chest (walks up to it first). */
-export async function peekChest(ctx: GoalContext, at: Pos): Promise<Record<string, number>> {
-  const open = () => ctx.call<{ items: Record<string, number> }>('chest.open', { ...at });
-  try {
-    try { return (await open()).items; } catch {
-      const r = await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 });
-      if (!r.ok) throw new Error(`could not reach the chest at ${fmt(at)}: ${r.text}`);
-      return (await open()).items;
-    }
-  } finally {
-    await ctx.call('container.close').catch(() => undefined);
-  }
-}
-
 export const food: Goal = {
   name: 'food',
   priority: 70,
@@ -89,11 +76,13 @@ export const food: Goal = {
         if (enough()) break;
         const want = COOKS_TO[name] ? n : Math.min(n, Math.ceil((FOOD_TARGET - readyFoodPoints(have)) / foods[name].foodPoints));
         const r = await ctx.act('take-from-chest', { ...chest, item: name, count: want });
+        rememberReply(ctx.world, chest, r.text);
         if (r.ok) say(`took ${want} ${name}`);
         await refresh();
       }
       if (Object.keys(inside).includes('wheat') && !enough()) {
         const r = await ctx.act('take-from-chest', { ...chest, item: 'wheat', count: 27 });
+        rememberReply(ctx.world, chest, r.text);
         if (r.ok) say('took wheat');
         await refresh();
       }

@@ -1,0 +1,85 @@
+import test from 'ava';
+import { kit, lights, smelt, stash, stock, stockShort } from '../../src/client/brain/chores.js';
+import { food, readyFoodPoints } from '../../src/client/brain/food.js';
+import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
+import type { WorldMemory } from '../../src/client/brain/memory.js';
+import type { InventoryItem } from '../../src/client/tools.js';
+
+const CHEST = { x: 1, y: 64, z: 0 };
+const world = (over: Partial<WorldMemory> = {}): WorldMemory => ({
+  landmarks: { chests: [CHEST], farmland: [], furnace: { x: -1, y: 64, z: 0 } }, leash: 96, chestItems: { '1,64,0': {} }, ...over
+});
+const snap = (items: InventoryItem[], over: Partial<Snapshot> = {}): Snapshot => {
+  const counts = new Map<string, number>();
+  for (const i of items) counts.set(i.name, (counts.get(i.name) ?? 0) + i.count);
+  return {
+    now: 10 * 60 * 60_000, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: { x: 0, y: 64, z: 0 }, dimension: 'overworld',
+    sleeping: false, raining: false, thundering: false, process: null, items, counts, slotsUsed: items.filter(i => i.slot < 36).length,
+    home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, distHome: 0, ...over
+  };
+};
+const gear = (): InventoryItem[] => ['stone_pickaxe', 'stone_pickaxe', 'stone_axe', 'stone_shovel', 'stone_sword', 'stone_hoe']
+  .map((name, slot): InventoryItem => ({ slot, name, count: 1, damage: 0, maxDamage: 131 }))
+  .concat(['iron_boots', 'iron_leggings', 'iron_chestplate', 'iron_helmet'].map((name, i) => ({ slot: 36 + i, name, count: 1, damage: 0, maxDamage: 200 })))
+  .concat([{ slot: 10, name: 'torch', count: 20 }, { slot: 11, name: 'cobblestone', count: 40 }, { slot: 12, name: 'bread', count: 5 }]);
+
+test('ready food counts cooked food and bread, not raw meat or poison', (t) => {
+  t.is(readyFoodPoints(new Map([['bread', 2], ['cooked_cod', 1], ['beef', 5], ['pufferfish', 3], ['rotten_flesh', 4]])), 2 * 5 + 5);
+  t.is(food.wants(snap([{ slot: 0, name: 'bread', count: 4 }]), world()), null); // 20 points: enough
+  t.regex(food.wants(snap([{ slot: 0, name: 'bread', count: 1 }]), world()) ?? '', /carrying 5 food points/);
+  // at night only from home
+  t.is(food.wants(snap([], { activity: 'rest', distHome: 40 }), world()), null);
+});
+
+test('stash: when nearly full, or now and then with things to put away; never away from home', (t) => {
+  const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: `oak_log`, count: 64 }));
+  t.regex(stash.wants(snap([...gear(), ...junk]), world()) ?? '', /slots used/);
+  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 30 }), world()), null);
+  t.is(stash.wants(snap(gear()), world()), null);
+  t.regex(stash.wants(snap([...gear(), ...junk.slice(0, 3).map((j, i) => ({ ...j, name: ['oak_log', 'bone', 'string'][i] }))]), world()) ?? '', /3 kinds/);
+  t.is(stash.wants(snap([...gear(), ...junk.slice(0, 3).map((j, i) => ({ ...j, name: ['oak_log', 'bone', 'string'][i] }))]),
+    world({ lastDone: { stash: 10 * 60 * 60_000 - 60_000 } })), null); // put away a minute ago
+});
+
+test('smelt: raw ore and fuel at home', (t) => {
+  t.regex(smelt.wants(snap([{ slot: 0, name: 'raw_iron', count: 5 }, { slot: 1, name: 'coal', count: 1 }]), world()) ?? '', /5 raw_iron/);
+  t.is(smelt.wants(snap([{ slot: 0, name: 'raw_iron', count: 5 }]), world()), null);
+});
+
+test('kit: looks in unknown chests first, then wants only what it can take or craft', (t) => {
+  t.is(kit.wants(snap(gear()), world({ chestItems: {} })), 'look in the home chests');
+  t.is(kit.wants(snap(gear()), world()), null);
+  const noAxe = gear().filter(i => i.name !== 'stone_axe');
+  t.is(kit.wants(snap(noAxe.filter(i => i.name !== 'cobblestone')), world()), null); // nothing to make it from: stock's job
+  t.regex(kit.wants(snap(noAxe.concat([{ slot: 20, name: 'stick', count: 4 }])), world()) ?? '', /axe \(missing\)/);
+});
+
+test('stock: the kit\'s gathering first, then the home stock; by day, fit and not too late', (t) => {
+  const s = snap(gear().filter(i => i.name !== 'stone_axe' && i.name !== 'cobblestone'));
+  const short = stockShort(s, world({ chestItems: { '1,64,0': { oak_log: 40, coal: 20, iron_ingot: 20 } } }));
+  t.deepEqual(short.map(x => x.name), ['cobblestone']);
+  t.regex(stock.wants(s, world()) ?? '', /short of .*cobblestone/);
+  t.is(stock.wants(snap(gear(), { timeOfDay: 10_000 }), world()), null); // too late
+  t.is(stock.wants(snap(gear(), { health: 9 }), world()), null);
+  t.is(stock.wants(snap(gear()), world({ chestItems: {} })), null); // chests not looked in yet
+});
+
+test('lights: places the planned torches and reports what is left dark', async (t) => {
+  // a 33 x 13 x 33 yard: dirt at y 60 (the box starts at y 60 = home 64 - 4), dark everywhere
+  const W = 33, H = 13, L = 33;
+  const blocks = new Array(W * H * L).fill('air');
+  for (let i = 0; i < W * L; i++) blocks[i] = 'dirt';
+  const placed: string[] = [];
+  const ctx = {
+    s: snap([{ slot: 0, name: 'torch', count: 10 }]), world: world(), signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => { placed.push(`${tool} ${a.x},${a.y},${a.z} ${a.item}`); return { ok: true, text: `Placed torch at (${a.x}, ${a.y}, ${a.z})` }; },
+    call: (async (m: string) => (m === 'world.region' ? { blocks } : { block: new Array(W * H * L).fill(0) })) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  } as GoalContext;
+  t.regex(lights.wants(ctx.s, ctx.world) ?? '', /daily round/);
+  const r = await lights.run(ctx);
+  t.true(placed.length > 0 && placed.every(p => /^place-block -?\d+,61,-?\d+ torch$/.test(p)));
+  t.regex(r, /^placed \d+\/\d+ torch\(es\)/);
+  t.is(lights.wants(ctx.s, ctx.world), null); // done for today
+});

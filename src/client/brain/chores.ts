@@ -1,0 +1,259 @@
+import { AVOID_UNLESS_ASKED } from '../../food.js';
+import { foodsFor26 } from '../tools.js';
+import type { Goal, GoalContext, Snapshot } from './goals.js';
+import { COOKS_TO } from './food.js';
+import { chestTotals, key, peekChest, storeInChests, takeFromChests } from './chests.js';
+import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
+import { planTorches, yardBox } from './lighting.js';
+import { daylightLeft } from './schedule.js';
+import type { WorldMemory } from './memory.js';
+
+/**
+ * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
+ * replacing worn tools and armour, fetching materials, and keeping the yard lit so nothing spawns in it.
+ */
+
+/** Near enough home for chores at the chests and furnace. */
+const NEAR_HOME = 10;
+const MINUTE = 60_000;
+
+const awakeAtHome = (s: Snapshot) => !s.sleeping && s.dimension === 'overworld' && !!s.home && s.distHome <= NEAR_HOME;
+const since = (world: WorldMemory, chore: string, now: number) => now - (world.lastDone?.[chore] ?? 0);
+const done = (world: WorldMemory, chore: string, now: number) => { world.lastDone ??= {}; world.lastDone[chore] = now; };
+
+let foodNames: Set<string> | undefined;
+/** Everything edible worth carrying, raw food that cooks included. */
+function foods(): Set<string> {
+  foodNames ??= new Set(Object.keys(foodsFor26()).filter(n => !AVOID_UNLESS_ASKED.has(n)).concat(Object.keys(COOKS_TO)));
+  return foodNames;
+}
+
+/** Look in every home chest not looked in for a while (plans use what they hold). */
+async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<void> {
+  if (since(ctx.world, 'chests', ctx.s.now) < maxAgeMs && ctx.world.landmarks.chests.every(c => ctx.world.chestItems?.[key(c)])) return;
+  for (const c of ctx.world.landmarks.chests) await peekChest(ctx, c).catch(e => ctx.progress(`chest at ${key(c)}: ${(e as Error).message}`));
+  done(ctx.world, 'chests', ctx.s.now);
+}
+
+// ------------------------------------------------------------------------------------------------ stash
+
+/** Empty the pockets into the home chests: when nearly full, and once in a while when home anyway. */
+export const stash: Goal = {
+  name: 'stash',
+  priority: 55,
+  timeoutMs: 6 * MINUTE,
+  retryMs: 10 * MINUTE,
+  wants: (s, world) => {
+    if (!awakeAtHome(s) || !world.landmarks.chests.length) return null;
+    const plan = stashPlan(s.items, { foods: foods() });
+    if (!plan.deposit.length && !plan.drop.length) return null;
+    if (s.slotsUsed >= 27) return `${s.slotsUsed}/36 slots used`;
+    if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
+    return null;
+  },
+  run: async ctx => {
+    const plan = stashPlan(ctx.s.items, { foods: foods() });
+    const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
+    let stored = 0;
+    for (const e of plan.deposit) {
+      // a worse duplicate of a kept tool shares its name: store-in-chest can't tell them apart, so leave it
+      if (e.slot !== undefined && names(e.name) > 1) continue;
+      stored += await storeInChests(ctx, e.name, e.count);
+    }
+    done(ctx.world, 'stash', ctx.s.now);
+    let dropped = 0;
+    if (plan.drop.length) {
+      // thrown where the bot stands it picks them straight back up: throw them at the edge of the yard and walk off
+      const home = ctx.s.home!;
+      await ctx.act('move-to-position', { x: home.x - 10, y: home.y, z: home.z - 10, range: 2, timeoutMs: 60_000 });
+      for (const e of plan.drop) {
+        const r = await ctx.act('drop-item', { item: e.name, count: e.count });
+        const m = /^Dropped (\d+)/.exec(r.text);
+        if (m) dropped += Number(m[1]);
+      }
+      await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 });
+    }
+    ctx.progress(`stored ${stored}, dropped ${dropped}`);
+    return `put ${stored} item(s) in the chests${dropped ? `, threw away ${dropped} junk` : ''}`;
+  }
+};
+
+// ------------------------------------------------------------------------------------------------ smelt
+
+const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot' };
+const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
+
+/** Raw ore carried home: smelt it at the home furnace. */
+export const smelt: Goal = {
+  name: 'smelt',
+  priority: 50,
+  timeoutMs: 10 * MINUTE,
+  retryMs: 10 * MINUTE,
+  wants: (s, world) => {
+    if (!awakeAtHome(s) || !world.landmarks.furnace) return null;
+    const ore = Object.keys(ORES).find(o => (s.counts.get(o) ?? 0) > 0);
+    if (!ore || !FUELS.some(f => (s.counts.get(f) ?? 0) > 0)) return null;
+    return `${s.counts.get(ore)} ${ore} to smelt`;
+  },
+  run: async ctx => {
+    const did: string[] = [];
+    for (const ore of Object.keys(ORES)) {
+      const n = ctx.s.counts.get(ore) ?? 0;
+      const fuel = FUELS.find(f => (ctx.s.counts.get(f) ?? 0) > 0);
+      if (!n || !fuel) continue;
+      const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: ore, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
+      did.push(r.ok ? `smelted ${n} ${ore}` : `could not smelt ${ore}: ${r.text}`);
+      ctx.progress(did.at(-1)!);
+    }
+    return did.join('; ') || 'nothing to smelt';
+  }
+};
+
+// ------------------------------------------------------------------------------------------------ kit
+
+const doable = (n: KitNeed) => n.plan.some(st => 'take' in st || 'craft' in st);
+const label = (n: KitNeed) => `${'spare' in n && n.spare ? 'spare ' : ''}${n.kind} (${n.why})`;
+
+/** Tools and armour worn out or missing, torches or throwaway blocks short: take from the chests or craft. */
+export const kit: Goal = {
+  name: 'kit',
+  priority: 60,
+  timeoutMs: 8 * MINUTE,
+  retryMs: 10 * MINUTE,
+  wants: (s, world) => {
+    if (!awakeAtHome(s)) return null;
+    if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return 'look in the home chests';
+    const needs = kitNeeds(s.items, chestTotals(world)).filter(doable);
+    return needs.length ? `needs ${needs.map(label).join(', ')}` : null;
+  },
+  run: async ctx => {
+    await refreshChests(ctx, 0);
+    const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
+    const needs = kitNeeds(inv.items, chestTotals(ctx.world));
+    const did: string[] = [];
+    for (const need of needs.filter(doable)) {
+      for (const step of need.plan) {
+        const r = await runStep(ctx, step);
+        if (r) { did.push(r); ctx.progress(`${label(need)}: ${r}`); }
+      }
+    }
+    return did.join('; ') || 'nothing could be done (materials ran short)';
+  }
+};
+
+async function runStep(ctx: GoalContext, step: PlanStep): Promise<string | undefined> {
+  if ('gather' in step) return undefined; // the stock goal fetches materials
+  if ('take' in step) {
+    const got = await takeFromChests(ctx, step.take, step.count);
+    return got ? `took ${got} ${step.take}` : `no ${step.take} in the chests after all`;
+  }
+  for (const [item, n] of Object.entries(step.fromChest ?? {})) await takeFromChests(ctx, item, n);
+  for (const pre of step.first ?? []) {
+    const r = await ctx.act('craft-item', { outputItem: pre.craft, amount: pre.times });
+    if (!r.ok) return `could not craft ${pre.craft}: ${r.text}`;
+  }
+  const r = await ctx.act('craft-item', { outputItem: step.craft, amount: step.times });
+  return r.ok ? `crafted ${step.craft}${step.times > 1 ? ` x${step.times}` : ''}` : `could not craft ${step.craft}: ${r.text}`;
+}
+
+// ------------------------------------------------------------------------------------------------ stock
+
+/** Keep at least this much of each at home (carried and in the chests together). */
+export const STOCK: { name: string; want: number; mine: string; counts: RegExp }[] = [
+  { name: 'log', want: 32, mine: 'oak_log,birch_log,spruce_log,dark_oak_log,acacia_log,jungle_log,cherry_log', counts: /_log$/ },
+  { name: 'cobblestone', want: 64, mine: 'stone,cobblestone', counts: /^(cobblestone|cobbled_deepslate)$/ },
+  { name: 'coal', want: 16, mine: 'coal_ore,deepslate_coal_ore', counts: /^(coal|charcoal)$/ },
+  { name: 'iron_ingot', want: 16, mine: 'iron_ore,deepslate_iron_ore', counts: /^(iron_ingot|raw_iron)$/ }
+];
+
+/** How short the home is of each stock item (kit gathering needs on top), most urgent first. */
+export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp }[] {
+  const chest = chestTotals(world);
+  const have = (re: RegExp) => [...s.counts].filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0) +
+    Object.entries(chest).filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0);
+  const extra: Record<string, number> = {};
+  for (const n of kitNeeds(s.items, chest)) {
+    for (const st of n.plan) if ('gather' in st) for (const [k, v] of Object.entries(st.gather)) extra[k] = (extra[k] ?? 0) + v;
+  }
+  const out = STOCK.map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts)) })).filter(t => t.short > 0);
+  // what the kit is waiting for first
+  return out.sort((a, b) => Number(!!extra[b.name]) - Number(!!extra[a.name]));
+}
+
+/**
+ * A materials trip by day: mine what the home is shortest of near home, timeboxed to be back before the evening, and
+ * home again afterwards. Never with the pockets nearly full, low food or hurt.
+ */
+export const stock: Goal = {
+  name: 'stock',
+  priority: 40,
+  timeoutMs: 12 * MINUTE,
+  retryMs: 8 * MINUTE,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > world.leash) return null;
+    if (s.slotsUsed >= 30 || s.health < 14 || s.food < 10) return null;
+    if (daylightLeft(s.timeOfDay) < 3000) return null; // under 2.5 minutes of daylight: not worth setting out
+    if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return null; // the kit goal looks in them first
+    const short = stockShort(s, world);
+    return short.length ? `short of ${short.map(t => `${t.short} ${t.name}`).join(', ')}` : null;
+  },
+  run: async ctx => {
+    const [t] = stockShort(ctx.s, ctx.world);
+    if (!t) return 'nothing short';
+    const carried = [...ctx.s.counts].filter(([n]) => t.counts.test(n)).reduce((a, [, k]) => a + k, 0);
+    // back home by the evening: daylight left less a 90 s walk home
+    const budget = Math.min(6 * MINUTE, daylightLeft(ctx.s.timeOfDay) * 50 - 90_000);
+    if (budget < 60_000) return 'too late in the day';
+    ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
+    const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 64), timeoutMs: budget });
+    ctx.progress(r.text.slice(0, 160));
+    const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+    if (!back.ok) throw new Error(`mined, but could not get home: ${back.text}`);
+    if (!r.ok) throw new Error(r.text);
+    return `${r.text.slice(0, 120)}; back home`;
+  }
+};
+
+// ------------------------------------------------------------------------------------------------ lights
+
+/** How far around home the yard is kept lit. */
+export const YARD_RADIUS = 16;
+
+/**
+ * Once a day: read the block light over the yard and put torches where a monster could spawn (block light 0 since
+ * 1.18), as few as the plan needs.
+ */
+export const lights: Goal = {
+  name: 'lights',
+  priority: 30,
+  timeoutMs: 10 * MINUTE,
+  retryMs: 15 * MINUTE,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || !awakeAtHome(s) || (s.counts.get('torch') ?? 0) === 0) return null;
+    return since(world, 'lights', s.now) > 20 * MINUTE ? 'daily round: dark spots in the yard' : null;
+  },
+  run: async ctx => {
+    const home = ctx.s.home!;
+    const box = yardBox(home, YARD_RADIUS);
+    const read = async () => {
+      const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...box }, 60_000);
+      const { block } = await ctx.call<{ block: number[] }>('world.light', { ...box }, 60_000);
+      return { blocks, block };
+    };
+    const { blocks, block } = await read();
+    const torches = ctx.s.counts.get('torch') ?? 0;
+    const plan = planTorches(box, blocks, block, { prefer: home, max: torches });
+    done(ctx.world, 'lights', ctx.s.now);
+    if (!plan.torches.length) return plan.dark ? `${plan.dark} dark cell(s) but nowhere to put a torch` : 'the yard is lit';
+    let placed = 0;
+    for (const t of plan.torches) {
+      const r = await ctx.act('place-block', { ...t, faceDirection: 'down', item: 'torch' });
+      if (/^Placed/.test(r.text)) placed++;
+      else ctx.progress(`torch at ${key(t)}: ${r.text}`);
+    }
+    const after = await read();
+    const left = planTorches(box, after.blocks, after.block, { max: 0 }).dark;
+    return `placed ${placed}/${plan.torches.length} torch(es); ${left} dark cell(s) left of ${plan.dark}`;
+  }
+};
+
