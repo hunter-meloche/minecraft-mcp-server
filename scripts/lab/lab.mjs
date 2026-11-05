@@ -14,6 +14,7 @@ const LOG = process.env.MC_LOG ?? `${process.env.APPDATA}/.minecraft/logs/latest
 const BOTNAME = process.env.LAB_BOT_NAME ?? 'ClaudeBot';
 const ARENA = { x: -50, y: 150, z: -50 }; // floor at y=150, stand at y=151
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const NL = String.fromCharCode(10);
 
 async function call(url, name, args = {}) {
   const res = await fetch(url, { method: 'POST', body: JSON.stringify({ name, args }) });
@@ -145,7 +146,25 @@ async function lava() {
 }
 
 const which = process.argv[2] ?? 'all';
-const scenarios = { creeper, shield, emergency, drown, lava };
+async function defend() {
+  // a mining job (on the arena's glass rim, which drops nothing, so it never finishes) and a husk walks up:
+  // Baritone should pause the job, the bot should kill it, and the job should carry on
+  await reset(['stone_sword', 'stone_pickaxe'], 6000);
+  await gm(`fill ${ax - 12} ${ay + 1} ${az - 12} ${ax + 12} ${ay + 1} ${az - 12} glass`);
+  const mark = logSince(0).offset;
+  const job = bot('mine-blocks', { block: 'glass', count: 200, timeoutMs: 40000 });
+  await sleep(4000);
+  await gm(`execute at ${BOTNAME} run summon husk ~4 ~ ~`);
+  const seen = [];
+  for (let i = 0; i < 6; i++) { await sleep(5000); seen.push((await bot('get-status', {})).split(NL).find(l => l.startsWith('Backend'))); }
+  await job;
+  const husk = await bot('find-entity', { type: 'husk', maxDistance: 32 });
+  const deaths = deathsIn(logSince(mark).lines);
+  report('defend during a job (husk while mining)', !deaths.length && /No husk/.test(husk) && seen.some(l => /Defend/.test(l)) && /Mine glass/.test(seen.at(-1)),
+    [...seen, husk, ...deaths].join(NL));
+}
+
+const scenarios = { creeper, shield, emergency, drown, lava, defend };
 if (which === 'setup') await setup();
 else if (which === 'all') { for (const s of Object.values(scenarios)) await s(); }
 else await scenarios[which]();
