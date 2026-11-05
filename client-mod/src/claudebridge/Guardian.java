@@ -92,6 +92,8 @@ public final class Guardian {
             if (Combat.equipShield() && !shieldWorn) { put.add("shield"); }
             shieldWorn = Combat.hasShield();
             if (!put.isEmpty()) note("put on " + String.join(", ", put));
+            List<String> tools = Tools.keepInHotbar(p);
+            if (!tools.isEmpty()) note("moved " + String.join(", ", tools) + " to the hotbar (auto-tool picks from there)");
             keepFed(p, melee);
         }
     }

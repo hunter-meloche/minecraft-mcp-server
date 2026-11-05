@@ -59,6 +59,12 @@ public class ClaudeBridge implements ClientModInitializer {
         s.acceptableThrowawayItems.value = new java.util.ArrayList<>(java.util.List.of(net.minecraft.world.item.Items.COBBLESTONE,
             net.minecraft.world.item.Items.COBBLED_DEEPSLATE, net.minecraft.world.item.Items.NETHERRACK, net.minecraft.world.item.Items.ANDESITE,
             net.minecraft.world.item.Items.DIORITE, net.minecraft.world.item.Items.GRANITE, net.minecraft.world.item.Items.TUFF));
+        // no random aim: Baritone nudges the yaw up to 2 degrees every tick by default to look human, enough to slip off
+        // a block seen at an angle and reset the breaking progress (the bot kept restarting blocks)
+        s.randomLooking.value = 0.0;
+        s.randomLooking113.value = 0.0;
+        s.autoTool.value = true;
+        s.itemSaver.value = true; // don't use a tool to destruction
         s.allowInventory.value = true; // let the builder (and tool choice) use items outside the hotbar; without it a build stalls silently
         // build-structure writes structure_void where a directional block goes (stairs facing out over a wall can't be
         // placed from where Baritone stands) and places those itself afterwards; Baritone leaves those cells alone
