@@ -86,10 +86,17 @@ export function repairGoal(rt: ClientRuntime): Goal {
       let restored = 0;
       const noItem = new Map<string, number>();
       const failed: string[] = [];
+      // a cell put back in vain two days running (buried fill out of reach, say) is left alone from then on
+      const tries = (ctx.world.repairFails ??= {});
       for (const r of plan.restore) {
+        if ((tries[key(r.at)] ?? 0) >= 2) continue;
         if ((have.get(r.item) ?? 0) <= 0) { noItem.set(r.item, (noItem.get(r.item) ?? 0) + 1); continue; }
         const why = await rt.restoreBlock(r.at, r.item, r.facing);
-        if (why) { failed.push(`${r.item} at ${key(r.at)}: ${why}`); ctx.progress(failed.at(-1)!); continue; }
+        if (why) {
+          tries[key(r.at)] = (tries[key(r.at)] ?? 0) + 1;
+          failed.push(`${r.item} at ${key(r.at)}: ${why}`); ctx.progress(failed.at(-1)!); continue;
+        }
+        delete tries[key(r.at)];
         restored++;
         have.set(r.item, have.get(r.item)! - 1);
         ctx.progress(`put back ${r.item} at ${key(r.at)}`);

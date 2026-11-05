@@ -278,6 +278,10 @@ export const stock: Goal = {
     const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 64), timeoutMs: budget });
     ctx.progress(r.text.slice(0, 160));
     if (/nothing gained|in sight outside the home area/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
+    // a project's shortfall is served once per trip: the project works out what's still short when it next runs
+    // (left standing, it had the bot fetch 22 more birch logs trip after trip)
+    const need = ctx.world.progress?.need;
+    if (need && t.name in need) { delete need[t.name]; if (!Object.keys(need).length) ctx.world.progress!.need = undefined; }
     const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
     if (!back.ok) throw new Error(`mined, but could not get home: ${back.text}`);
     if (!r.ok) throw new Error(r.text);
