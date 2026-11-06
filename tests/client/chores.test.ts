@@ -43,7 +43,10 @@ test('stash: when nearly full, or now and then with things to put away; never aw
 
 test('smelt: raw ore and fuel at home', (t) => {
   t.regex(smelt.wants(snap([{ slot: 0, name: 'raw_iron', count: 5 }, { slot: 1, name: 'coal', count: 1 }]), world()) ?? '', /5 raw_iron/);
-  t.is(smelt.wants(snap([{ slot: 0, name: 'raw_iron', count: 5 }]), world()), null);
+  // no fuel: nothing to smelt, but a furnace not looked at in half an hour gets its finished smelting taken out
+  t.regex(smelt.wants(snap([{ slot: 0, name: 'raw_iron', count: 5 }]), world()) ?? '', /check the furnace/);
+  const s = snap([{ slot: 0, name: 'raw_iron', count: 5 }]);
+  t.is(smelt.wants(s, world({ lastDone: { furnace: s.now - 60_000 } })), null);
 });
 
 test('kit: looks in unknown chests first, then wants only what it can take or craft', (t) => {
