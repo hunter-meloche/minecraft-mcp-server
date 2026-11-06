@@ -169,6 +169,8 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
         progressOf(ctx.world).carry = undefined;
         return ok(`${label} built at (${origin.x}, ${origin.y}, ${origin.z})`);
       }
+      // the whole story in the log (what couldn't be placed and why), a line in the journal
+      ctx.progress(r.text.replace(/\s+/g, ' ').slice(0, 600));
       return going(r.text.split('\n')[0].slice(0, 140));
     }
   };

@@ -154,6 +154,15 @@ export function structureGoal(store: StructureStore): Goal {
         ctx.progress(`${job.structure}: walking to the site`);
         await near(ctx, centre, 6);
       }
+      // the ground first, if asked: the footprint levelled to just under the floor (hills cut, holes filled)
+      if (s.prepare?.level && !job.prepared) {
+        stamp('levelling the site', 'working');
+        ctx.progress(`${job.structure}: levelling the site`);
+        const r = await ctx.act('level-area', { x1: c.box.x, z1: c.box.z, x2: c.box.x + c.box.width - 1, z2: c.box.z + c.box.length - 1, level: c.box.y - 1, timeoutMs: 8 * MINUTE })
+          .catch(e => ({ ok: false, text: (e as Error).message }));
+        if (!/Now level|Already level/.test(r.text)) return `${job.structure}: levelling the site: ${r.text.split('\n').pop()?.slice(0, 120)}`;
+        job.prepared = true;
+      }
       ctx.progress(`${job.structure}: checking it block by block`);
       const changes = await plan(ctx, c);
       const given = new Set(Object.entries(job.fails ?? {}).filter(([, n]) => n >= FAILS_ALLOWED).map(([k]) => k));

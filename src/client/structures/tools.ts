@@ -13,6 +13,7 @@ import { StructureStore } from './store.js';
 import { jobsOf, jobText, queueJob } from './job.js';
 import { importChanges, importDesign } from './importer.js';
 import { readBox } from '../brain/milestones.js';
+import { rankSites, siteMap } from './site.js';
 
 /**
  * The declarative build tools: the LLM writes a design (the shape), places it as a named structure (anchor, rotation)
@@ -172,9 +173,10 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       anchor: pos.optional().describe("Where the design's minimum corner goes (needed with design)"),
       rotation: rotation.optional().describe('Clockwise from above: 0, 90, 180 or 270 (default 0)'),
       autoRepair: z.boolean().optional().describe('Put it back automatically when the daily check finds it changed (default: only report)'),
+      level: z.boolean().optional().describe('Level the footprint first, to just under the floor (cut hills, fill holes)'),
       notes: z.string().optional().describe('What it is for (kept in the file)')
     },
-    async ({ name, design, anchor, rotation: rot, autoRepair, notes }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; notes?: string }) => {
+    async ({ name, design, anchor, rotation: rot, autoRepair, level, notes }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string }) => {
       try {
         if (!brain) return factory.createErrorResponse("Build jobs need the bot's brain (the client backend)");
         const w = await world();
@@ -185,7 +187,8 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
           if (typeof design !== 'string') store.saveDesign(d);
           s = { version: 1, name, design: d.name, anchor: anchor ?? s!.anchor, rotation: rot ?? s?.rotation ?? 0,
             ...(autoRepair !== undefined || s?.autoRepair !== undefined ? { autoRepair: autoRepair ?? s?.autoRepair } : {}),
-            ...(notes ?? s?.notes ? { notes: notes ?? s?.notes } : {}) };
+            ...(notes ?? s?.notes ? { notes: notes ?? s?.notes } : {}),
+            ...(level ?? s?.prepare?.level ? { prepare: { level: level ?? s?.prepare?.level } } : {}) };
         } else if (!s) {
           return factory.createErrorResponse(`No structure called "${name}" in this world: give design and anchor to place one`);
         } else {
@@ -193,6 +196,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
           if (rot !== undefined) s.rotation = rot;
           if (autoRepair !== undefined) s.autoRepair = autoRepair;
           if (notes !== undefined) s.notes = notes;
+          if (level !== undefined) s.prepare = { ...(s.prepare ?? {}), level };
         }
         const d = designOf(s.design);
         const c = compile(d, s.anchor, s.rotation ?? 0);
@@ -290,6 +294,44 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         st.history.push({ at: Date.now(), text: `imported from the world: ${ch.added.length} added, ${ch.removed.length} gone, ${ch.changed.length} changed` });
         store.saveState(w, name, st);
         return factory.createResponse(`${lines.join('\n')}\nSaved "${name}": the file now matches the world.`);
+      } catch (e) {
+        return factory.createErrorResponse((e as Error).message);
+      }
+    }
+  );
+
+  factory.registerTool(
+    'structure-site',
+    "Where a design could go: scans the land around a point (default: home) and ranks the spots its footprint fits (either way round): the least ground to cut and fill to make it level, fewest trees, nearest the point; never over water or anything built, and inside or outside the yard as asked. Returns the best few with their anchor (y one above the ground: the design stands on it; level: true in structure-apply sinks nothing, it flattens) and a map ('.' ground at the usual height, 1-9 higher, a-i lower, T trees, ~ water, B built, the picks drawn as 1, 2, 3...). Pick one with the user's wishes in mind.",
+    {
+      design: z.any().describe("A saved design's name, or a design object"),
+      near: z.object({ x: z.coerce.number(), z: z.coerce.number() }).optional().describe('Where it should be near (default: home)'),
+      radius: z.coerce.number().int().min(8).max(48).optional().describe('How far around to look (default: 24)'),
+      where: z.enum(['inside', 'outside', 'any']).optional().describe('Inside the yard, outside it, or either (default: either)'),
+      count: z.coerce.number().int().min(1).max(9).optional().describe('How many spots to return (default: 5)')
+    },
+    async ({ design, near, radius = 24, where = 'any', count = 5 }: { design: string | Design; near?: { x: number; z: number }; radius?: number; where?: 'inside' | 'outside' | 'any'; count?: number }) => {
+      try {
+        const d = designOf(design);
+        const c0 = compile(d, { x: 0, y: 0, z: 0 });
+        const st = await rt.status();
+        const home = rt.home(st);
+        const mem = brain?.worldMemory();
+        const centre = near ?? (home ? { x: home.x, z: home.z } : { x: Math.floor(st.position!.x), z: Math.floor(st.position!.z) });
+        const ref = mem?.yard?.y ?? Math.floor(st.position!.y) - 1;
+        const area = { x: centre.x - radius, y: ref - 10, z: centre.z - radius, width: 2 * radius + 1, height: 26, length: 2 * radius + 1 };
+        const blocks = await readBox(rt, area);
+        const w = await world();
+        const avoid = [
+          ...store.listStructures(w).flatMap(n => { const s = store.loadStructure(w, n); if (!s) return []; try { const b = compile(designOf(s.design), s.anchor, s.rotation ?? 0).box; return [{ x: b.x, z: b.z, width: b.width, length: b.length }]; } catch { return []; } }),
+          ...Object.entries(mem?.zones ?? {}).filter(([k]) => k !== 'fence').flatMap(([, zs]) => zs).filter(zz => zz.width && zz.length).map(zz => ({ x: zz.x, z: zz.z, width: zz.width!, length: zz.length! }))
+        ];
+        const picks = rankSites(area, blocks, c0.box.width, c0.box.length, { near: centre, yard: mem?.yard, where, avoid, count });
+        if (!picks.length) return factory.createErrorResponse(`No spot within ${radius} of (${centre.x}, ${centre.z}) fits ${d.name} (${c0.box.width}x${c0.box.length}) ${where === 'any' ? '' : `${where} the yard `}clear of water and buildings. Try a bigger radius or another point.`);
+        const lines = picks.map((p, i) => `${i + 1}. anchor ${fmt(p.anchor)} rotation ${p.rotation}: cut ${p.cut}, fill ${p.fill}, ${p.trees} tree block(s), ${p.distance} from (${centre.x}, ${centre.z})`);
+        const map = siteMap(area, blocks, picks);
+        return factory.createResponse(`Spots for ${d.name} (${c0.box.width}x${c0.box.height}x${c0.box.length}):\n${lines.join('\n')}\n` +
+          `Map, x ${area.x}..${area.x + area.width - 1} left to right, z ${area.z} at the top:\n${map.join('\n')}`);
       } catch (e) {
         return factory.createErrorResponse((e as Error).message);
       }

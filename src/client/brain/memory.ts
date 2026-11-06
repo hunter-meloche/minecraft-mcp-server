@@ -42,6 +42,8 @@ export interface BuildJob {
   /** cells ("x,y,z") a package failed on, and how often: left alone after two */
   fails?: Record<string, number>;
   packages?: number;
+  /** the footprint was levelled (the structure's prepare.level) */
+  prepared?: boolean;
   /** changes still to make when it started */
   total?: number;
 }
