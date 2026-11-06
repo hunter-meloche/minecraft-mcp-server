@@ -57,7 +57,8 @@ public final class Protection {
 
     static boolean furniture(Block b) {
         return b instanceof net.minecraft.world.level.block.DoorBlock || b instanceof net.minecraft.world.level.block.TrapDoorBlock
-            || b instanceof net.minecraft.world.level.block.FenceGateBlock || b instanceof net.minecraft.world.level.block.BedBlock
+            || b instanceof net.minecraft.world.level.block.FenceGateBlock || b instanceof net.minecraft.world.level.block.FenceBlock
+            || b instanceof net.minecraft.world.level.block.BedBlock
             || b instanceof net.minecraft.world.level.block.AbstractChestBlock<?> || b instanceof net.minecraft.world.level.block.BarrelBlock
             || b instanceof net.minecraft.world.level.block.CraftingTableBlock || b instanceof net.minecraft.world.level.block.AbstractFurnaceBlock;
     }

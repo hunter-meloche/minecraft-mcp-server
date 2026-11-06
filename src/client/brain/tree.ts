@@ -81,6 +81,29 @@ export function sideCells(y: Box2, side: Side): { x: number; z: number }[] {
   return out;
 }
 
+const fenceRingStep = buildStep('fence', st => {
+  const site = st.data.site as { width: number; length: number };
+  return fenceRing({ width: site.width, length: site.length }, st.data.gates as { side: Side; offset: number }[]);
+});
+
+/**
+ * The fence, in the wood of the fence already standing (a moved fence picked "the wood there's most of", oak, for a
+ * birch fence): a post on the ring decides it, else the build step picks.
+ */
+const fenceBuild = {
+  ...fenceRingStep,
+  run: async (ctx: GoalContext, st: MilestoneState) => {
+    if (!st.data.wood) {
+      const site = st.data.site as { x: number; y: number; z: number; width: number; length: number };
+      const ring = sideCells({ x1: site.x, z1: site.z, x2: site.x + site.width - 1, z2: site.z + site.length - 1 }, 'north');
+      const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { x: site.x, y: site.y + 1, z: site.z, width: ring.length, height: 1, length: 1 });
+      const wood = blocks.map(b => /^(?:minecraft:)?([a-z_]+?)_fence(?:_gate)?(?:\[|$)/.exec(b ?? '')?.[1]).find(Boolean);
+      if (wood) st.data.wood = wood;
+    }
+    return fenceRingStep.run(ctx, st);
+  }
+};
+
 const perimeter: Milestone = {
   id: 'perimeter',
   title: 'fence round the yard',
@@ -122,13 +145,54 @@ const perimeter: Milestone = {
         return { status: 'done', text: `fence along the yard's edge, ${(st.data.gates as unknown[]).length} gates` };
       }
     },
-    buildStep('fence', st => {
-      const site = st.data.site as { width: number; length: number };
-      return fenceRing({ width: site.width, length: site.length }, st.data.gates as { side: Side; offset: number }[]);
-    })
+    fenceBuild
   ]
 };
 
-export const TREE: Milestone[] = [storage, perimeter, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
+/** The yard box as a key: the band outside the fence is cleared for one box (it moves when the yard grows). */
+const boxKey = (y: Box2) => `${y.x1},${y.z1},${y.x2},${y.z2}`;
+
+/** The 2-block band just outside a yard's edge, as four strips (north and south take the corners). */
+export function outerBand(y: Box2, w = 2): Box2[] {
+  return [
+    { x1: y.x1 - w, z1: y.z1 - w, x2: y.x2 + w, z2: y.z1 - 1 },
+    { x1: y.x1 - w, z1: y.z2 + 1, x2: y.x2 + w, z2: y.z2 + w },
+    { x1: y.x1 - w, z1: y.z1, x2: y.x1 - 1, z2: y.z2 },
+    { x1: y.x2 + 1, z1: y.z1, x2: y.x2 + w, z2: y.z2 }
+  ];
+}
+
+/**
+ * Two blocks cleared outside the fence, level with the yard: a 3-high hill against the fence let creepers walk
+ * straight over it into the yard. Done for the yard as it is; when the fence moves out, again.
+ */
+const fenceClear: Milestone = {
+  id: 'fence-clear',
+  title: 'clear ground outside the fence',
+  prereqs: ['perimeter'],
+  done: v => !!v.world.yard && v.world.fenceClearFor === boxKey(v.world.yard) && !v.world.fenceMove,
+  steps: [{
+    name: 'level 2 blocks outside the fence',
+    run: async (ctx: GoalContext, st: MilestoneState) => {
+      const yard = await yardOf(ctx);
+      const strips = outerBand(yard);
+      const doneStrips = (st.data.strips as number[] | undefined) ?? [];
+      for (let i = 0; i < strips.length; i++) {
+        if (doneStrips.includes(i)) continue;
+        if (ctx.signal.aborted) return { status: 'progress', text: `${doneStrips.length} of 4 sides cleared` };
+        const s = strips[i];
+        ctx.progress(`clearing outside the fence (${s.x1}..${s.x2}, ${s.z1}..${s.z2})`);
+        const r = await ctx.act('level-area', { x1: s.x1, z1: s.z1, x2: s.x2, z2: s.z2, level: yard.y, fillWater: false, timeoutMs: 6 * 60_000 });
+        if (!/Now level|Already level/.test(r.text)) return { status: 'progress', text: `side ${i + 1}: ${r.text.split('\n').pop()?.slice(0, 100)}` };
+        doneStrips.push(i);
+        st.data.strips = doneStrips;
+      }
+      ctx.world.fenceClearFor = boxKey(yard);
+      return { status: 'done', text: 'the ground outside the fence is level with the yard' };
+    }
+  }]
+};
+
+export const TREE: Milestone[] = [storage, perimeter, fenceClear, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
   penMilestone('cow', ['plot1']), penMilestone('sheep', ['pen-cow']),
   caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow'])];

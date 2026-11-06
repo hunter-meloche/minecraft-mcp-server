@@ -19,3 +19,13 @@ test('sideCells: the old east side, corners included', (t) => {
   t.deepEqual(cells[0], { x: -32, z: -31 });
   t.deepEqual(cells[25], { x: -32, z: -6 });
 });
+
+test('outerBand: two blocks all round outside the yard, corners in the north and south strips', async (t) => {
+  const { outerBand } = await import('../../src/client/brain/tree.js');
+  const band = outerBand({ x1: 0, z1: 0, x2: 9, z2: 4 });
+  t.deepEqual(band, [
+    { x1: -2, z1: -2, x2: 11, z2: -1 }, { x1: -2, z1: 5, x2: 11, z2: 6 }, { x1: -2, z1: 0, x2: -1, z2: 4 }, { x1: 10, z1: 0, x2: 11, z2: 4 }
+  ]);
+  const cells = band.reduce((a, b) => a + (b.x2 - b.x1 + 1) * (b.z2 - b.z1 + 1), 0);
+  t.is(cells, 14 * 9 - 10 * 5);
+});

@@ -163,6 +163,24 @@ export const sortStorage: Goal = {
 const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot' };
 const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
 
+/** Take whatever the home furnace has finished; how much (as "16 iron_ingot"), or '' when nothing. */
+async function collectFurnace(ctx: GoalContext): Promise<string> {
+  const at = ctx.world.landmarks.furnace;
+  if (!at) return '';
+  type Slot = { name: string; count: number } | null;
+  const open = () => ctx.call<{ open: boolean; output: Slot }>('furnace.open', { ...at });
+  let f = await open().catch(() => undefined);
+  if (!f) { await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 }); f = await open().catch(() => undefined); }
+  if (!f) return '';
+  try {
+    if (!f.output) return '';
+    const r = await ctx.call<{ took: Slot }>('furnace.take');
+    return r.took ? `${r.took.count} ${r.took.name}` : '';
+  } finally {
+    await ctx.call('container.close').catch(() => undefined);
+  }
+}
+
 /** Ingots wanted at home: a full iron kit's worth. */
 const INGOTS_KEPT = 24;
 /** Raw iron in the chests to smelt now: while the home has fewer than INGOTS_KEPT ingots. */
@@ -184,7 +202,7 @@ function charcoalLogs(s: Snapshot, world: WorldMemory): { name: string; count: n
 /** Raw ore carried home: smelt it at the home furnace; charcoal when coal runs low. */
 export const smelt: Goal = {
   name: 'smelt',
-  priority: 62,
+  priority: 66,
   timeoutMs: 10 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
@@ -192,10 +210,15 @@ export const smelt: Goal = {
     const ore = Object.keys(ORES).find(o => (s.counts.get(o) ?? 0) > 0);
     if (ore && FUELS.some(f => (s.counts.get(f) ?? 0) > 0)) return `${s.counts.get(ore)} ${ore} to smelt`;
     if (storedIronToSmelt(s, world) > 0) return `${storedIronToSmelt(s, world)} raw iron in the chests to smelt for the gear`;
+    if (since(world, 'furnace', s.now) > 30 * MINUTE) return 'check the furnace for finished smelting';
     return charcoalLogs(s, world) ? 'low on coal: charcoal from logs' : null;
   },
   run: async ctx => {
     const did: string[] = [];
+    // a smelt stopped midway (something more urgent) leaves its output in the furnace: take it out
+    done(ctx.world, 'furnace', ctx.s.now);
+    const took = await collectFurnace(ctx);
+    if (took) { did.push(`took ${took} out of the furnace`); ctx.progress(did.at(-1)!); }
     // raw iron the stash put away, while the home is short of ingots (the gear wants them)
     const fromChest = storedIronToSmelt(ctx.s, ctx.world);
     if (fromChest > 0) {
