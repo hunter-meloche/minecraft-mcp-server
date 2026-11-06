@@ -12,6 +12,8 @@ import { caneRound } from './cane.js';
 import { enchantGoal } from './enchant.js';
 import { HeatMap } from './paths.js';
 import { signsGoal } from './signs.js';
+import { structureGoal } from '../structures/job.js';
+import { StructureStore } from '../structures/store.js';
 import { LoopWatch, type Outcome, type Run } from './loops.js';
 
 /** Staying alive: never backed off by the loop watch. */
@@ -86,7 +88,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, signsGoal, projectGoal(TREE), returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, structureGoal(new StructureStore()), stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, signsGoal, projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

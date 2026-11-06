@@ -10,6 +10,7 @@ import { packages } from './order.js';
 import { billFor, sourceBill, type SourcedBill } from './bill.js';
 import { plan } from './scan.js';
 import { StructureStore } from './store.js';
+import { jobsOf, jobText, queueJob } from './job.js';
 
 /**
  * The declarative build tools: the LLM writes a design (the shape), places it as a named structure (anchor, rotation)
@@ -157,6 +158,87 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       } catch (e) {
         return factory.createErrorResponse((e as Error).message);
       }
+    }
+  );
+
+  factory.registerTool(
+    'structure-apply',
+    `Build (or repair) a structure: place a design under a name (design + anchor + rotation; saved as this world's structure file) or name one placed before, and the bot works on it at its own pace (priority 3.5: after staying alive, its gear and its food stock; before its chores and projects). It gathers and crafts the materials it can, fights or shelters when it must, and picks up where the world says it got to, block by block, until every cell matches. By day only. Returns the plan and the job; follow it with structure-status. A design can be a saved design's name or the design itself (see structure-design).`,
+    {
+      name: z.string().describe("The structure's name in this world (letters, digits, - and _)"),
+      design: z.any().optional().describe("A saved design's name, or a design object (saved under its own name)"),
+      anchor: pos.optional().describe("Where the design's minimum corner goes (needed with design)"),
+      rotation: rotation.optional().describe('Clockwise from above: 0, 90, 180 or 270 (default 0)'),
+      autoRepair: z.boolean().optional().describe('Put it back automatically when the daily check finds it changed (default: only report)'),
+      notes: z.string().optional().describe('What it is for (kept in the file)')
+    },
+    async ({ name, design, anchor, rotation: rot, autoRepair, notes }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; notes?: string }) => {
+      try {
+        if (!brain) return factory.createErrorResponse("Build jobs need the bot's brain (the client backend)");
+        const w = await world();
+        let s = store.loadStructure(w, name);
+        if (design !== undefined) {
+          if (!anchor && !s) return factory.createErrorResponse("A new structure needs an anchor (where the design's minimum corner goes)");
+          const d = designOf(design);
+          if (typeof design !== 'string') store.saveDesign(d);
+          s = { version: 1, name, design: d.name, anchor: anchor ?? s!.anchor, rotation: rot ?? s?.rotation ?? 0,
+            ...(autoRepair !== undefined || s?.autoRepair !== undefined ? { autoRepair: autoRepair ?? s?.autoRepair } : {}),
+            ...(notes ?? s?.notes ? { notes: notes ?? s?.notes } : {}) };
+        } else if (!s) {
+          return factory.createErrorResponse(`No structure called "${name}" in this world: give design and anchor to place one`);
+        } else {
+          if (anchor) s.anchor = anchor;
+          if (rot !== undefined) s.rotation = rot;
+          if (autoRepair !== undefined) s.autoRepair = autoRepair;
+          if (notes !== undefined) s.notes = notes;
+        }
+        const d = designOf(s.design);
+        const c = compile(d, s.anchor, s.rotation ?? 0);
+        store.saveStructure(w, s);
+        const changes = await plan(rt, c);
+        const text = planText(`Plan for "${name}" (design ${d.name}, rotation ${s.rotation ?? 0})`, c, changes, await sourced(rt, brain, changes));
+        const mem = brain.worldMemory();
+        if (!mem) return factory.createErrorResponse(`${text}\nThe brain doesn't know this world yet: try again in a few seconds.`);
+        const st = store.loadState(w, name);
+        const job = queueJob(mem, w, name, st.completeAt ? 'repair' : 'apply', Date.now());
+        st.history.push({ at: Date.now(), text: `job #${job.id} (${job.mode}) queued` });
+        store.saveState(w, name, st);
+        brain.saveMemory();
+        const off = brain.enabled ? '' : " The bot's autonomy is off: the job starts once set-autonomy turns it on.";
+        return factory.createResponse(`${text}\nQueued job #${job.id} (${job.mode}).${off} Follow it with structure-status.`);
+      } catch (e) {
+        return factory.createErrorResponse((e as Error).message);
+      }
+    }
+  );
+
+  factory.registerTool(
+    'structure-status',
+    'The build jobs (going and recent: what each is doing, what it waits for) and the placed structures with their last check.',
+    {},
+    async () => {
+      const mem = brain?.worldMemory();
+      const jobs = mem ? jobsOf(mem) : [];
+      const going = jobs.filter(j => !['done', 'failed', 'cancelled'].includes(j.status));
+      const recent = jobs.filter(j => !going.includes(j)).slice(-5);
+      const lines = [going.length ? `Jobs:\n${going.map(j => `- ${jobText(j)}`).join('\n')}` : 'No build jobs going.'];
+      if (recent.length) lines.push(`Recent:\n${recent.map(j => `- ${jobText(j)}`).join('\n')}`);
+      if (brain && /^Autopilot: build/.test(brain.statusLine())) lines.push(`Working on it now: ${brain.statusLine()}`);
+      return factory.createResponse(lines.join('\n'));
+    }
+  );
+
+  factory.registerTool(
+    'structure-cancel',
+    'Stop the build job for a structure (what stands stays; the structure file is kept, so structure-apply can start it again).',
+    { name: z.string().describe('The structure') },
+    async ({ name }: { name: string }) => {
+      const mem = brain?.worldMemory();
+      const jobs = mem ? jobsOf(mem).filter(j => j.structure === name && !['done', 'failed', 'cancelled'].includes(j.status)) : [];
+      if (!jobs.length) return factory.createErrorResponse(`No job going for "${name}"`);
+      for (const j of jobs) { j.status = 'cancelled'; j.note = 'cancelled'; j.updatedAt = Date.now(); j.need = j.missing = j.carry = undefined; }
+      brain!.saveMemory();
+      return factory.createResponse(`Cancelled ${jobs.map(j => `#${j.id}`).join(', ')} for ${name}.`);
     }
   );
 

@@ -153,7 +153,7 @@ async function planksFor(ctx: GoalContext): Promise<string> {
 }
 
 /** Prepare a whole bill; what's short goes to the stock trips (progress.need) and comes back. */
-export async function prepareBill(ctx: GoalContext, bill: Record<string, number>): Promise<Record<string, number>> {
+export async function prepareBill(ctx: GoalContext, bill: Record<string, number>, opts: { record?: boolean } = {}): Promise<Record<string, number>> {
   const short: Record<string, number> = {};
   // raw items first (they can't be crafted), and kept back from the crafting of the rest
   const raw = Object.entries(bill).filter(([item]) => !recipeFor(item));
@@ -161,6 +161,7 @@ export async function prepareBill(ctx: GoalContext, bill: Record<string, number>
   for (const [item, n] of [...raw, ...Object.entries(bill).filter(([item]) => recipeFor(item))]) {
     for (const [k, v] of Object.entries(await prepare(ctx, item, n, 0, reserve))) short[k] = (short[k] ?? 0) + v;
   }
-  progressOf(ctx.world).need = Object.keys(short).length ? short : undefined;
+  // the project's shortfall is the stock trips' to fetch; a build job keeps its own (opts.record false)
+  if (opts.record !== false) progressOf(ctx.world).need = Object.keys(short).length ? short : undefined;
   return short;
 }

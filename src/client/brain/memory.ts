@@ -19,6 +19,33 @@ export interface Landmarks {
   foundAt?: number;
 }
 
+/** A declarative build the LLM asked for (structures/job.ts works on it at priority 3.5). */
+export interface BuildJob {
+  id: number;
+  /** the world id its structure file is kept under */
+  world: string;
+  structure: string;
+  mode: 'apply' | 'repair';
+  status: 'queued' | 'working' | 'gathering' | 'waiting' | 'done' | 'failed' | 'cancelled';
+  createdAt: number;
+  updatedAt: number;
+  /** the last thing that happened */
+  note?: string;
+  /** what the stock trips should bring for it (raw materials) */
+  need?: Record<string, number>;
+  /** what the bot can't get by itself: the job waits until someone puts it in a home chest */
+  missing?: Record<string, number>;
+  /** items it builds with: the stash leaves them carried */
+  carry?: string[];
+  /** not before (ms) */
+  retryAt?: number;
+  /** cells ("x,y,z") a package failed on, and how often: left alone after two */
+  fails?: Record<string, number>;
+  packages?: number;
+  /** changes still to make when it started */
+  total?: number;
+}
+
 export interface WorldMemory {
   landmarks: Landmarks;
   /** how far from home a trip may go */
@@ -48,6 +75,8 @@ export interface WorldMemory {
   /** the yard grew past the fence on this side: the fence moves out (its old side comes down, the ring is rebuilt) */
   /** the yard box (x1,z1,x2,z2) the 2-block band outside the fence was last cleared for */
   fenceClearFor?: string;
+  /** the LLM's declarative builds, oldest first */
+  buildJobs?: BuildJob[];
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
 }
 

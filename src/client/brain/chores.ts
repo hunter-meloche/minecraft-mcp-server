@@ -32,9 +32,19 @@ function foods(): Set<string> {
   return foodNames;
 }
 
-/** What the project in hand is gathering and building with: stays carried (the stash put a trip's logs away). */
+/** What the project in hand and the build jobs are gathering and building with: stays carried (the stash put a trip's logs away). */
 function projectCarry(world: WorldMemory): Set<string> {
-  return new Set(world.progress?.carry ?? []);
+  return new Set([...(world.progress?.carry ?? []), ...activeJobs(world).flatMap(j => j.carry ?? [])]);
+}
+
+/** The LLM's build jobs still going. */
+export const activeJobs = (world: WorldMemory) => (world.buildJobs ?? []).filter(j => !['done', 'failed', 'cancelled'].includes(j.status));
+
+/** Raw materials the project in hand and the build jobs are short of, together. */
+export function allNeeds(world: WorldMemory): Record<string, number> {
+  const out: Record<string, number> = { ...(world.progress?.need ?? {}) };
+  for (const j of activeJobs(world)) for (const [k, v] of Object.entries(j.need ?? {})) out[k] = (out[k] ?? 0) + v;
+  return out;
 }
 
 /** Look in every home chest not looked in for a while (plans use what they hold). */
@@ -61,7 +71,7 @@ export const stash: Goal = {
     plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
     if (!plan.deposit.length && !plan.drop.length) return null;
     // a project carrying its materials fills the pockets on purpose: only stop it when really full
-    if (s.slotsUsed >= (world.progress?.carry ? 33 : 27)) return `${s.slotsUsed}/36 slots used`;
+    if (s.slotsUsed >= (world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27)) return `${s.slotsUsed}/36 slots used`;
     if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
     return null;
   },
@@ -345,8 +355,8 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
     extra.iron_ingot = Math.max(0, extra.iron_ingot - raw);
     if (!extra.iron_ingot) delete extra.iron_ingot;
   }
-  // what the project in hand is short of (its bill broken down to raw materials)
-  const project = world.progress?.need ?? {};
+  // what the project in hand and the LLM's build jobs are short of (their bills broken down to raw materials)
+  const project = allNeeds(world);
   // a project short of a particular wood's logs mines that wood
   const woods = Object.keys(project).filter(k => /_log$/.test(k)).map(k => ({ name: k, want: 0, mine: k, counts: new RegExp(`^${k}$`) }));
   const out = [...STOCK, ...woods].map(t => ({ ...t, gear: (extra[t.name] ?? 0) > 0, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
@@ -363,7 +373,8 @@ export const stock: Goal = {
   name: 'stock',
   priority: 33,
   // materials for the gear go with the gear (second only to staying alive); the rest is home upkeep
-  urgency: (s, world) => (gearShort(s, world) ? 64 : 33),
+  // build jobs' materials just under the job itself (3.5)
+  urgency: (s, world) => (gearShort(s, world) ? 64 : activeJobs(world).some(j => j.need) ? 43 : 33),
   timeoutMs: 12 * MINUTE,
   retryMs: 8 * MINUTE,
   wants: (s, world) => {
@@ -389,6 +400,7 @@ export const stock: Goal = {
     // (left standing, it had the bot fetch 22 more birch logs trip after trip)
     const need = ctx.world.progress?.need;
     if (need && t.name in need) { delete need[t.name]; if (!Object.keys(need).length) ctx.world.progress!.need = undefined; }
+    for (const j of activeJobs(ctx.world)) if (j.need && t.name in j.need) { delete j.need[t.name]; if (!Object.keys(j.need).length) j.need = undefined; }
     const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
     if (!back.ok) throw new Error(`mined, but could not get home: ${back.text}`);
     if (!r.ok) throw new Error(r.text);
