@@ -4,7 +4,7 @@ import { prepareBill } from './project.js';
 import { allItems, mostWood, progressOf } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
-import type { Blueprint } from './blueprints.js';
+import { billLeft, billOf, type Blueprint } from './blueprints.js';
 
 /**
  * Building blocks for milestones: find room in the yard (growing it when there is none), get the materials together,
@@ -149,7 +149,14 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       const bp = inWood(plan(st), st.data.wood as string);
       const wood = st.data.wood as string;
       progressOf(ctx.world).carry = [...Object.keys(bp.bill), `${wood}_log`, `${wood}_planks`, 'stick'];
-      const short = await prepareBill(ctx, bp.bill);
+      // only what isn't in place yet (a half-built house, a fence moved out), plus the extras the spec doesn't place
+      const origin0 = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
+      const there = await readBox(ctx, { ...origin0, ...bp.size });
+      const left = billLeft(bp.spec, there, bp.size);
+      const all = billOf(bp.spec);
+      const bill = { ...left };
+      for (const [k, n] of Object.entries(bp.bill)) { const extra = n - (all[k] ?? 0); if (extra > 0) bill[k] = (bill[k] ?? 0) + extra; }
+      const short = await prepareBill(ctx, bill);
       if (Object.keys(short).length) {
         return blocked(`gathering for the ${label}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
       }

@@ -163,6 +163,25 @@ export function billOf(spec: StructureSpec): Record<string, number> {
   return bill;
 }
 
+/**
+ * What's left to place of a spec, given the blocks there now (a region read at the build's origin over its size, x
+ * fastest, then z, then y): a cell already holding its block (by id, whatever its state) costs nothing. A fence ring
+ * moved out wanted all 148 pieces again with 100 of them still standing.
+ */
+export function billLeft(spec: StructureSpec, blocks: (string | null)[], size: { width: number; length: number }): Record<string, number> {
+  const bill: Record<string, number> = {};
+  const id = (b: string | null | undefined) => (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+  spec.layers.forEach((layer, y) => layer.forEach((row, z) => [...row].forEach((ch, x) => {
+    if (ch === '.' || ch === ' ') return;
+    const state = spec.palette[ch];
+    if (secondHalf(state)) return;
+    if (id(blocks[x + z * size.width + y * size.width * size.length]) === id(state)) return;
+    const item = itemOf(state);
+    bill[item] = (bill[item] ?? 0) + (/_slab\[.*type=double/.test(state) ? 2 : 1);
+  })));
+  return bill;
+}
+
 const addBill = (a: Record<string, number>, b: Record<string, number>) => {
   const out = { ...a };
   for (const [k, n] of Object.entries(b)) out[k] = (out[k] ?? 0) + n;

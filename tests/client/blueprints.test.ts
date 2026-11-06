@@ -295,3 +295,10 @@ test('rotation: states, positions and specs turn clockwise; four turns change no
   const r = rotate(h, 1);
   for (const [i, l] of h.landmarks.entries()) t.is(rotateState(stateAt(h.spec, l.at), 1), stateAt(r.spec, r.landmarks[i].at));
 });
+
+test('billLeft: cells already holding their block cost nothing, whatever their state', async (t) => {
+  const { billLeft } = await import('../../src/client/brain/blueprints.js');
+  const spec = { palette: { F: 'minecraft:oak_fence', T: 'minecraft:torch' }, layers: [['FFF'], ['T  ']] };
+  const blocks = ['minecraft:oak_fence[east=true,north=false]', 'air', 'air', 'air', 'air', 'air'];
+  t.deepEqual(billLeft(spec, blocks, { width: 3, length: 1 }), { oak_fence: 2, torch: 1 });
+});
