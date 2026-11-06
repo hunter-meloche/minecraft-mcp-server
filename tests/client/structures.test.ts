@@ -3,6 +3,7 @@ import { compile, validateDesign, type Design } from '../../src/client/structure
 import { diff, sameBlock, summary } from '../../src/client/structures/diff.js';
 import { packages } from '../../src/client/structures/order.js';
 import { billFor, sourceBill } from '../../src/client/structures/bill.js';
+import { placed } from '../../src/client/structures/tools.js';
 
 const hut: Design = {
   version: 1, name: 'hut',
@@ -155,4 +156,16 @@ test('import: built blocks only, a chest by its facing, a sign with its text; wh
 test('sameBlock: a gate opened from the other side is the same gate', (t) => {
   t.is(sameBlock('birch_fence_gate[facing=south]', 'birch_fence_gate[facing=north,in_wall=false,open=false,powered=false]'), 'same');
   t.is(sameBlock('birch_fence_gate[facing=south]', 'birch_fence_gate[facing=east,in_wall=false,open=false,powered=false]'), 'state');
+});
+
+test('placed: a redesign keeps the old structure\'s flags (homeStorage above all)', (t) => {
+  const old = { version: 1 as const, name: 'homestead', design: { version: 1 as const, name: 'homestead', palette: {}, parts: [] }, anchor: { x: -65, y: 62, z: -31 },
+    rotation: 0 as const, homeStorage: true, autoRepair: false, notes: 'the yard' };
+  const s = placed(old, { name: 'homestead', design: 'homestead-v2', anchor: { x: -65, y: 66, z: -31 } });
+  t.deepEqual(s, { version: 1, name: 'homestead', design: 'homestead-v2', anchor: { x: -65, y: 66, z: -31 }, rotation: 0, autoRepair: false, notes: 'the yard', homeStorage: true });
+  // a new one: only what the call says
+  t.deepEqual(placed(null, { name: 'hut', design: 'hut', anchor: { x: 0, y: 64, z: 0 }, level: true }),
+    { version: 1, name: 'hut', design: 'hut', anchor: { x: 0, y: 64, z: 0 }, rotation: 0, prepare: { level: true } });
+  // no new anchor: the old one
+  t.deepEqual(placed(old, { name: 'homestead', design: 'x' }).anchor, old.anchor);
 });

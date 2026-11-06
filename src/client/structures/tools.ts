@@ -4,7 +4,7 @@ import type { ClientRuntime } from '../tools.js';
 import type { Brain } from '../brain/brain.js';
 import { worldIdFromSeed } from '../../build-protection.js';
 import { chestTotals } from '../brain/chests.js';
-import { compile, type Compiled, type Design, type Rotation, type Structure } from './format.js';
+import { compile, type Compiled, type Design, type Pos, type Rotation, type Structure } from './format.js';
 import { summary, type Change } from './diff.js';
 import { packages } from './order.js';
 import { billFor, sourceBill, type SourcedBill } from './bill.js';
@@ -29,6 +29,22 @@ along +x, ...] per layer bottom-up] } } with '.' air and ' ' unmanaged. A block 
 ("stone_bricks", "oak_stairs[facing=east]"). signs: [{ at, facing, lines: [up to 4] }] are wall signs whose text faces
 \`facing\`. Local coordinates: x east, y up, z south. Cells no part touches are left as they are. A door's top and a bed's
 head come with their other half.`;
+
+/**
+ * A design placed under a name: a new structure, or `old` given a new design. What the call leaves out comes from the
+ * old file, and so does homeStorage, which only structure-import sets: a homestead given a redesign keeps its chests as
+ * the home's storage (without it, the bot stopped stashing in them and fetched its kit from nowhere).
+ */
+export function placed(old: Structure | null | undefined, o: { name: string; design: string; anchor?: Pos; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string }): Structure {
+  const autoRepair = o.autoRepair ?? old?.autoRepair, notes = o.notes ?? old?.notes, level = o.level ?? old?.prepare?.level;
+  return {
+    version: 1, name: o.name, design: o.design, anchor: o.anchor ?? old!.anchor, rotation: o.rotation ?? old?.rotation ?? 0,
+    ...(autoRepair !== undefined ? { autoRepair } : {}),
+    ...(notes ? { notes } : {}),
+    ...(level || old?.prepare?.foundation ? { prepare: { ...(level ? { level } : {}), ...(old?.prepare?.foundation ? { foundation: true } : {}) } } : {}),
+    ...(old?.homeStorage ? { homeStorage: true } : {})
+  };
+}
 
 const pos = z.object({ x: z.coerce.number(), y: z.coerce.number(), z: z.coerce.number() });
 const rotation = z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]);
@@ -185,10 +201,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
           if (!anchor && !s) return factory.createErrorResponse("A new structure needs an anchor (where the design's minimum corner goes)");
           const d = designOf(design);
           if (typeof design !== 'string') store.saveDesign(d);
-          s = { version: 1, name, design: d.name, anchor: anchor ?? s!.anchor, rotation: rot ?? s?.rotation ?? 0,
-            ...(autoRepair !== undefined || s?.autoRepair !== undefined ? { autoRepair: autoRepair ?? s?.autoRepair } : {}),
-            ...(notes ?? s?.notes ? { notes: notes ?? s?.notes } : {}),
-            ...(level ?? s?.prepare?.level ? { prepare: { level: level ?? s?.prepare?.level } } : {}) };
+          s = placed(s, { name, design: d.name, anchor, rotation: rot, autoRepair, level, notes });
         } else if (!s) {
           return factory.createErrorResponse(`No structure called "${name}" in this world: give design and anchor to place one`);
         } else {
