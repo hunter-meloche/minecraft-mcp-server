@@ -66,6 +66,8 @@ export interface Goal {
 
 /** Close enough to home to count as there. */
 export const AT_HOME = 3;
+/** Within this of home the bot is in its yard. */
+export const IN_YARD = 16;
 
 /** Out of bed in the morning (beds wake everyone at dawn, but not if the bot lay down after the others got up). */
 export const wake: Goal = {
@@ -133,7 +135,10 @@ export function shelterGoal(): Goal {
     wants: (s, world) => {
       if (s.activity === 'work') { holedUp = false; return null; }
       if (holedUp || s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
-      if (s.distHome > AT_HOME) return s.activity === 'return' ? 'evening: head home before dark' : 'night: get home';
+      // in the evening the fenced, lit yard is home enough (the chests and the furnace are in it: pulled back to the
+      // doorstep, the kit and the food goal never got to them); at night, the house
+      if (s.activity === 'return') return s.distHome > IN_YARD ? 'evening: head home before dark' : null;
+      if (s.distHome > AT_HOME) return 'night: get home';
       if (s.activity === 'rest' && world.landmarks.bed) return 'night: go to bed';
       return null;
     },
