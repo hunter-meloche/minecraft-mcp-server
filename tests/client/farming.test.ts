@@ -15,3 +15,16 @@ test('the plot and the tree farm count as done once their zones are there', (t) 
   t.false(cropPlotMilestone(2, []).done!(view({ plot: [{}] })));
   t.true(treeFarmMilestone([]).done!(view({ trees: [{}] })));
 });
+
+test('till: grass with its state is tilled, and a plot with no farmland is not done', async (t) => {
+  const { tillStep } = await import('../../src/client/brain/farming.js');
+  const used: string[] = [];
+  const ctx = {
+    s: { items: [{ slot: 0, name: 'stone_hoe', count: 1 }] }, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown>) => { used.push(`${tool} ${a.x},${a.z}`); return { ok: true, text: 'grass_block -> grass_block' }; },
+    call: async () => ({ blocks: new Array(81).fill('minecraft:grass_block[snowy=false]') })
+  };
+  const r = await tillStep.run(ctx as never, { step: 3, data: { site: { x: 0, y: 64, z: 0 } } });
+  t.is(used.length, 81);
+  t.is(r.status, 'progress');
+});

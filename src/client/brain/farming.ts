@@ -98,7 +98,8 @@ export const tillStep: Step = {
     let tilled = 0, left = 0;
     for (let i = 0; i < blocks.length; i++) {
       if (ctx.signal.aborted) break;
-      const b = (blocks[i] ?? '').replace(/^minecraft:/, '');
+      // by id: the region gives states ("grass_block[snowy=false]"), and matched whole it tilled nothing
+      const b = (blocks[i] ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
       if (!/^(grass_block|dirt|coarse_dirt|rooted_dirt|dirt_path)$/.test(b)) continue;
       const at = { x: site.x + i % SIZE, y: site.y, z: site.z + Math.floor(i / SIZE) };
       const r = await ctx.act('use-item-on-block', { ...at, item: hoe, face: 'up' });
@@ -108,7 +109,9 @@ export const tillStep: Step = {
     const after = (await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...site, width: SIZE, height: 1, length: SIZE })).blocks;
     const farmland = after.filter(b => /farmland/.test(b ?? '')).length;
     if (farmland >= SIZE * SIZE - 1 - 4) return ok(`${farmland} farmland`);
-    return left ? going(`tilled ${tilled}, ${left} would not till (${farmland} farmland)`) : ok(`${farmland} farmland (the rest is not dirt)`);
+    // most of it at least, or it isn't a plot yet (it once called 0 farmland done)
+    if (farmland >= (SIZE * SIZE) / 2 && !left) return ok(`${farmland} farmland (the rest is not dirt)`);
+    return going(`tilled ${tilled}, ${left} would not till (${farmland} farmland)`);
   }
 };
 
