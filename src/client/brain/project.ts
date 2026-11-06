@@ -11,12 +11,14 @@ import { chestTotals, takeFromChests } from './chests.js';
 const MINUTE = 60_000;
 
 export function projectGoal(tree: Milestone[]): Goal {
+  // while a step runs it keeps the raised urgency: a stock trip for 1 cobblestone stopped the yard's leveling midway
+  let running = false;
   return {
     name: 'project',
     priority: 25,
     // chores (stock trips, sorting, the farm round) can fill a short day: after 4 minutes of waiting the project goes
     // ahead of them, below food, kit and the stash (a whole day went by with the storage house never touched)
-    urgency: (s, world) => (s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 52 : 25),
+    urgency: (s, world) => (running || s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 52 : 25),
     timeoutMs: 9 * MINUTE,
     retryMs: 2 * MINUTE,
     wants: (s, world) => {
@@ -30,6 +32,12 @@ export function projectGoal(tree: Milestone[]): Goal {
       return `${m.title}: ${step?.name ?? 'finishing'}`;
     },
     run: async ctx => {
+      running = true;
+      try { return await runStep(ctx); } finally { running = false; }
+    }
+  };
+
+  async function runStep(ctx: GoalContext): Promise<string> {
       const p = progressOf(ctx.world);
       (ctx.world.lastDone ??= {}).project = ctx.s.now;
       const m = nextMilestone(tree, ctx.s, ctx.world);
@@ -51,8 +59,7 @@ export function projectGoal(tree: Milestone[]): Goal {
         journal(ctx.world, ctx.s.now, `${m.title}: ${step.name} blocked (${r.text})`);
       }
       return `${m.title} - ${step.name}: ${r.text}`;
-    }
-  };
+  }
 }
 
 function finish(ctx: GoalContext, m: Milestone): string {
