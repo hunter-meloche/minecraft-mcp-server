@@ -4,7 +4,7 @@
 // loot drops, recipes, materials) is carried over from minecraft-data 26.1 by name, with ids remapped.
 const fs = require('fs'), path = require('path')
 const [dumpFile, reportsDir, extractDir, outDir] = process.argv.slice(2)
-const BASE = 'C:/Users/Hunter/minecraft-mcp-server/node_modules/minecraft-data/minecraft-data/data/pc/26.1/'
+const BASE = path.join(__dirname, '../../../node_modules/minecraft-data/minecraft-data/data/pc/26.1') + '/'
 const base = (f) => JSON.parse(fs.readFileSync(BASE + f + '.json', 'utf8'))
 const read = (f) => JSON.parse(fs.readFileSync(f, 'utf8'))
 const D = read(dumpFile)

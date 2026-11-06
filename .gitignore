@@ -28,3 +28,6 @@ pids/
 # client mod: fetched libraries and build output
 client-mod/libs/
 client-mod/build/
+
+# shell crash dumps (Git Bash on Windows)
+*.stackdump
