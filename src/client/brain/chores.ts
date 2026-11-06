@@ -103,7 +103,13 @@ export const stash: Goal = {
       const yard = ctx.world.yard;
       while (yard && d < 60 && outsideBy(yard, at(d)) < 6) d++;
       const dump = at(d);
-      await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
+      try {
+        await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
+      } catch (e) {
+        // near enough will do, as long as it's well outside the fence
+        const me = (await ctx.status()).position;
+        if (!me || !yard || outsideBy(yard, me) < 4) throw e;
+      }
       for (const e of plan.drop) {
         const r = await ctx.act('drop-item', { item: e.name, count: e.count });
         const m = /^Dropped (\d+)/.exec(r.text);
