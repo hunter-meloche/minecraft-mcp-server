@@ -45,7 +45,8 @@ export const signsGoal: Goal = {
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 24 || world.landmarks.chests.length < 3) return null;
     if (s.now - (world.lastDone?.signs ?? 0) < 20 * MINUTE) return null;
-    const labels = chestLabels(world.landmarks.chests, world.chestAssign ?? {});
+    // the assignment as it stands now (new chests in it), not as the stash last left it
+    const labels = chestLabels(world.landmarks.chests, chestAssignment(world));
     const keys = new Set(world.landmarks.chests.map(key));
     const missing = world.landmarks.chests.filter(c => labels[key(c)] && world.chestSigns?.[key(c)] !== labels[key(c)]).length +
       Object.keys(world.chestSigns ?? {}).filter(k => !keys.has(k)).length;
