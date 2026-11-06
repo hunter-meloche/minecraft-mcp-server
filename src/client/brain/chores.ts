@@ -539,13 +539,15 @@ export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: st
   const plots = ctx.world.zones?.plot ?? [];
   const inPlot = (f: Pos) => plots.some(p => f.x >= p.x && f.x < p.x + (p.width ?? 9) && f.z >= p.z && f.z < p.z + (p.length ?? 9));
   const loose = ctx.world.landmarks.farmland.filter(f => !inPlot(f));
-  const spots: { at: Pos; range: number }[] = plots.map(p => ({ at: { x: p.x + Math.floor((p.width ?? 9) / 2), y: p.y + 1, z: p.z + Math.floor((p.length ?? 9) / 2) + 1 }, range: 7 }));
+  // each plot from just outside its north edge (Baritone won't path onto farmland), far enough to reach its far side
+  const spots: { at: Pos; range: number }[] = plots.map(p => ({ at: { x: p.x + Math.floor((p.width ?? 9) / 2), y: p.y + 1, z: p.z - 1 }, range: (p.length ?? 9) + 2 }));
   if (loose.length) spots.push({ at: farmCentre({ ...ctx.world, landmarks: { ...ctx.world.landmarks, farmland: loose } })!, range: 12 });
   const out: string[] = [];
   let ok = true;
   for (const sp of spots) {
     if (ctx.signal.aborted) break;
-    await ctx.act('move-to-position', { ...sp.at, range: 3, timeoutMs: 90_000 });
+    // short of the spot but near it will do: the farm works around wherever the bot ends up
+    await ctx.act('move-to-position', { ...sp.at, range: 3, timeoutMs: 90_000 }).catch(() => undefined);
     const r = await ctx.act('farm', { range: sp.range, timeoutMs: 180_000 });
     ctx.progress(r.text.slice(0, 160));
     out.push(r.text.slice(0, 100));

@@ -124,8 +124,10 @@ export const sowStep: Step = {
     const have = await inv(ctx);
     const seeds = ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds'].reduce((a, n) => a + (have.get(n) ?? 0), 0);
     if (seeds < 20) for (const n of ['wheat_seeds', 'carrot', 'potato']) await takeFromChests(ctx, n, 40);
-    await ctx.act('move-to-position', { x: c.x, y: c.y + 1, z: c.z + 1, range: 2, timeoutMs: 90_000 });
-    const r = await ctx.act('farm', { range: 6, timeoutMs: 120_000 });
+    // from just outside the plot's north edge: Baritone won't walk onto farmland (it would trample it), so a spot in
+    // the plot was "no path found" 2 blocks away; the farm reaches the far corner from there with range 11
+    await ctx.act('move-to-position', { x: c.x, y: c.y + 1, z: site.z - 1, range: 1, timeoutMs: 90_000 }).catch(() => undefined);
+    const r = await ctx.act('farm', { range: 11, timeoutMs: 180_000 });
     addZone(ctx.world, 'plot', { x: site.x, y: site.y, z: site.z, width: SIZE, length: SIZE });
     ctx.world.landmarks.foundAt = 0; // pick up the new farmland
     progressOf(ctx.world).carry = undefined;
