@@ -195,7 +195,7 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
   }
   // the gates in the fence and the doors of the other buildings, further out: the fishing trip left a gate open
   const inBox = (p: Pos) => p.x >= box.x && p.x < box.x + box.width && p.z >= box.z && p.z < box.z + box.length && p.y >= box.y && p.y < box.y + box.height;
-  const far = Object.entries(ctx.world.zones ?? {}).filter(([k]) => /:(gate|door)$/.test(k)).flatMap(([, zs]) => zs).filter(p => !inBox(p));
+  const far = Object.entries(ctx.world?.zones ?? {}).filter(([k]) => /:(gate|door)$/.test(k)).flatMap(([, zs]) => zs).filter(p => !inBox(p));
   for (const at of far) {
     if (ctx.signal.aborted) break;
     const { blocks: [b] } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...at, width: 1, height: 1, length: 1 });

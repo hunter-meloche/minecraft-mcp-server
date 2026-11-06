@@ -6,6 +6,7 @@ import { chestTotals, key, peekChest, rememberReply, storeInChests, takeFromChes
 import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign } from './storage.js';
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
+import { HeatMap, pathTorchSpots } from './paths.js';
 import { daylightLeft } from './schedule.js';
 import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
@@ -310,9 +311,9 @@ const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
  * goes through walls, and the daily round kept putting two torches by an enclosed air pocket that they never lit,
  * every day. A torch that lights no dark spot is taken back up. `ignore` holds spots to leave out ("x,y,z").
  */
-export async function lightArea(io: Io, centre: Pos, radius: number, opts: { place: boolean; max: number; ignore: Set<string> }): Promise<LightReport> {
+export async function lightArea(io: Io, centre: Pos, radius: number, opts: { place: boolean; max: number; ignore: Set<string>; only?: (p: Pos) => boolean }): Promise<LightReport> {
   const box = yardBox(centre, radius);
-  const mask = (p: Pos) => !opts.ignore.has(key(p));
+  const mask = (p: Pos) => !opts.ignore.has(key(p)) && (opts.only?.(p) ?? true);
   const read = async () => {
     const { blocks } = await io.call<{ blocks: (string | null)[] }>('world.region', { ...box }, 60_000);
     const { block } = await io.call<{ block: number[] }>('world.light', { ...box }, 60_000);
@@ -342,14 +343,28 @@ export async function lightArea(io: Io, centre: Pos, radius: number, opts: { pla
   return report;
 }
 
+/** Torches kept back for the mine and the trips (the kit's own count). */
+const TORCH_RESERVE = 16;
+/** A day's torches for the band outside the fence, and for the routes. */
+const BAND_PER_DAY = 8;
+const PATH_PER_DAY = 6;
+/** The band outside the fence: 2 to 12 blocks out. */
+const BAND = { from: 2, to: 12 };
+
+/** How far a point is outside a yard box (0 inside), in the larger of the two directions. */
+export function outsideBy(yard: { x1: number; z1: number; x2: number; z2: number }, p: { x: number; z: number }): number {
+  return Math.max(yard.x1 - p.x, 0, p.x - yard.x2, yard.z1 - p.z, p.z - yard.z2);
+}
+
 /**
- * Once a day: put torches where a monster could spawn in the yard, as few as do any good. Spots a torch didn't reach
- * are remembered and left out from then on.
+ * Once a day, in order, while torches last: the yard (none dark, spots no torch reached are left out from then on);
+ * a band 2 to 12 blocks outside the fence, nearest first, a few a day, so mobs don't spawn right at the fence; and
+ * the dark stretches of the routes the bot walks most (the heat map the brain keeps), a torch every 10 blocks.
  */
 export const lights: Goal = {
   name: 'lights',
   priority: 30,
-  timeoutMs: 10 * MINUTE,
+  timeoutMs: 12 * MINUTE,
   retryMs: 15 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || !awakeAtHome(s) || (s.counts.get('torch') ?? 0) === 0) return null;
@@ -358,12 +373,45 @@ export const lights: Goal = {
   run: async ctx => {
     done(ctx.world, 'lights', ctx.s.now);
     const ignore = new Set(ctx.world.darkIgnore ?? []);
-    const r = await lightArea(ctx, ctx.s.home!, YARD_RADIUS, { place: true, max: ctx.s.counts.get('torch') ?? 0, ignore });
+    const yard = ctx.world.yard;
+    const centre = yard ? { x: Math.round((yard.x1 + yard.x2) / 2), y: yard.y + 1, z: Math.round((yard.z1 + yard.z2) / 2) } : ctx.s.home!;
+    const radius = yard ? Math.ceil(Math.max(yard.x2 - yard.x1, yard.z2 - yard.z1) / 2) + 1 : YARD_RADIUS;
+    let torches = ctx.s.counts.get('torch') ?? 0;
+    const out: string[] = [];
+
+    const r = await lightArea(ctx, centre, radius, { place: true, max: torches, ignore, only: yard ? p => outsideBy(yard, p) === 0 : undefined });
+    torches -= r.placed.length;
     // what no torch reached is out of reach for this plan (enclosed, or out of the bot's reach): leave it be
     ctx.world.darkIgnore = [...new Set([...(ctx.world.darkIgnore ?? []), ...r.left.map(key)])].slice(-500);
-    if (!r.dark.length) return 'the yard is lit';
-    return `placed ${r.placed.length} torch(es)${r.undone.length ? `, took back ${r.undone.length} that lit nothing` : ''}; ` +
-      `${r.left.length} of ${r.dark.length} dark spot(s) left${r.left.length ? ' (left out from now on)' : ''}`;
+    out.push(!r.dark.length ? 'the yard is lit' : `yard: placed ${r.placed.length} torch(es)${r.undone.length ? `, took back ${r.undone.length} that lit nothing` : ''}; ` +
+      `${r.left.length} of ${r.dark.length} dark spot(s) left${r.left.length ? ' (left out from now on)' : ''}`);
+    if (!yard || ctx.signal.aborted) return out.join('; ');
+
+    // the band outside the fence (not remembered as left out: there's always more of it than a day's torches)
+    if (torches > TORCH_RESERVE) {
+      ctx.progress('lighting the band outside the fence');
+      const b = await lightArea(ctx, centre, Math.min(radius + BAND.to, 34), {
+        place: true, max: Math.min(BAND_PER_DAY, torches - TORCH_RESERVE), ignore,
+        only: p => { const d = outsideBy(yard, p); return d >= BAND.from && d <= BAND.to; }
+      });
+      torches -= b.placed.length;
+      out.push(`outside the fence: ${b.placed.length} torch(es), ${b.left.length} dark spot(s) to go`);
+    }
+
+    // the routes beyond the band
+    if (torches > TORCH_RESERVE && ctx.world.heat && !ctx.signal.aborted) {
+      const spots = pathTorchSpots(HeatMap.fromJSON(ctx.world.heat), () => true, 10, (x, z) => outsideBy(yard, { x, z }) <= BAND.to, 3);
+      let lit = 0, tried = 0;
+      for (const spot of spots) {
+        if (lit >= PATH_PER_DAY || torches <= TORCH_RESERVE || tried >= 3 * PATH_PER_DAY || ctx.signal.aborted) break;
+        tried++;
+        const y = Math.floor(ctx.s.position.y);
+        const p = await lightArea(ctx, { x: spot.x, y: Math.min(y, yard.y + 1), z: spot.z }, 3, { place: true, max: 1, ignore });
+        if (p.placed.length) { lit++; torches--; ctx.progress(`a torch on the route at (${spot.x}, ${spot.z})`); }
+      }
+      if (tried) out.push(`routes: ${lit} torch(es) (${tried} of ${spots.length} spot(s) looked at)`);
+    }
+    return out.join('; ');
   }
 };
 

@@ -41,6 +41,8 @@ export interface WorldMemory {
   repairFails?: Record<string, number>;
   /** the yard as it grows (x1..x2, z1..z2 at ground y) */
   yard?: { x1: number; z1: number; x2: number; z2: number; y: number };
+  /** where the bot walks (paths.ts HeatMap.toJSON): its routes, lit by the lights round */
+  heat?: import('./paths.js').HeatJSON;
 }
 
 export const DEFAULT_LEASH = 96;

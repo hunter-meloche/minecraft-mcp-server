@@ -3,8 +3,9 @@ import path from 'path';
 import { brainRun, type ClientRuntime, type InventoryItem } from '../tools.js';
 import { worldIdFromSeed } from '../../build-protection.js';
 import { activityAt } from './schedule.js';
-import { BrainMemory, findLandmarks, type WorldMemory } from './memory.js';
+import { BrainMemory, findLandmarks, type Pos, type WorldMemory } from './memory.js';
 import { tidyGoal } from './tidy.js';
+import { HeatMap } from './paths.js';
 import { breakOut, returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { food, recoverGoal, retreat } from './food.js';
 import { farm, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
@@ -122,6 +123,7 @@ export class Brain {
       const world = this.memory.world(this.worldId);
       await this.discover(s, world);
       this.countDay(s);
+      this.walked(s, world);
       const r = this.running;
       if (r) {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
@@ -187,8 +189,30 @@ export class Brain {
   }
 
   /** Count today's daytime ticks and the idle ones (a new day starts when the clock wraps). */
+  private heat?: { world: string; map: HeatMap; last?: Pos; saved: number };
+
+  /**
+   * Count the cells walked since the last tick into the world's heat map (its routes, which the lights round lights).
+   * Ticks are 5 s apart, a dozen blocks of walking: the cells between are filled in along a straight line.
+   */
+  private walked(s: Snapshot, world: WorldMemory): void {
+    if (s.dimension !== 'overworld' || s.sleeping) return;
+    if (this.heat?.world !== this.worldId) this.heat = { world: this.worldId!, map: HeatMap.fromJSON(world.heat), saved: this.now() };
+    const h = this.heat!;
+    const p = s.position, last = h.last;
+    h.last = p;
+    if (!last) return;
+    const d = Math.hypot(p.x - last.x, p.z - last.z);
+    if (d < 1 || d > 40) return; // standing about, or a teleport / respawn
+    const steps = Math.ceil(d);
+    for (let i = 1; i <= steps; i++) h.map.visit({ x: last.x + (p.x - last.x) * i / steps, z: last.z + (p.z - last.z) * i / steps });
+    if (this.now() - h.saved > 60_000) { world.heat = h.map.toJSON(); h.saved = this.now(); }
+  }
+
   private countDay(s: Snapshot): void {
     if (s.timeOfDay < this.day.tod - 12_000) {
+      // a new day: old routes fade, so a path no longer walked stops being lit
+      if (this.heat) { this.heat.map.decay(0.9); if (this.worldId) this.memory.world(this.worldId).heat = this.heat.map.toJSON(); }
       if (this.day.work) this.day.lastIdle = Math.round(100 * this.day.idle / this.day.work);
       this.day.work = this.day.idle = 0;
     }

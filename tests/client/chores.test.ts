@@ -1,5 +1,5 @@
 import test from 'ava';
-import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stock, stockShort } from '../../src/client/brain/chores.js';
+import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stock, outsideBy, stockShort } from '../../src/client/brain/chores.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -94,7 +94,7 @@ test('lights: torches checked against the real light; one that lit nothing comes
   } as GoalContext;
   t.regex(lights.wants(ctx.s, ctx.world) ?? '', /daily round/);
   const r = await lights.run(ctx);
-  t.regex(r, /^placed \d+ torch\(es\); 1 of \d+ dark spot\(s\) left \(left out from now on\)$/);
+  t.regex(r, /^yard: placed \d+ torch\(es\); 1 of \d+ dark spot\(s\) left \(left out from now on\)$/);
   t.true(acts.filter(a => a.startsWith('place-block')).every(a => / -?\d+,61,-?\d+$/.test(a)));
   t.deepEqual(w.darkIgnore, ['16,61,16']);
   t.is(lights.wants(ctx.s, ctx.world), null); // done for today
@@ -209,4 +209,11 @@ test('sort: things in the wrong chest go to their own', async (t) => {
   t.is(await sortStorage.run(ctx), 'moved 1 kind(s) of things to their own chest');
   t.deepEqual(acts, ['take-from-chest 1,64,0 oak_log 10', 'store-in-chest 2,64,0 oak_log 10']);
   t.is(sortStorage.wants(snap(gear()), w), null);
+});
+
+test('outsideBy: 0 inside the yard, else how far past its edge', (t) => {
+  const yard = { x1: 0, z1: 0, x2: 10, z2: 20 };
+  t.is(outsideBy(yard, { x: 5, z: 5 }), 0);
+  t.is(outsideBy(yard, { x: -3, z: 5 }), 3);
+  t.is(outsideBy(yard, { x: 12, z: 30 }), 10);
 });
