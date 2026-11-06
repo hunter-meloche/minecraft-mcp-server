@@ -203,13 +203,18 @@ public final class Handlers {
             // nearest 512 stone were all inside it once the yard grew
             int awayMin = intParam(p, "awayMin", 0);
             int awayX = intParam(p, "awayX", 0), awayZ = intParam(p, "awayZ", 0);
+            // or at least awayMin outside a rectangle (the yard): awayX1, awayZ1, awayX2, awayZ2
+            boolean awayRect = p.has("awayX1");
+            int ax1 = intParam(p, "awayX1", 0), az1 = intParam(p, "awayZ1", 0), ax2 = intParam(p, "awayX2", 0), az2 = intParam(p, "awayZ2", 0);
             List<BlockPos> found = baritone.api.BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
                 Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), openAbove || awayMin > 0 ? 65536 : 4096, -1, (maxDistance >> 4) + 1);
             Vec3 eye = pl.position();
             JsonArray out = new JsonArray();
             found.stream()
                 .filter(bp -> Vec3.atCenterOf(bp).distanceTo(eye) <= maxDistance)
-                .filter(bp -> awayMin <= 0 || Math.hypot(bp.getX() - awayX, bp.getZ() - awayZ) >= awayMin)
+                .filter(bp -> awayMin <= 0 || (awayRect
+                    ? Math.max(Math.max(ax1 - bp.getX(), bp.getX() - ax2), Math.max(az1 - bp.getZ(), bp.getZ() - az2)) >= awayMin
+                    : Math.hypot(bp.getX() - awayX, bp.getZ() - awayZ) >= awayMin))
                 .filter(bp -> !openAbove || mc.level.getBlockState(bp.above()).isAir())
                 .sorted(Comparator.comparingDouble(bp -> Vec3.atCenterOf(bp).distanceTo(eye)))
                 .limit(count)

@@ -139,10 +139,10 @@ export class Brain {
       await this.discover(s, world);
       this.countDay(s);
       this.walked(s, world);
-      // the home zone covers the whole yard as it grows (2 blocks past its farthest corner)
+      // the home zone is the yard as it grows (its rectangle; the game client keeps a margin round it)
       if (world.yard && s.home) {
         const y = world.yard;
-        this.rt.setHomeZone?.(Math.max(...[[y.x1, y.z1], [y.x1, y.z2], [y.x2, y.z1], [y.x2, y.z2]].map(([x, z]) => Math.hypot(x - s.home!.x, z - s.home!.z))) + 2);
+        this.rt.setHomeZone?.({ x1: y.x1, z1: y.z1, x2: y.x2, z2: y.z2 });
       }
       const r = this.running;
       if (r) {

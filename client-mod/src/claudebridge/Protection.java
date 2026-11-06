@@ -93,6 +93,9 @@ public final class Protection {
      */
     private static boolean zoneSet;
     private static int zoneX, zoneZ, zoneRadius;
+    /** or a rectangle (the yard): x1..x2, z1..z2 */
+    private static boolean zoneRect;
+    private static int zoneX1, zoneZ1, zoneX2, zoneZ2;
     /** How far past the zone's edge the rule still holds (Baritone breaks up to about 5 blocks away). */
     private static final int ZONE_MARGIN = 6;
     private static final List<Block> GROUND = List.of(
@@ -106,6 +109,9 @@ public final class Protection {
 
     static boolean nearZone(BlockPos p) {
         if (!zoneSet) return false;
+        // the yard's rectangle: a circle round home as wide as its farthest corner covered seven times the yard once it
+        // grew long, and Baritone, never allowed to dig while in it, found no path to any ore
+        if (zoneRect) return p.getX() >= zoneX1 - ZONE_MARGIN && p.getX() <= zoneX2 + ZONE_MARGIN && p.getZ() >= zoneZ1 - ZONE_MARGIN && p.getZ() <= zoneZ2 + ZONE_MARGIN;
         double dx = p.getX() - zoneX, dz = p.getZ() - zoneZ;
         return dx * dx + dz * dz <= (double) (zoneRadius + ZONE_MARGIN) * (zoneRadius + ZONE_MARGIN);
     }
@@ -149,16 +155,23 @@ public final class Protection {
         });
         // the home zone: {x, z, radius}; radius 0 clears it
         s.register("protect.zone", true, (p, c) -> {
-            zoneRadius = intParam(p, "radius", 0);
-            zoneSet = zoneRadius > 0;
-            if (zoneSet) { zoneX = intParam(p, "x", 0); zoneZ = intParam(p, "z", 0); }
+            // {x, z, radius} a circle (radius 0 clears it), or {x1, z1, x2, z2} a rectangle
+            zoneRect = p.has("x1");
+            if (zoneRect) {
+                zoneX1 = intParam(p, "x1", 0); zoneZ1 = intParam(p, "z1", 0); zoneX2 = intParam(p, "x2", 0); zoneZ2 = intParam(p, "z2", 0);
+                zoneSet = true;
+            } else {
+                zoneRadius = intParam(p, "radius", 0);
+                zoneSet = zoneRadius > 0;
+                if (zoneSet) { zoneX = intParam(p, "x", 0); zoneZ = intParam(p, "z", 0); }
+            }
             JsonObject r = new JsonObject();
             r.addProperty("set", zoneSet);
             return r;
         });
         s.register("protect.status", true, (p, c) -> {
             JsonObject r = new JsonObject();
-            r.addProperty("zone", zoneSet ? zoneX + "," + zoneZ + " r" + zoneRadius : null);
+            r.addProperty("zone", !zoneSet ? null : zoneRect ? zoneX1 + "," + zoneZ1 + ".." + zoneX2 + "," + zoneZ2 : zoneX + "," + zoneZ + " r" + zoneRadius);
             r.addProperty("count", POSITIONS.size());
             r.addProperty("suspended", suspended);
             JsonArray types = new JsonArray();
