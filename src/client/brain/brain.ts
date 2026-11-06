@@ -12,7 +12,7 @@ import { caneRound } from './cane.js';
 import { enchantGoal } from './enchant.js';
 import { HeatMap } from './paths.js';
 import { signsGoal } from './signs.js';
-import { structureGoal } from '../structures/job.js';
+import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { LoopWatch, type Outcome, type Run } from './loops.js';
 
@@ -88,7 +88,8 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, structureGoal(new StructureStore()), stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, signsGoal, projectGoal(TREE), returnIdle];
+    const structures = new StructureStore();
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, structureGoal(structures), stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -133,6 +134,7 @@ export class Brain {
       const s = await this.sense();
       if (!s || !this.worldId) return;
       const world = this.memory.world(this.worldId);
+      world.id = this.worldId;
       await this.discover(s, world);
       this.countDay(s);
       this.walked(s, world);

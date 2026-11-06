@@ -122,3 +122,32 @@ test('planText and render: what the LLM reads', async (t) => {
   t.regex(pic, /y 65:\n {2}LPPPL/);
   t.regex(pic, /Other blocks: .*oak_door\[facing=south,half=upper\]/);
 });
+
+test('import: built blocks only, a chest by its facing, a sign with its text; what changed against the file', async (t) => {
+  const { importDesign, importChanges, cleanState } = await import('../../src/client/structures/importer.js');
+  t.is(cleanState('minecraft:chest[facing=north,type=left,waterlogged=false]'), 'chest[facing=north]');
+  t.is(cleanState('minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]'), 'oak_stairs[facing=east,half=bottom]');
+  // a 3x3x3 box: dirt and stone at the bottom (terrain), a plank floor on top of it, a chest, a sign, grass
+  const box = { x: 10, y: 63, z: 20, width: 3, height: 3, length: 3 };
+  const blocks: string[] = new Array(27).fill('minecraft:air');
+  const set = (x: number, y: number, z: number, b: string) => { blocks[x + z * 3 + y * 9] = b; };
+  for (let z = 0; z < 3; z++) for (let x = 0; x < 3; x++) { set(x, 0, z, 'minecraft:dirt'); set(x, 1, z, 'minecraft:oak_planks'); }
+  set(0, 2, 0, 'minecraft:chest[facing=south,type=single,waterlogged=false]');
+  set(1, 2, 0, 'minecraft:oak_wall_sign[facing=south,waterlogged=false]');
+  set(2, 2, 2, 'minecraft:short_grass');
+  const { design: d, anchor } = importDesign('shed', box, blocks, { '11,65,20': ['seeds1', '', '', ''] });
+  t.deepEqual(validateDesign(d), []);
+  t.deepEqual(anchor, { x: 10, y: 64, z: 20 }); // the floor, over the terrain left out
+  const c = compile(d, anchor);
+  t.is(c.cells.filter(k => k.want === 'oak_planks').length, 9);
+  t.false(c.cells.some(k => /dirt|grass/.test(k.want)));
+  t.true(c.cells.some(k => k.want === 'chest[facing=south]' && k.at.y === 65));
+  t.deepEqual(c.cells.find(k => k.sign)!.sign, ['seeds1']);
+  // against a file without the chest, and with other text on the sign
+  const before = c.cells.filter(k => k.want !== 'chest[facing=south]').map(k => (k.sign ? { ...k, sign: ['wood1'] } : k));
+  const ch = importChanges(before, c.cells);
+  t.is(ch.added.length, 1);
+  t.is(ch.added[0].want, 'chest[facing=south]');
+  t.is(ch.changed.length, 1);
+  t.is(ch.removed.length, 0);
+});

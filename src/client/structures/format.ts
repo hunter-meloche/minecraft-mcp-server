@@ -35,7 +35,8 @@ export type Part =
   | { layers: { at?: Vec3; rows: string[][] } }
   | { set: { at: Vec3; block: string } };
 
-export interface SignSpec { at: Vec3; facing: Side; lines: string[]; wood?: string }
+/** A sign: a wall sign whose text faces `facing`, or any sign block given as `block` (a standing one with its rotation). */
+export interface SignSpec { at: Vec3; facing?: Side; lines: string[]; wood?: string; block?: string }
 
 export interface Design {
   version: 1;
@@ -126,7 +127,7 @@ export function validateDesign(d: Design): string[] {
   });
   (d.signs ?? []).forEach((s, i) => {
     vec(s.at, `sign ${i + 1} at`);
-    if (!SIDES.includes(s.facing)) out.push(`sign ${i + 1}: facing must be north, south, east or west`);
+    if (s.block ? !/_sign(\[|$)/.test(bare(s.block)) : !SIDES.includes(s.facing!)) out.push(`sign ${i + 1}: facing must be north, south, east or west (or give block, a sign block state)`);
     if (!Array.isArray(s.lines) || s.lines.length > 4 || s.lines.some(l => typeof l !== 'string' || l.length > 15)) out.push(`sign ${i + 1}: lines are up to 4 strings of up to 15 characters`);
   });
   return out;
@@ -165,7 +166,7 @@ function localCells(d: Design): { cells: Map<string, string>; signs: Map<string,
   }
   const signs = new Map<string, string[]>();
   for (const s of d.signs ?? []) {
-    cells.set(key(...s.at), `${s.wood ?? 'oak'}_wall_sign[facing=${s.facing}]`);
+    cells.set(key(...s.at), s.block ? bare(s.block) : `${s.wood ?? 'oak'}_wall_sign[facing=${s.facing}]`);
     signs.set(key(...s.at), s.lines);
   }
   return { cells, signs };

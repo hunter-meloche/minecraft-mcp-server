@@ -80,7 +80,9 @@ export function specFor(cells: Cell[] | Change[]): { origin: { x: number; y: num
 }
 
 const isSign = (c: Change) => /_sign\[/.test(c.want) || !!c.sign;
-const supportSide = (want: string) => ({ north: 'south', south: 'north', east: 'west', west: 'east' } as Record<string, string>)[/facing=(north|south|east|west)/.exec(want)?.[1] ?? 'north'];
+/** The side of a sign's cell its support is on: behind a wall sign, under a standing one. */
+const supportSide = (want: string) => (!/_wall_sign/.test(want) ? 'down'
+  : ({ north: 'south', south: 'north', east: 'west', west: 'east' } as Record<string, string>)[/facing=(north|south|east|west)/.exec(want)?.[1] ?? 'north']);
 
 async function near(ctx: GoalContext, at: { x: number; y: number; z: number }, range = 3) {
   await ctx.act('move-to-position', { ...at, range, timeoutMs: 90_000 }).catch(() => undefined);
@@ -195,6 +197,48 @@ export function structureGoal(store: StructureStore): Goal {
       job.packages = (job.packages ?? 0) + 1;
       stamp(`${p.phase} package done: ${did.slice(0, 120)}`);
       return `${job.structure}: ${did}`;
+    }
+  };
+}
+
+/**
+ * Once a day: compare every placed structure with the world (only what's loaded counts) and note the drift in its
+ * state file; a structure with autoRepair gets a repair job (the user's choice: the others are only reported, so a
+ * change made by hand can be imported instead of undone).
+ */
+export function driftGoal(store: StructureStore): Goal {
+  return {
+    name: 'structures',
+    priority: 21,
+    timeoutMs: 4 * MINUTE,
+    retryMs: 30 * MINUTE,
+    wants: (s, world) => {
+      if (s.activity !== 'work' || s.sleeping || !world.id || s.dimension !== 'overworld') return null;
+      if (s.now - (world.lastDone?.structures ?? 0) < 20 * MINUTE) return null;
+      return store.listStructures(world.id).length ? 'daily check: the structures against their files' : null;
+    },
+    run: async ctx => {
+      (ctx.world.lastDone ??= {}).structures = ctx.s.now;
+      const w = ctx.world.id!;
+      const out: string[] = [];
+      for (const name of store.listStructures(w)) {
+        if (ctx.signal.aborted) break;
+        const s = store.loadStructure(w, name);
+        if (!s) continue;
+        let c: Compiled;
+        try { c = compile(store.designOf(s), s.anchor, s.rotation ?? 0); } catch { continue; }
+        const todo = pending(await plan(ctx, c));
+        const st = store.loadState(w, name);
+        st.drift = { at: ctx.s.now, changes: todo.length, sample: todo.slice(0, 5).map(x => `${x.kind} ${x.want === 'air' ? x.have : x.want} at ${key(x.at)}`) };
+        if (todo.length) st.history.push({ at: ctx.s.now, text: `drift: ${todo.length} cell(s) differ` });
+        store.saveState(w, name, st);
+        const going = jobsOf(ctx.world).some(j => j.structure === name && !DONE.has(j.status));
+        if (todo.length && s.autoRepair && !going) {
+          const j = queueJob(ctx.world, w, name, 'repair', ctx.s.now);
+          out.push(`${name}: ${todo.length} cell(s) differ, repair job #${j.id} queued`);
+        } else if (todo.length) out.push(`${name}: ${todo.length} cell(s) differ${going ? ' (a job is on it)' : ' (reported)'}`);
+      }
+      return out.join('; ') || 'every structure matches its file';
     }
   };
 }

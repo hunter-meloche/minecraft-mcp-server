@@ -64,6 +64,25 @@ public final class Signs {
             return obj("sign", true, "lines", a);
         });
 
+        // {x, y, z, width, height, length}: every sign in the box and its text ({signs: [{x, y, z, lines}]})
+        s.register("signs.read", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            BlockPos min = blockPos(p);
+            int w = intParam(p, "width", 1), h = intParam(p, "height", 1), l = intParam(p, "length", 1);
+            if ((long) w * h * l > 262_144) throw new IllegalArgumentException("box too big (at most 262144 cells)");
+            JsonArray out = new JsonArray();
+            for (BlockPos q : BlockPos.betweenClosed(min, min.offset(w - 1, h - 1, l - 1))) {
+                String[] lines = read(mc, q);
+                if (lines == null) continue;
+                JsonArray a = new JsonArray();
+                for (String line : lines) a.add(line);
+                JsonObject o = obj("x", q.getX(), "y", q.getY(), "z", q.getZ());
+                o.add("lines", a);
+                out.add(o);
+            }
+            return obj("signs", out);
+        });
+
         // {x, y, z: the cell for the sign; face: the side of the cell its support is on (north/south/east/west, or
         // down for a standing sign); lines: [up to 4]} -> {placed, lines}
         s.register("sign.place", true, (p, c) -> {

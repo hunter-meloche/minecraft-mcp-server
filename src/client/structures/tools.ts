@@ -11,6 +11,8 @@ import { billFor, sourceBill, type SourcedBill } from './bill.js';
 import { plan } from './scan.js';
 import { StructureStore } from './store.js';
 import { jobsOf, jobText, queueJob } from './job.js';
+import { importChanges, importDesign } from './importer.js';
+import { readBox } from '../brain/milestones.js';
 
 /**
  * The declarative build tools: the LLM writes a design (the shape), places it as a named structure (anchor, rotation)
@@ -239,6 +241,58 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       for (const j of jobs) { j.status = 'cancelled'; j.note = 'cancelled'; j.updatedAt = Date.now(); j.need = j.missing = j.carry = undefined; }
       brain!.saveMemory();
       return factory.createResponse(`Cancelled ${jobs.map(j => `#${j.id}`).join(', ')} for ${name}.`);
+    }
+  );
+
+  factory.registerTool(
+    'structure-import',
+    "Take a structure as it stands in the world into its file: after a change made by hand (a chest put in, a sign rewritten, a wall knocked through), or to start managing something already built. Scans the box (a placed structure's own box by default) block by block: built blocks only (natural ground under it and loose nature like grass, flowers, leaves and water stay unmanaged), a chest as its block and facing (never what's in it), a sign with its text. Shows what changed against the file before; with dryRun it only shows.",
+    {
+      name: z.string().describe('The structure (a placed one, or a new name for something already built)'),
+      box: z.object({ x: z.coerce.number(), y: z.coerce.number(), z: z.coerce.number(), width: z.coerce.number().int().min(1), height: z.coerce.number().int().min(1), length: z.coerce.number().int().min(1) })
+        .optional().describe("The box to scan: minimum corner and size (default: the placed structure's box)"),
+      keepTerrain: z.boolean().optional().describe('Take natural ground under it too (default: no)'),
+      saveDesignAs: z.string().optional().describe('Also save the scanned shape as a reusable design under this name'),
+      dryRun: z.boolean().optional().describe('Only show what would change')
+    },
+    async ({ name, box, keepTerrain, saveDesignAs, dryRun }: { name: string; box?: { x: number; y: number; z: number; width: number; height: number; length: number }; keepTerrain?: boolean; saveDesignAs?: string; dryRun?: boolean }) => {
+      try {
+        const w = await world();
+        const old = store.loadStructure(w, name);
+        const oldCells = old ? compile(designOf(old.design), old.anchor, old.rotation ?? 0) : undefined;
+        const b = box ?? oldCells?.box;
+        if (!b) return factory.createErrorResponse(`No structure called "${name}": give box to import something already built`);
+        if (b.width * b.height * b.length > 262_144) return factory.createErrorResponse('The box is too big to scan in one go (at most 262144 cells)');
+        const blocks = await readBox(rt, b);
+        const { signs: found } = await rt.call<{ signs: { x: number; y: number; z: number; lines: string[] }[] }>('signs.read', { ...b }, 30_000);
+        const signs = Object.fromEntries(found.map(s => [`${s.x},${s.y},${s.z}`, s.lines]));
+        const { design: d, anchor } = importDesign(saveDesignAs ?? name, b, blocks, signs, { keepTerrain });
+        const now = compile(d, anchor, 0);
+        const ch = importChanges(oldCells?.cells ?? [], now.cells);
+        const list = (cs: { at: { x: number; y: number; z: number }; want: string; sign?: string[] }[]) =>
+          cs.slice(0, 6).map(c => `${c.want}${c.sign ? ` "${c.sign.join(' / ')}"` : ''} at ${fmt(c.at)}`).join('; ') + (cs.length > 6 ? '; ...' : '');
+        const lines = [`Scanned ${fmt(b)} ${b.width}x${b.height}x${b.length}: ${now.cells.filter(c => !c.second).length} built cell(s), ${d.signs?.length ?? 0} sign(s).`];
+        if (old) {
+          lines.push(`Against the file: ${ch.added.length} added, ${ch.removed.length} gone, ${ch.changed.length} changed.`);
+          if (ch.added.length) lines.push(`  added: ${list(ch.added)}`);
+          if (ch.removed.length) lines.push(`  gone: ${list(ch.removed)}`);
+          if (ch.changed.length) lines.push(`  changed: ${ch.changed.slice(0, 6).map(x => `${x.from.want} -> ${x.to.want}${x.to.sign ? ` "${x.to.sign.join(' / ')}"` : ''} at ${fmt(x.to.at)}`).join('; ')}`);
+          if ((old.rotation ?? 0) !== 0) lines.push('  (the imported shape is kept as it stands, so the structure is now unrotated)');
+        }
+        if (dryRun) return factory.createResponse(`${lines.join('\n')}\nDry run: nothing written.`);
+        if (saveDesignAs) store.saveDesign(d);
+        const s: Structure = { version: 1, name, design: saveDesignAs ? d.name : d, anchor, rotation: 0,
+          ...(old?.autoRepair !== undefined ? { autoRepair: old.autoRepair } : {}), ...(old?.notes ? { notes: old.notes } : {}) };
+        store.saveStructure(w, s);
+        const st = store.loadState(w, name);
+        st.completeAt = Date.now();
+        st.drift = undefined;
+        st.history.push({ at: Date.now(), text: `imported from the world: ${ch.added.length} added, ${ch.removed.length} gone, ${ch.changed.length} changed` });
+        store.saveState(w, name, st);
+        return factory.createResponse(`${lines.join('\n')}\nSaved "${name}": the file now matches the world.`);
+      } catch (e) {
+        return factory.createErrorResponse((e as Error).message);
+      }
     }
   );
 

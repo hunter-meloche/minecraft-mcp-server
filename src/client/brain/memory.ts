@@ -47,6 +47,8 @@ export interface BuildJob {
 }
 
 export interface WorldMemory {
+  /** the world's id ("seed:..."), as the brain knows it */
+  id?: string;
   landmarks: Landmarks;
   /** how far from home a trip may go */
   leash: number;
