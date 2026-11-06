@@ -122,6 +122,12 @@ async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number
   const r = await ctx.act('level-area', { x1: g.strip.x1, z1: g.strip.z1, x2: g.strip.x2, z2: g.strip.z2, level: yard.y, timeoutMs: 8 * MINUTE });
   if (/Now level|Already level/.test(r.text)) {
     ctx.world.yard = { ...g.newYard, y: yard.y };
+    // the fence follows the yard: its old side comes down and the ring goes up round the new yard, before the next build
+    if (ctx.world.zones?.fence?.length) {
+      ctx.world.fenceMove = { side: g.side, old: { x1: yard.x1, z1: yard.z1, x2: yard.x2, z2: yard.z2, y: yard.y } };
+      const p = progressOf(ctx.world);
+      p.done = p.done.filter(id => id !== 'perimeter');
+    }
     return going(`grew the yard to the ${g.side} (${g.strip.x1}..${g.strip.x2}, ${g.strip.z1}..${g.strip.z2})`);
   }
   return going(`leveling ground to the ${g.side} for the ${kind}: ${r.text.split('\n').pop()?.slice(0, 100)}`);

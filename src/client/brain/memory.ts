@@ -43,6 +43,8 @@ export interface WorldMemory {
   yard?: { x1: number; z1: number; x2: number; z2: number; y: number };
   /** where the bot walks (paths.ts HeatMap.toJSON): its routes, lit by the lights round */
   heat?: import('./paths.js').HeatJSON;
+  /** the yard grew past the fence on this side: the fence moves out (its old side comes down, the ring is rebuilt) */
+  fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
 }
 
 export const DEFAULT_LEASH = 96;

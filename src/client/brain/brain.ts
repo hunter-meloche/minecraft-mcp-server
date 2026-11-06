@@ -125,6 +125,11 @@ export class Brain {
       await this.discover(s, world);
       this.countDay(s);
       this.walked(s, world);
+      // the home zone covers the whole yard as it grows (2 blocks past its farthest corner)
+      if (world.yard && s.home) {
+        const y = world.yard;
+        this.rt.setHomeZone?.(Math.max(...[[y.x1, y.z1], [y.x1, y.z2], [y.x2, y.z1], [y.x2, y.z2]].map(([x, z]) => Math.hypot(x - s.home!.x, z - s.home!.z))) + 2);
+      }
       const r = this.running;
       if (r) {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)

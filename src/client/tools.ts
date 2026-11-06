@@ -88,7 +88,8 @@ const SCAFFOLD_MARGIN = 6;
  */
 export const HOME_ZONE = 24;
 /** Where mining from home starts: ore at least this far from home (the zone, its margin and Baritone's reach). */
-const MINE_FROM = HOME_ZONE + 12;
+/** How far past the home zone's edge ore trips start (Baritone reaches some blocks past where it stands). */
+const MINE_BEYOND = 12;
 
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
@@ -190,6 +191,8 @@ export interface ClientRuntime {
    * there when it was built, when that is known (positions protected before states were kept have none).
    */
   builtNear: (center: Pos, radius: number) => { at: Pos; state?: string }[];
+  /** widen the home zone to cover a grown yard (never below HOME_ZONE) */
+  setHomeZone: (radius: number) => void;
   /**
    * Put `item` back at `at` (selecting it, clearing a wrong block, stepping out of the cell or closer as needed),
    * turned to `facing` (the way the bot looks while placing: see placerFacing) when given. Resolves to why it could
@@ -242,6 +245,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   events.on?.('event', e => { if (e.type === 'death' && e.at) lastDeath = { at: e.at, time: Date.now() }; });
   let syncedVersion = -1;
   let zoneSent = 'none'; // a client starts without one
+  /** the home zone's radius: grows with the yard (the brain sets it) */
+  let zoneRadius = HOME_ZONE;
   /** the dimension at the last status read */
   let lastDimension = 'overworld';
   /** Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current. */
@@ -261,10 +266,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     // the home zone, for the home in the dimension the bot is in (resent when it changes or the client is new)
     const world = worldIdFromSeed(s.hashedSeed ?? undefined);
     const home = world ? readHomes()[world]?.home : undefined;
-    const zone = home && home.dimension === (s.dimension ?? 'overworld') ? `${home.x},${home.z}` : 'none';
+    const zone = home && home.dimension === (s.dimension ?? 'overworld') ? `${home.x},${home.z},${zoneRadius}` : 'none';
     if (zone !== zoneSent || (relaunched && zone !== 'none')) {
       const [x, z] = zone === 'none' ? [0, 0] : zone.split(',').map(Number);
-      await call('protect.zone', { x, z, radius: zone === 'none' ? 0 : HOME_ZONE }).then(() => { zoneSent = zone; }).catch(() => undefined);
+      await call('protect.zone', { x, z, radius: zone === 'none' ? 0 : zoneRadius }).then(() => { zoneSent = zone; }).catch(() => undefined);
     }
     return s;
   };
@@ -456,21 +461,21 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     if (!home || home.dimension !== (s.dimension ?? 'overworld')) return undefined;
     const me = s.position!;
     const fromHome = (p: Pos) => Math.hypot(p.x - home.x, p.z - home.z);
-    if (fromHome(me) > HOME_ZONE + 8) return undefined;
+    if (fromHome(me) > zoneRadius + 8) return undefined;
     let best: Pos | undefined;
     for (const name of names) {
       const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 96, count: 512 }, 60_000);
       for (const p of found.positions) {
-        if (fromHome(p) < MINE_FROM) continue;
+        if (fromHome(p) < zoneRadius + MINE_BEYOND) continue;
         if (!best || Math.hypot(p.x - me.x, p.y - me.y, p.z - me.z) < Math.hypot(best.x - me.x, best.y - me.y, best.z - me.z)) best = p;
       }
     }
     if (!best) {
-      return factory.createErrorResponse(`No ${names.join(' or ')} in sight outside the home area (${MINE_FROM}+ blocks from home ${fmt(home)}); ` +
-        "the bot doesn't mine within " + `${HOME_ZONE} blocks of home. Go further out (explore) and mine from there.`);
+      return factory.createErrorResponse(`No ${names.join(' or ')} in sight outside the home area (${zoneRadius + MINE_BEYOND}+ blocks from home ${fmt(home)}); ` +
+        "the bot doesn't mine within " + `${zoneRadius} blocks of home. Go further out (explore) and mine from there.`);
     }
     const r = await call<ProcessResult & { arrived: boolean }>('goto', { ...best, xz: true, range: 3, timeoutMs: 180_000 }, 195_000);
-    if (!r.arrived && fromHome((await status()).position!) <= HOME_ZONE + 8) {
+    if (!r.arrived && fromHome((await status()).position!) <= zoneRadius + 8) {
       return factory.createErrorResponse(`Could not get out of the home area to the ${names[0]} at ${fmt(best)}${baritoneSaid(r.baritone)}`);
     }
     return undefined;
@@ -1540,6 +1545,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     },
     lastDeath: () => lastDeath,
     setManualHook: fn => { manualHook = fn; },
+    setHomeZone: radius => { zoneRadius = Math.max(HOME_ZONE, Math.ceil(radius)); },
     builtNear: (center, radius) => protection.entries(lastDimension).filter(({ at }) =>
       Math.hypot(at.x - center.x, at.z - center.z) <= radius && Math.abs(at.y - center.y) <= radius),
     restoreBlock: async (at, item, facing) => {

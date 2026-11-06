@@ -48,18 +48,74 @@ function gatesFor(yard: { x1: number; z1: number; x2: number; z2: number }, home
   return gates;
 }
 
+type Box2 = { x1: number; z1: number; x2: number; z2: number };
+const onRing = (p: { x: number; z: number }, y: Box2) =>
+  p.x >= y.x1 && p.x <= y.x2 && p.z >= y.z1 && p.z <= y.z2 && (p.x === y.x1 || p.x === y.x2 || p.z === y.z1 || p.z === y.z2);
+
+/**
+ * When the fence moves out: the gates stay where they are on the sides that stay, and the moved side's gates go
+ * straight out to the new edge (so the paths through them still line up).
+ */
+export function gatesKept(yard: Box2, old: { x: number; z: number }[], moved: Side): { side: Side; offset: number }[] {
+  const out: { side: Side; offset: number }[] = [];
+  for (const g of old) {
+    const side: Side = g.z === yard.z1 && g.x > yard.x1 && g.x < yard.x2 ? 'north' : g.z === yard.z2 && g.x > yard.x1 && g.x < yard.x2 ? 'south'
+      : g.x === yard.x1 && g.z > yard.z1 && g.z < yard.z2 ? 'west' : g.x === yard.x2 && g.z > yard.z1 && g.z < yard.z2 ? 'east' : moved;
+    const alongX = side === 'north' || side === 'south';
+    const offset = alongX ? g.x - yard.x1 : g.z - yard.z1;
+    const span = alongX ? yard.x2 - yard.x1 + 1 : yard.z2 - yard.z1 + 1;
+    if (offset < 1 || offset > span - 2 || out.some(o => o.side === side && o.offset === offset)) continue;
+    out.push({ side, offset });
+  }
+  return out;
+}
+
+/** The cells of one side of a yard's edge. */
+export function sideCells(y: Box2, side: Side): { x: number; z: number }[] {
+  const out: { x: number; z: number }[] = [];
+  if (side === 'north' || side === 'south') for (let x = y.x1; x <= y.x2; x++) out.push({ x, z: side === 'north' ? y.z1 : y.z2 });
+  else for (let z = y.z1; z <= y.z2; z++) out.push({ x: side === 'west' ? y.x1 : y.x2, z });
+  return out;
+}
+
 const perimeter: Milestone = {
   id: 'perimeter',
   title: 'fence round the yard',
   prereqs: ['storage'],
-  done: v => !!v.world.zones?.fence?.length,
+  done: v => !!v.world.zones?.fence?.length && !v.world.fenceMove,
   steps: [
+    {
+      name: 'take down the old side of the fence',
+      run: async (ctx: GoalContext, st: MilestoneState) => {
+        const mv = ctx.world.fenceMove;
+        if (!mv) return { status: 'done', text: 'no fence to move' };
+        const yard = await yardOf(ctx);
+        const cells = sideCells(mv.old, mv.side).filter(p => !onRing(p, yard));
+        let dug = 0;
+        for (const c of cells) for (const dy of [2, 1]) { // the post's torch first, then the post (or gate)
+          if (ctx.signal.aborted) return { status: 'progress', text: `took down ${dug} block(s)` };
+          const at = { x: c.x, y: mv.old.y + dy, z: c.z };
+          const { blocks: [b] } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...at, width: 1, height: 1, length: 1 });
+          if (!/(_fence|_fence_gate|torch)(\[|$)/.test((b ?? '').replace(/^minecraft:/, ''))) continue;
+          const r = await ctx.act('dig-block', { ...at });
+          if (/^Dug/.test(r.text)) dug++;
+        }
+        // the ring is rebuilt round the new yard, landmarks and all; its gates stay put (see gatesKept)
+        const z = ctx.world.zones ?? {};
+        st.data.oldGates = (z['fence:gate'] ?? []).map(g => ({ x: g.x, z: g.z }));
+        st.data.moved = mv.side;
+        delete z.fence; delete z['fence:gate']; delete z['fence:torch'];
+        ctx.world.fenceMove = undefined;
+        return { status: 'done', text: `took down the ${mv.side} side (${dug} block(s))` };
+      }
+    },
     {
       name: 'mark the fence line',
       run: async (ctx: GoalContext, st: MilestoneState) => {
         const yard = await yardOf(ctx);
         st.data.site = { x: yard.x1, z: yard.z1, y: yard.y, width: yard.x2 - yard.x1 + 1, length: yard.z2 - yard.z1 + 1 };
-        st.data.gates = gatesFor(yard, ctx.s.home!);
+        const old = st.data.oldGates as { x: number; z: number }[] | undefined;
+        st.data.gates = old?.length ? gatesKept(yard, old, st.data.moved as Side) : gatesFor(yard, ctx.s.home!);
         return { status: 'done', text: `fence along the yard's edge, ${(st.data.gates as unknown[]).length} gates` };
       }
     },

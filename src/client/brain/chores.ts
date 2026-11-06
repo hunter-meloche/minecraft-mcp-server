@@ -96,7 +96,13 @@ export const stash: Goal = {
       const f = farmCentre(ctx.world);
       const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
       const len = Math.hypot(dx, dz) || 1;
-      const dump = { x: Math.round(home.x + dx / len * 14), y: home.y, z: Math.round(home.z + dz / len * 14) };
+      // and outside the fence: 14 blocks out was still in the farm round's reach (it picked up 124 dirt and 124 leaf
+      // litter thrown a minute before); items left there despawn after 5 minutes
+      const at = (d: number) => ({ x: Math.round(home.x + dx / len * d), y: home.y, z: Math.round(home.z + dz / len * d) });
+      let d = 14;
+      const yard = ctx.world.yard;
+      while (yard && d < 60 && outsideBy(yard, at(d)) < 6) d++;
+      const dump = at(d);
       await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
       for (const e of plan.drop) {
         const r = await ctx.act('drop-item', { item: e.name, count: e.count });
