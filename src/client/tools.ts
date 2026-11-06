@@ -35,6 +35,7 @@ export interface Status {
   /** boxed in where it stands: the cells the Guardian's last wall-in filled there (empty when it didn't build this one) */
   boxedIn?: Pos[];
   xpLevel?: number;
+  biome?: string;
 }
 export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number; enchanted?: boolean }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
@@ -302,7 +303,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       return factory.createResponse([
         `Health ${s.health}/20, food ${s.food}/20, saturation ${s.saturation}`,
         timeLine(s.timeOfDay ?? 0),
-        `Dimension ${s.dimension}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
+        `Dimension ${s.dimension}${s.biome ? `, biome ${s.biome}` : ''}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
         `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}` +
           await call<Inventory>('inventory').then(inv => `; inventory ${packSlotsUsed(inv.items)}/36 slots used`, () => ''),
         `Backend: game client with Baritone (${s.process ? `busy: ${processName(s.process)}` : 'idle'})` +

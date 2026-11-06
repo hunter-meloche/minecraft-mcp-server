@@ -257,9 +257,10 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         .optional().describe("The box to scan: minimum corner and size (default: the placed structure's box)"),
       keepTerrain: z.boolean().optional().describe('Take natural ground under it too (default: no)'),
       saveDesignAs: z.string().optional().describe('Also save the scanned shape as a reusable design under this name'),
+      homeStorage: z.boolean().optional().describe("Its chests are the home's storage (a whole homestead): the bot keeps using them for its stash, kit and food"),
       dryRun: z.boolean().optional().describe('Only show what would change')
     },
-    async ({ name, box, keepTerrain, saveDesignAs, dryRun }: { name: string; box?: { x: number; y: number; z: number; width: number; height: number; length: number }; keepTerrain?: boolean; saveDesignAs?: string; dryRun?: boolean }) => {
+    async ({ name, box, keepTerrain, saveDesignAs, homeStorage, dryRun }: { name: string; box?: { x: number; y: number; z: number; width: number; height: number; length: number }; keepTerrain?: boolean; saveDesignAs?: string; homeStorage?: boolean; dryRun?: boolean }) => {
       try {
         const w = await world();
         const old = store.loadStructure(w, name);
@@ -286,7 +287,8 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         if (dryRun) return factory.createResponse(`${lines.join('\n')}\nDry run: nothing written.`);
         if (saveDesignAs) store.saveDesign(d);
         const s: Structure = { version: 1, name, design: saveDesignAs ? d.name : d, anchor, rotation: 0,
-          ...(old?.autoRepair !== undefined ? { autoRepair: old.autoRepair } : {}), ...(old?.notes ? { notes: old.notes } : {}) };
+          ...(old?.autoRepair !== undefined ? { autoRepair: old.autoRepair } : {}), ...(old?.notes ? { notes: old.notes } : {}),
+          ...(homeStorage ?? old?.homeStorage ? { homeStorage: true } : {}) };
         store.saveStructure(w, s);
         const st = store.loadState(w, name);
         st.completeAt = Date.now();

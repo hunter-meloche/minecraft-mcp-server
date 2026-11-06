@@ -12,8 +12,8 @@ export interface Box { x: number; y: number; z: number; width: number; height: n
 
 /** Ground the world made: unmanaged where it's the bottom of a column (the terrain under a build). */
 const NATURAL = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mycelium|mud|clay|sand|red_sand|gravel|stone|deepslate|granite|diorite|andesite|tuff|calcite|dripstone_block|bedrock|.*_ore|sandstone|red_sandstone|terracotta|snow_block|ice|packed_ice|moss_block|netherrack)$/;
-/** Never part of a structure. */
-const LOOSE = /^(air|cave_air|void_air|water|lava|short_grass|tall_grass|fern|large_fern|dead_bush|bush|firefly_bush|leaf_litter|snow|vine|glow_lichen|seagrass|tall_seagrass|kelp|kelp_plant|fire|soul_fire|.*_leaves|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|lily_of_the_valley|pink_petals|wildflowers|sweet_berry_bush|.*_sapling|sugar_cane|bamboo|cactus|moss_carpet|structure_void)$/;
+/** Never part of a structure (crops too: they grow, and would read as drift every day). */
+const LOOSE = /^(air|cave_air|void_air|water|lava|short_grass|tall_grass|fern|large_fern|dead_bush|bush|firefly_bush|leaf_litter|snow|vine|glow_lichen|seagrass|tall_seagrass|kelp|kelp_plant|fire|soul_fire|.*_leaves|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|lily_of_the_valley|pink_petals|wildflowers|sweet_berry_bush|.*_sapling|sugar_cane|bamboo|cactus|moss_carpet|structure_void|wheat|carrots|potatoes|beetroots|melon_stem|pumpkin_stem|attached_melon_stem|attached_pumpkin_stem|cocoa|nether_wart|torchflower_crop|pitcher_crop)$/;
 /** Properties kept in an imported state: how it was placed (the rest change by themselves). */
 const KEEP = new Set(['facing', 'half', 'type', 'axis', 'part', 'rotation', 'face', 'attachment', 'hanging']);
 

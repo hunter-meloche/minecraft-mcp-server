@@ -67,6 +67,7 @@ public final class Handlers {
             r.addProperty("raining", mc.level.isRaining());
             r.addProperty("thundering", mc.level.isThundering());
             r.addProperty("xpLevel", pl.experienceLevel);
+            mc.level.getBiome(pl.blockPosition()).unwrapKey().ifPresent(k -> r.addProperty("biome", Names.strip(k.identifier().toString())));
             JsonArray boxed = Guardian.boxedIn(mc);
             if (boxed != null) r.add("boxedIn", boxed);
             r.addProperty("hashedSeed", hashedSeed(mc));

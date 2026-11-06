@@ -59,6 +59,8 @@ export interface Structure {
   autoRepair?: boolean;
   /** before building: level the footprint and fill under the floor down to the ground */
   prepare?: { level?: boolean; foundation?: boolean };
+  /** its chests are the home's storage (the whole homestead): the stash, the kit and the food goal use them */
+  homeStorage?: boolean;
   notes?: string;
 }
 

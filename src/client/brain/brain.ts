@@ -254,7 +254,7 @@ export class Brain {
     return this.structures.listStructures(world.id).flatMap(n => {
       try {
         const s = this.structures.loadStructure(world.id!, n);
-        return s ? [compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box] : [];
+        return s && !s.homeStorage ? [compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box] : [];
       } catch { return []; }
     });
   }
