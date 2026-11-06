@@ -44,8 +44,16 @@ export const waterBucketStep: Step = {
     }
     // the nearest still water open to the sky (the lake: the yard's pond is filled in)
     const found = await ctx.call<{ positions: Site[] }>('world.findBlocks', { block: 'water', maxDistance: 64, count: 64, openAbove: true });
-    for (const w of found.positions.slice(0, 8)) {
+    // real open water: not in the yard, and sky above it (a pocket under the storage house had air right above it)
+    const yard = ctx.world.yard;
+    const outside = found.positions.filter(w => !yard || w.x < yard.x1 - 2 || w.x > yard.x2 + 2 || w.z < yard.z1 - 2 || w.z > yard.z2 + 2);
+    let tried = 0;
+    for (const w of outside) {
+      if (tried >= 6) break;
       if (!/^water(\[level=0\])?$/.test(await block(ctx, w))) continue;
+      const { blocks: col } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { x: w.x, y: w.y + 1, z: w.z, width: 1, height: 16, length: 1 });
+      if (col.some(b => b && !/^(minecraft:)?(air|cave_air|void_air)$/.test(b))) continue;
+      tried++;
       const r = await ctx.act('use-item-on-block', { ...w, item: 'bucket', face: 'up' });
       if ((await inv(ctx)).get('water_bucket')) return ok(`filled a bucket at (${w.x}, ${w.y}, ${w.z})`);
       ctx.progress(`bucket at (${w.x}, ${w.y}, ${w.z}): ${r.text.slice(0, 80)}`);
