@@ -66,7 +66,9 @@ public class ClaudeBridge implements ClientModInitializer {
         s.randomLooking.value = 0.0;
         s.randomLooking113.value = 0.0;
         s.autoTool.value = true;
-        s.itemSaver.value = true; // don't use a tool to destruction
+        // use a tool until it breaks: with the saver on, Baritone left a nearly worn-out axe alone and chopped wood with
+        // the pickaxe or the shovel instead, and the axe never broke, so nothing told the kit to make another
+        s.itemSaver.value = false;
         s.allowInventory.value = true; // let the builder (and tool choice) use items outside the hotbar; without it a build stalls silently
         // build-structure writes structure_void where a directional block goes (stairs facing out over a wall can't be
         // placed from where Baritone stands) and places those itself afterwards; Baritone leaves those cells alone
