@@ -43,7 +43,7 @@ export const waterBucketStep: Step = {
       if (Object.keys(short).length) return blocked(`gathering for a bucket: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
     }
     // the nearest still water open to the sky (the lake: the yard's pond is filled in)
-    const found = await ctx.call<{ positions: Site[] }>('world.findBlocks', { block: 'water', maxDistance: 64, count: 64, openAbove: true });
+    const found = await ctx.call<{ positions: Site[] }>('world.findBlocks', { block: 'water', maxDistance: 64, count: 256, openAbove: true });
     // real open water: not in the yard, and sky above it (a pocket under the storage house had air right above it)
     const yard = ctx.world.yard;
     const outside = found.positions.filter(w => !yard || w.x < yard.x1 - 2 || w.x > yard.x2 + 2 || w.z < yard.z1 - 2 || w.z > yard.z2 + 2);

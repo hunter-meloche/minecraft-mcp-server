@@ -168,14 +168,22 @@ async function collectFurnace(ctx: GoalContext): Promise<string> {
   const at = ctx.world.landmarks.furnace;
   if (!at) return '';
   type Slot = { name: string; count: number } | null;
-  const open = () => ctx.call<{ open: boolean; output: Slot }>('furnace.open', { ...at });
+  const open = () => ctx.call<{ open: boolean; output: Slot; input: Slot; lit: boolean }>('furnace.open', { ...at });
   let f = await open().catch(() => undefined);
   if (!f) { await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 }); f = await open().catch(() => undefined); }
   if (!f) return '';
   try {
-    if (!f.output) return '';
-    const r = await ctx.call<{ took: Slot }>('furnace.take');
-    return r.took ? `${r.took.count} ${r.took.name}` : '';
+    const took: string[] = [];
+    if (f.output) {
+      const r = await ctx.call<{ took: Slot }>('furnace.take');
+      if (r.took) took.push(`${r.took.count} ${r.took.name}`);
+    }
+    // what sits in the input unlit (no fuel left) blocks every other smelt ("input slot occupied"): take it back
+    if (f.input && !f.lit) {
+      const r = await ctx.call<{ took: Slot }>('furnace.take', { slot: 'input' });
+      if (r.took) took.push(`${r.took.count} ${r.took.name} (not cooked)`);
+    }
+    return took.join(', ');
   } finally {
     await ctx.call('container.close').catch(() => undefined);
   }
@@ -248,7 +256,11 @@ export const smelt: Goal = {
       const fuel = FUELS.find(f => (ctx.s.counts.get(f) ?? 0) > 0);
       if (!n || !fuel) continue;
       const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: ore, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
-      did.push(r.ok ? `smelted ${n} ${ore}` : `could not smelt ${ore}: ${r.text}`);
+      // smelted means the ore went: a reply like "input slot is occupied" is no error, and counted as done it had
+      // the bot "smelt" the same 7 raw copper every 5 seconds
+      const left = (await ctx.call<{ items: { name: string; count: number }[] }>('inventory')).items.filter(i => i.name === ore).reduce((a, i) => a + i.count, 0);
+      if (left >= n) throw new Error(`could not smelt ${ore}: ${r.text.slice(0, 120)}`);
+      did.push(r.ok ? `smelted ${n - left} ${ore}` : `could not smelt ${ore}: ${r.text}`);
       ctx.progress(did.at(-1)!);
     }
     return did.join('; ') || 'nothing to smelt';

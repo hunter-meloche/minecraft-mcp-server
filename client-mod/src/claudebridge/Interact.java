@@ -579,8 +579,10 @@ public final class Interact {
         s.register("furnace.take", true, (p, c) -> {
             LocalPlayer pl = player();
             if (!(pl.containerMenu instanceof AbstractFurnaceMenu menu)) throw new IllegalStateException("no furnace open");
-            ItemStack out = menu.getSlot(2).getItem().copy();
-            click(menu, 2, 0, ContainerInput.QUICK_MOVE);
+            // slot: "output" (default) or "input" (take back what's waiting to cook, to free the furnace)
+            int from = "input".equals(strParam(p, "slot", "output")) ? 0 : 2;
+            ItemStack out = menu.getSlot(from).getItem().copy();
+            click(menu, from, 0, ContainerInput.QUICK_MOVE);
             return obj("took", out.isEmpty() ? null : obj("name", Names.item(out), "count", out.getCount()));
         });
         s.register("container.close", true, (p, c) -> { player().closeContainer(); return obj("ok", true); });

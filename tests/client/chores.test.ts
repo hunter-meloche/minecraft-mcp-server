@@ -230,3 +230,20 @@ test('dumpSpot: 8 out from the side the bot walks least', async (t) => {
   for (let i = 0; i < 20; i++) { heat.visit({ x: 10, z: 18 + (i % 2) }); heat.visit({ x: -8 + (i % 2), z: 5 }); heat.visit({ x: 10, z: -8 + (i % 2) }); }
   t.deepEqual(dumpSpot(yard, heat), { x: 28, y: 65, z: 5 });
 });
+
+test('smelt: ore still carried after the smelt is a failure, not "done" (the 7 raw copper smelted every 5 seconds)', async (t) => {
+  const items = [{ slot: 0, name: 'raw_copper', count: 7 }, { slot: 1, name: 'coal', count: 3 }];
+  const s = snap(items);
+  const ctx = {
+    s, world: world({ lastDone: { furnace: s.now } }), signal: new AbortController().signal,
+    act: async () => ({ ok: true, text: 'Furnace input slot is occupied by raw_iron' }),
+    call: (async (m: string) => {
+      if (m === 'inventory') return { items };
+      if (m === 'furnace.open') return { open: true, output: null, input: null, lit: true };
+      return {};
+    }) as never,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  };
+  await t.throwsAsync(smelt.run(ctx as never), { message: /could not smelt raw_copper: Furnace input slot is occupied/ });
+});
