@@ -107,12 +107,22 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
     const want = n - have;
     let ore = await count(ctx, x => x === raw);
     if (ore < want) { await takeFromChests(ctx, raw, want - ore); ore = await count(ctx, x => x === raw); }
-    const fuel = ore ? await fuelFor(ctx) : undefined;
-    if (ore && fuel) {
-      const k = Math.min(ore, want);
+    // not enough of what it smelts from: get that first (cobblestone for stone, stone for smooth stone...); with none
+    // at all, what that's short of is what's short
+    if (ore < want && depth < 6) {
+      const sub = await prepare(ctx, raw, want, depth + 1, reserve);
+      ore = await count(ctx, x => x === raw);
+      if (!ore) return Object.keys(sub).length ? sub : { [item]: want };
+    }
+    if (ore) {
+      const fuel = await fuelFor(ctx);
+      if (!fuel) return { coal: Math.max(1, Math.ceil(Math.min(ore, want, SMELT_BATCH) / 8)) };
+      // a batch at a time (a stack of glass is 11 minutes at the furnace): the rest next run
+      const k = Math.min(ore, want, SMELT_BATCH);
       await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, takeOutput: true, timeoutMs: k * 10_500 + 15_000 });
       have = await counted();
       if (have >= n) return {};
+      return { [item]: n - have };
     }
   }
   const r = recipeFor(item);
@@ -130,7 +140,14 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   return now >= n ? {} : { [item]: n - now };
 }
 
-export const SMELTED: Record<string, string> = { iron_ingot: 'raw_iron', gold_ingot: 'raw_gold', copper_ingot: 'raw_copper' };
+/** What smelts into what: the ingots, and the building blocks (glass from sand, stone from cobblestone, ...). */
+export const SMELTED: Record<string, string> = {
+  iron_ingot: 'raw_iron', gold_ingot: 'raw_gold', copper_ingot: 'raw_copper',
+  glass: 'sand', stone: 'cobblestone', smooth_stone: 'stone', brick: 'clay_ball', terracotta: 'clay',
+  cracked_stone_bricks: 'stone_bricks', smooth_sandstone: 'sandstone', deepslate: 'cobbled_deepslate'
+};
+/** Most to smelt in one go (about 4 minutes at the furnace): a bigger bill is smelted over several runs. */
+export const SMELT_BATCH = 24;
 const FUEL = /^(coal|charcoal|(?!stripped_)[a-z_]+_log|[a-z_]+_planks)$/;
 
 /** Something to burn: carried, else coal or logs from the chests. */

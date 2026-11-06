@@ -1,6 +1,7 @@
 import type { Goal, GoalContext } from '../brain/goals.js';
 import type { BuildJob, WorldMemory } from '../brain/memory.js';
 import { prepareBill } from '../brain/project.js';
+import { chestTotals } from '../brain/chests.js';
 import { compile, type Cell, type Compiled } from './format.js';
 import { pending, type Change } from './diff.js';
 import { packages, type Package } from './order.js';
@@ -189,9 +190,24 @@ export function structureGoal(store: StructureStore): Goal {
         ctx.progress(`${job.structure}: getting ${Object.entries(bill).map(([k, v]) => `${v} ${k}`).join(', ')} ready`);
         const short = await prepareBill(ctx, bill, { record: false });
         if (Object.keys(short).length) {
-          const src = sourceBill(short, {});
+          // sourced against what there is now: sand on hand means more glass to smelt, not a trip for sand
+          const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
+          const have: Record<string, number> = { ...chestTotals(ctx.world) };
+          for (const i of inv.items) if (i.slot < 36) have[i.name] = (have[i.name] ?? 0) + i.count;
+          const src = sourceBill(short, have);
           job.need = Object.keys(src.gather).length ? src.gather : undefined;
           job.missing = Object.keys(src.missing).length ? src.missing : undefined;
+          if (!job.need && !job.missing) {
+            // only more crafting or smelting (a batch at a time): straight on with it next run; but the same shortfall
+            // as last time means the making failed (no table in reach, a recipe it can't do): wait, don't spin
+            const sig = JSON.stringify(short);
+            const same = job.lastShort === sig;
+            job.lastShort = sig;
+            if (same) job.retryAt = ctx.s.now + 5 * MINUTE;
+            stamp(`${same ? 'could not make' : 'making more'}: ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 'working');
+            return jobText(job);
+          }
+          job.lastShort = undefined;
           job.retryAt = ctx.s.now + (job.missing ? 10 : 3) * MINUTE;
           stamp(job.missing ? 'waiting for materials it cannot get' : 'gathering materials', job.missing ? 'waiting' : 'gathering');
           return jobText(job);

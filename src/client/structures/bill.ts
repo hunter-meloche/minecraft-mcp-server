@@ -15,7 +15,7 @@ export interface BillLine { item: string; need: number; have: number; source: So
 export interface SourcedBill { lines: BillLine[]; gather: Record<string, number>; missing: Record<string, number> }
 
 /** What the stock trips bring home by themselves. */
-const GATHERABLE = /^(log|[a-z_]+_log|cobblestone|coal|iron_ingot|raw_iron)$/;
+const GATHERABLE = /^(log|[a-z_]+_log|cobblestone|coal|iron_ingot|raw_iron|sand|clay_ball|gravel|andesite|diorite|granite)$/;
 
 /** Items the changes place (a door's top, a bed's head and air left out). */
 export function billFor(changes: Change[]): Record<string, number> {

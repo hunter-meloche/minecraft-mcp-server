@@ -97,14 +97,14 @@ test('bill: what the changes place, sourced from what there is, recipes, smeltin
   t.is(bill.oak_door, 1);
   t.is(bill.torch, 1);
   t.is(bill.oak_sign, 1);
-  const s = sourceBill({ oak_planks: 10, torch: 4, glass: 2, iron_ingot: 2 }, { oak_log: 1, coal: 1, stick: 1, raw_iron: 1 });
+  const s = sourceBill({ oak_planks: 10, torch: 4, white_wool: 2, iron_ingot: 2 }, { oak_log: 1, coal: 1, stick: 1, raw_iron: 1 });
   const by = Object.fromEntries(s.lines.map(l => [l.item, l.source]));
   t.is(by.oak_planks, 'gather'); // 1 log makes 4: 6 more planks need 2 more oak logs
   t.is(s.gather.oak_log, 2);
   t.is(by.torch, 'craft');
-  t.is(by.glass, 'missing');
+  t.is(by.white_wool, 'missing');
   t.is(by.iron_ingot, 'gather'); // one smelted from the raw iron, the other mined
-  t.deepEqual(s.missing, { glass: 2 });
+  t.deepEqual(s.missing, { white_wool: 2 });
 });
 
 test('planText and render: what the LLM reads', async (t) => {

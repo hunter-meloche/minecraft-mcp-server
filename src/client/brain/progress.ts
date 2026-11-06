@@ -104,9 +104,49 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   bookshelf: { makes: 1, from: { planks: 6, book: 3 } },
   enchanting_table: { makes: 1, from: { book: 1, diamond: 2, obsidian: 4 } },
   ladder: { makes: 3, from: { stick: 7 } },
-  stone_hoe: { makes: 1, from: { cobblestone: 2, stick: 2 } }
+  stone_hoe: { makes: 1, from: { cobblestone: 2, stick: 2 } },
+  oak_trapdoor: { makes: 2, from: { planks: 6 } },
+  oak_pressure_plate: { makes: 1, from: { planks: 2 } },
+  oak_button: { makes: 1, from: { planks: 1 } },
+  // building blocks (stone, brick, sand, glass), for the LLM's designs: stone comes from smelting cobblestone, glass
+  // from sand, bricks from clay (SMELTED in project.ts)
+  stone_bricks: { makes: 4, from: { stone: 4 } },
+  stone_slab: { makes: 6, from: { stone: 3 } },
+  stone_stairs: { makes: 4, from: { stone: 6 } },
+  stone_pressure_plate: { makes: 1, from: { stone: 2 } },
+  stone_button: { makes: 1, from: { stone: 1 } },
+  stone_brick_slab: { makes: 6, from: { stone_bricks: 3 } },
+  stone_brick_stairs: { makes: 4, from: { stone_bricks: 6 } },
+  stone_brick_wall: { makes: 6, from: { stone_bricks: 6 } },
+  smooth_stone_slab: { makes: 6, from: { smooth_stone: 3 } },
+  cobblestone_slab: { makes: 6, from: { cobblestone: 3 } },
+  cobblestone_stairs: { makes: 4, from: { cobblestone: 6 } },
+  cobblestone_wall: { makes: 6, from: { cobblestone: 6 } },
+  bricks: { makes: 1, from: { brick: 4 } },
+  brick_slab: { makes: 6, from: { bricks: 3 } },
+  brick_stairs: { makes: 4, from: { bricks: 6 } },
+  brick_wall: { makes: 6, from: { bricks: 6 } },
+  clay: { makes: 1, from: { clay_ball: 4 } },
+  glass_pane: { makes: 16, from: { glass: 6 } },
+  sandstone: { makes: 1, from: { sand: 4 } },
+  sandstone_slab: { makes: 6, from: { sandstone: 3 } },
+  sandstone_stairs: { makes: 4, from: { sandstone: 6 } },
+  sandstone_wall: { makes: 6, from: { sandstone: 6 } },
+  cut_sandstone: { makes: 4, from: { sandstone: 4 } },
+  polished_andesite: { makes: 4, from: { andesite: 4 } },
+  polished_diorite: { makes: 4, from: { diorite: 4 } },
+  polished_granite: { makes: 4, from: { granite: 4 } },
+  andesite_slab: { makes: 6, from: { andesite: 3 } },
+  andesite_stairs: { makes: 4, from: { andesite: 6 } },
+  diorite_slab: { makes: 6, from: { diorite: 3 } },
+  diorite_stairs: { makes: 4, from: { diorite: 6 } },
+  granite_slab: { makes: 6, from: { granite: 3 } },
+  granite_stairs: { makes: 4, from: { granite: 6 } },
+  iron_bars: { makes: 16, from: { iron_ingot: 6 } },
+  iron_nugget: { makes: 9, from: { iron_ingot: 1 } },
+  lantern: { makes: 1, from: { iron_nugget: 8, torch: 1 } }
 };
-const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab|sign)$/;
+const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab|sign|trapdoor|pressure_plate|button)$/;
 
 /** The recipe for an item: wooden things of any wood (birch_fence from birch_planks, birch_planks from birch_log). */
 export function recipeFor(item: string): { makes: number; from: Record<string, number> } | undefined {

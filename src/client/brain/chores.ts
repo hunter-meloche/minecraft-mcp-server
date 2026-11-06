@@ -331,7 +331,14 @@ export const STOCK: { name: string; want: number; mine: string; counts: RegExp }
   { name: 'log', want: 32, mine: 'oak_log,birch_log,spruce_log,dark_oak_log,acacia_log,jungle_log,cherry_log', counts: /_log$/ },
   { name: 'cobblestone', want: 64, mine: 'stone,cobblestone', counts: /^(cobblestone|cobbled_deepslate)$/ },
   { name: 'coal', want: 16, mine: 'coal_ore,deepslate_coal_ore', counts: /^(coal|charcoal)$/ },
-  { name: 'iron_ingot', want: 16, mine: 'iron_ore,deepslate_iron_ore', counts: /^(iron_ingot|raw_iron)$/ }
+  { name: 'iron_ingot', want: 16, mine: 'iron_ore,deepslate_iron_ore', counts: /^(iron_ingot|raw_iron)$/ },
+  // building materials: none kept in stock, fetched when a build job (or a project) asks for them
+  { name: 'sand', want: 0, mine: 'sand', counts: /^sand$/ },
+  { name: 'clay_ball', want: 0, mine: 'clay', counts: /^clay_ball$/ },
+  { name: 'gravel', want: 0, mine: 'gravel', counts: /^gravel$/ },
+  { name: 'andesite', want: 0, mine: 'andesite', counts: /^andesite$/ },
+  { name: 'diorite', want: 0, mine: 'diorite', counts: /^diorite$/ },
+  { name: 'granite', want: 0, mine: 'granite', counts: /^granite$/ }
 ];
 
 /** After a trip that found none of something, leave it this long (try the next thing; what's near may be out of reach). */
