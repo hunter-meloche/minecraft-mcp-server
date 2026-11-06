@@ -199,12 +199,17 @@ public final class Handlers {
             // openAbove: only blocks with air right above (surface water, not an aquifer's: underground water filled
             // the nearest 256 and hid the lake), with a bigger scan budget since most hits are thrown away
             boolean openAbove = p.has("openAbove") && p.get("openAbove").getAsBoolean();
+            // away: only blocks at least awayMin (horizontally) from (awayX, awayZ): outside the home zone, where the
+            // nearest 512 stone were all inside it once the yard grew
+            int awayMin = intParam(p, "awayMin", 0);
+            int awayX = intParam(p, "awayX", 0), awayZ = intParam(p, "awayZ", 0);
             List<BlockPos> found = baritone.api.BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
-                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), openAbove ? 65536 : 4096, -1, (maxDistance >> 4) + 1);
+                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), openAbove || awayMin > 0 ? 65536 : 4096, -1, (maxDistance >> 4) + 1);
             Vec3 eye = pl.position();
             JsonArray out = new JsonArray();
             found.stream()
                 .filter(bp -> Vec3.atCenterOf(bp).distanceTo(eye) <= maxDistance)
+                .filter(bp -> awayMin <= 0 || Math.hypot(bp.getX() - awayX, bp.getZ() - awayZ) >= awayMin)
                 .filter(bp -> !openAbove || mc.level.getBlockState(bp.above()).isAir())
                 .sorted(Comparator.comparingDouble(bp -> Vec3.atCenterOf(bp).distanceTo(eye)))
                 .limit(count)

@@ -28,3 +28,10 @@ test('kit: a sound iron pickaxe with 3 diamonds and sticks about: upgrade to dia
   t.truthy(up);
   t.like(up, { have: 'iron_pickaxe', bestPossible: 'diamond_pickaxe' });
 });
+
+test('kit: a worn diamond pickaxe carried beside a sound stone one: no upgrade from the chest, and it stays on the bot', async (t) => {
+  const { stashPlan } = await import('../../src/client/brain/kit.js');
+  const items = [item(36, 'stone_pickaxe'), { slot: 10, name: 'diamond_pickaxe', count: 1, damage: 1550, maxDamage: 1561 }, item(11, 'stone_pickaxe')];
+  t.falsy(kitNeeds(items, { diamond_pickaxe: 1 }).find(n => n.kind === 'pickaxe' && 'why' in n && n.why === 'upgrade'));
+  t.false(stashPlan(items).deposit.some(d => d.name === 'diamond_pickaxe'));
+});

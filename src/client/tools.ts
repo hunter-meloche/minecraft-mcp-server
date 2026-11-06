@@ -465,7 +465,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     if (fromHome(me) > zoneRadius + 8) return undefined;
     let best: Pos | undefined;
     for (const name of names) {
-      const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 96, count: 512 }, 60_000);
+      const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 128, count: 256, awayX: home.x, awayZ: home.z, awayMin: zoneRadius + MINE_BEYOND }, 60_000);
       for (const p of found.positions) {
         if (fromHome(p) < zoneRadius + MINE_BEYOND) continue;
         if (!best || Math.hypot(p.x - me.x, p.y - me.y, p.z - me.z) < Math.hypot(best.x - me.x, best.y - me.y, best.z - me.z)) best = p;

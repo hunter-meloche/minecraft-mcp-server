@@ -298,6 +298,8 @@ export function kitNeeds(items: InventoryItem[], chest: Record<string, number>):
     const up = planGear(kind, pool);
     const step = up.plan[0];
     if (!step || 'gather' in step || !up.bestPossible || tier(up.bestPossible) <= tier(have.name)) continue;
+    // one that good is carried already, worn (the old diamond pickaxe taken back out of the chest over and over)
+    if (items.some(i => gearKind(i.name) === kind && tier(i.name) >= tier(up.bestPossible!))) continue;
     pool = up.pool;
     needs.push({ kind, have: have.name, why: 'upgrade', bestPossible: up.bestPossible, plan: up.plan });
   }
@@ -342,7 +344,12 @@ export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { de
   const totals = new Map<string, number>();
   for (const i of main) {
     if (gearKind(i.name)) {
-      if (!keptGear.has(i)) deposit.push({ name: i.name, count: 1, slot: i.slot });
+      if (keptGear.has(i)) continue;
+      // a worn one better than the sound one kept stays on the bot and is used until it breaks: put in the chest, the
+      // kit took it back out again and again (chest items carry no durability, so it looked like an upgrade)
+      const b = best[gearKind(i.name)!];
+      if (isWorn(i) && (!b || tier(i.name) > tier(b.name))) continue;
+      deposit.push({ name: i.name, count: 1, slot: i.slot });
     } else if (KEEP_ONE.has(i.name) && i.maxDamage) {
       // Damageable, one per slot: keep the one with the most use left.
       const keeper = main.filter(o => o.name === i.name).sort((a, b) => left(b) - left(a))[0];
