@@ -37,6 +37,45 @@ public final class Tools {
         return 0;
     }
 
+    /**
+     * The hotbar slot to break `state` with: the item that breaks it fastest (a real gain over the bare hand), the
+     * cheaper tier on a tie; with no such tool, an item that doesn't wear (an empty hand, blocks, food), since a
+     * pickaxe on dirt or a shovel on stone is no faster than a fist and only loses durability. Swords only for what
+     * they cut fast (cobwebs). -1: leave the hand as it is (every hotbar slot holds a tool and none helps).
+     */
+    public static int slotFor(Inventory inv, net.minecraft.world.level.block.state.BlockState state) {
+        int best = -1;
+        float bestSpeed = 1.0f;
+        int bestTier = Integer.MAX_VALUE;
+        for (int i = 0; i < 9; i++) {
+            var st = inv.getItem(i);
+            if (st.isEmpty()) continue;
+            float speed = st.getDestroySpeed(state);
+            String n = Names.item(st);
+            if ("sword".equals(kindOf(n)) && speed < 10f) continue;
+            if (state.requiresCorrectToolForDrops() && !st.isCorrectToolForDrops(state)) continue; // breaks it, drops nothing
+            if (speed <= 1.0f) continue;
+            int t = tier(n);
+            if (speed > bestSpeed || (speed == bestSpeed && t < bestTier)) { best = i; bestSpeed = speed; bestTier = t; }
+        }
+        if (best >= 0) return best;
+        // no tool for it: the hand, or anything that doesn't wear out
+        int sel = inv.getSelectedSlot();
+        if (!inv.getItem(sel).isDamageableItem()) return sel;
+        for (int i = 0; i < 9; i++) if (inv.getItem(i).isEmpty()) return i;
+        for (int i = 0; i < 9; i++) if (!inv.getItem(i).isDamageableItem()) return i;
+        return -1;
+    }
+
+    /** Hold the right thing for the block about to be (or being) broken; called as each dig starts and goes on. */
+    public static void holdFor(net.minecraft.core.BlockPos pos) {
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) return;
+        Inventory inv = mc.player.getInventory();
+        int slot = slotFor(inv, mc.level.getBlockState(pos));
+        if (slot >= 0 && slot != inv.getSelectedSlot()) inv.setSelectedSlot(slot);
+    }
+
     /** Move the best tool of each kind into the hotbar if it isn't there; returns what moved. */
     static List<String> keepInHotbar(LocalPlayer p) {
         List<String> moved = new ArrayList<>();

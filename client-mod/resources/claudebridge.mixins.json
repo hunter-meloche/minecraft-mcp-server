@@ -11,7 +11,8 @@
     "KeyboardHandlerMixin",
     "WindowMixin",
     "HudMixin",
-    "TitleMixin"
+    "TitleMixin",
+    "DestroyToolMixin"
   ],
   "injectors": { "defaultRequire": 1 }
 }
