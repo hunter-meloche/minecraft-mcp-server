@@ -132,3 +132,99 @@ export function cropPlotMilestone(n: number, prereqs: string[]): Milestone {
     steps: [siteStep('plot', SIZE, SIZE), waterBucketStep, waterStep, tillStep, sowStep]
   };
 }
+
+// ------------------------------------------------------------------------------------------------ tree farm
+
+const TREE_COLS = 4, TREE_ROWS = 3, TREE_PITCH = 4;
+const SAPLING = /_sapling$/;
+const LOG = /^(?!stripped_)[a-z_]+_log$/;
+
+/** The sapling cells of a tree farm on `site` (ground y): where the trunks stand, a block above the ground. */
+export function treeCells(site: Site): Site[] {
+  const out: Site[] = [];
+  for (let j = 0; j < TREE_ROWS; j++) for (let i = 0; i < TREE_COLS; i++) out.push({ x: site.x + i * TREE_PITCH, y: site.y + 1, z: site.z + j * TREE_PITCH });
+  return out;
+}
+
+/** Plant a sapling on each bare cell (whatever saplings it carries or has in the chests). */
+async function plantSaplings(ctx: GoalContext, cells: Site[]): Promise<{ planted: number; bare: number }> {
+  let planted = 0, bare = 0;
+  for (const c of cells) {
+    if (ctx.signal.aborted) break;
+    const here = await block(ctx, c);
+    if (here !== 'air' && !/^(short_grass|tall_grass|fern|leaf_litter|dandelion|poppy)$/.test(here.replace(/\[.*$/, ''))) continue;
+    let sapling = [...(await inv(ctx))].find(([n]) => SAPLING.test(n))?.[0];
+    if (!sapling) {
+      const stored = Object.entries(ctx.world.chestItems ?? {}).flatMap(([, items]) => Object.keys(items)).find(n => SAPLING.test(n));
+      if (stored) await takeFromChests(ctx, stored, 12);
+      sapling = [...(await inv(ctx))].find(([n]) => SAPLING.test(n))?.[0];
+    }
+    if (!sapling) { bare++; continue; }
+    if (here !== 'air') await ctx.act('dig-block', { ...c, collect: false });
+    const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: sapling });
+    if (/^Placed/.test(r.text)) planted++; else bare++;
+  }
+  return { planted, bare };
+}
+
+/** A grid of 12 saplings with 3 blocks between them, once the plot is in: logs (and charcoal) from home. */
+export function treeFarmMilestone(prereqs: string[]): Milestone {
+  return {
+    id: 'trees',
+    title: 'a tree farm',
+    prereqs,
+    done: v => !!v.world.zones?.trees?.length,
+    steps: [
+      siteStep('trees', (TREE_COLS - 1) * TREE_PITCH + 1 + 2, (TREE_ROWS - 1) * TREE_PITCH + 1 + 2),
+      {
+        name: 'plant the saplings',
+        run: async (ctx, st) => {
+          // the site has a block of room on each side: the grid starts one in
+          const s0 = siteOf(st);
+          const site = { x: s0.x + 1, y: s0.y, z: s0.z + 1 };
+          const cells = treeCells(site);
+          const r = await plantSaplings(ctx, cells);
+          if (r.bare === cells.length) return blocked('no saplings to plant', 30 * MINUTE);
+          addZone(ctx.world, 'trees', { x: s0.x, y: s0.y, z: s0.z, width: (TREE_COLS - 1) * TREE_PITCH + 3, length: (TREE_ROWS - 1) * TREE_PITCH + 3 });
+          for (const c of cells) addZone(ctx.world, 'trees:sapling', c);
+          return ok(`planted ${r.planted} sapling(s)${r.bare ? `, ${r.bare} cell(s) bare for now` : ''}`);
+        }
+      }
+    ]
+  };
+}
+
+/**
+ * Once a day: fell the grown trees of the tree farm (each trunk dug from the bottom up: Baritone climbs for the top)
+ * and plant saplings where the trunks stood (the leaves drop more as they decay; a bare cell is planted next round).
+ */
+export const treeFarm: import('./goals.js').Goal = {
+  name: 'trees',
+  priority: 28,
+  timeoutMs: 10 * MINUTE,
+  retryMs: 30 * MINUTE,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || s.sleeping || !world.zones?.['trees:sapling']?.length || s.distHome > 24 || s.slotsUsed >= 33) return null;
+    return s.now - (world.lastDone?.trees ?? 0) > 20 * MINUTE ? 'daily round: the tree farm' : null;
+  },
+  run: async ctx => {
+    (ctx.world.lastDone ??= {}).trees = ctx.s.now;
+    const cells = ctx.world.zones!['trees:sapling'];
+    let felled = 0, logs = 0;
+    for (const c of cells) {
+      if (ctx.signal.aborted) break;
+      const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 10, length: 1 });
+      const trunk = blocks.map((b, i) => ({ b: (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, ''), y: c.y + i })).filter(t => LOG.test(t.b));
+      if (!trunk.length || trunk[0].y !== c.y) continue; // a sapling still, or nothing
+      ctx.progress(`felling the tree at (${c.x}, ${c.z}): ${trunk.length} log(s)`);
+      for (const t of trunk) {
+        if (ctx.signal.aborted) break;
+        const r = await ctx.act('dig-block', { x: c.x, y: t.y, z: c.z });
+        if (/^Dug/.test(r.text)) logs++;
+      }
+      felled++;
+    }
+    const p = await plantSaplings(ctx, cells);
+    return `felled ${felled} tree(s) (${logs} log(s)); planted ${p.planted} sapling(s)${p.bare ? `, ${p.bare} cell(s) bare` : ''}`;
+  }
+};

@@ -5,6 +5,7 @@ import { worldIdFromSeed } from '../../build-protection.js';
 import { activityAt } from './schedule.js';
 import { BrainMemory, findLandmarks, type Pos, type WorldMemory } from './memory.js';
 import { tidyGoal } from './tidy.js';
+import { treeFarm } from './farming.js';
 import { HeatMap } from './paths.js';
 import { breakOut, returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { food, recoverGoal, retreat } from './food.js';
@@ -76,7 +77,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, repairGoal(rt), tidyGoal(rt), lights, sortStorage, projectGoal(TREE), returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, repairGoal(rt), tidyGoal(rt), treeFarm, lights, sortStorage, projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

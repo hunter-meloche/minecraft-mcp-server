@@ -152,7 +152,16 @@ export const sortStorage: Goal = {
 const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot' };
 const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
 
-/** Raw ore carried home: smelt it at the home furnace. */
+/** Logs to burn into charcoal: when coal (carried and stored) is under 8 and it carries 10 or more of one kind. */
+function charcoalLogs(s: Snapshot, world: WorldMemory): { name: string; count: number } | undefined {
+  const chest = chestTotals(world);
+  const coal = (s.counts.get('coal') ?? 0) + (s.counts.get('charcoal') ?? 0) + (chest.coal ?? 0) + (chest.charcoal ?? 0);
+  if (coal >= 8) return undefined;
+  const best = [...s.counts].filter(([n]) => /^(?!stripped_)[a-z_]+_log$/.test(n)).sort((a, b) => b[1] - a[1])[0];
+  return best && best[1] >= 10 ? { name: best[0], count: best[1] } : undefined;
+}
+
+/** Raw ore carried home: smelt it at the home furnace; charcoal when coal runs low. */
 export const smelt: Goal = {
   name: 'smelt',
   priority: 50,
@@ -161,11 +170,22 @@ export const smelt: Goal = {
   wants: (s, world) => {
     if (!awakeAtHome(s) || !world.landmarks.furnace) return null;
     const ore = Object.keys(ORES).find(o => (s.counts.get(o) ?? 0) > 0);
-    if (!ore || !FUELS.some(f => (s.counts.get(f) ?? 0) > 0)) return null;
-    return `${s.counts.get(ore)} ${ore} to smelt`;
+    if (ore && FUELS.some(f => (s.counts.get(f) ?? 0) > 0)) return `${s.counts.get(ore)} ${ore} to smelt`;
+    return charcoalLogs(s, world) ? 'low on coal: charcoal from logs' : null;
   },
   run: async ctx => {
     const did: string[] = [];
+    // charcoal when coal runs low (torches, cooking and smelting all burn it): logs in, planks or a log to burn
+    const logs = charcoalLogs(ctx.s, ctx.world);
+    if (logs) {
+      const fuel = [...ctx.s.counts].find(([n, k]) => /_planks$/.test(n) && k > 0)?.[0] ?? logs.name;
+      const n = Math.min(8, logs.count - (fuel === logs.name ? 2 : 0));
+      if (n > 0) {
+        const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: logs.name, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
+        did.push(r.ok ? `made ${n} charcoal` : `could not make charcoal: ${r.text}`);
+        ctx.progress(did.at(-1)!);
+      }
+    }
     for (const ore of Object.keys(ORES)) {
       const n = ctx.s.counts.get(ore) ?? 0;
       const fuel = FUELS.find(f => (ctx.s.counts.get(f) ?? 0) > 0);
