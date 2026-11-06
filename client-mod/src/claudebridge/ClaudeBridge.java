@@ -67,8 +67,11 @@ public class ClaudeBridge implements ClientModInitializer {
         // a block seen at an angle and reset the breaking progress (the bot kept restarting blocks)
         s.randomLooking.value = 0.0;
         s.randomLooking113.value = 0.0;
-        // tool choice is ours (DestroyToolMixin): Baritone's broke ties by slot order and dug dirt with the pickaxe
-        s.autoTool.value = false;
+        // on, so Baritone plans with the best tool: off, it costed every block by whatever was in hand (a sword), digging
+        // through stone looked endless, and it found no path to any ore. The tool actually used is still ours:
+        // DestroyToolMixin picks it as each dig starts and goes on, after Baritone's choice (which broke ties by slot
+        // order and dug dirt with the pickaxe)
+        s.autoTool.value = true;
         // use a tool until it breaks: with the saver on, Baritone left a nearly worn-out axe alone and chopped wood with
         // the pickaxe or the shovel instead, and the axe never broke, so nothing told the kit to make another
         s.itemSaver.value = false;
