@@ -43,6 +43,9 @@ export async function readBox(ctx: Pick<GoalContext, 'call'>, b: { x: number; y:
   return out;
 }
 
+/** Zones that are rings round an area (the fence), not footprints. */
+const RINGS = new Set(['fence']);
+
 const SOLID_TOP = /^(minecraft:)?(grass_block|dirt|coarse_dirt|podzol|stone|sand|gravel|clay|andesite|diorite|granite|deepslate|tuff)/;
 
 /**
@@ -86,7 +89,8 @@ export function siteStep(kind: string, width: number, length: number): Step {
       const yard = await yardOf(ctx);
       const box = { x: yard.x1, y: yard.y - 1, z: yard.z1, width: yard.x2 - yard.x1 + 1, height: 6, length: yard.z2 - yard.z1 + 1 };
       const grid = occupancy(box, await readBox(ctx, box), yard.y);
-      const avoid = Object.values(ctx.world.zones ?? {}).flat().filter(z => z.width && z.length)
+      // not the fence: its zone is the ring round the whole yard (as a rectangle it left no room anywhere)
+      const avoid = Object.entries(ctx.world.zones ?? {}).filter(([k]) => !RINGS.has(k)).flatMap(([, zs]) => zs).filter(z => z.width && z.length)
         .map(z => ({ x: z.x, z: z.z, width: z.width!, length: z.length! }));
       const site = findSite(grid, width, length, { near: ctx.s.home, clearance: 2, avoidRect: avoid });
       if (site) {
