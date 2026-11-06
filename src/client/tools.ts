@@ -13,6 +13,7 @@ import { survey, type Cluster } from './survey.js';
 import { planLevel } from './level.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
 import { checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
+import { itemOf } from './brain/blueprints.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -169,6 +170,10 @@ function baritoneSaid(lines: string[], max = 3): string {
 export const brainRun = new AsyncLocalStorage<{ signal: AbortSignal }>();
 
 /** Tools that only look: an LLM calling them doesn't take control from the brain. */
+/** Blocks that hang on the side of another block, and which way is the other way. */
+const WALL_MOUNTED = /^(wall_torch|soul_wall_torch|redstone_wall_torch|copper_wall_torch|ladder|[a-z_]+_wall_banner)$/;
+const OPPOSITE: Record<string, string> = { north: 'south', south: 'north', east: 'west', west: 'east' };
+
 const READ_ONLY = new Set(['get-position', 'get-status', 'list-inventory', 'find-item', 'get-block-info', 'find-blocks', 'find-entity',
   'detect-gamemode', 'read-chat', 'survey-area', 'get-recipe', 'list-recipes', 'can-craft']);
 
@@ -554,10 +559,12 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   };
 
   /** Place `item` at `at` while facing `look` (clearing a wrong block first); returns why not, or undefined when placed. */
-  const placeFacing = async (at: Pos, item: string, look?: string): Promise<string | undefined> => {
+  const placeFacing = async (at: Pos, block: string, look?: string, attach?: string): Promise<string | undefined> => {
     type Placed = { placed: boolean; block?: string; reason?: string };
+    // the item that places the block (a wall torch is a torch); a wall-mounted one goes on the block on its `attach` side
+    const item = itemOf(block);
     try { await call('item.select', { name: item }); } catch { return `no ${item} in the inventory`; }
-    const attempt = () => call<Placed>('place', { ...at, face: 'down', ...(look ? { facing: look } : {}) });
+    const attempt = () => call<Placed>('place', { ...at, face: attach ?? 'down', ...(look ? { facing: look } : {}) });
     let r = await attempt();
     if (!r.placed && r.reason?.startsWith('occupied by')) {
       await call('dig', { ...at }, 75_000).catch(() => undefined);
@@ -892,9 +899,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
             return factory.createResponse(`${name} is already built at ${fmt(origin)}: all ${before.total} blocks in place.`);
           }
           const { counts: have } = await inventoryCounts();
-          const own = (item: string) => (have.get(item) ?? 0) + (before.misplaced[item] ?? 0);
-          const missing = Object.entries(before.missing).filter(([item, n]) => own(item) < n)
-            .map(([item, n]) => `${item} ${own(item)}/${n}`);
+          // by the item that places each block (a wall torch is placed with a torch)
+          const own = (id: string) => (have.get(itemOf(id)) ?? 0) + (before.misplaced[id] ?? 0);
+          const missing = Object.entries(before.missing).filter(([id, n]) => own(id) < n)
+            .map(([id, n]) => `${itemOf(id)} ${own(id)}/${n}`);
           if (missing.length) return factory.createErrorResponse(`Not enough blocks to build it. Missing: ${missing.join(', ')}`);
         }
         const dir = path.join(options.gameDir, 'schematics');
@@ -954,7 +962,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           for (const cell of todo) {
             if (secondHalf(cell.state)) continue; // comes with the lower half / foot
             const at = { x: origin.x + cell.x, y: origin.y + cell.y, z: origin.z + cell.z };
-            const why = await placeFacing(at, cell.id, cell.facing ? placerFacing(cell.id, cell.facing) : undefined);
+            // wall torches and ladders hang on the block behind them (the side opposite their facing)
+            const attach = cell.facing && WALL_MOUNTED.test(cell.id) ? OPPOSITE[cell.facing] : undefined;
+            const why = await placeFacing(at, cell.id, cell.facing ? placerFacing(cell.id, cell.facing) : undefined, attach);
             if (why) failures.set(fmt(at), `${cell.id} at ${fmt(at)}: ${why}`);
             else { failures.delete(fmt(at)); progress++; placedByHand++; }
           }
