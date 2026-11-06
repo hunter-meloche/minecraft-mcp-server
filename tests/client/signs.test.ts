@@ -25,3 +25,10 @@ test('signSpot: on the wall behind the chest, another wall, or standing on it', 
   t.deepEqual(signSpot('chest[facing=south,type=single]', { above: 'air', sides: sides({}) }), { face: 'down' });
   t.is(signSpot('chest[facing=south]', { above: 'chest', sides: sides({}) }), undefined);
 });
+
+test('findLandmarks: a double chest is one chest (its left half)', async (t) => {
+  const { findLandmarks } = await import('../../src/client/brain/memory.js');
+  const box = { x: 0, y: 64, z: 0, width: 3, height: 1, length: 1 };
+  const blocks = ['minecraft:chest[facing=south,type=left,waterlogged=false]', 'minecraft:chest[facing=south,type=right,waterlogged=false]', 'minecraft:chest[facing=south,type=single,waterlogged=false]'];
+  t.deepEqual(findLandmarks(box, blocks, { x: 0, y: 64, z: 0 }).chests, [{ x: 0, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }]);
+});

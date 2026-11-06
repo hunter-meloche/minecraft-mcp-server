@@ -100,7 +100,9 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
     if (!name) return;
     const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
     if (/_bed$/.test(name) && /part=head/.test(b ?? '')) beds.push(at);
-    else if (name === 'chest' || name === 'barrel' || name === 'trapped_chest') found.chests.push(at);
+    // one landmark per container: a double chest's right half is the same inventory as its left (counted twice, and
+    // given two categories, its signs said wood1 and food1 over one chest)
+    else if ((name === 'chest' || name === 'barrel' || name === 'trapped_chest') && !/type=right/.test(b ?? '')) found.chests.push(at);
     else if (name === 'furnace' || name === 'smoker' || name === 'blast_furnace') furnaces.push(at);
     else if (name === 'crafting_table') tables.push(at);
     else if (name === 'farmland') found.farmland.push(at);

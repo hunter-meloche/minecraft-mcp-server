@@ -46,14 +46,29 @@ export const signsGoal: Goal = {
     if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 24 || world.landmarks.chests.length < 3) return null;
     if (s.now - (world.lastDone?.signs ?? 0) < 20 * MINUTE) return null;
     const labels = chestLabels(world.landmarks.chests, world.chestAssign ?? {});
-    const missing = world.landmarks.chests.filter(c => labels[key(c)] && world.chestSigns?.[key(c)] !== labels[key(c)]).length;
+    const keys = new Set(world.landmarks.chests.map(key));
+    const missing = world.landmarks.chests.filter(c => labels[key(c)] && world.chestSigns?.[key(c)] !== labels[key(c)]).length +
+      Object.keys(world.chestSigns ?? {}).filter(k => !keys.has(k)).length;
     return missing ? `${missing} chest(s) without the right sign` : null;
   },
   run: async ctx => {
     (ctx.world.lastDone ??= {}).signs = ctx.s.now;
     const signs = (ctx.world.chestSigns ??= {});
     let labels = chestLabels(ctx.world.landmarks.chests, chestAssignment(ctx.world));
-    let placed = 0, adopted = 0, skipped = 0;
+    let placed = 0, adopted = 0, skipped = 0, removed = 0;
+    // our signs over what is no longer a chest of its own (the right half of a double chest, a chest taken away)
+    const chestKeys = new Set(ctx.world.landmarks.chests.map(key));
+    for (const [k, text] of Object.entries(signs)) {
+      if (chestKeys.has(k) || ctx.signal.aborted) continue;
+      const [x, y, z] = k.split(',').map(Number);
+      const cell = { x, y: y + 1, z };
+      const there = await ctx.call<{ sign: boolean; lines?: string[] }>('sign.read', { ...cell });
+      if (there.sign && (there.lines ?? []).join(' ').trim() === text) {
+        await ctx.act('dig-block', { ...cell, collect: true }).catch(() => undefined);
+        removed++;
+      }
+      delete signs[k];
+    }
     for (const c of ctx.world.landmarks.chests) {
       if (ctx.signal.aborted) break;
       const k = key(c);
@@ -84,15 +99,16 @@ export const signsGoal: Goal = {
         const short = await prepare(ctx, `${mostWood(allItems(ctx.s, ctx.world))}_sign`, 3);
         if (Object.keys(short).length) throw new Error(`no signs, short of ${Object.entries(short).map(([n, v]) => `${v} ${n}`).join(', ')}`);
       }
-      await ctx.act('move-to-position', { ...cell, range: 2, timeoutMs: 60_000 });
+      // near enough to reach it will do (a walk to the cell itself found no path 2 blocks away)
+      await ctx.act('move-to-position', { ...cell, range: 2, timeoutMs: 60_000 }).catch(() => undefined);
       let r = await ctx.call<{ placed: boolean; written?: boolean; reason?: string }>('sign.place', { ...cell, face: spot.face, lines: [want] }, 15_000);
       if (!r.placed && r.reason === 'too far') {
-        await ctx.act('move-to-position', { ...cell, range: 1, timeoutMs: 30_000 });
+        await ctx.act('move-to-position', { ...cell, range: 1, timeoutMs: 30_000 }).catch(() => undefined);
         r = await ctx.call('sign.place', { ...cell, face: spot.face, lines: [want] }, 15_000);
       }
       if (r.placed && r.written !== false) { signs[k] = want; placed++; ctx.progress(`"${want}" over the chest at ${k}`); }
       else { skipped++; ctx.progress(`sign at ${k}: ${r.reason ?? 'not written'}`); }
     }
-    return `${placed} sign(s) put up${adopted ? `, ${adopted} label(s) someone else wrote followed` : ''}${skipped ? `, ${skipped} chest(s) left without` : ''}`;
+    return `${placed} sign(s) put up${removed ? `, ${removed} old one(s) taken down` : ''}${adopted ? `, ${adopted} label(s) someone else wrote followed` : ''}${skipped ? `, ${skipped} chest(s) left without` : ''}`;
   }
 };
