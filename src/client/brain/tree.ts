@@ -1,4 +1,5 @@
 import { fenceRing, storageHouse, type Side } from './blueprints.js';
+import { cropPlotMilestone } from './farming.js';
 import { buildStep, siteStep, yardOf } from './milestones.js';
 import type { Milestone, MilestoneState } from './progress.js';
 import type { GoalContext } from './goals.js';
@@ -69,4 +70,4 @@ const perimeter: Milestone = {
   ]
 };
 
-export const TREE: Milestone[] = [storage, perimeter];
+export const TREE: Milestone[] = [storage, perimeter, cropPlotMilestone(1, ['perimeter'])];

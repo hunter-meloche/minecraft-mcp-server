@@ -102,7 +102,8 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   book: { makes: 1, from: { paper: 3, leather: 1 } },
   bookshelf: { makes: 1, from: { planks: 6, book: 3 } },
   enchanting_table: { makes: 1, from: { book: 1, diamond: 2, obsidian: 4 } },
-  ladder: { makes: 3, from: { stick: 7 } }
+  ladder: { makes: 3, from: { stick: 7 } },
+  stone_hoe: { makes: 1, from: { cobblestone: 2, stick: 2 } }
 };
 const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab)$/;
 

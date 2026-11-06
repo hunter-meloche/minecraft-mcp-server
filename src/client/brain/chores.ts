@@ -418,6 +418,29 @@ export const lights: Goal = {
 
 // ------------------------------------------------------------------------------------------------ farm
 
+/**
+ * Harvest and replant every plot (the farm tool works around where the bot stands): each crop plot from its middle,
+ * and the farmland outside the plots from its own middle.
+ */
+export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: string }> {
+  const plots = ctx.world.zones?.plot ?? [];
+  const inPlot = (f: Pos) => plots.some(p => f.x >= p.x && f.x < p.x + (p.width ?? 9) && f.z >= p.z && f.z < p.z + (p.length ?? 9));
+  const loose = ctx.world.landmarks.farmland.filter(f => !inPlot(f));
+  const spots: { at: Pos; range: number }[] = plots.map(p => ({ at: { x: p.x + Math.floor((p.width ?? 9) / 2), y: p.y + 1, z: p.z + Math.floor((p.length ?? 9) / 2) + 1 }, range: 7 }));
+  if (loose.length) spots.push({ at: farmCentre({ ...ctx.world, landmarks: { ...ctx.world.landmarks, farmland: loose } })!, range: 12 });
+  const out: string[] = [];
+  let ok = true;
+  for (const sp of spots) {
+    if (ctx.signal.aborted) break;
+    await ctx.act('move-to-position', { ...sp.at, range: 3, timeoutMs: 90_000 });
+    const r = await ctx.act('farm', { range: sp.range, timeoutMs: 180_000 });
+    ctx.progress(r.text.slice(0, 160));
+    out.push(r.text.slice(0, 100));
+    ok &&= r.ok;
+  }
+  return { ok, text: out.join(' | ') || 'no farmland' };
+}
+
 /** Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat. */
 export const farm: Goal = {
   name: 'farm',
@@ -430,10 +453,7 @@ export const farm: Goal = {
   },
   run: async ctx => {
     done(ctx.world, 'farm', ctx.s.now);
-    const centre = farmCentre(ctx.world)!;
-    await ctx.act('move-to-position', { ...centre, range: 3, timeoutMs: 90_000 });
-    const r = await ctx.act('farm', { range: 16, timeoutMs: 180_000 });
-    ctx.progress(r.text.slice(0, 160));
+    const r = await farmAll(ctx);
     const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
     const wheat = inv.items.filter(i => i.name === 'wheat').reduce((a, i) => a + i.count, 0);
     let baked = '';

@@ -1,7 +1,7 @@
 import type { Goal, GoalContext } from './goals.js';
 import { daylightLeft } from './schedule.js';
 import { journal, nextMilestone, progressOf, recipeFor, type Milestone } from './progress.js';
-import { takeFromChests } from './chests.js';
+import { chestTotals, takeFromChests } from './chests.js';
 
 /**
  * The project goal: works the next milestone of the long game, one step per slot of free daytime, so the bot keeps
@@ -93,6 +93,20 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
     have = await counted();
   }
   if (have >= n) return {};
+  // ingots: smelted from the raw ore carried or in the chests (14 raw iron sat in a chest while the trips mined more)
+  const raw = SMELTED[item];
+  if (raw && ctx.world.landmarks.furnace) {
+    const want = n - have;
+    let ore = await count(ctx, x => x === raw);
+    if (ore < want) { await takeFromChests(ctx, raw, want - ore); ore = await count(ctx, x => x === raw); }
+    const fuel = ore ? await fuelFor(ctx) : undefined;
+    if (ore && fuel) {
+      const k = Math.min(ore, want);
+      await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, takeOutput: true, timeoutMs: k * 10_500 + 15_000 });
+      have = await counted();
+      if (have >= n) return {};
+    }
+  }
   const r = recipeFor(item);
   if (!r || depth > 6) return { [item]: n - have };
   const crafts = Math.ceil((n - have) / r.makes);
@@ -106,6 +120,20 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   if (!c.ok) return { [item]: n - have };
   const now = await counted();
   return now >= n ? {} : { [item]: n - now };
+}
+
+const SMELTED: Record<string, string> = { iron_ingot: 'raw_iron', gold_ingot: 'raw_gold', copper_ingot: 'raw_copper' };
+const FUEL = /^(coal|charcoal|(?!stripped_)[a-z_]+_log|[a-z_]+_planks)$/;
+
+/** Something to burn: carried, else coal or logs from the chests. */
+export async function fuelFor(ctx: GoalContext): Promise<string | undefined> {
+  const inv = await ctx.call<{ items: { name: string; slot: number }[] }>('inventory');
+  const carried = inv.items.find(i => i.slot < 36 && FUEL.test(i.name))?.name;
+  if (carried) return carried;
+  const stored = Object.entries(chestTotals(ctx.world)).filter(([n, k]) => k > 0 && FUEL.test(n))
+    .sort(([a], [b]) => Number(!/coal/.test(a)) - Number(!/coal/.test(b)))[0]?.[0];
+  if (stored && await takeFromChests(ctx, stored, 8)) return stored;
+  return undefined;
 }
 
 /** Planks of the kind of log carried most. */
