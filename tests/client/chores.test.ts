@@ -217,3 +217,13 @@ test('outsideBy: 0 inside the yard, else how far past its edge', (t) => {
   t.is(outsideBy(yard, { x: -3, z: 5 }), 3);
   t.is(outsideBy(yard, { x: 12, z: 30 }), 10);
 });
+
+test('dumpSpot: 8 out from the side the bot walks least', async (t) => {
+  const { dumpSpot } = await import('../../src/client/brain/chores.js');
+  const { HeatMap } = await import('../../src/client/brain/paths.js');
+  const yard = { x1: 0, z1: 0, x2: 20, z2: 10, y: 64 };
+  const heat = new HeatMap();
+  // the walk south to the lake, west and north: east is the quiet side
+  for (let i = 0; i < 20; i++) { heat.visit({ x: 10, z: 18 + (i % 2) }); heat.visit({ x: -8 + (i % 2), z: 5 }); heat.visit({ x: 10, z: -8 + (i % 2) }); }
+  t.deepEqual(dumpSpot(yard, heat), { x: 28, y: 65, z: 5 });
+});

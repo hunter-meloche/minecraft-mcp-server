@@ -90,19 +90,17 @@ export const stash: Goal = {
     done(ctx.world, 'stash', ctx.s.now);
     let dropped = 0;
     if (plan.drop.length) {
-      // thrown where the bot stands it picks them straight back up: throw them at the edge of the yard, on the side
-      // away from the farm (the farm round collected the leaf litter thrown by it a minute before), and walk off
-      const home = ctx.s.home!;
-      const f = farmCentre(ctx.world);
-      const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
-      const len = Math.hypot(dx, dz) || 1;
-      // and outside the fence: 14 blocks out was still in the farm round's reach (it picked up 124 dirt and 124 leaf
-      // litter thrown a minute before); items left there despawn after 5 minutes
-      const at = (d: number) => ({ x: Math.round(home.x + dx / len * d), y: home.y, z: Math.round(home.z + dz / len * d) });
-      let d = 14;
+      // thrown where the bot stands it picks them straight back up, and anything it walks over it picks up too (the
+      // farm round, then a fishing walk, brought back hundreds of dirt and leaf litter thrown minutes before): throw
+      // them 8 blocks out from the fence on the side it walks least (the heat map), where they despawn in 5 minutes
       const yard = ctx.world.yard;
-      while (yard && d < 60 && outsideBy(yard, at(d)) < 6) d++;
-      const dump = at(d);
+      const dump = yard ? dumpSpot(yard, ctx.world.heat ? HeatMap.fromJSON(ctx.world.heat) : undefined) : (() => {
+        const home = ctx.s.home!;
+        const f = farmCentre(ctx.world);
+        const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
+        const len = Math.hypot(dx, dz) || 1;
+        return { x: Math.round(home.x + dx / len * 14), y: home.y, z: Math.round(home.z + dz / len * 14) };
+      })();
       try {
         await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
       } catch (e) {
@@ -382,6 +380,19 @@ const BAND_PER_DAY = 8;
 const PATH_PER_DAY = 6;
 /** The band outside the fence: 2 to 12 blocks out. */
 const BAND = { from: 2, to: 12 };
+
+/** Where to throw junk: 8 out from the middle of the yard's least walked side (heat summed within 6 of each spot). */
+export function dumpSpot(yard: { x1: number; z1: number; x2: number; z2: number; y: number }, heat?: HeatMap): { x: number; y: number; z: number } {
+  const mx = Math.round((yard.x1 + yard.x2) / 2), mz = Math.round((yard.z1 + yard.z2) / 2), out = 8;
+  const spots = [{ x: mx, z: yard.z1 - out }, { x: mx, z: yard.z2 + out }, { x: yard.x1 - out, z: mz }, { x: yard.x2 + out, z: mz }];
+  const warmth = (p: { x: number; z: number }) => {
+    let h = 0;
+    for (let dz = -6; dz <= 6; dz++) for (let dx = -6; dx <= 6; dx++) h += heat?.get(p.x + dx, p.z + dz) ?? 0;
+    return h;
+  };
+  const best = spots.map(p => ({ p, h: warmth(p) })).sort((a, b) => a.h - b.h)[0].p;
+  return { ...best, y: yard.y + 1 };
+}
 
 /** How far a point is outside a yard box (0 inside), in the larger of the two directions. */
 export function outsideBy(yard: { x1: number; z1: number; x2: number; z2: number }, p: { x: number; z: number }): number {
