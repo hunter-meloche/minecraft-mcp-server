@@ -23,6 +23,7 @@ export function projectGoal(tree: Milestone[]): Goal {
     retryMs: 2 * MINUTE,
     wants: (s, world) => {
       if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || !Number.isFinite(s.distHome)) return null;
+      if (s.distHome > 64) return null; // its work is in and around the yard (it ran while the bot was out on a deep trip)
       if (daylightLeft(s.timeOfDay) < 2400) return null; // two minutes before the evening: not worth starting
       if (s.health < 12 || s.slotsUsed >= 35) return null; // its own materials can fill the pockets
       const m = nextMilestone(tree, s, world);

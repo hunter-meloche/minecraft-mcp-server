@@ -1,4 +1,4 @@
-import type { Goal, Snapshot } from './goals.js';
+import type { Goal, GoalContext, Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { deepTripReady, tripBudgetMs } from './mine.js';
 import { readyFoodPoints } from './food.js';
@@ -43,9 +43,14 @@ export function tripCheck(s: Snapshot) {
   };
 }
 
+let tripRunning = false;
+
 export const deepTrip: Goal = {
   name: 'deep trip',
   priority: 37,
+  // once under way, only what matters more than the trip itself (staying alive, the gear, a full inventory) stops it:
+  // the yard's projects stopped one 170 blocks out, mid-mine, and the walk was wasted
+  urgency: () => (tripRunning ? 58 : 37),
   timeoutMs: 14 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
@@ -57,6 +62,13 @@ export const deepTrip: Goal = {
     return deepTripReady(tripCheck(s)).ok ? `${want} diamond(s) wanted: a deep trip` : null;
   },
   run: async ctx => {
+    tripRunning = true;
+    try { return await trip(ctx); } finally { tripRunning = false; }
+  }
+};
+
+async function trip(ctx: GoalContext): Promise<string> {
+  {
     (ctx.world.lastDone ??= {}).deep = ctx.s.now;
     const budget = Math.min(10 * MINUTE, tripBudgetMs(ctx.s.timeOfDay, 2 * MINUTE));
     if (budget < 3 * MINUTE) throw new Error('too late in the day for a deep trip');
@@ -79,4 +91,4 @@ export const deepTrip: Goal = {
     if (!back.ok) throw new Error(`mined, but could not get home: ${back.text.slice(0, 120)}`);
     return `${r.text.split('\n')[0].slice(0, 120)}; back home`;
   }
-};
+}

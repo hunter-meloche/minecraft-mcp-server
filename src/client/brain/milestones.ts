@@ -130,7 +130,11 @@ async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number
     }
     return going(`grew the yard to the ${g.side} (${g.strip.x1}..${g.strip.x2}, ${g.strip.z1}..${g.strip.z2})`);
   }
-  return going(`leveling ground to the ${g.side} for the ${kind}: ${r.text.split('\n').pop()?.slice(0, 100)}`);
+  const why = r.text.split('\n').pop()?.slice(0, 100);
+  // a leveling that failed outright (part of the area not loaded: the bot was far off) waits; one that got partway
+  // goes on next time (it spun 4 times in 15 s on "Failed: Part of the area...")
+  if (!r.ok || /^Failed/.test(r.text)) return blocked(`leveling ground to the ${g.side} for the ${kind}: ${why}`, 5 * MINUTE);
+  return going(`leveling ground to the ${g.side} for the ${kind}: ${why}`);
 }
 
 /**
