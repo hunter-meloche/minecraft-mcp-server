@@ -35,6 +35,9 @@ public final class Gates {
     /** The bot's open gates and doors (lower halves), with the tick they opened. */
     private static final Map<Long, Long> opened = new HashMap<>();
     private static final int R = 3;
+    /** where the bot stood last tick, and for how many ticks */
+    private static BlockPos stillAt;
+    private static int stillFor;
 
     private static boolean gateOrDoor(BlockState s) {
         if (s.getBlock() instanceof FenceGateBlock) return true;
@@ -56,6 +59,22 @@ public final class Gates {
         if (!enabled) { opened.clear(); seen.clear(); return; }
         BlockPos me = p.blockPosition();
         Vec3 eye = p.getEyePosition();
+        // shut in a doorway: a door a pressure plate held open closed on the bot as it stood in it (the plate let go),
+        // and Baritone, pathing on, never opens a door it stands in: open it (the closer shuts it once it's through)
+        stillFor = me.equals(stillAt) ? stillFor + 1 : 0;
+        stillAt = me;
+        if ((stillFor == 20 || stillFor == 60) && Processes.baritone().getPathingBehavior().isPathing()) {
+            for (BlockPos q : new BlockPos[]{me, me.above()}) {
+                BlockState s = mc.level.getBlockState(q);
+                BlockPos lower = s.getBlock() instanceof DoorBlock && s.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.UPPER ? q.below() : q;
+                BlockState ls = mc.level.getBlockState(lower);
+                if (!gateOrDoor(ls) || open(ls)) continue;
+                Vec3 c = Vec3.atCenterOf(lower);
+                mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND, new BlockHitResult(c, Direction.UP, lower, false));
+                opened.put(lower.asLong(), Ticker.ticks());
+                break;
+            }
+        }
         // gates and doors that just opened next to the bot are its own
         Map<Long, Boolean> now = new HashMap<>();
         for (BlockPos q : BlockPos.betweenClosed(me.offset(-R, -1, -R), me.offset(R, 2, R))) {
