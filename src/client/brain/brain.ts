@@ -14,6 +14,7 @@ import { HeatMap } from './paths.js';
 import { signsGoal } from './signs.js';
 import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
+import { compile } from '../structures/format.js';
 import { LoopWatch, type Outcome, type Run } from './loops.js';
 
 /** Staying alive: never backed off by the loop watch. */
@@ -88,7 +89,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    const structures = new StructureStore();
+    const structures = this.structures;
     this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, structureGoal(structures), stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
@@ -211,6 +212,7 @@ export class Brain {
 
   /** Count today's daytime ticks and the idle ones (a new day starts when the clock wraps). */
   private heat?: { world: string; map: HeatMap; last?: Pos; saved: number };
+  private readonly structures = new StructureStore();
   private readonly loops = new LoopWatch();
   /** why the running goal was stopped (what stopped it), for the loop watch */
   private stopWhy?: string;
@@ -244,6 +246,17 @@ export class Brain {
     if (s.activity !== 'work' || s.sleeping) return;
     this.day.work++;
     if (!this.running) this.day.idle++;
+  }
+
+  /** The boxes of the structures placed in this world. */
+  private structureBoxes(world: WorldMemory): { x: number; y: number; z: number; width: number; height: number; length: number }[] {
+    if (!world.id) return [];
+    return this.structures.listStructures(world.id).flatMap(n => {
+      try {
+        const s = this.structures.loadStructure(world.id!, n);
+        return s ? [compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box] : [];
+      } catch { return []; }
+    });
   }
 
   /** The memory of the world the bot is in (chests, zones, jobs), once it knows which world that is. */
@@ -333,6 +346,10 @@ export class Brain {
     const blocks = await readBox({ call: (m, p, t) => this.rt.call(m, p, t) }, box);
     const before = JSON.stringify({ ...world.landmarks, foundAt: 0 });
     world.landmarks = { ...findLandmarks(box, blocks, s.home), foundAt: this.now() };
+    // a chest inside one of the LLM's structures is that structure's (a valuables chest in a hut 40 blocks out), not
+    // home storage: the kit walked out to it at dusk, and the shelter pulled it back, three times over
+    const boxes = this.structureBoxes(world);
+    world.landmarks.chests = world.landmarks.chests.filter(c => !boxes.some(b => c.x >= b.x && c.x < b.x + b.width && c.y >= b.y && c.y < b.y + b.height && c.z >= b.z && c.z < b.z + b.length));
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
       const l = world.landmarks;
       this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland`);
