@@ -242,6 +242,14 @@ export class Brain {
     if (!this.running) this.day.idle++;
   }
 
+  /** The memory of the world the bot is in (chests, zones, jobs), once it knows which world that is. */
+  worldMemory(): WorldMemory | undefined {
+    return this.worldId ? this.memory.world(this.worldId) : undefined;
+  }
+
+  /** Save the memory now (after a tool changed it). */
+  saveMemory(): void { this.memory.save(); }
+
   /** One line for the bot's own window: what the autopilot is doing right now. */
   statusLine(): string {
     if (!this.enabled) return 'Autopilot off';

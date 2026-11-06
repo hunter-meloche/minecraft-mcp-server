@@ -15,6 +15,7 @@ import { ClientConnection } from './client/client-connection.js';
 import { registerClientTools } from './client/tools.js';
 import { Brain } from './client/brain/brain.js';
 import { registerBrainTools } from './client/brain/brain-tools.js';
+import { registerStructureTools } from './client/structures/tools.js';
 import { jsonFileStore } from './build-protection.js';
 import { defaultMinecraftDir } from './client/install.js';
 import { takeAlerts } from './auto-defend.js';
@@ -65,6 +66,7 @@ async function main() {
     const brain = new Brain(runtime, { memoryFile: path.join(dataDir, 'brain.json'), logFile: path.join(dataDir, 'brain.log') });
     runtime.setManualHook(tool => brain.manual(tool));
     registerBrainTools(factory, brain, runtime);
+    registerStructureTools(factory, runtime, brain);
     if (config.autonomy) brain.setEnabled(true);
     cleanup = () => { brain.setEnabled(false); connection.cleanup(); };
   } else {

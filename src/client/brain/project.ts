@@ -129,7 +129,7 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   return now >= n ? {} : { [item]: n - now };
 }
 
-const SMELTED: Record<string, string> = { iron_ingot: 'raw_iron', gold_ingot: 'raw_gold', copper_ingot: 'raw_copper' };
+export const SMELTED: Record<string, string> = { iron_ingot: 'raw_iron', gold_ingot: 'raw_gold', copper_ingot: 'raw_copper' };
 const FUEL = /^(coal|charcoal|(?!stripped_)[a-z_]+_log|[a-z_]+_planks)$/;
 
 /** Something to burn: carried, else coal or logs from the chests. */
