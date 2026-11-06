@@ -41,7 +41,7 @@ test('rankSites: flat ground near the point first, no water, the hill costs cutt
   const straddle = ranked.find(p => p.anchor.x === 0 && p.width === 4);
   if (straddle) t.true(straddle.cut + straddle.fill > 0);
   t.true(ranked.some(p => p.anchor.x === 0 && p.width === 3 && p.cut + p.fill === 0));
-  t.regex(siteMap(area, b, picks).join('\n'), /1/);
+  t.regex(siteMap(area, b, picks).join('\n'), /X/);
 });
 
 test('rankSites: inside or outside the yard', (t) => {

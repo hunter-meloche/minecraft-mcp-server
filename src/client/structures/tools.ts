@@ -302,7 +302,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
 
   factory.registerTool(
     'structure-site',
-    "Where a design could go: scans the land around a point (default: home) and ranks the spots its footprint fits (either way round): the least ground to cut and fill to make it level, fewest trees, nearest the point; never over water or anything built, and inside or outside the yard as asked. Returns the best few with their anchor (y one above the ground: the design stands on it; level: true in structure-apply sinks nothing, it flattens) and a map ('.' ground at the usual height, 1-9 higher, a-i lower, T trees, ~ water, B built, the picks drawn as 1, 2, 3...). Pick one with the user's wishes in mind.",
+    "Where a design could go: scans the land around a point (default: home) and ranks the spots its footprint fits (either way round): the least ground to cut and fill to make it level, fewest trees, nearest the point; never over water or anything built, and inside or outside the yard as asked. Returns the best few with their anchor (y one above the ground: the design stands on it; level: true in structure-apply sinks nothing, it flattens) and a map ('.' ground at the usual height, 1-9 higher, a-i lower, T trees, ~ water, B built, the picks drawn as X, Y, Z, W, V in rank order). Pick one with the user's wishes in mind.",
     {
       design: z.any().describe("A saved design's name, or a design object"),
       near: z.object({ x: z.coerce.number(), z: z.coerce.number() }).optional().describe('Where it should be near (default: home)'),

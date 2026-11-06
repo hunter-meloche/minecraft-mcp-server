@@ -114,7 +114,7 @@ export function rankSites(area: Area, blocks: (string | null)[], width: number, 
 }
 
 /** A map of the area, one character per column ('.' ground at the median height, 1-9 higher, a-i lower, T tree,
- * ~ water, B built), with candidates 1..n drawn as their numbers' outlines. */
+ * ~ water, B built), with the picks drawn as outlines of X, Y, Z, W, V... (in rank order). */
 export function siteMap(area: Area, blocks: (string | null)[], picks: Candidate[]): string[] {
   const cols = columns(area, blocks);
   const hs = cols.filter(c => c.kind === 'ground').map(c => c.height).sort((a, b) => a - b);
@@ -131,7 +131,7 @@ export function siteMap(area: Area, blocks: (string | null)[], picks: Candidate[
     rows.push(row);
   }
   picks.forEach((p, i) => {
-    const mark = String(i + 1);
+    const mark = 'XYZWVUSRQP'[i] ?? 'P';
     for (let z = p.anchor.z; z < p.anchor.z + p.length; z++) for (let x = p.anchor.x; x < p.anchor.x + p.width; x++) {
       const edge = z === p.anchor.z || z === p.anchor.z + p.length - 1 || x === p.anchor.x || x === p.anchor.x + p.width - 1;
       const rz = z - area.z, rx = x - area.x;
