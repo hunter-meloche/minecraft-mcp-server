@@ -203,7 +203,7 @@ export interface GearNeed {
   spare?: true;
   /** The worn-out item carried now. */
   have?: string;
-  why: 'missing' | 'worn';
+  why: 'missing' | 'worn' | 'upgrade';
   /** The item the plan gets (taken, crafted, or what the gathered materials are for). */
   bestPossible?: string;
   plan: PlanStep[];
@@ -290,6 +290,17 @@ export function kitNeeds(items: InventoryItem[], chest: Record<string, number>):
   };
   for (const kind of KIT.gear) gear(kind, best[kind], false);
   gear(KIT.spare, spare, true);
+  // then upgrades from what's left: a sound piece when there's enough for a better one (the diamonds from a deep
+  // trip); the old one goes in the chest. Not the spare pickaxe, which is meant to be the cheap one.
+  for (const kind of KIT.gear) {
+    const have = best[kind];
+    if (!have || isWorn(have)) continue;
+    const up = planGear(kind, pool);
+    const step = up.plan[0];
+    if (!step || 'gather' in step || !up.bestPossible || tier(up.bestPossible) <= tier(have.name)) continue;
+    pool = up.pool;
+    needs.push({ kind, have: have.name, why: 'upgrade', bestPossible: up.bestPossible, plan: up.plan });
+  }
   for (const kind of ['torch', 'cobblestone'] as const) {
     const r = planConsumable(kind, pool);
     pool = r.pool;
