@@ -137,9 +137,9 @@ async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number
  * A step that builds a blueprint on the milestone's site: materials first (from the chests, crafted, or left to the
  * stock trips), then build-structure, which only places what's missing, so a stopped build picks up where it was.
  */
-export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan): Step {
+export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan, label = kind): Step {
   return {
-    name: `build the ${kind}`,
+    name: `build the ${label}`,
     bill: () => ({}),
     run: async (ctx, st) => {
       const site = st.data.site as { x: number; z: number; y: number } | undefined;
@@ -151,7 +151,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan)
       progressOf(ctx.world).carry = [...Object.keys(bp.bill), `${wood}_log`, `${wood}_planks`, 'stick'];
       const short = await prepareBill(ctx, bp.bill);
       if (Object.keys(short).length) {
-        return blocked(`gathering for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+        return blocked(`gathering for the ${label}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
       }
       const origin = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
       const r = await ctx.act('build-structure', { ...origin, spec: bp.spec, name: bp.name, timeoutMs: 8 * MINUTE });
@@ -160,7 +160,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan)
         addZone(ctx.world, kind, { x: site.x, y: site.y, z: site.z, width: bp.size.width, length: bp.size.length });
         ctx.world.landmarks.foundAt = 0; // look for the new chests, beds and tables
         progressOf(ctx.world).carry = undefined;
-        return ok(`${kind} built at (${origin.x}, ${origin.y}, ${origin.z})`);
+        return ok(`${label} built at (${origin.x}, ${origin.y}, ${origin.z})`);
       }
       return going(r.text.split('\n')[0].slice(0, 140));
     }

@@ -52,6 +52,10 @@ public final class Combat {
 
     static boolean matches(Entity e, String query, LocalPlayer self) {
         if (e == self || !e.isAlive()) return false;
+        // one particular entity: "#<id>" (culling an adult in the pen, not the calf beside it)
+        if (query.startsWith("#")) {
+            try { return e.getId() == Integer.parseInt(query.substring(1)) && e instanceof LivingEntity; } catch (NumberFormatException x) { return false; }
+        }
         String name = Names.entity(e);
         return switch (query) {
             case "hostile" -> isHostile(e) && !NOT_PICKED_AS_HOSTILE.contains(name);

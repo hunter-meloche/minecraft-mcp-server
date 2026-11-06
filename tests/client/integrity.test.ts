@@ -124,6 +124,7 @@ test('repair: once a day at home by day, puts back what it carries or finds in t
   world[0] = ['air', 'air', 'air', 'air']; // y 64
   world[1] = ['air', 'air', 'air', 'air']; // y 65
   const acts: string[] = [];
+  const taken: { slot: number; name: string; count: number }[] = [];
   const mem: WorldMemory = { landmarks: { chests: [at(-1, 64, 0)], farmland: [] }, leash: 96, chestItems: { '-1,64,0': { oak_planks: 10 } } };
   const s = {
     now: 10 * 60 * 60_000, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: at(0, 64, 0), dimension: 'overworld',
@@ -135,10 +136,11 @@ test('repair: once a day at home by day, puts back what it carries or finds in t
     s, world: mem, signal: new AbortController().signal,
     act: async (tool: string, a: Record<string, unknown> = {}) => {
       acts.push(`${tool} ${a.item} ${a.count}`);
+      if (tool === 'take-from-chest') taken.push({ slot: 1, name: String(a.item), count: Number(a.count) });
       return { ok: true, text: `Took ${a.count} ${a.item} from the chest at (-1, 64, 0). It holds: oak_planks x${10 - Number(a.count)}.` };
     },
     call: (async (m: string, p: Record<string, number>) => {
-      if (m === 'inventory') return { items: [{ slot: 0, name: 'cobblestone', count: 5 }] };
+      if (m === 'inventory') return { items: [{ slot: 0, name: 'cobblestone', count: 5 }, ...taken] };
       if (m === 'world.region' && p.x === 6) return { blocks: ['air'] }; // the cell without a state: nothing there to adopt
       if (m === 'world.region') {
         t.like(p, { x: 2, y: 64, z: 0, width: 4, height: 2, length: 1 });

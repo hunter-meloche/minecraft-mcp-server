@@ -1,6 +1,7 @@
 import type { ClientRuntime } from '../tools.js';
 import type { Goal, GoalContext } from './goals.js';
-import { chestsWith, key, takeFromChests } from './chests.js';
+import { key } from './chests.js';
+import { prepare } from './project.js';
 import { missingBuilt, type BuiltBlock } from './integrity.js';
 import type { Pos, WorldMemory } from './memory.js';
 
@@ -77,10 +78,13 @@ export function repairGoal(rt: ClientRuntime): Goal {
       const need = new Map<string, number>();
       for (const r of plan.restore) need.set(r.item, (need.get(r.item) ?? 0) + 1);
       for (const [item, n] of need) {
-        const short = n - (have.get(item) ?? 0);
-        if (short <= 0 || !chestsWith(ctx.world, item).length) continue;
-        const got = await takeFromChests(ctx, item, short);
-        if (got) { have.set(item, (have.get(item) ?? 0) + got); ctx.progress(`took ${got} ${item} from the chests`); }
+        if (n - (have.get(item) ?? 0) <= 0) continue;
+        // from the chests, else crafted (planks and stairs from the logs in the chests: a creeper took cabin planks
+        // and the round put back only what it found as it was)
+        const short = await prepare(ctx, item, n).catch(() => ({ [item]: n }));
+        if (!Object.keys(short).length) { have.set(item, n); ctx.progress(`got ${n} ${item} ready`); continue; }
+        const now = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
+        have.set(item, now.items.filter(i => i.name === item).reduce((a, i) => a + i.count, 0));
       }
 
       let restored = 0;
