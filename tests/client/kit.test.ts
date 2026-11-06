@@ -16,7 +16,8 @@ function kit(): InventoryItem[] {
     { slot: 36, name: 'iron_boots', count: 1, damage: 0, maxDamage: 195 },
     { slot: 37, name: 'iron_leggings', count: 1, damage: 0, maxDamage: 225 },
     { slot: 38, name: 'iron_chestplate', count: 1, damage: 0, maxDamage: 240 },
-    { slot: 39, name: 'iron_helmet', count: 1, damage: 0, maxDamage: 165 }
+    { slot: 39, name: 'iron_helmet', count: 1, damage: 0, maxDamage: 165 },
+    { slot: 40, name: 'shield', count: 1, damage: 0, maxDamage: 336 }
   ];
 }
 const without = (items: InventoryItem[], ...names: string[]) => items.filter(i => !names.includes(i.name));
@@ -179,4 +180,12 @@ test('a sound pickaxe beats a worn-out better one, so the need is met once a sou
   t.is(best.pickaxe?.slot, 1);
   t.is(spare?.slot, 2);
   t.false(kitNeeds(items, {}).some(n => n.kind === 'pickaxe' && n.why !== 'below iron'));
+});
+
+test('a shield, always: from the chest, else crafted from 6 planks and an iron ingot, else gathered for', (t) => {
+  const bare = kit().filter(i => i.name !== 'shield');
+  t.like(kitNeeds(bare, { shield: 1 }).find(n => n.kind === 'shield'), { why: 'missing', plan: [{ take: 'shield', count: 1 }] });
+  const crafted = kitNeeds([...bare, { slot: 20, name: 'oak_planks', count: 6 }, { slot: 21, name: 'iron_ingot', count: 1 }], {}).find(n => n.kind === 'shield');
+  t.like(crafted!.plan[0], { craft: 'shield', times: 1 });
+  t.deepEqual(kitNeeds(bare, {}).find(n => n.kind === 'shield')!.plan, [{ gather: { log: 2, iron_ingot: 1 } }]);
 });

@@ -40,7 +40,7 @@ test('stock trips for the gear run with the gear; the rest with the home', (t) =
   t.is(stock.urgency!(snap({ items: stone }), world), 64);
   const iron = ['iron_pickaxe', 'iron_axe', 'iron_shovel', 'iron_sword', 'stone_hoe', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']
     .map((name, i) => ({ slot: i < 5 ? 36 + i : i, name, count: 1 }));
-  t.is(stock.urgency!(snap({ items: [...iron, { slot: 20, name: 'torch', count: 32 }, { slot: 21, name: 'cobblestone', count: 64 }, { slot: 22, name: 'stone_pickaxe', count: 1 }] }), world), 33);
+  t.is(stock.urgency!(snap({ items: [...iron, { slot: 20, name: 'torch', count: 32 }, { slot: 21, name: 'cobblestone', count: 64 }, { slot: 22, name: 'stone_pickaxe', count: 1 }, { slot: 45, name: 'shield', count: 1 }] }), world), 33);
 });
 
 test('the kit wants at least iron: a stone pickaxe gathers iron for an iron one', (t) => {

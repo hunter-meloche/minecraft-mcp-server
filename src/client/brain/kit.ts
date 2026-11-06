@@ -211,8 +211,8 @@ export interface GearNeed {
   plan: PlanStep[];
 }
 export interface ConsumableNeed {
-  kind: ConsumableKind;
-  why: 'short';
+  kind: ConsumableKind | 'shield';
+  why: 'short' | 'missing';
   carried: number;
   want: number;
   plan: PlanStep[];
@@ -315,6 +315,22 @@ export function kitNeeds(items: InventoryItem[], chest: Record<string, number>):
     const r = tryCraft(pool, `iron_${kind}`, 1, sticks ? [[G.stick, sticks], [G.iron, material]] : [[G.iron, material]]);
     if ('step' in r) { pool = r.pool; needs.push({ kind, ...(have ? { have: have.name } : {}), why: 'below iron', bestPossible: `iron_${kind}`, plan: [r.step] }); }
     else needs.push({ kind, ...(have ? { have: have.name } : {}), why: 'below iron', bestPossible: `iron_${kind}`, plan: [{ gather: r.short }] });
+  }
+  // a shield, always (the Guardian raises it against skeletons and creepers): from the chest, else 6 planks and an iron
+  // ingot, else gather for it; ahead of the torches and blocks, after the gear
+  if (!items.some(i => i.name === 'shield')) {
+    let plan: PlanStep[];
+    if ((pool.chest.get('shield') ?? 0) > 0) {
+      const p = pool.clone();
+      p.use('shield', 1);
+      p.add('shield', 1);
+      pool = p;
+      plan = [{ take: 'shield', count: 1 }];
+    } else {
+      const r = tryCraft(pool, 'shield', 1, [[G.planks, 6], [G.iron, 1]]);
+      if ('step' in r) { pool = r.pool; plan = [r.step]; } else plan = [{ gather: r.short }];
+    }
+    needs.push({ kind: 'shield', why: 'missing', carried: 0, want: 1, plan });
   }
   for (const kind of ['torch', 'cobblestone'] as const) {
     const r = planConsumable(kind, pool);

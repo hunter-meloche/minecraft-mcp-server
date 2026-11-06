@@ -89,7 +89,17 @@ export const larder: Goal = {
     const total = readyFoodPoints(s.counts) + storedFood(world);
     return total < LARDER ? `${total} food points at home (keep ${LARDER})` : null;
   },
-  run: ctx => gatherFood(ctx, Math.max(FOOD_TARGET, LARDER - storedFood(ctx.world)), false)
+  run: async ctx => {
+    const before = readyFoodPoints(ctx.s.counts) + storedFood(ctx.world);
+    const text = await gatherFood(ctx, Math.max(FOOD_TARGET, LARDER - storedFood(ctx.world)), false);
+    const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
+    const counts = new Map<string, number>();
+    for (const i of inv.items) counts.set(i.name, (counts.get(i.name) ?? 0) + i.count);
+    // nothing gained (nothing ripe, no fish biting, no game about): a failure, so it waits before trying again rather
+    // than going straight back to the same empty farm
+    if (readyFoodPoints(counts) + storedFood(ctx.world) <= before) throw new Error(`nothing gained: ${text.slice(0, 120)}`);
+    return text;
+  }
 };
 
 /**
