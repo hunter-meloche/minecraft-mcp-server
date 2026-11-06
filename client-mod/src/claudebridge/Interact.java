@@ -238,11 +238,18 @@ public final class Interact {
             String before = Names.block(mc.level.getBlockState(at));
             final net.minecraft.world.level.block.state.BlockState beforeState = mc.level.getBlockState(at);
             BlockHitResult click = new BlockHitResult(hit, face, at, false);
+            // a shield in the off-hand stops a hoe, axe or shovel from working the block unless the player sneaks
+            // (26.x: "blocking item use intent"): with the kit's shield, tilling the plot did nothing
+            String inHand = Names.item(pl.getMainHandItem());
+            boolean sneak = pl.getOffhandItem().has(net.minecraft.core.component.DataComponents.BLOCKS_ATTACKS)
+                && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel"));
+            if (sneak) mc.options.keyShift.setDown(true);
             Ticker.add(new Ticker.Task() {
                 int wait = 5;
                 String result = "", held = "";
                 @Override public boolean tick(Minecraft m) {
                     wait--;
+                    if (wait == 0 && sneak) m.options.keyShift.setDown(false);
                     if (wait == 3) {
                         // after the rotation is sent; buckets (and other aimed items) act through "use", along the look
                         // direction at the same point, when the block click does nothing

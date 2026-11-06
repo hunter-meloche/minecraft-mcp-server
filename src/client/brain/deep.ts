@@ -20,7 +20,7 @@ const ORE = 'diamond_ore,deepslate_diamond_ore';
 
 /** How many diamonds the bot still wants: the kit pieces not yet diamond (or better), the table, less what it has. */
 export function diamondsWanted(s: Pick<Snapshot, 'items'>, world: WorldMemory): number {
-  const wear = s.items; // the hotbar (36+), the main inventory and the armour slots (5-8)
+  const wear = s.items; // carried (0-35) and worn (36-40)
   let want = TABLE;
   for (const [kind, n] of Object.entries(COST)) {
     const best = Math.max(0, ...wear.filter(i => new RegExp(`_${kind}$`).test(i.name)).map(i => tier(i.name)),
@@ -33,7 +33,8 @@ export function diamondsWanted(s: Pick<Snapshot, 'items'>, world: WorldMemory): 
 
 /** The deep-trip checklist from a snapshot. */
 export function tripCheck(s: Snapshot) {
-  const armour = [5, 6, 7, 8].map(slot => s.items.find(i => i.slot === slot)?.name);
+  // the bridge's raw slots: 36-39 are the worn armour (feet, legs, chest, head)
+  const armour = [36, 37, 38, 39].map(slot => s.items.find(i => i.slot === slot)?.name);
   const blocks = ['cobblestone', 'cobbled_deepslate', 'dirt', 'stone'].reduce((a, n) => a + (s.counts.get(n) ?? 0), 0);
   return {
     health: s.health, food: s.food, readyFoodPoints: readyFoodPoints(s.counts),

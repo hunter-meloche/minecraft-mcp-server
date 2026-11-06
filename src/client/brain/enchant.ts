@@ -64,15 +64,15 @@ export const enchantGoal: Goal = {
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || (s.xpLevel ?? 0) < 30 || !world.zones?.['enchanting:table']?.length || s.distHome > 24) return null;
-    const piece = s.items.find(i => i.slot >= 9 && WORTH.test(i.name) && !i.enchanted && tier(i.name) >= tier(i.name.replace(/^[a-z]+_/, 'diamond_')));
+    const piece = s.items.find(i => i.slot < 36 && WORTH.test(i.name) && !i.enchanted && tier(i.name) >= tier(i.name.replace(/^[a-z]+_/, 'diamond_')));
     if (!piece) return null;
     const lapis = (s.counts.get('lapis_lazuli') ?? 0) + (chestTotals(world).lapis_lazuli ?? 0);
     return lapis >= 3 ? `level ${s.xpLevel}: enchant the ${piece.name}` : null;
   },
   run: async ctx => {
     const table = ctx.world.zones!['enchanting:table'][0];
-    // carried pieces (worn armour isn't in the slots the table takes from: it waits for a spare)
-    const piece = ctx.s.items.filter(i => i.slot >= 9 && WORTH.test(i.name) && !i.enchanted).sort((a, b) => tier(b.name) - tier(a.name))[0];
+    // carried pieces, 0-35 (worn armour, 36-39, isn't where the table takes from: it waits for a spare)
+    const piece = ctx.s.items.filter(i => i.slot < 36 && WORTH.test(i.name) && !i.enchanted).sort((a, b) => tier(b.name) - tier(a.name))[0];
     if (!piece) return 'nothing to enchant';
     if ((ctx.s.counts.get('lapis_lazuli') ?? 0) < 3) await takeFromChests(ctx, 'lapis_lazuli', 16);
     await ctx.act('move-to-position', { ...table, range: 2, timeoutMs: 60_000 });

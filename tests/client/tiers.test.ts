@@ -36,15 +36,15 @@ const snap = (over: Partial<Snapshot> = {}): Snapshot => ({
 test('stock trips for the gear run with the gear; the rest with the home', (t) => {
   const world = { landmarks: { chests: [], farmland: [] }, leash: 96 };
   // a stone kit: iron wanted for it
-  const stone = ['stone_pickaxe', 'stone_axe', 'stone_shovel', 'stone_sword', 'stone_hoe'].map((name, i) => ({ slot: 36 + i, name, count: 1 }));
+  const stone = ['stone_pickaxe', 'stone_axe', 'stone_shovel', 'stone_sword', 'stone_hoe'].map((name, i) => ({ slot: i, name, count: 1 }));
   t.is(stock.urgency!(snap({ items: stone }), world), 64);
   const iron = ['iron_pickaxe', 'iron_axe', 'iron_shovel', 'iron_sword', 'stone_hoe', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']
-    .map((name, i) => ({ slot: i < 5 ? 36 + i : i, name, count: 1 }));
-  t.is(stock.urgency!(snap({ items: [...iron, { slot: 20, name: 'torch', count: 32 }, { slot: 21, name: 'cobblestone', count: 64 }, { slot: 22, name: 'stone_pickaxe', count: 1 }, { slot: 45, name: 'shield', count: 1 }] }), world), 33);
+    .map((name, i) => ({ slot: i < 5 ? i : 31 + i, name, count: 1 }));
+  t.is(stock.urgency!(snap({ items: [...iron, { slot: 20, name: 'torch', count: 32 }, { slot: 21, name: 'cobblestone', count: 64 }, { slot: 22, name: 'stone_pickaxe', count: 1 }, { slot: 40, name: 'shield', count: 1 }] }), world), 33);
 });
 
 test('the kit wants at least iron: a stone pickaxe gathers iron for an iron one', (t) => {
-  const n = kitNeeds([{ slot: 36, name: 'stone_pickaxe', count: 1 }, { slot: 10, name: 'stick', count: 8 }], {}).find(x => x.kind === 'pickaxe' && x.why === 'below iron');
+  const n = kitNeeds([{ slot: 0, name: 'stone_pickaxe', count: 1 }, { slot: 10, name: 'stick', count: 8 }], {}).find(x => x.kind === 'pickaxe' && x.why === 'below iron');
   t.like(n, { bestPossible: 'iron_pickaxe' });
   t.deepEqual(n!.plan, [{ gather: { iron_ingot: 3 } }]);
 });
