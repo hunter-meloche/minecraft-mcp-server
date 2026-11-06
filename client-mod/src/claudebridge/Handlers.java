@@ -66,6 +66,8 @@ public final class Handlers {
             r.addProperty("destroying", mc.gameMode != null && mc.gameMode.isDestroying());
             r.addProperty("raining", mc.level.isRaining());
             r.addProperty("thundering", mc.level.isThundering());
+            JsonArray boxed = Guardian.boxedIn(mc);
+            if (boxed != null) r.add("boxedIn", boxed);
             r.addProperty("hashedSeed", hashedSeed(mc));
             r.addProperty("protectedCount", Protection.count());
             r.addProperty("windowMinimized", mc.getWindow().isIconified());

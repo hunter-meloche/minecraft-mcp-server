@@ -6,7 +6,7 @@
 
 export interface Box { x: number; y: number; z: number; width: number; height: number; length: number }
 export interface Pos { x: number; y: number; z: number }
-export interface Cluster { min: Pos; max: Pos; blocks: number; kinds: Record<string, number> }
+export interface Cluster { min: Pos; max: Pos; blocks: number; kinds: Record<string, number>; cells: (Pos & { block: string })[] }
 export interface Pit { x: number; z: number; surface: number; around: number }
 export interface Survey {
   surface: { min: number; max: number; median: number };
@@ -65,7 +65,7 @@ export function survey(box: Box, blocks: (string | null)[], isProtected: (p: Pos
   const seen = new Set<number>();
   for (const start of flagged) {
     if (seen.has(start)) continue;
-    const c: Cluster = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity }, blocks: 0, kinds: {} };
+    const c: Cluster = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity }, blocks: 0, kinds: {}, cells: [] };
     const stack = [start];
     seen.add(start);
     while (stack.length) {
@@ -75,6 +75,7 @@ export function survey(box: Box, blocks: (string | null)[], isProtected: (p: Pos
       c.blocks++;
       const n = at(x, y, z);
       c.kinds[n] = (c.kinds[n] ?? 0) + 1;
+      c.cells.push({ x: wx, y: wy, z: wz, block: n });
       c.min = { x: Math.min(c.min.x, wx), y: Math.min(c.min.y, wy), z: Math.min(c.min.z, wz) };
       c.max = { x: Math.max(c.max.x, wx), y: Math.max(c.max.y, wy), z: Math.max(c.max.z, wz) };
       for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {

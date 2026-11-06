@@ -2,7 +2,7 @@ import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { farmCentre, type Pos } from './memory.js';
-import { peekChest, rememberReply, takeFromChests } from './chests.js';
+import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 
 /**
  * Food: keep enough ready-to-eat food on the bot that the Guardian can always heal it, the cheapest way first:
@@ -43,9 +43,18 @@ async function counts(ctx: GoalContext): Promise<Map<string, number>> {
   return m;
 }
 
+/** Within this of home the bot is in its fenced, lit yard: no need to retreat, and the chests and furnace are there. */
+const RETREAT_FROM = 16;
+
+/** Nothing ready to eat while hungry or hurt: worse than being out at dusk (it went to bed at 7 health, food 8). */
+const starving = (s: Snapshot) => readyFoodPoints(s.counts) < 3 && (s.food <= 14 || s.health < 10);
+
 export const food: Goal = {
   name: 'food',
   priority: 70,
+  // above the shelter's evening walk and the retreat, which kept pulling it back to the doorstep on its way to the
+  // chests and the furnace in the yard, so it never ate
+  urgency: s => (starving(s) ? 88 : 70),
   timeoutMs: 15 * 60_000,
   retryMs: 5 * 60_000,
   wants: s => {
@@ -53,7 +62,7 @@ export const food: Goal = {
     const need = short(s);
     if (need <= 0) return null;
     // at night only what can be done at home: cook, bake, the chest
-    if (s.activity !== 'work' && s.distHome > AT_HOME) return null;
+    if (s.activity !== 'work' && s.distHome > (starving(s) ? RETREAT_FROM : AT_HOME)) return null;
     return `carrying ${FOOD_TARGET - need} food points of ready food (want ${FOOD_TARGET})`;
   },
   run: async ctx => {
@@ -102,7 +111,16 @@ export const food: Goal = {
       for (const [raw] of Object.entries(COOKS_TO)) {
         const n = have.get(raw) ?? 0;
         if (!n) continue;
-        const fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
+        let fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
+        if (!fuel) {
+          // the stash puts the coal and the logs away: fetch some back (it sat at 7 health with raw fish and no fuel)
+          const stored = chestTotals(ctx.world);
+          const want = FUELS.find(f => (stored[f] ?? 0) > 0);
+          if (want && await takeFromChests(ctx, want, Math.min(stored[want], Math.ceil(n / (/_planks$/.test(want) ? 1.5 : 8)) + 1))) {
+            await refresh();
+            fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
+          }
+        }
         if (!fuel) { say('no fuel to cook with'); return; }
         const r = await ctx.act('smelt-item', { ...landmarks.furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
         if (r.ok) say(`cooked ${n} ${raw}`);
@@ -202,7 +220,9 @@ export const retreat: Goal = {
   priority: 85,
   timeoutMs: 10 * 60_000,
   retryMs: 60_000,
-  wants: s => (s.health < 10 && s.home && s.distHome > AT_HOME && Number.isFinite(s.distHome) ? `health ${s.health.toFixed(1)}: home to heal` : null),
+  // the yard counts as home: within it the food goal walks to the chests and the furnace, which is how it heals (with
+  // AT_HOME it pulled the bot back to the doorstep every few steps, and the food never got fetched)
+  wants: s => (s.health < 10 && s.home && s.distHome > RETREAT_FROM && Number.isFinite(s.distHome) ? `health ${s.health.toFixed(1)}: home to heal` : null),
   run: async ctx => {
     const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
     if (!r.ok) throw new Error(r.text);

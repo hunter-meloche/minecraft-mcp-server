@@ -24,6 +24,8 @@ export interface Snapshot {
   home?: Pos & { dimension: string };
   /** horizontal distance to home; Infinity with no home or in another dimension */
   distHome: number;
+  /** boxed in where it stands (see Status.boxedIn): the wall cells to dig out, if it built them */
+  boxedIn?: Pos[];
 }
 
 export interface GoalContext {
@@ -76,6 +78,43 @@ export const wake: Goal = {
   run: async ctx => {
     await ctx.call('bed.wake');
     return 'got up';
+  }
+};
+
+/**
+ * Out of an emergency wall-in by day. The Guardian walls the bot in when a fight goes badly, and the shelter does at
+ * night away from home; in the home zone the dirt it used can't be broken by Baritone (ground there is protected), so
+ * every walk failed at once and it sat in its box at 7 health with nothing to eat. Digs the wall it built (all of it,
+ * so no stray blocks are left on the lawn); a box it didn't build, it opens on the side toward home.
+ */
+export const breakOut: Goal = {
+  name: 'break out',
+  priority: 92,
+  timeoutMs: 3 * 60_000,
+  retryMs: 20_000,
+  wants: s => (s.boxedIn && s.activity === 'work' && !s.sleeping ? 'walled in, and it is day' : null),
+  run: async ctx => {
+    const { entities } = await ctx.call<{ entities: { name: string; category: string; distance: number }[] }>('world.entities', { maxDistance: 10 });
+    const threat = entities.find(e => e.category === 'monster');
+    if (threat) throw new Error(`waiting: ${threat.name} ${threat.distance.toFixed(0)} blocks away`);
+    const feet = { x: Math.floor(ctx.s.position.x), y: Math.floor(ctx.s.position.y), z: Math.floor(ctx.s.position.z) };
+    let cells = [...(ctx.s.boxedIn ?? [])];
+    if (!cells.length) {
+      const home = ctx.s.home ?? feet;
+      const dx = home.x - feet.x, dz = home.z - feet.z;
+      const step = Math.abs(dx) >= Math.abs(dz) ? { x: Math.sign(dx) || 1, z: 0 } : { x: 0, z: Math.sign(dz) };
+      cells = [1, 0].map(dy => ({ x: feet.x + step.x, y: feet.y + dy, z: feet.z + step.z }));
+    }
+    // the sides at its height first (the way out), the roof and supports after
+    cells.sort((a, b) => Number(a.y < feet.y || a.y > feet.y + 1) - Number(b.y < feet.y || b.y > feet.y + 1));
+    let dug = 0;
+    for (const c of cells) {
+      if (ctx.signal.aborted) break;
+      const r = await ctx.act('dig-block', { ...c });
+      if (r.ok && /^Dug/.test(r.text)) { dug++; ctx.progress(`dug (${c.x}, ${c.y}, ${c.z})`); }
+    }
+    if (!dug) throw new Error(`could not dig out of the wall at (${feet.x}, ${feet.y}, ${feet.z})`);
+    return `dug out of the wall-in (${dug} of ${cells.length} block(s))`;
   }
 };
 
@@ -151,6 +190,16 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
     if (!(door || /_fence_gate\[/.test(b)) || !/open=true/.test(b) || /powered=true/.test(b)) continue;
     const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
     if (me && me.x === at.x && me.z === at.z && Math.abs(me.y - at.y) <= 1) continue; // standing in it
+    const r = await ctx.act('use-item-on-block', { ...at, face: 'up' });
+    if (r.ok && /open=false|closed/.test(r.text)) shut++;
+  }
+  // the gates in the fence and the doors of the other buildings, further out: the fishing trip left a gate open
+  const inBox = (p: Pos) => p.x >= box.x && p.x < box.x + box.width && p.z >= box.z && p.z < box.z + box.length && p.y >= box.y && p.y < box.y + box.height;
+  const far = Object.entries(ctx.world.zones ?? {}).filter(([k]) => /:(gate|door)$/.test(k)).flatMap(([, zs]) => zs).filter(p => !inBox(p));
+  for (const at of far) {
+    if (ctx.signal.aborted) break;
+    const { blocks: [b] } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...at, width: 1, height: 1, length: 1 });
+    if (!b || !/open=true/.test(b) || /powered=true/.test(b) || /half=upper/.test(b)) continue;
     const r = await ctx.act('use-item-on-block', { ...at, face: 'up' });
     if (r.ok && /open=false|closed/.test(r.text)) shut++;
   }

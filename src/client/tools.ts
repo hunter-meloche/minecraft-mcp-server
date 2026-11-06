@@ -31,6 +31,8 @@ export interface Status {
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
   timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
   windowMinimized?: boolean; mouseGrabbed?: boolean; onGround?: boolean; destroying?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
+  /** boxed in where it stands: the cells the Guardian's last wall-in filled there (empty when it didn't build this one) */
+  boxedIn?: Pos[];
 }
 export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }

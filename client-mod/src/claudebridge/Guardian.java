@@ -301,8 +301,28 @@ public final class Guardian {
      * Close the bot in: step to the middle of its cell (its body at an edge blocks wall placement), then blocks on four
      * sides at feet and head height, a support on top of one side, and the roof. One placement per tick.
      */
+    /** The cells the last wall-in filled (and where the bot stood), so the brain can dig its way out again by day. */
+    static final List<BlockPos> WALL = new ArrayList<>();
+    static BlockPos wallFeet;
+
+    /**
+     * Boxed in where it stands (four sides at feet and head height and a roof): the cells to dig to get out, the wall
+     * it built if it built this one, else none (the brain picks the way out). Null when not boxed in.
+     */
+    static JsonArray boxedIn(Minecraft m) {
+        LocalPlayer p = m.player;
+        if (p == null || m.level == null) return null;
+        BlockPos feet = p.blockPosition();
+        if (!sheltered(m, feet)) return null;
+        JsonArray cells = new JsonArray();
+        if (feet.equals(wallFeet)) for (BlockPos c : WALL) if (!Interact.replaceable(m.level.getBlockState(c))) cells.add(pos(c));
+        return cells;
+    }
+
     static void wallIn(Consumer<JsonObject> done) {
         Processes.baritone().getPathingBehavior().cancelEverything();
+        WALL.clear();
+        wallFeet = null;
         Ticker.add(new Ticker.Task() {
             int age = 0, step = 0, placed = 0, solid = 0;
             BlockPos feet;
@@ -324,6 +344,7 @@ public final class Guardian {
                     m.options.keyUp.setDown(false);
                     if (age < 35 && !p.onGround()) return false; // let it land if it stepped into a hole
                     feet = p.blockPosition();
+                    wallFeet = feet;
                     for (Direction d : SIDES) cells.add(feet.relative(d));
                     for (Direction d : SIDES) cells.add(feet.relative(d).above());
                     return false;
@@ -331,9 +352,9 @@ public final class Guardian {
                 if (step < cells.size()) {
                     BlockPos cell = cells.get(step++);
                     boolean was = !Interact.replaceable(m.level.getBlockState(cell));
-                    if (!was && !hasReference(m, cell)) placeCover(cell.below()); // nothing to place against: support it
+                    if (!was && !hasReference(m, cell) && Interact.replaceable(m.level.getBlockState(cell.below())) && placeCover(cell.below())) WALL.add(cell.below()); // nothing to place against: support it
                     if (was) solid++;
-                    else if (placeCover(cell)) placed++;
+                    else if (placeCover(cell)) { placed++; WALL.add(cell); }
                     else gaps.add(pos(cell));
                     return false;
                 }
@@ -341,8 +362,8 @@ public final class Guardian {
                 if (Interact.replaceable(m.level.getBlockState(roof))) {
                     boolean neighbour = false;
                     for (Direction d : SIDES) if (!Interact.replaceable(m.level.getBlockState(roof.relative(d))) && !Interact.isActivatable(Names.block(m.level.getBlockState(roof.relative(d))))) neighbour = true;
-                    if (!neighbour) for (Direction d : SIDES) if (!Interact.replaceable(m.level.getBlockState(feet.relative(d).above())) && placeCover(roof.relative(d))) { placed++; break; }
-                    if (placeCover(roof)) placed++; else gaps.add(pos(roof));
+                    if (!neighbour) for (Direction d : SIDES) if (!Interact.replaceable(m.level.getBlockState(feet.relative(d).above())) && placeCover(roof.relative(d))) { placed++; WALL.add(roof.relative(d)); break; }
+                    if (placeCover(roof)) { placed++; WALL.add(roof); } else gaps.add(pos(roof));
                 } else solid++;
                 done.accept(obj("at", pos(feet), "placed", placed, "alreadySolid", solid, "gaps", gaps));
                 return true;
