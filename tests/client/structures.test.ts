@@ -113,10 +113,10 @@ test('planText and render: what the LLM reads', async (t) => {
   const changes = diff(c.cells, c.cells.map(() => 'air'));
   const text = planText('Plan for "hut"', c, changes, sourceBill(billFor(changes), { oak_log: 40, stick: 4, coal: 2 }));
   t.regex(text, /box \(0, 64, 0\) 5x5x5/);
-  t.regex(text, /Changes: 1\d\d to place/);
+  t.regex(text, /Changes: 99 to place/);
   t.regex(text, /oak_planks x84 \(have 0; craft it\)/);
   t.regex(text, /Work: \d+ package/);
-  const upToDate = planText('x', c, diff(c.cells, c.cells.map(k => k.want)), sourceBill({}, {}));
+  const upToDate = planText('x', c, diff(c.cells, c.cells.map(k => k.want), { '1,66,1': ['food1'] }), sourceBill({}, {}));
   t.regex(upToDate, /Up to date/);
   const pic = render(hut, c);
   t.regex(pic, /y 65:\n {2}LPPPL/);
