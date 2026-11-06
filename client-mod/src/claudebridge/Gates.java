@@ -63,7 +63,8 @@ public final class Gates {
         // and Baritone, pathing on, never opens a door it stands in: open it (the closer shuts it once it's through)
         stillFor = me.equals(stillAt) ? stillFor + 1 : 0;
         stillAt = me;
-        if ((stillFor == 20 || stillFor == 60) && Processes.baritone().getPathingBehavior().isPathing()) {
+        // while a Baritone job is on (it may be failing to find a path out of the doorway, so not "pathing" as such)
+        if ((stillFor == 20 || stillFor % 200 == 60) && Processes.active() != null) {
             for (BlockPos q : new BlockPos[]{me, me.above()}) {
                 BlockState s = mc.level.getBlockState(q);
                 BlockPos lower = s.getBlock() instanceof DoorBlock && s.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.UPPER ? q.below() : q;
