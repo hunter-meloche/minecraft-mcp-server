@@ -33,8 +33,9 @@ export interface Status {
   windowMinimized?: boolean; mouseGrabbed?: boolean; onGround?: boolean; destroying?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
   /** boxed in where it stands: the cells the Guardian's last wall-in filled there (empty when it didn't build this one) */
   boxedIn?: Pos[];
+  xpLevel?: number;
 }
-export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number }
+export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number; enchanted?: boolean }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
 interface EntityInfo { id: number; name: string; category: string; position: Pos; distance: number; health?: number }
 interface FightResult {

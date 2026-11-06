@@ -66,6 +66,7 @@ public final class Handlers {
             r.addProperty("destroying", mc.gameMode != null && mc.gameMode.isDestroying());
             r.addProperty("raining", mc.level.isRaining());
             r.addProperty("thundering", mc.level.isThundering());
+            r.addProperty("xpLevel", pl.experienceLevel);
             JsonArray boxed = Guardian.boxedIn(mc);
             if (boxed != null) r.add("boxedIn", boxed);
             r.addProperty("hashedSeed", hashedSeed(mc));
@@ -365,6 +366,7 @@ public final class Handlers {
             o.addProperty("damage", st.getDamageValue());
             o.addProperty("maxDamage", st.getMaxDamage());
         }
+        if (st.isEnchanted()) o.addProperty("enchanted", true);
         return o;
     }
 

@@ -26,6 +26,8 @@ export interface Snapshot {
   distHome: number;
   /** boxed in where it stands (see Status.boxedIn): the wall cells to dig out, if it built them */
   boxedIn?: Pos[];
+  /** experience level (enchanting costs up to 30) */
+  xpLevel?: number;
 }
 
 export interface GoalContext {

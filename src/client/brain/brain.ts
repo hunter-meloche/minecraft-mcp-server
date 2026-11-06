@@ -8,6 +8,8 @@ import { tidyGoal } from './tidy.js';
 import { treeFarm } from './farming.js';
 import { pens } from './pens.js';
 import { deepTrip } from './deep.js';
+import { caneRound } from './cane.js';
+import { enchantGoal } from './enchant.js';
 import { HeatMap } from './paths.js';
 import { breakOut, returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { food, recoverGoal, retreat } from './food.js';
@@ -79,7 +81,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, lights, sortStorage, projectGoal(TREE), returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -288,7 +290,8 @@ export class Brain {
       slotsUsed: inv.items.filter(i => i.slot < 36).length,
       home,
       distHome: home && home.dimension === dimension ? Math.hypot(home.x - st.position.x, home.z - st.position.z) : Infinity,
-      boxedIn: st.boxedIn
+      boxedIn: st.boxedIn,
+      xpLevel: st.xpLevel
     };
     this.last = s;
     return s;
