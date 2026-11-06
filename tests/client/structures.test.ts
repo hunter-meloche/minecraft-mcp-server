@@ -151,3 +151,8 @@ test('import: built blocks only, a chest by its facing, a sign with its text; wh
   t.is(ch.changed.length, 1);
   t.is(ch.removed.length, 0);
 });
+
+test('sameBlock: a gate opened from the other side is the same gate', (t) => {
+  t.is(sameBlock('birch_fence_gate[facing=south]', 'birch_fence_gate[facing=north,in_wall=false,open=false,powered=false]'), 'same');
+  t.is(sameBlock('birch_fence_gate[facing=south]', 'birch_fence_gate[facing=east,in_wall=false,open=false,powered=false]'), 'state');
+});

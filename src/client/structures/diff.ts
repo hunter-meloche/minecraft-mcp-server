@@ -20,6 +20,8 @@ const REPLACEABLE = /^(air|cave_air|void_air|water|lava|short_grass|tall_grass|f
 /** Properties that say how a block was placed; the rest change by themselves (open, powered, a fence's connections). */
 const SIGNIFICANT = new Set(['facing', 'half', 'type', 'axis', 'part', 'rotation', 'face', 'attachment', 'hanging']);
 
+const axisOf = (facing: string) => (facing === 'north' || facing === 'south' ? 'z' : 'x');
+
 export function parse(state: string | null | undefined): { id: string; props: Record<string, string> } {
   const s = (state ?? '').replace(/^minecraft:/, '');
   const m = /^([^[]+)(?:\[(.*)\])?$/.exec(s);
@@ -41,6 +43,8 @@ export function sameBlock(want: string, have: string | null | undefined): 'same'
   for (const [k, v] of Object.entries(w.props)) {
     if (!SIGNIFICANT.has(k)) continue;
     if (k === 'type' && /chest$/.test(w.id)) continue; // single, left, right: how chests next to each other join
+    // a gate faces whichever way it was last opened from: only its line (north-south or east-west) is how it was placed
+    if (k === 'facing' && /_fence_gate$/.test(w.id) && h.props.facing && axisOf(h.props.facing) === axisOf(v)) continue;
     if (h.props[k] !== undefined && h.props[k] !== v) return 'state';
   }
   return 'same';
