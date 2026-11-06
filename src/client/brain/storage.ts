@@ -203,3 +203,43 @@ export function misplaced(assign: ChestAssign, contents: ChestContents, limit = 
   }
   return moves;
 }
+
+// ------------------------------------------------------------------------------------------------ labels
+
+/** What a category's chests say on their signs (food1, tools2, ...). */
+export const LABEL: Readonly<Record<Category, string>> = {
+  stone: 'stone', wood: 'wood', ores: 'ore', food: 'food', farming: 'seeds', mobdrops: 'drops', gear: 'tools', misc: 'misc'
+};
+const SYNONYM: Record<string, Category> = {
+  stone: 'stone', stones: 'stone', blocks: 'stone', wood: 'wood', woods: 'wood', logs: 'wood', ore: 'ores', ores: 'ores', ingots: 'ores',
+  food: 'food', foods: 'food', seeds: 'farming', seed: 'farming', farming: 'farming', farm: 'farming', drops: 'mobdrops',
+  mobdrops: 'mobdrops', mob: 'mobdrops', tools: 'gear', tool: 'gear', gear: 'gear', armor: 'gear', armour: 'gear',
+  misc: 'misc', miscblock: 'misc', miscblocks: 'misc', miscitems: 'misc', other: 'misc'
+};
+
+/** The category a sign names ("Food 2", "tools1", "miscBlocks"), or undefined for text that isn't a label. */
+export function categoryOfLabel(text: string): Category | undefined {
+  return SYNONYM[text.toLowerCase().replace(/[^a-z]/g, '')];
+}
+
+/**
+ * The label for each chest ("x,y,z" -> "food1"): numbered within its category in chest order, the two halves of a
+ * double chest (side by side, same category) sharing one number.
+ */
+export function chestLabels(chests: Pos[], assign: ChestAssign): Record<string, string> {
+  const out: Record<string, string> = {};
+  const count = new Map<string, number>();
+  for (const c of chests) {
+    const k = keyOf(c);
+    const cat = assign[k] as Category | undefined;
+    if (!cat || out[k]) continue;
+    const n = (count.get(cat) ?? 0) + 1;
+    count.set(cat, n);
+    const label = `${LABEL[cat] ?? cat}${n}`;
+    out[k] = label;
+    for (const o of chests) {
+      if (o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1 && assign[keyOf(o)] === cat && !out[keyOf(o)]) out[keyOf(o)] = label;
+    }
+  }
+  return out;
+}

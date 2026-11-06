@@ -37,6 +37,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Handlers.register(server);
         Interact.register(server);
         Enchanting.register(server);
+        Signs.register(server);
         Combat.register(server);
         Guardian.register(server);
         Protection.register(server);

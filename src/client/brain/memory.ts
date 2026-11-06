@@ -35,6 +35,8 @@ export interface WorldMemory {
   zones?: Record<string, { x: number; y: number; z: number; width?: number; length?: number }[]>;
   /** which home chest ("x,y,z") holds which kind of thing (storage.ts categories) */
   chestAssign?: Record<string, string>;
+  /** the label on the sign over each chest ("x,y,z" -> "food1"), as put up or as found */
+  chestSigns?: Record<string, string>;
   /** kinds of things with no room left in their chests: the storage needs another chest */
   storageFull?: string[];
   /** built cells ("x,y,z") the repair round failed to put back, and how often */

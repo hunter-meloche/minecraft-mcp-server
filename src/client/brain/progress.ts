@@ -93,6 +93,7 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   oak_fence_gate: { makes: 1, from: { planks: 2, stick: 4 } },
   oak_stairs: { makes: 4, from: { planks: 6 } },
   oak_slab: { makes: 6, from: { planks: 3 } },
+  oak_sign: { makes: 3, from: { planks: 6, stick: 1 } },
   torch: { makes: 4, from: { coal: 1, stick: 1 } },
   crafting_table: { makes: 1, from: { planks: 4 } },
   furnace: { makes: 1, from: { cobblestone: 8 } },
@@ -105,7 +106,7 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   ladder: { makes: 3, from: { stick: 7 } },
   stone_hoe: { makes: 1, from: { cobblestone: 2, stick: 2 } }
 };
-const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab)$/;
+const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab|sign)$/;
 
 /** The recipe for an item: wooden things of any wood (birch_fence from birch_planks, birch_planks from birch_log). */
 export function recipeFor(item: string): { makes: number; from: Record<string, number> } | undefined {
