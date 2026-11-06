@@ -81,6 +81,8 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
   const way = gateOf(ctx.world.zones?.[`pen:${kind}:gate`]?.[0], p);
   if (!way) return `${kind}: no gate on the pen`;
   await ctx.call('sprint.set', { allowed: false });
+  // the gate stays open while the animal follows the bot in (the client shuts gates behind the bot otherwise)
+  await ctx.call('gates.auto', { enabled: false }).catch(() => undefined);
   try {
     await ctx.call('item.select', { name: food });
     let e = await find(ctx, id);
@@ -112,6 +114,7 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
     return e && inside(p, e.position) ? `${kind}: led one into the pen` : `${kind}: it did not come in`;
   } finally {
     await ctx.call('sprint.set', { allowed: true }).catch(() => undefined);
+    await ctx.call('gates.auto', { enabled: true }).catch(() => undefined);
   }
 }
 
