@@ -25,14 +25,20 @@ test('stack sizes come from minecraft-data', (t) => {
 });
 
 test('one chest per category, most-needed first when there are too few', (t) => {
-  t.deepEqual(assignChests([P(0), P(1), P(2)]), { [K(0)]: 'stone', [K(1)]: 'wood', [K(2)]: 'ores' });
+  t.deepEqual(assignChests([P(0), P(1), P(2)]), { [K(0)]: 'food', [K(1)]: 'gear', [K(2)]: 'ores' });
   const all = assignChests(CATEGORIES.map((_, i) => P(i)));
   t.deepEqual(Object.values(all), [...CATEGORIES] as string[]);
 });
 
 test('existing assignments are kept and a new chest takes a missing category', (t) => {
   const prev = { [K(0)]: 'wood', [K(1)]: 'stone' };
-  t.deepEqual(assignChests([P(0), P(1), P(2)], CATEGORIES, {}, prev), { [K(0)]: 'wood', [K(1)]: 'stone', [K(2)]: 'ores' });
+  t.deepEqual(assignChests([P(0), P(1), P(2)], CATEGORIES, {}, prev), { [K(0)]: 'wood', [K(1)]: 'stone', [K(2)]: 'food' });
+});
+
+test('a category keeps no second chest while another has none', (t) => {
+  const prev = { [K(0)]: 'stone', [K(1)]: 'stone', [K(2)]: 'wood' };
+  const contents: ChestContents = { [K(0)]: { cobblestone: 500 }, [K(1)]: { cobblestone: 20 } };
+  t.deepEqual(assignChests([P(0), P(1), P(2)], ['stone', 'wood', 'food'], contents, prev), { [K(0)]: 'stone', [K(1)]: 'food', [K(2)]: 'wood' });
 });
 
 test('an unassigned chest gets the category it already holds', (t) => {

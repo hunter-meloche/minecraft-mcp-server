@@ -1,4 +1,5 @@
-import { fenceRing, storageHouse, type Side } from './blueprints.js';
+import { fenceRing, STORAGE_HOUSE_MAX_CHESTS, storageHouse, type Side } from './blueprints.js';
+import { CATEGORIES } from './storage.js';
 import { cropPlotMilestone, treeFarmMilestone } from './farming.js';
 import { penMilestone } from './pens.js';
 import { caneMilestone } from './cane.js';
@@ -193,6 +194,42 @@ const fenceClear: Milestone = {
   }]
 };
 
-export const TREE: Milestone[] = [storage, perimeter, fenceClear, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
+/** The side of a footprint a point on its edge is on. */
+export function sideOf(site: { x: number; z: number; width: number; length: number }, p: { x: number; z: number }): Side {
+  if (p.z === site.z) return 'north';
+  if (p.z === site.z + site.length - 1) return 'south';
+  if (p.x === site.x) return 'west';
+  return 'east';
+}
+
+const moreChestsBuild = buildStep('storage', st => storageHouse({ chests: STORAGE_HOUSE_MAX_CHESTS, doorSide: st.data.door as Side }), 'rest of the chests');
+
+/**
+ * A chest for every kind of thing: the storage house filled up to its six double chests (it went up with four, and
+ * with six chests for eight kinds the food and the tools had none). Same site, door and wood as the house.
+ */
+const moreChests: Milestone = {
+  id: 'storage-more',
+  title: 'a chest for every kind of thing',
+  prereqs: ['storage'],
+  done: v => v.world.landmarks.chests.length >= CATEGORIES.length || !v.world.zones?.storage?.length,
+  steps: [{
+    ...moreChestsBuild,
+    run: async (ctx: GoalContext, st: MilestoneState) => {
+      const z = ctx.world.zones!.storage[0];
+      const site = { x: z.x, y: z.y, z: z.z, width: z.width!, length: z.length! };
+      st.data.site ??= site;
+      const door = ctx.world.zones?.['storage:door']?.[0];
+      st.data.door ??= door ? sideOf(site, door) : 'south';
+      if (!st.data.wood) {
+        const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { x: site.x, y: site.y + 1, z: site.z, width: 1, height: 1, length: 1 });
+        st.data.wood = /^(?:minecraft:)?([a-z_]+?)_log/.exec(blocks[0] ?? '')?.[1] ?? undefined;
+      }
+      return moreChestsBuild.run(ctx, st);
+    }
+  }]
+};
+
+export const TREE: Milestone[] = [storage, moreChests, perimeter, fenceClear, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
   penMilestone('cow', ['plot1']), penMilestone('sheep', ['pen-cow']),
   caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow'])];

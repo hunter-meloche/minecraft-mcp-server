@@ -29,3 +29,11 @@ test('outerBand: two blocks all round outside the yard, corners in the north and
   const cells = band.reduce((a, b) => a + (b.x2 - b.x1 + 1) * (b.z2 - b.z1 + 1), 0);
   t.is(cells, 14 * 9 - 10 * 5);
 });
+
+test('sideOf: the storage house door on its south wall', async (t) => {
+  const { sideOf } = await import('../../src/client/brain/tree.js');
+  const site = { x: -63, z: -24, width: 7, length: 9 };
+  t.is(sideOf(site, { x: -60, z: -16 }), 'south');
+  t.is(sideOf(site, { x: -60, z: -24 }), 'north');
+  t.is(sideOf(site, { x: -57, z: -20 }), 'east');
+});

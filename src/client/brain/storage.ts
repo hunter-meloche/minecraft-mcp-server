@@ -10,7 +10,8 @@ import type { Pos } from './memory.js';
 
 export type Category = 'stone' | 'wood' | 'ores' | 'food' | 'farming' | 'mobdrops' | 'gear' | 'misc';
 /** Every category, most-needed first: when there are fewer chests than categories, the first ones get a chest. */
-export const CATEGORIES: readonly Category[] = ['stone', 'wood', 'ores', 'food', 'farming', 'mobdrops', 'gear', 'misc'];
+/** Most needed first: with too few chests, the last ones go without (and their things go in misc). */
+export const CATEGORIES: readonly Category[] = ['food', 'gear', 'ores', 'stone', 'wood', 'misc', 'farming', 'mobdrops'];
 
 /** Chest key ("x,y,z") -> category. */
 export type ChestAssign = Record<string, string>;
@@ -84,6 +85,17 @@ export function assignChests(chests: Pos[], categories: readonly string[] = CATE
   for (const k of keys) if (previous[k] && categories.includes(previous[k])) out[k] = previous[k];
   const has = (c: string) => Object.values(out).includes(c);
   const free = () => keys.filter(k => !out[k]);
+  // a second chest for one category while another has none (and no chest is free): the second one goes back in the
+  // pool (with too few chests, stone kept two while food and the tools had none)
+  for (const c of categories) {
+    if (has(c) || free().length) continue;
+    const counts = new Map<string, string[]>();
+    for (const [k, v] of Object.entries(out)) counts.set(v, [...(counts.get(v) ?? []), k]);
+    const spare = [...counts.values()].filter(ks => ks.length > 1).sort((a, b) => b.length - a.length)[0];
+    if (!spare) break;
+    const least = spare.sort((a, b) => Object.values(contents[a] ?? {}).reduce((x, y) => x + y, 0) - Object.values(contents[b] ?? {}).reduce((x, y) => x + y, 0))[0];
+    delete out[least];
+  }
 
   for (const c of categories) {
     if (has(c)) continue;
