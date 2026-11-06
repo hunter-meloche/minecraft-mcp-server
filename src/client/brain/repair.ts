@@ -43,7 +43,7 @@ export function repairGoal(rt: ClientRuntime): Goal {
   const builtAround = (home: Pos): BuiltBlock[] => rt.builtNear(home, REPAIR_RADIUS).filter(b => b.state);
   return {
     name: 'repair',
-    priority: 35,
+    priority: 38,
     timeoutMs: 10 * MINUTE,
     retryMs: 15 * MINUTE,
     wants: (s, world) => {

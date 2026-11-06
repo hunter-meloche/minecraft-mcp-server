@@ -152,7 +152,7 @@ test('repair: once a day at home by day, puts back what it carries or finds in t
     progress: (x: string) => { progress.push(x); }
   } as GoalContext;
   const goal = repairGoal(rt);
-  t.is(goal.priority, 35);
+  t.is(goal.priority, 38);
   t.regex(goal.wants(s, mem) ?? '', /daily round/);
   t.is(goal.wants({ ...s, activity: 'rest' }, mem), null);
   t.is(goal.wants({ ...s, distHome: 30 }, mem), null);

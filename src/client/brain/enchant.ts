@@ -59,7 +59,7 @@ const WORTH = /_(pickaxe|sword|helmet|chestplate|leggings|boots)$/;
 /** Every so often by day at level 30 with lapis: enchant the best unenchanted piece at the table. */
 export const enchantGoal: Goal = {
   name: 'enchant',
-  priority: 33,
+  priority: 31,
   timeoutMs: 4 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {

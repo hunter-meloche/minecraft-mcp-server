@@ -103,6 +103,8 @@ const TOOL_TIERS: { prefix: string; group: Group }[] = [
 ];
 const ARMOUR_TIERS = TOOL_TIERS.slice(0, 2);
 /** The cheapest tier worth gathering for: stone tools, iron armour. */
+/** The kit is at least iron in these (the hoe can stay stone). */
+const IRON_FLOOR: GearKind[] = ['pickaxe', 'axe', 'shovel', 'sword', 'helmet', 'chestplate', 'leggings', 'boots'];
 const GATHER_TOOL = 2;
 const GATHER_ARMOUR = 1;
 
@@ -203,7 +205,7 @@ export interface GearNeed {
   spare?: true;
   /** The worn-out item carried now. */
   have?: string;
-  why: 'missing' | 'worn' | 'upgrade';
+  why: 'missing' | 'worn' | 'upgrade' | 'below iron';
   /** The item the plan gets (taken, crafted, or what the gathered materials are for). */
   bestPossible?: string;
   plan: PlanStep[];
@@ -302,6 +304,17 @@ export function kitNeeds(items: InventoryItem[], chest: Record<string, number>):
     if (items.some(i => gearKind(i.name) === kind && tier(i.name) >= tier(up.bestPossible!))) continue;
     pool = up.pool;
     needs.push({ kind, have: have.name, why: 'upgrade', bestPossible: up.bestPossible, plan: up.plan });
+  }
+  // and at least full iron (the user's floor for a fed, healthy bot): a piece below iron that nothing above covers
+  // gathers the iron for it, which the stock trips bring and the smelter turns into ingots
+  for (const kind of IRON_FLOOR) {
+    if (needs.some(n => n.kind === kind && !('spare' in n && n.spare))) continue;
+    const have = best[kind];
+    if (have && tier(have.name) >= tier(`iron_${kind}`)) continue;
+    const { material, sticks } = RECIPE[kind];
+    const r = tryCraft(pool, `iron_${kind}`, 1, sticks ? [[G.stick, sticks], [G.iron, material]] : [[G.iron, material]]);
+    if ('step' in r) { pool = r.pool; needs.push({ kind, ...(have ? { have: have.name } : {}), why: 'below iron', bestPossible: `iron_${kind}`, plan: [r.step] }); }
+    else needs.push({ kind, ...(have ? { have: have.name } : {}), why: 'below iron', bestPossible: `iron_${kind}`, plan: [{ gather: r.short }] });
   }
   for (const kind of ['torch', 'cobblestone'] as const) {
     const r = planConsumable(kind, pool);

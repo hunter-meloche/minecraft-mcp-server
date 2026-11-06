@@ -1,7 +1,8 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
-import type { Pos } from './memory.js';
+import type { Pos, WorldMemory } from './memory.js';
+import { daylightLeft } from './schedule.js';
 import { farmAll } from './chores.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 
@@ -52,10 +53,10 @@ const starving = (s: Snapshot) => readyFoodPoints(s.counts) < 3 && (s.food <= 14
 
 export const food: Goal = {
   name: 'food',
-  priority: 70,
+  priority: 76,
   // above the shelter's evening walk and the retreat, which kept pulling it back to the doorstep on its way to the
   // chests and the furnace in the yard, so it never ate
-  urgency: s => (starving(s) ? 88 : 70),
+  urgency: s => (starving(s) ? 88 : 76),
   timeoutMs: 15 * 60_000,
   retryMs: 5 * 60_000,
   wants: s => {
@@ -66,117 +67,146 @@ export const food: Goal = {
     if (s.activity !== 'work' && s.distHome > (starving(s) ? RETREAT_FROM : AT_HOME)) return null;
     return `carrying ${FOOD_TARGET - need} food points of ready food (want ${FOOD_TARGET})`;
   },
-  run: async ctx => {
-    const did: string[] = [];
-    const say = (t: string) => { did.push(t); ctx.progress(t); };
-    const { landmarks } = ctx.world;
-    let have = await counts(ctx);
-    const enough = () => readyFoodPoints(have) >= FOOD_TARGET;
-    const refresh = async () => { have = await counts(ctx); };
-    const foods = foodsFor26();
+  run: ctx => gatherFood(ctx, FOOD_TARGET, true)
+};
 
-    // 1. the home chests
-    for (const chest of landmarks.chests) {
+/** Ready food kept at home, carried and in the chests together (food points). */
+export const LARDER = 60;
+const storedFood = (world: WorldMemory) => readyFoodPoints(new Map(Object.entries(chestTotals(world))));
+
+/**
+ * The stockpile (third after staying alive and the gear): by day, fed and healthy, farm, fish and hunt until the
+ * home holds LARDER food points, so a bad day (rain, no fish, a fight) never leaves the bot short.
+ */
+export const larder: Goal = {
+  name: 'larder',
+  priority: 48,
+  timeoutMs: 12 * 60_000,
+  retryMs: 10 * 60_000,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 24 || s.dimension !== 'overworld') return null;
+    if (s.health < 14 || s.food < 14 || daylightLeft(s.timeOfDay) < 3000) return null;
+    const total = readyFoodPoints(s.counts) + storedFood(world);
+    return total < LARDER ? `${total} food points at home (keep ${LARDER})` : null;
+  },
+  run: ctx => gatherFood(ctx, Math.max(FOOD_TARGET, LARDER - storedFood(ctx.world)), false)
+};
+
+/**
+ * Get ready food up to `target` points carried: from the home chests (unless `useChests` is off: the larder adds to
+ * the stock rather than moving it about), baked, cooked, farmed, fished, hunted.
+ */
+export async function gatherFood(ctx: GoalContext, target: number, useChests: boolean): Promise<string> {
+  const did: string[] = [];
+  const say = (t: string) => { did.push(t); ctx.progress(t); };
+  const { landmarks } = ctx.world;
+  let have = await counts(ctx);
+  const enough = () => readyFoodPoints(have) >= target;
+  const refresh = async () => { have = await counts(ctx); };
+  const foods = foodsFor26();
+
+  // 1. the home chests
+  for (const chest of useChests ? landmarks.chests : []) {
+    if (enough()) break;
+    const inside = await peekChest(ctx, chest).catch(() => ({} as Record<string, number>));
+    const edible = Object.entries(inside)
+      .filter(([n]) => foods[n] && !AVOID_UNLESS_ASKED.has(n))
+      .sort(([a], [b]) => (COOKS_TO[a] ? 1 : 0) - (COOKS_TO[b] ? 1 : 0) || foods[b].foodPoints - foods[a].foodPoints);
+    for (const [name, n] of edible) {
       if (enough()) break;
-      const inside = await peekChest(ctx, chest).catch(() => ({} as Record<string, number>));
-      const edible = Object.entries(inside)
-        .filter(([n]) => foods[n] && !AVOID_UNLESS_ASKED.has(n))
-        .sort(([a], [b]) => (COOKS_TO[a] ? 1 : 0) - (COOKS_TO[b] ? 1 : 0) || foods[b].foodPoints - foods[a].foodPoints);
-      for (const [name, n] of edible) {
-        if (enough()) break;
-        const want = COOKS_TO[name] ? n : Math.min(n, Math.ceil((FOOD_TARGET - readyFoodPoints(have)) / foods[name].foodPoints));
-        const r = await ctx.act('take-from-chest', { ...chest, item: name, count: want });
-        rememberReply(ctx.world, chest, r.text);
-        if (r.ok) say(`took ${want} ${name}`);
-        await refresh();
-      }
-      if (Object.keys(inside).includes('wheat') && !enough()) {
-        const r = await ctx.act('take-from-chest', { ...chest, item: 'wheat', count: 27 });
-        rememberReply(ctx.world, chest, r.text);
-        if (r.ok) say('took wheat');
-        await refresh();
-      }
-    }
-
-    // 2. bread from wheat
-    const wheat = have.get('wheat') ?? 0;
-    if (!enough() && wheat >= 3) {
-      const r = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(wheat / 3) });
-      if (r.ok) say(`baked ${Math.floor(wheat / 3)} bread`);
+      const want = COOKS_TO[name] ? n : Math.min(n, Math.ceil((target - readyFoodPoints(have)) / foods[name].foodPoints));
+      const r = await ctx.act('take-from-chest', { ...chest, item: name, count: want });
+      rememberReply(ctx.world, chest, r.text);
+      if (r.ok) say(`took ${want} ${name}`);
       await refresh();
     }
+    if (Object.keys(inside).includes('wheat') && !enough()) {
+      const r = await ctx.act('take-from-chest', { ...chest, item: 'wheat', count: 27 });
+      rememberReply(ctx.world, chest, r.text);
+      if (r.ok) say('took wheat');
+      await refresh();
+    }
+  }
 
-    // 3. cook what it carries
-    const cook = async () => {
-      if (!landmarks.furnace) return;
-      for (const [raw] of Object.entries(COOKS_TO)) {
-        const n = have.get(raw) ?? 0;
-        if (!n) continue;
-        let fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
-        if (!fuel) {
-          // the stash puts the coal and the logs away: fetch some back (it sat at 7 health with raw fish and no fuel)
-          const stored = chestTotals(ctx.world);
-          const want = FUELS.find(f => (stored[f] ?? 0) > 0);
-          if (want && await takeFromChests(ctx, want, Math.min(stored[want], Math.ceil(n / (/_planks$/.test(want) ? 1.5 : 8)) + 1))) {
-            await refresh();
-            fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
-          }
+  // 2. bread from wheat
+  const wheat = have.get('wheat') ?? 0;
+  if (!enough() && wheat >= 3) {
+    const r = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(wheat / 3) });
+    if (r.ok) say(`baked ${Math.floor(wheat / 3)} bread`);
+    await refresh();
+  }
+
+  // 3. cook what it carries
+  const cook = async () => {
+    if (!landmarks.furnace) return;
+    for (const [raw] of Object.entries(COOKS_TO)) {
+      const n = have.get(raw) ?? 0;
+      if (!n) continue;
+      let fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
+      if (!fuel) {
+        // the stash puts the coal and the logs away: fetch some back (it sat at 7 health with raw fish and no fuel)
+        const stored = chestTotals(ctx.world);
+        const want = FUELS.find(f => (stored[f] ?? 0) > 0);
+        if (want && await takeFromChests(ctx, want, Math.min(stored[want], Math.ceil(n / (/_planks$/.test(want) ? 1.5 : 8)) + 1))) {
+          await refresh();
+          fuel = FUELS.find(f => (have.get(f) ?? 0) > 0);
         }
-        if (!fuel) { say('no fuel to cook with'); return; }
-        const r = await ctx.act('smelt-item', { ...landmarks.furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
-        if (r.ok) say(`cooked ${n} ${raw}`);
-        await refresh();
       }
-    };
-    if (!enough()) await cook();
-
-    // the rest means going out: by day only
-    const day = (await ctx.status()).timeOfDay ?? 0;
-    const working = day < 11_000 || day >= 23_500;
-
-    // 4. the farm
-    if (!enough() && working && landmarks.farmland.length) {
-      const r = await farmAll(ctx);
-      if (r.ok) say(`farmed (${r.text.slice(0, 80)})`);
-      await refresh();
-      const w = have.get('wheat') ?? 0;
-      if (w >= 3) {
-        const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(w / 3) });
-        if (b.ok) say(`baked ${Math.floor(w / 3)} bread`);
-        await refresh();
-      }
-    }
-
-    // 5. fish (a rod wears out: make another from string and sticks, the chests' included)
-    if (!enough() && working && !(have.get('fishing_rod') ?? 0)) {
-      if (await makeRod(ctx)) say('made a fishing rod');
+      if (!fuel) { say('no fuel to cook with'); return; }
+      const r = await ctx.act('smelt-item', { ...landmarks.furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
+      if (r.ok) say(`cooked ${n} ${raw}`);
       await refresh();
     }
-    if (!enough() && working && (have.get('fishing_rod') ?? 0) > 0) {
-      const r = await ctx.act('fish', { times: 8, timeoutMs: 240_000 });
-      if (r.ok) say(`fished (${r.text.slice(0, 80)})`);
+  };
+  if (!enough()) await cook();
+
+  // the rest means going out: by day only
+  const day = (await ctx.status()).timeOfDay ?? 0;
+  const working = day < 11_000 || day >= 23_500;
+
+  // 4. the farm
+  if (!enough() && working && landmarks.farmland.length) {
+    const r = await farmAll(ctx);
+    if (r.ok) say(`farmed (${r.text.slice(0, 80)})`);
+    await refresh();
+    const w = have.get('wheat') ?? 0;
+    if (w >= 3) {
+      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(w / 3) });
+      if (b.ok) say(`baked ${Math.floor(w / 3)} bread`);
+      await refresh();
+    }
+  }
+
+  // 5. fish (a rod wears out: make another from string and sticks, the chests' included)
+  if (!enough() && working && !(have.get('fishing_rod') ?? 0)) {
+    if (await makeRod(ctx)) say('made a fishing rod');
+    await refresh();
+  }
+  if (!enough() && working && (have.get('fishing_rod') ?? 0) > 0) {
+    const r = await ctx.act('fish', { times: 8, timeoutMs: 240_000 });
+    if (r.ok) say(`fished (${r.text.slice(0, 80)})`);
+    await refresh();
+    await cook();
+  }
+
+  // 6. hunt, keeping two of each kind
+  if (!enough() && working) {
+    const { entities } = await ctx.call<{ entities: { name: string; distance: number; position: Pos }[] }>('world.entities', { maxDistance: 32 });
+    const kind = GAME.find(g => entities.filter(e => e.name === g).length >= 3);
+    if (kind) {
+      const r = await ctx.act('attack-entity', { target: kind, maxDistance: 32, timeoutMs: 30_000 });
+      say(r.ok ? `hunted a ${kind}` : `could not hunt a ${kind}`);
+      await ctx.act('collect-items', { radius: 6, timeoutMs: 30_000 }).catch(() => undefined);
       await refresh();
       await cook();
     }
-
-    // 6. hunt, keeping two of each kind
-    if (!enough() && working) {
-      const { entities } = await ctx.call<{ entities: { name: string; distance: number; position: Pos }[] }>('world.entities', { maxDistance: 32 });
-      const kind = GAME.find(g => entities.filter(e => e.name === g).length >= 3);
-      if (kind) {
-        const r = await ctx.act('attack-entity', { target: kind, maxDistance: 32, timeoutMs: 30_000 });
-        say(r.ok ? `hunted a ${kind}` : `could not hunt a ${kind}`);
-        await ctx.act('collect-items', { radius: 6, timeoutMs: 30_000 }).catch(() => undefined);
-        await refresh();
-        await cook();
-      }
-    }
-
-    const points = readyFoodPoints(have);
-    if (!did.length) throw new Error(`no food to be had right now (carrying ${points} points)`);
-    return `${did.join('; ')}; now carrying ${points} food points`;
   }
-};
+
+  const points = readyFoodPoints(have);
+  if (!did.length) throw new Error(`no food to be had right now (carrying ${points} points)`);
+  return `${did.join('; ')}; now carrying ${points} food points`;
+}
+
 
 /** Craft a fishing rod (3 sticks, 2 string) from what's carried and in the home chests; true when it has one. */
 export async function makeRod(ctx: GoalContext): Promise<boolean> {

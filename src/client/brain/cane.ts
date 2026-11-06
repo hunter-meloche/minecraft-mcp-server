@@ -87,7 +87,7 @@ export function caneMilestone(prereqs: string[]): Milestone {
 /** Once a day: cut the cane down to its base (the stalk above the bottom block), and replant a missing base. */
 export const caneRound: Goal = {
   name: 'cane',
-  priority: 26,
+  priority: 29,
   timeoutMs: 6 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {

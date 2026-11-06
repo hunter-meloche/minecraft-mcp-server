@@ -44,7 +44,7 @@ test('a full kit needs nothing', (t) => {
 test('a worn diamond pickaxe with diamonds in the chest: craft a new one', (t) => {
   const items = kit().map(i => (i.name === 'diamond_pickaxe' ? { ...i, damage: 1500 } : i));
   items.push({ slot: 8, name: 'stick', count: 2 });
-  t.deepEqual(kitNeeds(items, { diamond: 3 }), [{
+  t.deepEqual(kitNeeds(items, { diamond: 3 }).filter(n => n.why !== 'below iron'), [{
     kind: 'pickaxe', spare: true, have: 'diamond_pickaxe', why: 'worn', bestPossible: 'diamond_pickaxe', // the sound stone one is the main pickaxe now
     plan: [{ craft: 'diamond_pickaxe', times: 1, materials: { stick: 2, diamond: 3 }, fromChest: { diamond: 3 } }]
   }]);
@@ -178,5 +178,5 @@ test('a sound pickaxe beats a worn-out better one, so the need is met once a sou
   const { best, spare } = carriedKit(items);
   t.is(best.pickaxe?.slot, 1);
   t.is(spare?.slot, 2);
-  t.false(kitNeeds(items, {}).some(n => n.kind === 'pickaxe'));
+  t.false(kitNeeds(items, {}).some(n => n.kind === 'pickaxe' && n.why !== 'below iron'));
 });

@@ -118,7 +118,7 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
 /** Every few minutes by day: up to three things at each pen (lure, cull, shear, breed). */
 export const pens: Goal = {
   name: 'pens',
-  priority: 27,
+  priority: 46,
   timeoutMs: 8 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {

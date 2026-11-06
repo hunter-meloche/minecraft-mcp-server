@@ -44,7 +44,7 @@ export function tripCheck(s: Snapshot) {
 
 export const deepTrip: Goal = {
   name: 'deep trip',
-  priority: 38,
+  priority: 37,
   timeoutMs: 14 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {

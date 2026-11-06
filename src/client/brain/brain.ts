@@ -11,8 +11,12 @@ import { deepTrip } from './deep.js';
 import { caneRound } from './cane.js';
 import { enchantGoal } from './enchant.js';
 import { HeatMap } from './paths.js';
+import { LoopWatch, type Outcome, type Run } from './loops.js';
+
+/** Staying alive: never backed off by the loop watch. */
+const SURVIVAL = new Set(['wake', 'break out', 'recover', 'retreat', 'shelter', 'food']);
 import { breakOut, returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
-import { food, recoverGoal, retreat } from './food.js';
+import { food, larder, recoverGoal, retreat } from './food.js';
 import { farm, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
 import { readBox } from './milestones.js';
@@ -81,7 +85,7 @@ export class Brain {
 
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, farm, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, projectGoal(TREE), returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, sortStorage, projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -194,12 +198,17 @@ export class Brain {
       for (const j of prog.journal.slice(-6)) lines.push(`  ${new Date(j.at).toISOString().slice(11, 16)} ${j.text}`);
     }
     if (this.day.work) lines.push(`Today: idle ${Math.round(100 * this.day.idle / this.day.work)}% of daytime${this.day.lastIdle ? ` (yesterday ${this.day.lastIdle}%)` : ''}.`);
+    const loops = this.loops.found.filter(f => this.now() - f.at < 60 * 60_000);
+    if (loops.length) lines.push('Loops in the last hour (fix these in the code):', ...loops.map(f => `- ${new Date(f.at).toISOString().slice(11, 19)} ${f.loop.kind}: ${f.loop.summary}`));
     if (this.log.length) lines.push('Recent:', ...this.log.slice(-20).map(l => `- ${l}`));
     return lines.join('\n');
   }
 
   /** Count today's daytime ticks and the idle ones (a new day starts when the clock wraps). */
   private heat?: { world: string; map: HeatMap; last?: Pos; saved: number };
+  private readonly loops = new LoopWatch();
+  /** why the running goal was stopped (what stopped it), for the loop watch */
+  private stopWhy?: string;
 
   /**
    * Count the cells walked since the last tick into the world's heat map (its routes, which the lights round lights).
@@ -335,11 +344,13 @@ export class Brain {
     };
     this.note(`start ${goal.name}: ${reason}`);
     const started = this.now();
+    const run = this.loops.begin(goal.name, reason, started);
     const done = brainRun.run({ signal: abort.signal }, () => goal.run(ctx))
       .then(text => {
         this.retryAt.delete(goal.name);
         this.fails.delete(goal.name);
         this.note(`done ${goal.name} in ${Math.round((this.now() - started) / 1000)}s: ${text}`);
+        this.loopCheck(run, 'done', text);
       })
       .catch((e: Error) => {
         // stopped for something more urgent (or the LLM) is no failure: it may go again as soon as it's wanted
@@ -357,6 +368,7 @@ export class Brain {
           }
         }
         this.note(`${abort.signal.aborted ? 'stopped' : 'failed'} ${goal.name}: ${e.message}`);
+        this.loopCheck(run, abort.signal.aborted ? 'stopped' : 'failed', this.stopWhy ?? e.message);
       })
       .finally(() => {
         if (this.running?.abort === abort) this.running = undefined;
@@ -368,9 +380,29 @@ export class Brain {
     void this.show();
   }
 
+  /**
+   * After each run: going round in circles? Log it (brain.log, loops.log beside it, and brain-status) for someone to
+   * fix in the code, and back the losing goal off for 10 minutes meanwhile; never a survival goal (then the other one).
+   */
+  private loopCheck(run: Run, outcome: Outcome, text: string): void {
+    this.stopWhy = undefined;
+    const loop = this.loops.end(run, outcome, text, this.now());
+    if (!loop) return;
+    const victim = !SURVIVAL.has(loop.victim) ? loop.victim : loop.goals.find(g => !SURVIVAL.has(g));
+    if (victim) this.retryAt.set(victim, this.now() + 10 * 60_000);
+    this.note(`LOOP (${loop.kind}): ${loop.summary}${victim ? `; ${victim} backed off for 10 min` : ''}`);
+    if (this.opts.logFile) {
+      try {
+        fs.appendFileSync(path.join(path.dirname(this.opts.logFile), 'loops.log'),
+          JSON.stringify({ at: new Date(this.now()).toISOString(), ...loop, backedOff: victim ?? null }) + '\n');
+      } catch { /* a convenience */ }
+    }
+  }
+
   private async stopRunning(why: string): Promise<void> {
     const r = this.running;
     if (!r) return;
+    this.stopWhy = why;
     this.note(`stopping ${r.goal.name}: ${why}`);
     r.abort.abort();
     await this.rt.call('cancel').catch(() => undefined);

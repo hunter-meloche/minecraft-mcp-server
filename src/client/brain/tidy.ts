@@ -40,7 +40,7 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
 export function tidyGoal(rt: ClientRuntime): Goal {
   return {
     name: 'tidy',
-    priority: 32,
+    priority: 34,
     timeoutMs: 6 * MINUTE,
     retryMs: 30 * MINUTE,
     wants: (s, world) => {

@@ -200,7 +200,7 @@ export function treeFarmMilestone(prereqs: string[]): Milestone {
  */
 export const treeFarm: import('./goals.js').Goal = {
   name: 'trees',
-  priority: 28,
+  priority: 30,
   timeoutMs: 10 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {

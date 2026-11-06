@@ -15,10 +15,10 @@ export function projectGoal(tree: Milestone[]): Goal {
   let running = false;
   return {
     name: 'project',
-    priority: 25,
+    priority: 28,
     // chores (stock trips, sorting, the farm round) can fill a short day: after 4 minutes of waiting the project goes
     // ahead of them, below food, kit and the stash (a whole day went by with the storage house never touched)
-    urgency: (s, world) => (running || s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 52 : 25),
+    urgency: (s, world) => (running || s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 39 : 28),
     timeoutMs: 9 * MINUTE,
     retryMs: 2 * MINUTE,
     wants: (s, world) => {

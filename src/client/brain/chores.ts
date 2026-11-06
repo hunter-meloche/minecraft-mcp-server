@@ -7,6 +7,7 @@ import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign } fr
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
+import { fuelFor } from './project.js';
 import { daylightLeft } from './schedule.js';
 import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
@@ -48,7 +49,7 @@ async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<
 /** Empty the pockets into the home chests: when nearly full, and once in a while when home anyway. */
 export const stash: Goal = {
   name: 'stash',
-  priority: 55,
+  priority: 60,
   timeoutMs: 6 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
@@ -162,6 +163,15 @@ export const sortStorage: Goal = {
 const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot' };
 const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
 
+/** Ingots wanted at home: a full iron kit's worth. */
+const INGOTS_KEPT = 24;
+/** Raw iron in the chests to smelt now: while the home has fewer than INGOTS_KEPT ingots. */
+function storedIronToSmelt(s: Snapshot, world: WorldMemory): number {
+  const chest = chestTotals(world);
+  const ingots = (s.counts.get('iron_ingot') ?? 0) + (chest.iron_ingot ?? 0);
+  return Math.min(chest.raw_iron ?? 0, Math.max(0, INGOTS_KEPT - ingots), 16);
+}
+
 /** Logs to burn into charcoal: when coal (carried and stored) is under 8 and it carries 10 or more of one kind. */
 function charcoalLogs(s: Snapshot, world: WorldMemory): { name: string; count: number } | undefined {
   const chest = chestTotals(world);
@@ -174,17 +184,31 @@ function charcoalLogs(s: Snapshot, world: WorldMemory): { name: string; count: n
 /** Raw ore carried home: smelt it at the home furnace; charcoal when coal runs low. */
 export const smelt: Goal = {
   name: 'smelt',
-  priority: 50,
+  priority: 62,
   timeoutMs: 10 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
     if (!awakeAtHome(s) || !world.landmarks.furnace) return null;
     const ore = Object.keys(ORES).find(o => (s.counts.get(o) ?? 0) > 0);
     if (ore && FUELS.some(f => (s.counts.get(f) ?? 0) > 0)) return `${s.counts.get(ore)} ${ore} to smelt`;
+    if (storedIronToSmelt(s, world) > 0) return `${storedIronToSmelt(s, world)} raw iron in the chests to smelt for the gear`;
     return charcoalLogs(s, world) ? 'low on coal: charcoal from logs' : null;
   },
   run: async ctx => {
     const did: string[] = [];
+    // raw iron the stash put away, while the home is short of ingots (the gear wants them)
+    const fromChest = storedIronToSmelt(ctx.s, ctx.world);
+    if (fromChest > 0) {
+      const got = await takeFromChests(ctx, 'raw_iron', fromChest);
+      if (got) {
+        const fuel = await fuelFor(ctx);
+        if (fuel) {
+          const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: 'raw_iron', inputCount: got, fuelItem: fuel, takeOutput: true, timeoutMs: got * 10_500 + 15_000 });
+          did.push(r.ok ? `smelted ${got} raw_iron from the chests` : `could not smelt raw_iron: ${r.text}`);
+          ctx.progress(did.at(-1)!);
+        }
+      }
+    }
     // charcoal when coal runs low (torches, cooking and smelting all burn it): logs in, planks or a log to burn
     const logs = charcoalLogs(ctx.s, ctx.world);
     if (logs) {
@@ -216,7 +240,7 @@ const label = (n: KitNeed) => `${'spare' in n && n.spare ? 'spare ' : ''}${n.kin
 /** Tools and armour worn out or missing, torches or throwaway blocks short: take from the chests or craft. */
 export const kit: Goal = {
   name: 'kit',
-  priority: 60,
+  priority: 70,
   timeoutMs: 8 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
@@ -268,8 +292,11 @@ export const STOCK: { name: string; want: number; mine: string; counts: RegExp }
 /** After a trip that found none of something, leave it this long (try the next thing; what's near may be out of reach). */
 const FRUITLESS_WAIT = 30 * MINUTE;
 
+/** The kit is waiting on a stock trip (iron for iron gear, coal for torches, ...), and raw ore at home won't do. */
+const gearShort = (s: Snapshot, world: WorldMemory) => stockShort(s, world).some(t => t.gear);
+
 /** How short the home is of each stock item (kit gathering needs on top), most urgent first. */
-export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp }[] {
+export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp; gear: boolean }[] {
   const chest = chestTotals(world);
   const have = (re: RegExp) => [...s.counts].filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0) +
     Object.entries(chest).filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0);
@@ -277,11 +304,17 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
   for (const n of kitNeeds(s.items, chest)) {
     for (const st of n.plan) if ('gather' in st) for (const [k, v] of Object.entries(st.gather)) extra[k] = (extra[k] ?? 0) + v;
   }
+  // raw iron at home is iron the smelter turns into ingots: not a reason to mine more
+  if (extra.iron_ingot) {
+    const raw = (s.counts.get('raw_iron') ?? 0) + (chest.raw_iron ?? 0);
+    extra.iron_ingot = Math.max(0, extra.iron_ingot - raw);
+    if (!extra.iron_ingot) delete extra.iron_ingot;
+  }
   // what the project in hand is short of (its bill broken down to raw materials)
   const project = world.progress?.need ?? {};
   // a project short of a particular wood's logs mines that wood
   const woods = Object.keys(project).filter(k => /_log$/.test(k)).map(k => ({ name: k, want: 0, mine: k, counts: new RegExp(`^${k}$`) }));
-  const out = [...STOCK, ...woods].map(t => ({ ...t, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
+  const out = [...STOCK, ...woods].map(t => ({ ...t, gear: (extra[t.name] ?? 0) > 0, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
     .filter(t => t.short > 0 && since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT);
   // what the kit is waiting for first
   return out.sort((a, b) => Number(!!extra[b.name]) - Number(!!extra[a.name]));
@@ -293,7 +326,9 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
  */
 export const stock: Goal = {
   name: 'stock',
-  priority: 40,
+  priority: 33,
+  // materials for the gear go with the gear (second only to staying alive); the rest is home upkeep
+  urgency: (s, world) => (gearShort(s, world) ? 64 : 33),
   timeoutMs: 12 * MINUTE,
   retryMs: 8 * MINUTE,
   wants: (s, world) => {
@@ -406,7 +441,7 @@ export function outsideBy(yard: { x1: number; z1: number; x2: number; z2: number
  */
 export const lights: Goal = {
   name: 'lights',
-  priority: 30,
+  priority: 36,
   timeoutMs: 12 * MINUTE,
   retryMs: 15 * MINUTE,
   wants: (s, world) => {
@@ -487,7 +522,7 @@ export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: st
 /** Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat. */
 export const farm: Goal = {
   name: 'farm',
-  priority: 45,
+  priority: 47,
   timeoutMs: 6 * MINUTE,
   retryMs: 15 * MINUTE,
   wants: (s, world) => {
