@@ -428,15 +428,22 @@ const WOODS_DIRS = ['north', 'east', 'south', 'west'] as const;
  * the plains had no tree within 96 blocks once its first few were felled: every trip found nothing and the storage
  * house waited for its logs all day. `text` says what it did; ok false when there are no woods within reach.
  */
-export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress'>, kinds: string[]): Promise<{ ok: boolean; text: string }> {
+export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress'>, kinds: string[], ownOnly = false): Promise<{ ok: boolean; text: string }> {
+  // a tree, not a log of its own: none in the yard or on a site the yard's projects keep (the storage house is logs)
+  const y = ctx.world.yard;
+  const sites = [...Object.values(ctx.world.zones ?? {}).flat().filter(b => b.width && b.length),
+    ...(ctx.world.progress?.current?.data?.site ? [ctx.world.progress.current.data.site as { x: number; z: number; width?: number; length?: number }] : [])];
+  const ours = (p: Pos) => (y && p.x >= y.x1 - 1 && p.x <= y.x2 + 1 && p.z >= y.z1 - 1 && p.z <= y.z2 + 1) ||
+    sites.some(b => p.x >= b.x - 1 && p.x <= b.x + b.width! && p.z >= b.z - 1 && p.z <= b.z + b.length!);
   const inSight = async () => {
     for (const block of kinds) {
-      const r = await ctx.call<{ positions: Pos[] }>('world.findBlocks', { block, maxDistance: WOOD_SIGHT, count: 1 }).catch(() => ({ positions: [] as Pos[] }));
-      if (r.positions.length) return true;
+      const r = await ctx.call<{ positions: Pos[] }>('world.findBlocks', { block, maxDistance: WOOD_SIGHT, count: 24 }).catch(() => ({ positions: [] as Pos[] }));
+      if (r.positions.some(p => !ours(p))) return true;
     }
     return false;
   };
-  if (await inSight()) return { ok: true, text: '' };
+  // ownOnly: the logs in sight are the bot's own builds (the storage house's posts), not trees
+  if (!ownOnly && await inSight()) return { ok: true, text: '' };
   const zones = (ctx.world.zones ??= {});
   const known = zones.woods?.[0];
   if (known) {
@@ -501,8 +508,18 @@ export const stock: Goal = {
     }
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
     // as much as the trip's time allows (a build job's whole bill, not a stack at a time)
-    const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
+    let r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
     ctx.progress(r.text.slice(0, 160));
+    // the only logs in sight were its own (the storage house's posts are oak): off to the woods, and mine there
+    // (the trip saw "trees" at home, mined nothing, and the storage house stayed 3 logs short all afternoon)
+    if (/_log(,|$)/.test(t.mine) && /isn't part of a build|Unable to find any path/.test(r.text) && /Mined 0 |nothing gained/.test(r.text)) {
+      const woods = await toTheWoods(ctx, t.mine.split(','), true);
+      if (woods.ok) {
+        ctx.progress(woods.text);
+        r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
+        ctx.progress(r.text.slice(0, 160));
+      }
+    }
     if (/nothing gained|in sight outside the home area/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
     // a project's shortfall is served once per trip: the project works out what's still short when it next runs
     // (left standing, it had the bot fetch 22 more birch logs trip after trip)

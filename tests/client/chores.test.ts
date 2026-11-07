@@ -313,6 +313,21 @@ test('toTheWoods: a tree in sight is enough; else the remembered woods; else eac
   t.deepEqual(await toTheWoods(known.ctx, ['oak_log']), { ok: true, text: 'off to the woods at (10, 120)' });
   t.deepEqual(known.acts, ['move-to-position']);
 
+  // logs in sight that are its own builds: it goes to the woods all the same
+  const own = io([true, true], {});
+  own.world.zones.woods = [{ x: 10, y: 70, z: 120 }];
+  t.deepEqual(await toTheWoods(own.ctx, ['oak_log'], true), { ok: true, text: 'off to the woods at (10, 120)' });
+  t.deepEqual(own.acts, ['move-to-position']);
+
+  // its storage house's logs in the zones it keeps are no trees: off to the woods
+  const house = io([true, true], {});
+  house.world.zones.storage = [{ x: 0, y: 64, z: 0, width: 7, length: 9 } as never];
+  house.world.zones.woods = [{ x: 10, y: 70, z: 120 }];
+  let looks = 0; // at home only the storage house's log; at the woods a tree
+  house.ctx.call = (async () => ({ positions: [looks++ === 0 ? { x: 1, y: 64, z: 1 } : { x: 11, y: 70, z: 121 }] })) as GoalContext['call'];
+  const seen = await toTheWoods(house.ctx, ['oak_log']);
+  t.deepEqual(seen, { ok: true, text: 'off to the woods at (10, 120)' }, 'the log at (1, 64, 1) is the storage house');
+
   const none = io([false], {});
   t.false((await toTheWoods(none.ctx, ['oak_log'])).ok);
   t.is(none.acts.filter(a => a.startsWith('explore')).length, 4);
