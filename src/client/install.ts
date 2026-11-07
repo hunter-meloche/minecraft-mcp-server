@@ -80,6 +80,9 @@ export function findLauncherJava(minecraftDir: string, component = 'java-runtime
       if (fs.existsSync(path.join(bin, exe))) return bin;
       const flat = path.join(base, platformDir, 'bin'); // some layouts skip the inner folder
       if (fs.existsSync(path.join(flat, exe))) return flat;
+      // macOS: a JRE bundle (runtime/java-runtime-epsilon/mac-os-arm64/java-runtime-epsilon/jre.bundle/Contents/Home/bin)
+      const bundle = path.join(base, platformDir, component, 'jre.bundle', 'Contents', 'Home', 'bin');
+      if (fs.existsSync(path.join(bundle, exe))) return bundle;
     }
   }
   return null;

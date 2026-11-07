@@ -81,6 +81,8 @@ export function prepareLaunch(opts: LaunchOptions, modDir = clientModDir()): Lau
   fs.mkdirSync(natives, { recursive: true });
 
   const args = [
+    // macOS: the window (SDL) must run on the process's first thread, as the official launcher arranges
+    ...(process.platform === 'darwin' ? ['-XstartOnFirstThread'] : []),
     '-Xmx2G', '-XX:StackShadowPages=32', '--enable-native-access=ALL-UNNAMED', '--add-exports', 'java.base/jdk.internal.misc=ALL-UNNAMED',
     `-Djava.library.path=${natives}`, `-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives}`, `-Djna.tmpdir=${natives}`,
     `-Dio.netty.native.workdir=${natives}`, `-Dfabric.gameVersion=${MC_VERSION}`,
