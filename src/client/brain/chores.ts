@@ -62,13 +62,55 @@ const STOCK_SLOTS = 30;
 /** How far out (the yard, a build job's site) the stash still goes home to make room for a waiting trip. */
 const TRIP_STASH_RANGE = 40;
 
+/** A chest to put down: one carried, or 8 planks to make one. */
+function canFirstChest(s: Snapshot): boolean {
+  const planks = [...s.counts].filter(([n]) => /_planks$/.test(n)).reduce((a, [, k]) => a + k, 0);
+  return (s.counts.get('chest') ?? 0) > 0 || planks >= 8;
+}
+
+/**
+ * The first chest, before the storage house: on solid ground 2 to 4 blocks from home, room over it to open the lid,
+ * clear of the sites the yard's projects keep (the storage house, the plot...). A new bot's pockets filled before
+ * its storage house could be built (it needed logs, and a wood trip won't set out at 30 slots): it stood all day.
+ */
+export async function firstChest(ctx: Pick<GoalContext, 'call' | 'act' | 's' | 'world'>): Promise<Pos | undefined> {
+  const home = ctx.s.home!;
+  if (!(ctx.s.counts.get('chest') ?? 0)) {
+    const r = await ctx.act('craft-item', { outputItem: 'chest', amount: 1 });
+    if (!r.ok) return undefined;
+  }
+  const box = { x: home.x - 4, y: home.y - 1, z: home.z - 4, width: 9, height: 3, length: 9 };
+  const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', box);
+  const at = (x: number, y: number, z: number) => (blocks[(x - box.x) + (z - box.z) * 9 + (y - box.y) * 81] ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+  const OPEN = /^(air|cave_air|short_grass|tall_grass|fern|leaf_litter|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|wildflowers|pink_petals|snow)$/;
+  const SOLID = /^(dirt|grass_block|coarse_dirt|podzol|stone|cobblestone|deepslate|cobbled_deepslate|sand|sandstone|.*_planks|andesite|diorite|granite|tuff|mud|moss_block)$/;
+  // the yard's zones, and the site the project under way has picked (the storage house's, before it stands)
+  const picked = ctx.world.progress?.current?.data?.site as { x: number; z: number; width?: number; length?: number } | undefined;
+  const kept = [...Object.values(ctx.world.zones ?? {}).flat(), ...(picked ? [{ ...picked, y: 0 }] : [])].filter(b => b.width && b.length);
+  const inSite = (x: number, z: number) => kept.some(b => x >= b.x && x < b.x + b.width! && z >= b.z && z < b.z + b.length!);
+  const spots: (Pos & { d: number })[] = [];
+  for (let dz = -4; dz <= 4; dz++) for (let dx = -4; dx <= 4; dx++) {
+    const d = Math.max(Math.abs(dx), Math.abs(dz));
+    const x = home.x + dx, z = home.z + dz;
+    if (d < 2 || inSite(x, z)) continue;
+    if (OPEN.test(at(x, home.y, z)) && OPEN.test(at(x, home.y + 1, z)) && SOLID.test(at(x, home.y - 1, z))) spots.push({ x, y: home.y, z, d });
+  }
+  for (const p of spots.sort((a, b) => a.d - b.d).slice(0, 4)) {
+    const r = await ctx.act('place-block', { x: p.x, y: p.y, z: p.z, item: 'chest' });
+    if (r.ok && /^Placed/.test(r.text)) return { x: p.x, y: p.y, z: p.z };
+  }
+  return undefined;
+}
+
 export const stash: Goal = {
   name: 'stash',
   priority: 60,
   timeoutMs: 6 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
-    if (!world.landmarks.chests.length || s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
+    if (s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
+    // no chest at home yet (a new bot, before its storage house): one put down beside home will do, if it has one
+    if (!world.landmarks.chests.length && !canFirstChest(s)) return null;
     // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used) is worth the walk home: the
     // build job keeps the bot at its site, 24 blocks out, where it waited all day at 31 slots
     // (not while a build job carries its load: those pockets are full on purpose)
@@ -91,6 +133,12 @@ export const stash: Goal = {
     return null;
   },
   run: async ctx => {
+    if (!ctx.world.landmarks.chests.length) {
+      const at = await firstChest(ctx);
+      if (!at) throw new Error('no chest at home, and none could be put down beside it');
+      ctx.world.landmarks.chests.push(at);
+      ctx.progress(`no chest at home yet: put one down at (${at.x}, ${at.y}, ${at.z})`);
+    }
     const plan = stashPlan(ctx.s.items, { foods: foods(), keep: projectCarry(ctx.world) });
     const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
     let stored = 0;
@@ -394,8 +442,55 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
   const woods = Object.keys(project).filter(k => /_log$/.test(k)).map(k => ({ name: k, want: 0, mine: k, counts: new RegExp(`^${k}$`) }));
   const out = [...STOCK, ...woods].map(t => ({ ...t, gear: (extra[t.name] ?? 0) > 0, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
     .filter(t => t.short > 0 && since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT);
-  // what the kit is waiting for first
-  return out.sort((a, b) => Number(!!extra[b.name]) - Number(!!extra[a.name]));
+  // what the kit is waiting for first, then what a project or a build job is short of, then the home's own stock: the
+  // home's "32 logs of any kind" came first, and with 30 carried every trip to the woods (160 blocks out) brought back
+  // the 2 that topped it up, while the storage house waited for its oak
+  const rank = (t: { name: string }) => (extra[t.name] ? 2 : (project[t.name] ?? 0) > 0 ? 1 : 0);
+  return out.sort((a, b) => rank(b) - rank(a));
+}
+
+/** How far round the bot a tree counts as in sight for a wood trip (Baritone's miner finds what's loaded near it). */
+const WOOD_SIGHT = 64;
+const WOODS_DIRS = ['north', 'east', 'south', 'west'] as const;
+
+/**
+ * Where a wood trip can mine: here if a tree of one of `kinds` is in sight; else the woods it found before; else it
+ * looks for trees round home (each side in turn, within its leash) and remembers where it found them. A home out on
+ * the plains had no tree within 96 blocks once its first few were felled: every trip found nothing and the storage
+ * house waited for its logs all day. `text` says what it did; ok false when there are no woods within reach.
+ */
+export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress'>, kinds: string[]): Promise<{ ok: boolean; text: string }> {
+  const inSight = async () => {
+    for (const block of kinds) {
+      const r = await ctx.call<{ positions: Pos[] }>('world.findBlocks', { block, maxDistance: WOOD_SIGHT, count: 1 }).catch(() => ({ positions: [] as Pos[] }));
+      if (r.positions.length) return true;
+    }
+    return false;
+  };
+  if (await inSight()) return { ok: true, text: '' };
+  const zones = (ctx.world.zones ??= {});
+  const known = zones.woods?.[0];
+  if (known) {
+    ctx.progress?.(`no tree in sight: to the woods at (${known.x}, ${known.z})`);
+    await ctx.act('move-to-position', { ...known, range: 6, timeoutMs: 150_000 });
+    if (await inSight()) return { ok: true, text: `off to the woods at (${known.x}, ${known.z})` };
+    delete zones.woods; // felled, or not there after all: look again
+  }
+  const reach = Math.min(Math.max(ctx.world.leash ?? 96, 48), 160);
+  for (const direction of WOODS_DIRS) {
+    ctx.progress?.(`no tree in sight: looking ${direction} for ${kinds[0]}`);
+    const r = await ctx.act('explore', { target: kinds[0], direction, maxDistance: reach, step: 32, timeoutMs: 90_000 });
+    const m = /^Found [a-z_]+ at \((-?\d+), (-?\d+), (-?\d+)\)/.exec(r.text);
+    if (m) {
+      const at = { x: Number(m[1]), y: Number(m[2]), z: Number(m[3]) };
+      zones.woods = [at];
+      // explore says so as soon as it sees one, maybe 60 blocks off: Baritone's miner found no path from there
+      await ctx.act('move-to-position', { ...at, range: 6, timeoutMs: 150_000 });
+      return { ok: true, text: `found woods ${direction} at (${at.x}, ${at.z})` };
+    }
+    await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+  }
+  return { ok: false, text: `no ${kinds[0]} within ${reach} blocks of home on any side` };
 }
 
 /**
@@ -425,6 +520,16 @@ export const stock: Goal = {
     // back home by the evening: daylight left less a 90 s walk home
     const budget = Math.min(6 * MINUTE, daylightLeft(ctx.s.timeOfDay) * 50 - 90_000);
     if (budget < 60_000) return 'too late in the day';
+    // wood with no tree in sight (a home out on the plains): off to the woods first, remembered or looked for
+    if (/_log(,|$)/.test(t.mine)) {
+      const woods = await toTheWoods(ctx, t.mine.split(','));
+      if (!woods.ok) {
+        done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
+        await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+        return woods.text;
+      }
+      if (woods.text) ctx.progress(woods.text);
+    }
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
     // as much as the trip's time allows (a build job's whole bill, not a stack at a time)
     const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });

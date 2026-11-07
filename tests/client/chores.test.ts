@@ -1,5 +1,5 @@
 import test from 'ava';
-import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stock, outsideBy, stockShort } from '../../src/client/brain/chores.js';
+import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -280,4 +280,75 @@ test('smelt: ore still carried after the smelt is a failure, not "done" (the 7 r
     progress: () => undefined
   };
   await t.throwsAsync(smelt.run(ctx as never), { message: /could not smelt raw_copper: Furnace input slot is occupied/ });
+});
+
+test('toTheWoods: a tree in sight is enough; else the remembered woods; else each side of home in turn, and remembered', async t => {
+  const io = (sight: boolean[], found: Record<string, string>) => {
+    const acts: string[] = [];
+    let look = 0;
+    const world = { zones: {} as Record<string, { x: number; y: number; z: number }[]>, leash: 96 };
+    return {
+      acts, world,
+      ctx: {
+        world: world as unknown as WorldMemory, progress: () => undefined,
+        call: (async (m: string) => (m === 'world.findBlocks' ? { positions: sight[look++] ? [{ x: 1, y: 64, z: 1 }] : [] } : {})) as GoalContext['call'],
+        act: async (tool: string, a: Record<string, unknown> = {}) => {
+          acts.push(tool === 'explore' ? `explore ${a.direction}` : tool);
+          return { ok: true, text: tool === 'explore' ? (found[String(a.direction)] ?? 'oak_log not found within 96 blocks') : 'ok' };
+        }
+      }
+    };
+  };
+  const here = io([true], {});
+  t.deepEqual(await toTheWoods(here.ctx, ['oak_log']), { ok: true, text: '' });
+  t.deepEqual(here.acts, []);
+
+  const search = io([false], { south: 'Found oak_log at (10, 70, 120), 120 blocks south of where the search began; the bot is at (10, 64, 110).' });
+  t.deepEqual(await toTheWoods(search.ctx, ['oak_log']), { ok: true, text: 'found woods south at (10, 120)' });
+  t.deepEqual(search.acts, ['explore north', 'go-home', 'explore east', 'go-home', 'explore south', 'move-to-position'], 'and walks up to the trees it saw');
+  t.deepEqual(search.world.zones.woods, [{ x: 10, y: 70, z: 120 }]);
+
+  const known = io([false, true], {});
+  known.world.zones.woods = [{ x: 10, y: 70, z: 120 }];
+  t.deepEqual(await toTheWoods(known.ctx, ['oak_log']), { ok: true, text: 'off to the woods at (10, 120)' });
+  t.deepEqual(known.acts, ['move-to-position']);
+
+  const none = io([false], {});
+  t.false((await toTheWoods(none.ctx, ['oak_log'])).ok);
+  t.is(none.acts.filter(a => a.startsWith('explore')).length, 4);
+});
+
+test('stash with no chest at home yet: wanted when full and a chest is carried; firstChest puts one beside home, off the sites', async t => {
+  const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'granite', count: 64 }));
+  const none = world({ landmarks: { chests: [], farmland: [] }, chestItems: {} });
+  t.is(stash.wants(snap([...gear(), ...junk]), none), null, 'nothing to put a chest down with');
+  const withChest = snap([...gear(), ...junk, { slot: 35, name: 'chest', count: 8 }]);
+  t.regex(stash.wants(withChest, none) ?? '', /slots used/);
+
+  // grass everywhere at y 63, air above; the storage house's site covers x 1..7: the first spot off it is west
+  const blocks = Array.from({ length: 243 }, (_, i) => (Math.floor(i / 81) === 0 ? 'grass_block' : 'air'));
+  const placed: Record<string, unknown>[] = [];
+  const ctx = {
+    s: withChest, world: world({
+      landmarks: { chests: [], farmland: [] },
+      // the storage house's site, picked but not built: only in the project's own data
+      progress: { done: [], journal: [], current: { id: 'storage', step: 1, data: { site: { x: 1, z: -4, width: 7, length: 9, y: 63 } } } }
+    } as Partial<WorldMemory>),
+    call: (async () => ({ blocks })) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => { placed.push({ tool, ...a }); return { ok: true, text: 'Placed chest at somewhere' }; }
+  };
+  const at = await firstChest(ctx);
+  t.truthy(at);
+  t.true(at!.x <= -2 || Math.abs(at!.z) >= 2, 'not on the storage site');
+  t.true(at!.x < 1, 'off the site');
+  t.is(Math.max(Math.abs(at!.x), Math.abs(at!.z)), 2, 'close to home');
+  t.like(placed[0], { tool: 'place-block', item: 'chest', y: 64 });
+});
+
+test('stockShort: a project short of oak goes before the home keeping its 32 logs of any kind', t => {
+  const logs = [{ slot: 20, name: 'oak_log', count: 30 }];
+  const w = world({ progress: { done: [], journal: [], need: { oak_log: 12 } } } as Partial<WorldMemory>);
+  const short = stockShort(snap([...gear(), ...logs]), w).map(x => `${x.name} ${x.short}`);
+  t.true(short.indexOf('oak_log 12') >= 0 && short.indexOf('oak_log 12') < short.indexOf('log 2'), short.join(', '));
+  t.true(short.indexOf('cobblestone 24') > short.indexOf('oak_log 12'), 'the home stock after the project');
 });

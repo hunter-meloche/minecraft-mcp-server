@@ -7,6 +7,9 @@ import { farmAll } from './chores.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 
+/** How far round the bot the hunt looks for game. */
+const HUNT_RANGE = 64;
+
 /**
  * Food: keep enough ready-to-eat food on the bot that the Guardian can always heal it, the cheapest way first:
  * the home chest, cooking what it carries, bread from wheat, the farm, fishing, and last hunting (never the last two
@@ -203,12 +206,13 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
   // 6. hunt, keeping two of each kind: wild ones only (never named, tamed, on a lead, in someone's pen, or grazing by
   // someone's builds: on a friend's server those are theirs), and one in particular, not "the nearest cow"
   if (!enough() && working) {
-    const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: 32 });
+    // 64 round: out on the plains the herds grazed 40 to 65 blocks off, never 3 of a kind within 32, and it went hungry
+    const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: HUNT_RANGE });
     const wild = entities.filter(e => !someones(e, ctx.world.yard));
     const kind = GAME.find(g => wild.filter(e => e.name === g).length >= 3);
     const prey = kind ? wild.filter(e => e.name === kind).sort((a, b) => a.distance - b.distance)[0] : undefined;
     if (kind && prey) {
-      const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: 32, timeoutMs: 30_000 });
+      const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: HUNT_RANGE, timeoutMs: 45_000 });
       say(r.ok ? `hunted a ${kind}` : `could not hunt a ${kind}`);
       await ctx.act('collect-items', { radius: 6, timeoutMs: 30_000 }).catch(() => undefined);
       await refresh();
