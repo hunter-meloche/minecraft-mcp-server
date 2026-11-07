@@ -1,10 +1,10 @@
 import type { Goal, GoalContext, Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
-import { deepTripReady, tripBudgetMs } from './mine.js';
+import { MINE_FROM_BUILDS, deepTripReady, pickMineStart, tripBudgetMs } from './mine.js';
 import { readyFoodPoints } from './food.js';
 import { tier } from './kit.js';
 import { chestTotals } from './chests.js';
-import { addZone } from './milestones.js';
+import { nearestZone, type Zone } from './courtesy.js';
 
 /**
  * Deep trips for diamonds: by day, kitted out (deepTripReady: health, food, iron armour, torches, blocks, room), from a
@@ -73,16 +73,24 @@ async function trip(ctx: GoalContext): Promise<string> {
     const budget = Math.min(10 * MINUTE, tripBudgetMs(ctx.s.timeOfDay, 2 * MINUTE));
     if (budget < 3 * MINUTE) throw new Error('too late in the day for a deep trip');
     const home = ctx.s.home!;
-    // the departure point: remembered; at first well outside the home zone on the side away from the lake (south)
-    let start = ctx.world.zones?.mine?.[0];
-    if (!start) {
-      const yard = ctx.world.yard;
-      const north = (yard ? home.z - yard.z1 : 16) + 40;
-      start = { x: home.x, y: home.y, z: home.z - north };
-      addZone(ctx.world, 'mine', start);
-    }
+    // the departure point: remembered; at first well outside the home zone on the side away from the lake (south),
+    // and never by someone else's build (a friend's base): another side of the yard then
+    const zones = async () => (await ctx.call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
+    const seen = await zones();
+    const start = pickMineStart(home, ctx.world.yard, ctx.world.zones?.mine?.[0], p => nearestZone(p, seen, true).distance);
+    if (!start) throw new Error("every side of the yard has someone else's build by it: no deep trip from here");
+    (ctx.world.zones ??= {}).mine = [start];
     ctx.progress(`out to the mine at (${start.x}, ${start.z})`);
     await ctx.call('goto', { ...start, xz: true, range: 4, timeoutMs: 180_000 }, 195_000);
+    // there, the bot sees round it (the mod looks every 5 s): a build it couldn't see from home means another side next time
+    await new Promise(r => setTimeout(r, 6000));
+    const here = (await ctx.call<{ position?: { x: number; y: number; z: number } }>('status').catch(() => undefined))?.position ?? start;
+    const near = nearestZone({ x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) }, await zones(), true);
+    if (near.distance < MINE_FROM_BUILDS) {
+      delete ctx.world.zones.mine;
+      const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+      return `someone else's build ${Math.round(near.distance)} blocks from the mine site: the next trip sets out from another side${back.ok ? '; back home' : ''}`;
+    }
     const want = diamondsWanted(ctx.s, ctx.world);
     ctx.progress(`mining for ${want} diamond(s), ${Math.round(budget / MINUTE)} min`);
     const r = await ctx.act('mine-blocks', { block: ORE, count: Math.min(want, 8), timeoutMs: budget });

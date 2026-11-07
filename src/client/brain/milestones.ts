@@ -5,6 +5,7 @@ import { allItems, mostWood, progressOf } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
 import { billLeft, billOf, type Blueprint } from './blueprints.js';
+import { YARD_FROM_BUILDS, zoneDistance, type Zone } from './courtesy.js';
 
 /**
  * Building blocks for milestones: find room in the yard (growing it when there is none), get the materials together,
@@ -116,7 +117,11 @@ async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number
     }
     return { h: null, water: false };
   };
-  const g = growYard(yard, footprint, { isWater: (x, z) => col(x, z).water, heightAt: (x, z) => col(x, z).h, level: yard.y });
+  // never toward someone else's build (a friend's base, a village): no side whose strip comes within 16 of one on the
+  // surface, or within 8 of something built under ground (a cellar right under the strip)
+  const zones = (await ctx.call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
+  const theirs = (x: number, z: number) => zones.some(zn => zoneDistance({ x, y: yard.y, z }, zn) < ((zn.surface ?? true) ? YARD_FROM_BUILDS : 8));
+  const g = growYard(yard, footprint, { isWater: (x, z) => col(x, z).water, heightAt: (x, z) => col(x, z).h, level: yard.y, forbid: theirs });
   if (!g) return blocked(`no room in the yard for the ${kind}, and no dry land beside it to grow into`, 60 * MINUTE);
   ctx.progress(`growing the yard to the ${g.side} for the ${kind}`);
   const r = await ctx.act('level-area', { x1: g.strip.x1, z1: g.strip.z1, x2: g.strip.x2, z2: g.strip.z2, level: yard.y, timeoutMs: 8 * MINUTE });

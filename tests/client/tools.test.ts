@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor } from '../../src/client/tools.js';
+import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor, offServer } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'level-area', 'mine-blocks', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'use-item-on-block']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'use-item-on-block']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -693,4 +693,70 @@ test('pausedFor reads the blocks Baritone paused for', t => {
     '[Baritone] Unable to do it. Pausing. resume to resume, cancel to cancel']), [{ id: 'lantern', count: 1 }]);
   t.deepEqual(pausedFor(['[Baritone] 10x Block{minecraft:oak_stairs}[facing=west]']), [{ id: 'oak_stairs', count: 10 }]);
   t.deepEqual(pausedFor(['[Baritone] Done building']), []);
+});
+
+test('set-home on a shared server: not near the builds of others nor in the spawn protection, unless forced', async t => {
+  const status = () => ({ ...STATUS, hashedSeed: '9', position: { x: 100.5, y: 64, z: 100.5 }, block: { x: 100, y: 64, z: 100 }, spawn: { x: 0, y: 64, z: 0 } });
+  const zones = [{ x1: 120, y1: 60, z1: 90, x2: 130, y2: 70, z2: 110, markers: 30, sample: 'oak_planks' }];
+  const { run } = setup({ status, 'foreign.zones': () => ({ zones }) });
+  const near = await run('set-home');
+  t.true(near.isError);
+  t.regex(near.text, /someone else's build is 20 blocks away/);
+  t.false((await run('set-home', { x: 100, y: 64, z: 300 })).isError, 'far from it: fine');
+  const spawn = await run('set-home', { x: 3, y: 64, z: 4 });
+  t.true(spawn.isError);
+  t.regex(spawn.text, /spawn protection/);
+  t.false((await run('set-home', { force: true })).isError, 'forced');
+});
+
+test('set-home and nearby-builds measure in a straight line: a mineshaft far under the spot is no neighbour, a cellar right under it is', async t => {
+  const status = () => ({ ...STATUS, hashedSeed: '9', position: { x: 100.5, y: 64, z: 100.5 }, block: { x: 100, y: 64, z: 100 } });
+  const mineshaft = { x1: 60, y1: -50, z1: 60, x2: 140, y2: -20, z2: 140, markers: 900, surface: false, sample: 'oak_planks', kinds: ['oak_planks x600', 'oak_fence x200', 'rail x100'] };
+  const tower = { x1: 90, y1: 141, z1: 90, x2: 110, y2: 155, z2: 110, markers: 137, surface: true, sample: 'glass', kinds: ['glass x137'] };
+  let zones: object[] = [mineshaft, tower];
+  const { run } = setup({ status, 'foreign.zones': () => ({ zones }) });
+  t.false((await run('set-home')).isError, 'the mineshaft is 84 down, the sky build 77 up');
+  const list = (await run('nearby-builds')).text;
+  t.regex(list, /Builds on the surface \(1\)[^]*glass x137; 77 blocks away, 77 above/);
+  t.regex(list, /Built under ground \(1;[^]*oak_planks x600, oak_fence x200, rail x100; 84 blocks away, 84 below/);
+  zones = [{ x1: 95, y1: 52, z1: 95, x2: 105, y2: 56, z2: 105, markers: 3, surface: false, sample: 'chest' }];
+  const cellar = await run('set-home');
+  t.true(cellar.isError);
+  t.regex(cellar.text, /something built under ground is 8 blocks away \(chest at y 52..56\)/);
+});
+
+test('off the server: tools say why and whether it comes back by itself; rejoin-server asks the mod to reconnect', async t => {
+  t.regex(offServer({ screen: 'DisconnectedScreen', disconnected: { reason: 'Server closed', rejoin: true, inSeconds: 30 } }), /off the server: "Server closed"\. It rejoins by itself in about 30 s/);
+  t.regex(offServer({ screen: 'DisconnectedScreen', disconnected: { reason: 'Kicked by an operator', rejoin: false } }), /no dropped connection \(a kick.*rejoin-server/);
+  t.regex(offServer({ screen: 'TitleScreen' }), /not in a world yet \(screen: TitleScreen\)/);
+  let asked = 0;
+  const { run } = setup({ status: () => ({ ...STATUS, inWorld: false, disconnected: { reason: 'Kicked by an operator', rejoin: false } }), 'server.rejoin': () => { asked++; return { rejoining: true, server: 'localhost:25565' }; } });
+  const off = await run('get-position');
+  t.true(off.isError);
+  t.regex(off.text, /no dropped connection \(a kick, a ban, the whitelist, a version mismatch/);
+  t.regex((await run('rejoin-server')).text, /Rejoining localhost:25565/);
+  t.is(asked, 1);
+  const left: unknown[] = [];
+  const on = setup({ 'server.leave': (a: unknown) => { left.push(a); return { left: true, rejoin: false }; } });
+  t.regex((await on.run('leave-server')).text, /stays off until rejoin-server/);
+  t.regex((await on.run('leave-server', { rejoin: true })).text, /rejoins by itself/);
+  t.deepEqual(left, [{ rejoin: false }, { rejoin: true }]);
+});
+
+test('a new server with no home and nothing built: the mod still hears both (its build scanner waits for them)', async t => {
+  const sent: string[] = [];
+  let synced = { protectSynced: false, zoneSynced: false };
+  const { run } = setup({
+    status: () => ({ ...STATUS, hashedSeed: '77', protectedCount: 0, ...synced }),
+    'protect.set': (p: Record<string, unknown>) => { sent.push(`set ${JSON.stringify(p.positions)}`); return {}; },
+    'protect.zone': (p: Record<string, unknown>) => { sent.push(`zone ${JSON.stringify(p)}`); return { set: false }; }
+  });
+  await run('get-position');
+  t.deepEqual(sent, ['set []', 'zone {"x":0,"z":0,"radius":0}']);
+  synced = { protectSynced: true, zoneSynced: true };
+  await run('get-position');
+  t.is(sent.length, 2, 'nothing resent once the mod has both');
+  synced = { protectSynced: false, zoneSynced: false }; // the client was relaunched
+  await run('get-position');
+  t.deepEqual(sent.slice(2), ['set []', 'zone {"x":0,"z":0,"radius":0}']);
 });

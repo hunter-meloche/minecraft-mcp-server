@@ -59,3 +59,27 @@ export function tripBudgetMs(timeOfDay: number, walkBackMs: number): number {
   const t = ((timeOfDay % 24000) + 24000) % 24000;
   return Math.max(0, (HOME_BY - t) * MS_PER_TICK - walkBackMs);
 }
+
+/** How far the deep trip's departure point keeps from anyone's build on the surface (Baritone digs nothing near one). */
+export const MINE_FROM_BUILDS = 32;
+
+type P3 = { x: number; y: number; z: number };
+
+/**
+ * Where a deep trip sets out from: the remembered point while it's clear of others' builds on the surface; otherwise
+ * the first clear one of the four sides of the yard, 40 blocks out (north first: the old default, away from the lake).
+ * Undefined when every side has someone's build by it. `distance` measures to the nearest build on the surface.
+ */
+export function pickMineStart(home: P3, yard: { x1: number; z1: number; x2: number; z2: number } | undefined, kept: P3 | undefined,
+  distance: (p: P3) => number): P3 | undefined {
+  const clear = (p: P3) => distance(p) >= MINE_FROM_BUILDS;
+  if (kept && clear(kept)) return kept;
+  const out = 40;
+  const sides: P3[] = [
+    { x: home.x, y: home.y, z: (yard?.z1 ?? home.z - 16) - out },
+    { x: (yard?.x2 ?? home.x + 16) + out, y: home.y, z: home.z },
+    { x: (yard?.x1 ?? home.x - 16) - out, y: home.y, z: home.z },
+    { x: home.x, y: home.y, z: (yard?.z2 ?? home.z + 16) + out }
+  ];
+  return sides.find(clear);
+}

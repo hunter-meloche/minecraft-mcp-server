@@ -173,6 +173,24 @@ test('lightArea: a torch that lights nothing dark is taken back up', async (t) =
   t.deepEqual((await lightArea(io, { x: 0, y: 64, z: 0 }, 16, { place: false, max: 5, ignore: new Set(['0,61,0']) })).dark, []);
 });
 
+test('lightArea: a yard too big for one region call is read in slabs of whole layers', async (t) => {
+  // radius 42 (an 82 x 26 yard): 85 x 85 x 13 = 93925 blocks, over the bridge's 65536 a call
+  const calls: { rpc: string; y: number; height: number }[] = [];
+  const io = {
+    act: async () => ({ ok: true, text: 'Placed torch' }),
+    call: (async (m: string, a: { y: number; width: number; height: number; length: number }) => {
+      if (a.width * a.height * a.length > 65_536) throw new Error('region too large (max 65536 blocks)');
+      calls.push({ rpc: m, y: a.y, height: a.height });
+      const n = a.width * a.height * a.length;
+      return m === 'world.region' ? { blocks: new Array(n).fill('air') } : { block: new Array(n).fill(15) };
+    }) as unknown as GoalContext['call']
+  };
+  const r = await lightArea(io, { x: 0, y: 64, z: 0 }, 42, { place: false, max: 0, ignore: new Set() });
+  t.deepEqual(r.dark, []);
+  t.deepEqual(calls.filter(c => c.rpc === 'world.region'), [{ rpc: 'world.region', y: 60, height: 9 }, { rpc: 'world.region', y: 69, height: 4 }]);
+  t.is(calls.filter(c => c.rpc === 'world.light').length, 2);
+});
+
 test('makeRod: string and sticks from the chest, then a fishing rod', async (t) => {
   const inv = new Map<string, number>([['oak_planks', 4]]);
   const acts: string[] = [];

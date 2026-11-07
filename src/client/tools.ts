@@ -18,6 +18,7 @@ import { freeLid } from './brain/chests.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
+import { WILD_DISTANCE, homeProblems, zoneDistance, type Creature, type Zone } from './brain/courtesy.js';
 
 export const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByName: Record<string, FoodInfo> }).foodsByName;
 
@@ -27,16 +28,33 @@ export const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByNa
  */
 
 interface Pos { x: number; y: number; z: number }
+/** Why the bot can't act: off the server (and whether it's coming back by itself), or still joining. */
+export function offServer(s: Pick<Status, 'screen' | 'disconnected'>): string {
+  const d = s.disconnected;
+  if (!d) return `The bot is not in a world yet (screen: ${s.screen ?? 'none'}). Try again shortly.`;
+  return `The bot is off the server: "${d.reason}". ` + (d.rejoin
+    ? `It rejoins by itself${d.inSeconds ? ` in about ${d.inSeconds} s` : ' shortly'} (and keeps trying every few minutes).`
+    : "That's no dropped connection (a kick, a ban, the whitelist, a version mismatch, or it left when asked to), so it stays off: rejoin-server tries again once that's sorted out with the people there.");
+}
+
 export interface Status {
   inWorld: boolean; username: string; screen: string | null;
+  /** off the server: why, and whether (and in how long) it rejoins by itself */
+  disconnected?: { reason: string; key?: string | null; rejoin: boolean; inSeconds?: number | null };
   position?: Pos; block?: Pos; health?: number; food?: number; saturation?: number; air?: number;
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
   timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
+  /** whether the mod has had the bot's built blocks and its home zone (none counts) from Node */
+  protectSynced?: boolean; zoneSynced?: boolean;
   windowMinimized?: boolean; mouseGrabbed?: boolean; onGround?: boolean; destroying?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
   /** boxed in where it stands: the cells the Guardian's last wall-in filled there (empty when it didn't build this one) */
   boxedIn?: Pos[];
   xpLevel?: number;
   biome?: string;
+  /** the world spawn (a server's spawn protection is round it) */
+  spawn?: Pos;
+  /** other players' builds the bot has seen (zones), and the nearest one's distance */
+  foreign?: { zones: number; surface?: number; nearest: number | null };
 }
 export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number; enchanted?: boolean }
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
@@ -282,17 +300,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   };
   const status = async () => {
     const s = await call<Status>('status');
-    if (!s.inWorld) throw new Error(`The bot is not in a world yet (screen: ${s.screen ?? 'none'}). Try again shortly.`);
+    if (!s.inWorld) throw new Error(offServer(s));
     protection.attach(worldIdFromSeed(s.hashedSeed ?? undefined));
     lastDimension = s.dimension ?? 'overworld';
-    // a relaunched client starts with none: resend when its count differs
-    const relaunched = s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length;
+    // a relaunched client starts with none: resend when its count differs, or when it says it has had none (a new
+    // world with nothing built has the same count as a fresh client: 0)
+    const relaunched = (s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length) || s.protectSynced === false;
     await syncProtection(s.dimension ?? 'overworld', relaunched);
     // the home zone, for the home in the dimension the bot is in (resent when it changes or the client is new)
     const world = worldIdFromSeed(s.hashedSeed ?? undefined);
     const home = world ? readHomes()[world]?.home : undefined;
     const zone = home && home.dimension === (s.dimension ?? 'overworld') ? (zoneRect ? `${zoneRect.x1},${zoneRect.z1},${zoneRect.x2},${zoneRect.z2}` : `${home.x},${home.z}`) : 'none';
-    if (zone !== zoneSent || (relaunched && zone !== 'none')) {
+    // no home yet is an answer too: the mod's build scanner waits for one (a new server: nearby-builds, set-home)
+    if (zone !== zoneSent || s.zoneSynced === false || (relaunched && zone !== 'none')) {
       const [x, z] = zone === 'none' ? [0, 0] : zone.split(',').map(Number);
       const params = zone === 'none' ? { x, z, radius: 0 } : zoneRect ? { ...zoneRect } : { x, z, radius: HOME_ZONE };
       await call('protect.zone', params).then(() => { zoneSent = zone; }).catch(() => undefined);
@@ -364,7 +384,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const match = (e: EntityInfo) => !t || (['player', 'mob', 'hostile'].includes(t) ? matchesTarget(entityKind(e.name), t) : e.name.includes(t));
       const e = r.entities.find(match);
       if (!e) return factory.createResponse(`No ${type || 'entity'} found within ${maxDistance} blocks`);
-      return factory.createResponse(`Found ${e.name} at position ${fmt(floorPos(e.position))}`);
+      // someone's animal (a name tag, tamed, on a lead, in their pen or by their build): say so, it isn't the bot's to hunt
+      const c = e as EntityInfo & Creature;
+      const marks = [c.named && 'named', c.tamed && 'tamed', c.leashed && 'on a lead', c.foreign && "in someone's build",
+        !c.foreign && c.buildDistance !== undefined && c.buildDistance < WILD_DISTANCE && `${Math.round(c.buildDistance)} blocks from someone's build`].filter(Boolean);
+      return factory.createResponse(`Found ${e.name} at position ${fmt(floorPos(e.position))}${marks.length ? ` (someone's, most likely: ${marks.join(', ')})` : ''}`);
     },
 
     'send-chat': async ({ message }) => {
@@ -668,10 +692,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       return factory.createResponse(`Equipped ${itemName} to ${destination}`);
     },
 
-    'dig-block': async ({ x, y, z, collect = true }) => {
+    'dig-block': async ({ x, y, z, collect = true, force = false }) => {
       const p = floorPos({ x: Number(x), y: Number(y), z: Number(z) });
       const before = (await inventoryCounts()).counts;
-      const r = await call<{ dug: boolean; block?: string; tool?: string | null; reason: string; baritone?: string[] }>('dig', { ...p, timeoutMs: 60_000 }, 75_000);
+      // inside someone else's build the mod refuses, unless a person asked for this block (force)
+      const r = await call<{ dug: boolean; block?: string; tool?: string | null; reason: string; baritone?: string[] }>('dig', { ...p, timeoutMs: 60_000, ...(force ? { force: true } : {}) }, 75_000);
       if (r.reason === 'air' || r.block === undefined) return factory.createResponse(`No block found at position ${fmt(p)}`);
       if (!r.dug) throw new Error(`Could not dig ${r.block} at ${fmt(p)} (${r.reason}).${baritoneSaid(r.baritone ?? [])}`);
       protection.remove(await dimension(), p);
@@ -1281,22 +1306,78 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   register(
     'set-home',
-    'Remember a place as home (default: where the bot stands), per world and across restarts, so go-home can walk back from anywhere.',
+    "Remember a place as home (default: where the bot stands), per world and across restarts, so go-home can walk back from anywhere. On a shared server home is where the bot settles and builds its homestead: it refuses a spot within 48 blocks of someone else's build or 24 of the world spawn (non-ops can't build in spawn protection), unless `force`.",
     {
       name: z.string().regex(/^[\w-]+$/).optional().describe("Name of the place (default: 'home')"),
       x: z.coerce.number().optional().describe('X (default: the bot)'),
       y: z.coerce.number().optional().describe('Y'),
-      z: z.coerce.number().optional().describe('Z')
+      z: z.coerce.number().optional().describe('Z'),
+      force: z.boolean().optional().describe("Set it even near someone else's build or the spawn (only when the people there agree)")
     },
-    async ({ name = 'home', x, y, z: zz }: { name?: string; x?: number; y?: number; z?: number }) => {
+    async ({ name = 'home', x, y, z: zz, force = false }: { name?: string; x?: number; y?: number; z?: number; force?: boolean }) => {
       const s = await status();
       const world = worldIdFromSeed(s.hashedSeed ?? undefined);
       if (!world) return factory.createErrorResponse('Cannot tell which world this is (no seed from the server)');
       const at = x !== undefined && y !== undefined && zz !== undefined ? floorPos({ x, y, z: zz }) : s.block!;
+      if (name === 'home' && !force) {
+        // others' builds the mod has seen round the bot, measured from the spot itself
+        const zones = (await call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
+        const problems = homeProblems(at, zones, s.spawn);
+        if (problems.length) return factory.createErrorResponse(`Not setting home at ${fmt(at)}: ${problems.join('; ')}. Pick a spot further out (force: true sets it anyway).`);
+      }
       const homes = readHomes();
       homes[world] = { ...(homes[world] ?? {}), [name]: { ...at, dimension: s.dimension ?? 'overworld' } };
       writeHomes(homes);
       return factory.createResponse(`Home '${name}' set at ${fmt(at)} (${s.dimension ?? 'overworld'})`);
+    }
+  );
+
+  register(
+    'nearby-builds',
+    "Other players' builds the bot has seen round itself (on a shared server: a friend's base; anywhere: villages), as boxes, and what's built under ground (mineshafts, dungeons, cellars). It breaks nothing in a build on the surface, takes nothing from their chests and leaves their animals alone; under ground it leaves the built blocks be and mines the rock round them. set-home keeps 48 blocks from builds on the surface and 16 from those under ground. It looks within 48 blocks of where it is as it moves, so walk round an area before deciding it's empty.",
+    {},
+    async () => {
+      const s = await status();
+      const me = s.block ?? floorPos(s.position ?? { x: 0, y: 0, z: 0 });
+      const zones = (await call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
+      const spawn = s.spawn ? ` The world spawn is at ${fmt(s.spawn)}, ${Math.round(Math.hypot(s.spawn.x - me.x, s.spawn.z - me.z))} blocks away.` : '';
+      if (!zones.length) return factory.createResponse(`No one else's builds seen near ${fmt(me)} (it looks within 48 blocks as it moves).${spawn}`);
+      const height = (zn: Zone) => (zn.y2 < me.y - 4 ? `, ${me.y - zn.y2} below` : zn.y1 > me.y + 4 ? `, ${zn.y1 - me.y} above` : '');
+      const line = (zn: Zone, i: number) => `${i + 1}. x ${zn.x1}..${zn.x2}, z ${zn.z1}..${zn.z2} (y ${zn.y1}..${zn.y2}): ${zn.markers ?? '?'} placed block(s)` +
+        `${zn.kinds?.length ? `, mostly ${zn.kinds.slice(0, 4).join(', ')}` : zn.sample ? ` such as ${zn.sample}` : ''}; ${Math.round(zoneDistance(me, zn))} blocks away${height(zn)}`;
+      const byDistance = (a: Zone, b: Zone) => zoneDistance(me, a) - zoneDistance(me, b);
+      const surface = zones.filter(zn => zn.surface ?? true).sort(byDistance).slice(0, 10);
+      const under = zones.filter(zn => !(zn.surface ?? true)).sort(byDistance).slice(0, 5);
+      const lines: string[] = [];
+      lines.push(surface.length ? `Builds on the surface (${zones.filter(zn => zn.surface ?? true).length}), nearest first:` : 'No builds on the surface seen.', ...surface.map(line));
+      if (under.length) lines.push(`Built under ground (${zones.length - zones.filter(zn => zn.surface ?? true).length}; mineshafts and dungeons mostly: it leaves their blocks and mines round them):`, ...under.map(line));
+      if (spawn) lines.push(spawn.trim());
+      return factory.createResponse(lines.join('\n'));
+    }
+  );
+
+  register(
+    'leave-server',
+    "Log the bot off the server (when someone there asks it to go). It stays off until rejoin-server. With rejoin: true it only drops the connection and comes back by itself in about 30 s (a fresh connection for a stuck client).",
+    {
+      rejoin: z.boolean().optional().describe('Come back by itself in about 30 s (default: stay off)')
+    },
+    async ({ rejoin = false }: { rejoin?: boolean }) => {
+      const r = await call<{ left: boolean; reason?: string }>('server.leave', { rejoin });
+      if (!r.left) return factory.createErrorResponse(`Not leaving: ${r.reason ?? 'unknown'}.`);
+      return factory.createResponse(rejoin ? 'Dropped the connection: it rejoins by itself in about 30 s.' : 'Left the server: it stays off until rejoin-server.');
+    }
+  );
+
+  register(
+    'rejoin-server',
+    "Join the server again after the bot was disconnected. It rejoins by itself after a server restart or a dropped connection; after a kick, a ban or a whitelist refusal it stays off until this is used (only once the people there agree).",
+    {},
+    async () => {
+      const r = await call<{ rejoining: boolean; server?: string; reason?: string }>('server.rejoin');
+      return r.rejoining
+        ? factory.createResponse(`Rejoining ${r.server}: it takes a few seconds; get-status shows when it's back.`)
+        : factory.createErrorResponse(`Not rejoining: ${r.reason ?? 'unknown'}.`);
     }
   );
 

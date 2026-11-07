@@ -25,9 +25,17 @@ import java.util.Set;
  */
 public final class Protection {
     private static final int RADIUS = 24;
+    /** this close to someone else's build (or in it) Baritone places no blocks */
+    private static final int FOREIGN_NO_PLACE = 8;
     private static final Set<Long> POSITIONS = new HashSet<>();
     private static List<Block> original;
     private static int suspended = 0;
+    /** what the bot built and its home zone have come from Node: until then nothing can be told apart as someone else's */
+    private static boolean positionsSynced, zoneSynced;
+
+    static boolean synced() { return positionsSynced && zoneSynced; }
+    static boolean positionsSynced() { return positionsSynced; }
+    static boolean zoneSynced() { return zoneSynced; }
 
     private Protection() { }
 
@@ -63,7 +71,10 @@ public final class Protection {
             || b instanceof net.minecraft.world.level.block.CraftingTableBlock || b instanceof net.minecraft.world.level.block.AbstractFurnaceBlock;
     }
 
-    /** The furniture types among the protected blocks near the bot, less what a dig is after. */
+    /**
+     * The furniture types among the protected blocks near the bot, less what a dig is after; and whatever is in other
+     * players' builds nearby (Foreign): a lift for our own work never reaches a friend's house.
+     */
     private static List<Block> furnitureNear(Minecraft mc) {
         if (mc.player == null || mc.level == null) return List.of();
         BlockPos me = mc.player.blockPosition();
@@ -74,7 +85,13 @@ public final class Protection {
             Block b = mc.level.getBlockState(p).getBlock();
             if (furniture(b) && !digging.contains(b)) types.add(b);
         }
+        types.addAll(Foreign.typesNear(me, RADIUS));
         return new ArrayList<>(types);
+    }
+
+    /** The bot's own: a block it built, or anywhere in its home zone (its yard). */
+    static boolean isOwn(BlockPos p) {
+        return POSITIONS.contains(p.asLong()) || nearZone(p);
     }
 
     private static void apply(List<Block> types) {
@@ -143,6 +160,8 @@ public final class Protection {
         }
         if (mc.player == null || mc.level == null) return;
         BlockPos me = mc.player.blockPosition();
+        // in or right by someone else's build: Baritone places nothing (no pillars or bridges left at a friend's base)
+        Careful.setForeign(Foreign.nearest(me) <= FOREIGN_NO_PLACE);
         Set<Block> types = new LinkedHashSet<>();
         for (long l : POSITIONS) {
             BlockPos p = BlockPos.of(l);
@@ -152,6 +171,8 @@ public final class Protection {
         }
         if (nearZone(me)) types.addAll(GROUND);
         types.removeAll(only);
+        // other players' builds nearby: every kind in them, whatever a narrow lift allows
+        types.addAll(Foreign.typesNear(me, RADIUS));
         apply(new ArrayList<>(types));
     }
 
@@ -162,6 +183,7 @@ public final class Protection {
         // the full list for the current dimension, replacing what was there
         s.register("protect.set", true, (p, c) -> {
             POSITIONS.clear();
+            positionsSynced = true;
             JsonElement list = p.get("positions");
             if (list != null && list.isJsonArray()) {
                 for (JsonElement e : list.getAsJsonArray()) {
@@ -176,6 +198,7 @@ public final class Protection {
         // the home zone: {x, z, radius}; radius 0 clears it
         s.register("protect.zone", true, (p, c) -> {
             // {x, z, radius} a circle (radius 0 clears it), or {x1, z1, x2, z2} a rectangle
+            zoneSynced = true;
             zoneRect = p.has("x1");
             if (zoneRect) {
                 zoneX1 = intParam(p, "x1", 0); zoneZ1 = intParam(p, "z1", 0); zoneX2 = intParam(p, "x2", 0); zoneZ2 = intParam(p, "z2", 0);

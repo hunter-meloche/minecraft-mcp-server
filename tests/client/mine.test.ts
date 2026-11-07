@@ -1,5 +1,5 @@
 import test from 'ava';
-import { chooseMineSite, deepTripReady, tripBudgetMs, type TripCheck } from '../../src/client/brain/mine.js';
+import { MINE_FROM_BUILDS, chooseMineSite, deepTripReady, pickMineStart, tripBudgetMs, type TripCheck } from '../../src/client/brain/mine.js';
 
 const home = { x: 0, z: 0 };
 const col = (x: number, z: number, extra: Partial<{ ground: number; water: boolean; protected: boolean }> = {}) =>
@@ -43,4 +43,18 @@ test('the trip budget gets the bot home by 11000', (t) => {
   t.is(tripBudgetMs(24000 + 1000, 60_000), 440_000);
   t.is(tripBudgetMs(10_000, 60_000), 0);
   t.is(tripBudgetMs(12_000, 0), 0);
+});
+
+test('pickMineStart: the remembered point while clear of builds, else the first clear side of the yard', t => {
+  const home = { x: 0, y: 64, z: 0 };
+  const yard = { x1: -10, z1: -20, x2: 30, z2: 5 };
+  const none = () => Infinity;
+  t.deepEqual(pickMineStart(home, yard, undefined, none), { x: 0, y: 64, z: -60 }, 'north of the yard by default');
+  const kept = { x: 7, y: 64, z: -70 };
+  t.is(pickMineStart(home, yard, kept, none), kept);
+  // a friend's base north of the yard: the east side then
+  const north = (p: { x: number; z: number }) => (p.z < -30 ? 10 : 100);
+  t.deepEqual(pickMineStart(home, yard, kept, north), { x: 70, y: 64, z: 0 });
+  t.deepEqual(pickMineStart(home, undefined, undefined, north), { x: 56, y: 64, z: 0 }, 'no yard: 16 round home');
+  t.is(pickMineStart(home, yard, undefined, () => MINE_FROM_BUILDS - 1), undefined, 'builds on every side');
 });

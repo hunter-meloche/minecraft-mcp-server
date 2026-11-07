@@ -12,7 +12,8 @@
     "WindowMixin",
     "HudMixin",
     "TitleMixin",
-    "DestroyToolMixin"
+    "DestroyToolMixin",
+    "DisconnectedScreenAccessor"
   ],
   "injectors": { "defaultRequire": 1 }
 }

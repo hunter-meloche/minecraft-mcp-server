@@ -88,6 +88,8 @@ export interface WorldMemory {
   lastDone?: Record<string, number>;
   /** dark spots ("x,y,z") no torch of the lights round reached: left out from then on */
   darkIgnore?: string[];
+  /** stray blocks the daily tidy couldn't get at ("x,y,z" -> tries): left be after two */
+  tidyTries?: Record<string, number>;
   /** the long game: milestones done, the one in hand, its journal */
   progress?: import('./progress.js').ProgressMemory;
   /** places the projects made: storage, plots, pens, tree farm, mine entrance ... (kind -> boxes or points) */

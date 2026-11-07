@@ -125,6 +125,55 @@ It offers the same tools (all except fly-to; combat and the auto-defend reflexes
 - `mine-blocks` - Gather blocks with Baritone until the inventory holds `count` of the item
 - `build-structure` - Build a structure from a text spec (palette + layers) or a .schem/.litematic file with Baritone
 - `stop` - Stop walking, mining or building
+- `set-home` / `go-home` - Remember home (per world) and walk back to it from anywhere
+- `nearby-builds` - Other players' builds the bot has seen round itself, and what's built under ground
+- `leave-server` / `rejoin-server` - Log off when asked to; come back after a kick once the people there agree
+
+### On a friend's server
+
+With `--autonomy` the client backend can live on a friend's vanilla server, among their builds. What the server needs:
+vanilla 26.3, `online-mode=false` (the bot is an offline account), the bot's name on the whitelist if there is one, and
+no idle kick (`player-idle-timeout=0`; after an idle kick the bot stays off). It needs no op.
+
+```json
+"minecraft": {
+  "command": "node",
+  "args": ["C:\\path\\to\\minecraft-mcp-server\\dist\\main.js", "--host", "<server address>", "--port", "25565",
+           "--username", "ClaudeBot", "--backend", "client", "--autonomy"]
+}
+```
+
+One bot client at a time: stop any lab bot (`scripts/lab/mcp-http.mjs`) first, since they share the game folder, the
+bridge port and the brain's memory. Then ask Claude to:
+
+1. Look round: `nearby-builds` lists the builds the bot has seen (it looks 48 blocks round itself as it walks) and how
+   far the world spawn is.
+2. Walk somewhere free, at least 48 blocks from anyone's build and 24 from the world spawn, and `set-home` there. It
+   refuses a spot too close and says what's near; `force: true` only if your friend agrees.
+3. Leave it be: from home it sees to its tools, food, shelter at night and a homestead that grows in its yard.
+
+What it leaves alone. A build is any group of blocks only people place (planks, glass, doors, beds, chests, crops,
+fences, rails, wool, torches...) that the bot didn't place itself. Near one on the surface:
+- it breaks nothing, by digging or on Baritone's paths: not the build, not the ground it stands on, not the trees and
+  crops round it. `dig-block` refuses a block there unless `force: true` (a person asked for that very block).
+- Baritone places no pillars or bridges within 8 blocks of it.
+- its chests, beds, furnaces and farmland are never taken for the bot's own, and its animals are never hunted or
+  herded: nor are any named, tamed or on a lead, or within 24 blocks of a build.
+- `structure-apply` won't build on it, the yard won't grow within 16 blocks of it, and deep-mining trips set out from a
+  side of home clear of it.
+
+Under ground (mineshafts, dungeons, someone's cellar) the built blocks stay and the rock round them is mined. Gates and
+doors it opens to walk through are shut behind it. It never attacks a player, even one that hits it (auto-defend is
+for hostile mobs), and it doesn't chat on its own. After a server restart or a dropped connection it rejoins by itself
+(after 30 s, then less often, down to every 5 minutes); kicked, banned or refused by the whitelist, it stays off until
+`rejoin-server`.
+
+Good to know:
+- Builds are recognised by their blocks: a base of nothing but stone, dirt, cobblestone and logs isn't. Ask Claude to
+  keep clear of it, or have your friend put a few torches or planks on it.
+- It only knows the builds it has been within 48 blocks of since it started.
+- It picks up items lying where it walks, like any player. Its sleeping skips the night only if enough players sleep.
+- It starts on a new server with nothing, so the first night is the riskiest.
 
 ## Lab scenarios (regression tests in a live world)
 

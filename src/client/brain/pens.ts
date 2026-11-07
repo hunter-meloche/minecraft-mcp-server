@@ -5,6 +5,7 @@ import { pen, type Side } from './blueprints.js';
 import { nextAnimalAction, PEN_FOOD, type Animal, type Pen, type PenKind } from './animals.js';
 import { prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
+import { someones, type Creature } from './courtesy.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -42,8 +43,9 @@ export function penMilestone(kind: PenKind, prereqs: string[]): Milestone {
 // ------------------------------------------------------------------------------------------------ the chore
 
 type Ent = Animal & { category: string };
+// someone's animals (named, tamed, on a lead, in their pen or by their builds) are never lured, bred or culled
 const entities = async (ctx: GoalContext) =>
-  (await ctx.call<{ entities: Ent[] }>('world.entities', { maxDistance: 48 })).entities.filter(e => e.category === 'creature');
+  (await ctx.call<{ entities: (Ent & Creature)[] }>('world.entities', { maxDistance: 48 })).entities.filter(e => e.category === 'creature' && !someones(e, ctx.world.yard));
 const find = async (ctx: GoalContext, id: number) => (await entities(ctx)).find(e => e.id === id);
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const OUT: Record<Side, { x: number; z: number }> = { north: { x: 0, z: -1 }, south: { x: 0, z: 1 }, west: { x: -1, z: 0 }, east: { x: 1, z: 0 } };

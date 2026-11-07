@@ -460,9 +460,20 @@ const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 export async function lightArea(io: Io, centre: Pos, radius: number, opts: { place: boolean; max: number; ignore: Set<string>; only?: (p: Pos) => boolean }): Promise<LightReport> {
   const box = yardBox(centre, radius);
   const mask = (p: Pos) => !opts.ignore.has(key(p)) && (opts.only?.(p) ?? true);
+  // in slabs of whole layers: one region call holds at most 65536 blocks, and the square round an 82 x 26 yard is
+  // 85 x 85 x 13 (the round failed every day, the yard stayed dark, and creepers took bits of the watchtower)
+  const slabs = async <T>(rpc: string, field: string): Promise<T[]> => {
+    const layers = Math.max(1, Math.floor(65_536 / (box.width * box.length)));
+    const out: T[] = [];
+    for (let y = 0; y < box.height; y += layers) {
+      const part = await io.call<Record<string, T[]>>(rpc, { ...box, y: box.y + y, height: Math.min(layers, box.height - y) }, 60_000);
+      out.push(...part[field]);
+    }
+    return out;
+  };
   const read = async () => {
-    const { blocks } = await io.call<{ blocks: (string | null)[] }>('world.region', { ...box }, 60_000);
-    const { block } = await io.call<{ block: number[] }>('world.light', { ...box }, 60_000);
+    const blocks = await slabs<string | null>('world.region', 'blocks');
+    const block = await slabs<number>('world.light', 'block');
     return { blocks, block, dark: spawnableCells(box, blocks, block, { mask }) };
   };
   let now = await read();

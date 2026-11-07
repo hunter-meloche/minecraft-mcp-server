@@ -37,6 +37,10 @@ export class AlertCollector {
       case 'guardian':
         if (event.note) this.notes.push(String(event.note));
         break;
+      case 'disconnected':
+        this.notes.push(`disconnected from the server: "${String(event.reason ?? 'no reason')}"; ` +
+          (event.rejoin ? `rejoining by itself in about ${String(event.inSeconds ?? 30)} s` : 'not a dropped connection, so it stays off (rejoin-server)'));
+        break;
       default:
         break;
     }

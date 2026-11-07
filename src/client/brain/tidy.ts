@@ -3,17 +3,23 @@ import { survey, type Cluster } from '../survey.js';
 import type { Goal } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { readBox, yardOf } from './milestones.js';
+import { digByHand } from '../structures/job.js';
 
 /**
  * Once a day: take away the stray blocks left standing on the lawn: an emergency wall-in, Baritone's scaffold, a
  * pillar it climbed. Only what survey-area calls placed-looking, only above the yard's ground (a filled hole is meant
  * to stay), only the scaffold kinds (dirt and cobblestone: never planks or anything else someone may have built
- * with), never next to a built block, and only small clusters.
+ * with), never next to a built block, and only small clusters. Dug by hand, from a spot it walks to without breaking
+ * or placing anything: Baritone's own dig lifts the protection on everything but furniture while it walks into reach,
+ * and reaching a stray up by the watchtower it cut logs and cobblestone out of the tower, every day. A stray it can't
+ * get at twice is left be.
  */
 
 const MINUTE = 60_000;
 const STRAY = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|netherrack)$/;
 const MAX_CLUSTER = 16;
+/** Tries at a stray before it's left be (out of reach on foot: high on a wall, over water). */
+const TRIES = 2;
 
 const since = (world: WorldMemory, chore: string, now: number) => now - (world.lastDone?.[chore] ?? 0);
 const done = (world: WorldMemory, chore: string, now: number) => { world.lastDone ??= {}; world.lastDone[chore] = now; };
@@ -57,13 +63,21 @@ export function tidyGoal(rt: ClientRuntime): Goal {
       const r = survey(box, blocks, p => built.has(`${p.x},${p.y},${p.z}`));
       const cells = strayCells(r.placed, yard.y, built).slice(0, 40);
       if (!cells.length) return 'the lawn is clear';
+      const tries = (ctx.world.tidyTries ??= {});
+      const todo = cells.filter(c => (tries[`${c.x},${c.y},${c.z}`] ?? 0) < TRIES);
+      if (!todo.length) return `${cells.length} stray block(s) out of reach on foot: left be`;
+      const here = { at: ctx.s.position };
+      const gone = new Set<string>();
       let dug = 0;
-      for (const c of cells) {
+      for (const c of todo) {
         if (ctx.signal.aborted) break;
-        const d = await ctx.act('dig-block', { ...c });
-        if (d.ok && /^Dug/.test(d.text)) dug++;
+        const k = `${c.x},${c.y},${c.z}`;
+        const why = await digByHand(ctx, blocks, box, c, here, gone);
+        if (!why) { dug++; gone.add(k); delete tries[k]; } else tries[k] = (tries[k] ?? 0) + 1;
       }
-      return `cleared ${dug} of ${cells.length} stray block(s)`;
+      // forget strays that are gone (dug, or taken down by someone else)
+      for (const k of Object.keys(tries)) if (!cells.some(c => `${c.x},${c.y},${c.z}` === k)) delete tries[k];
+      return `cleared ${dug} of ${todo.length} stray block(s)${todo.length < cells.length ? ` (${cells.length - todo.length} out of reach, left be)` : ''}`;
     }
   };
 }

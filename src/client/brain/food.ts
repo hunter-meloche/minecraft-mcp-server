@@ -5,6 +5,7 @@ import type { Pos, WorldMemory } from './memory.js';
 import { daylightLeft } from './schedule.js';
 import { farmAll } from './chores.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
+import { someones, type Creature } from './courtesy.js';
 
 /**
  * Food: keep enough ready-to-eat food on the bot that the Guardian can always heal it, the cheapest way first:
@@ -199,12 +200,15 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
     await cook();
   }
 
-  // 6. hunt, keeping two of each kind
+  // 6. hunt, keeping two of each kind: wild ones only (never named, tamed, on a lead, in someone's pen, or grazing by
+  // someone's builds: on a friend's server those are theirs), and one in particular, not "the nearest cow"
   if (!enough() && working) {
-    const { entities } = await ctx.call<{ entities: { name: string; distance: number; position: Pos }[] }>('world.entities', { maxDistance: 32 });
-    const kind = GAME.find(g => entities.filter(e => e.name === g).length >= 3);
-    if (kind) {
-      const r = await ctx.act('attack-entity', { target: kind, maxDistance: 32, timeoutMs: 30_000 });
+    const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: 32 });
+    const wild = entities.filter(e => !someones(e, ctx.world.yard));
+    const kind = GAME.find(g => wild.filter(e => e.name === g).length >= 3);
+    const prey = kind ? wild.filter(e => e.name === kind).sort((a, b) => a.distance - b.distance)[0] : undefined;
+    if (kind && prey) {
+      const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: 32, timeoutMs: 30_000 });
       say(r.ok ? `hunted a ${kind}` : `could not hunt a ${kind}`);
       await ctx.act('collect-items', { radius: 6, timeoutMs: 30_000 }).catch(() => undefined);
       await refresh();

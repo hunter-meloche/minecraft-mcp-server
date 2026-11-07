@@ -46,7 +46,11 @@ public final class Handlers {
             r.addProperty("inWorld", pl != null && mc.level != null);
             var screen = mc.gui.screen();
             r.addProperty("screen", screen == null ? null : screen.getClass().getSimpleName());
-            if (pl == null || mc.level == null) return r;
+            if (pl == null || mc.level == null) {
+                JsonObject off = Reconnect.summary(); // off the server: why, and whether it rejoins by itself
+                if (off != null) r.add("disconnected", off);
+                return r;
+            }
             r.add("position", pos(pl.position()));
             r.add("block", pos(pl.blockPosition()));
             r.addProperty("yaw", round(pl.getYRot()));
@@ -72,6 +76,13 @@ public final class Handlers {
             if (boxed != null) r.add("boxedIn", boxed);
             r.addProperty("hashedSeed", hashedSeed(mc));
             r.addProperty("protectedCount", Protection.count());
+            // whether Node has sent what the bot built and its home zone (none is an answer too): until both, nothing
+            // round it can be told apart as someone else's, and the build scanner waits
+            r.addProperty("protectSynced", Protection.positionsSynced());
+            r.addProperty("zoneSynced", Protection.zoneSynced());
+            // the world spawn (non-ops can't build within the server's spawn protection round it), and others' builds
+            r.add("spawn", pos(mc.level.getRespawnData().pos()));
+            r.add("foreign", Foreign.summary(pl.blockPosition()));
             r.addProperty("windowMinimized", mc.getWindow().isIconified());
             r.addProperty("mouseGrabbed", mc.mouseHandler.isMouseGrabbed());
             IBaritone b = Processes.baritone();
@@ -243,6 +254,14 @@ public final class Handlers {
                     o.addProperty("health", round(le.getHealth()));
                     o.addProperty("baby", le.isBaby()); // synced (AgeableMob's DATA_BABY_ID, zombies' own flag)
                 }
+                // someone's: named, tamed, on a lead, or in someone else's build (a friend's pen): the brain leaves those be
+                if (e.hasCustomName()) o.addProperty("named", true);
+                if ((e instanceof net.minecraft.world.entity.TamableAnimal t && t.isTame())
+                    || (e instanceof net.minecraft.world.entity.animal.equine.AbstractHorse h && h.isTamed())) o.addProperty("tamed", true);
+                if (e instanceof net.minecraft.world.entity.Leashable l && l.isLeashed()) o.addProperty("leashed", true);
+                if (Foreign.inZone(e.blockPosition())) o.addProperty("foreign", true);
+                double nb = Foreign.nearest(e.blockPosition());
+                if (!Double.isInfinite(nb)) o.addProperty("buildDistance", round(nb));
                 // sheared and colour are synced entity data. Whether an animal is in love is not: the client only gets a
                 // one-off heart burst (entity event 18) and its own inLove counter stays 0, so it is left out.
                 if (e instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep) {

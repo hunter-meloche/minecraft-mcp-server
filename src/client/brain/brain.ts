@@ -186,6 +186,12 @@ export class Brain {
     if (s) {
       lines.push(`Activity: ${s.activity} (time of day ${s.timeOfDay}${s.sleeping ? ', asleep' : ''}). Health ${s.health}, food ${s.food}, ${s.slotsUsed}/36 slots used.`);
       lines.push(s.home ? `Home (${s.home.x}, ${s.home.y}, ${s.home.z}), ${Number.isFinite(s.distHome) ? Math.round(s.distHome) + ' blocks away' : 'in another dimension'}.` : 'No home set (set-home).');
+      // others' builds (a friend's base, a village): what it keeps its hands off
+      if (s.foreign?.zones) {
+        const surface = s.foreign.surface ?? s.foreign.zones, under = s.foreign.zones - surface;
+        const near = s.foreign.nearest === null ? '' : ` (the nearest ${Math.round(s.foreign.nearest)} blocks away)`;
+        lines.push(`Others' builds seen: ${surface} on the surface${near}${under ? `, ${under} under ground (mineshafts, dungeons: their blocks stay, the rock round them is mined)` : ''}. It breaks nothing in a build, and leaves their animals and chests alone.`);
+      }
     }
     if (this.running) lines.push(`Now: ${this.running.goal.name} (${this.running.reason}) for ${Math.round((this.now() - this.running.started) / 1000)}s.`);
     else lines.push('Now: nothing to do.');
@@ -326,13 +332,39 @@ export class Brain {
       home,
       distHome: home && home.dimension === dimension ? Math.hypot(home.x - st.position.x, home.z - st.position.z) : Infinity,
       boxedIn: st.boxedIn,
-      xpLevel: st.xpLevel
+      xpLevel: st.xpLevel,
+      foreign: st.foreign
     };
     this.last = s;
     return s;
   }
 
   /** Look around home for the bed, chests, furnace, table and farmland: once, then every 10 minutes while near it. */
+  /**
+   * Leave out the landmarks in someone else's build (an older client without the call: as they are). Never what's in
+   * the bot's own yard or by home, whatever the mod says: a zone wrongly over the homestead once took its own bed and
+   * chests away.
+   */
+  private async dropForeign(world: WorldMemory, home: Pos): Promise<void> {
+    const l = world.landmarks;
+    const y = world.yard;
+    const ours = (p: Pos) => (y && p.x >= y.x1 - 6 && p.x <= y.x2 + 6 && p.z >= y.z1 - 6 && p.z <= y.z2 + 6) || Math.hypot(p.x - home.x, p.z - home.z) <= 24;
+    const all = [l.bed, ...l.chests, l.furnace, l.table, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
+    if (!all.length) return;
+    const r = await this.rt.call<{ inside?: boolean[] }>('foreign.at', { positions: all.map(p => [p.x, p.y, p.z]) }).catch(() => undefined);
+    if (!Array.isArray(r?.inside)) return;
+    const inside = r.inside;
+    const theirs = new Set(all.filter((_, i) => inside[i]).map(p => `${p.x},${p.y},${p.z}`));
+    if (!theirs.size) return;
+    const mine = (p?: Pos) => (p && !theirs.has(`${p.x},${p.y},${p.z}`) ? p : undefined);
+    l.bed = mine(l.bed);
+    l.furnace = mine(l.furnace);
+    l.table = mine(l.table);
+    l.chests = l.chests.filter(p => mine(p));
+    l.farmland = l.farmland.filter(p => mine(p));
+    this.note(`landmarks: left ${theirs.size} of someone else's alone (their chests, bed or farm)`);
+  }
+
   private async discover(s: Snapshot, world: WorldMemory): Promise<void> {
     if (!s.home || s.distHome > 48) return;
     if (world.landmarks.foundAt && this.now() - world.landmarks.foundAt < 10 * 60_000) return;
@@ -350,6 +382,9 @@ export class Brain {
     // home storage: the kit walked out to it at dusk, and the shelter pulled it back, three times over
     const boxes = this.structureBoxes(world);
     world.landmarks.chests = world.landmarks.chests.filter(c => !boxes.some(b => c.x >= b.x && c.x < b.x + b.width && c.y >= b.y && c.y < b.y + b.height && c.z >= b.z && c.z < b.z + b.length));
+    // nothing in someone else's build is the bot's: a friend's chest by home is not home storage, their bed not its bed,
+    // their farmland not its farm (the mod knows the builds round the bot it didn't make)
+    await this.dropForeign(world, s.home);
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
       const l = world.landmarks;
       this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland`);

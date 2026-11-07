@@ -22,6 +22,9 @@ export interface Snapshot {
   /** main inventory slots in use (of 36) */
   slotsUsed: number;
   home?: Pos & { dimension: string };
+  /** other players' builds the mod has seen (zones), and the nearest one's distance */
+  /** others' builds the mod has seen: how many, how many on the surface, the nearest on the surface (straight line) */
+  foreign?: { zones: number; surface?: number; nearest: number | null };
   /** horizontal distance to home; Infinity with no home or in another dimension */
   distHome: number;
   /** boxed in where it stands (see Status.boxedIn): the wall cells to dig out, if it built them */

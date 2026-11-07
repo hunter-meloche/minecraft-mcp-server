@@ -118,8 +118,9 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       y: z.coerce.number().describe("Y coordinate"),
       z: z.coerce.number().describe("Z coordinate"),
       collect: z.boolean().optional().describe("Walk over the drops to pick them up (default: true)"),
+      force: z.boolean().optional().describe("Client backend: dig it even inside someone else's build (only when a person asked for that very block)"),
     },
-    async ({ x, y, z, collect = true }: { x: number, y: number, z: number, collect?: boolean }) => {
+    async ({ x, y, z, collect = true }: { x: number, y: number, z: number, collect?: boolean, force?: boolean }) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();

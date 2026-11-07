@@ -107,7 +107,7 @@ test('the brain walks home in the evening, goes to bed at night and gets up in t
   calls.length = 0;
   await brain.tick();
   await settle();
-  t.deepEqual(calls.filter(c => !['inventory', 'world.region', 'hud.set'].includes(c)), ['move-to-position 0,64,0', 'bed.sleep']); // onto the home cell, then the bed is in reach
+  t.deepEqual(calls.filter(c => !['inventory', 'world.region', 'hud.set', 'foreign.at'].includes(c)), ['move-to-position 0,64,0', 'bed.sleep']); // onto the home cell, then the bed is in reach
   t.regex(brain.status(), /asleep in the bed at \(1, 64, 0\)/);
   t.regex(brain.status(), /Landmarks: bed \(1, 64, 0\)/);
 

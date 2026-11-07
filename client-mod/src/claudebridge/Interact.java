@@ -48,6 +48,10 @@ public final class Interact {
         return Handlers.player();
     }
 
+    static boolean flag(com.google.gson.JsonObject p, String name) {
+        return p.has(name) && p.get(name).getAsBoolean();
+    }
+
     /** An item is being used through the bridge ("use"/eating): reflexes keep their hands off the use key. */
     static volatile boolean using;
     /** a job holds an item in hand for a while (fishing): calm-time eating must not swap it out */
@@ -351,10 +355,13 @@ public final class Interact {
             BlockPos target = blockPos(p);
             BlockState before = mc.level.getBlockState(target);
             if (before.isAir()) return obj("dug", false, "reason", "air");
+            if (Foreign.guarded(target, before) && !flag(p, "force")) return obj("dug", false, "reason", "someone else's build (force: true to dig it anyway)", "block", Names.block(before));
             long seq = Events.baritoneLogSeq();
-            // breaking this one is the point (it may be a protected block the user asked to dig); narrow: only its kind
-            // may be broken on the way, the rest of what the bot built stays protected
-            boolean narrow = p.has("narrow") && p.get("narrow").getAsBoolean();
+            // breaking this one is the point (it may be a protected block the user asked to dig); narrow (the default):
+            // only its kind may be broken on the way, the rest of what the bot built (and the yard's ground) stays
+            // protected. narrow: false lifts all but the furniture, as it once always did: walking into reach of a stray
+            // by the watchtower, Baritone cut logs and cobblestone out of the tower
+            boolean narrow = !p.has("narrow") || p.get("narrow").getAsBoolean();
             if (narrow) { Protection.allowOnly(before.getBlock()); Protection.refresh(); } else Protection.suspend(before.getBlock());
             Processes.baritone().getBuilderProcess().clearArea(target, target); // walks into reach, picks the tool, digs
             Processes.watch(c, seq, intParam(p, "timeoutMs", 60_000) / 50, reason -> {
@@ -374,6 +381,8 @@ public final class Interact {
             BlockPos target = blockPos(p);
             BlockState before = mc.level.getBlockState(target);
             if (before.isAir()) return obj("dug", false, "reason", "air");
+            // someone else's build: not the bot's to dig, unless a person asked for this very block
+            if (Foreign.guarded(target, before) && !flag(p, "force")) return obj("dug", false, "reason", "someone else's build (force: true to dig it anyway)", "block", Names.block(before));
             Vec3 eye = pl.getEyePosition();
             double reach = pl.blockInteractionRange();
             // the face seen from the eye: the nearest open face whose centre a ray from the eye hits on this block

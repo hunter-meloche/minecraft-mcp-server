@@ -19,6 +19,7 @@ import { Voxels } from './terraslicer/world.js';
 import { slice, type Toolpath } from './terraslicer/slicer.js';
 import { sliceText, stationsText } from './terraslicer/preview.js';
 import { release } from './terraslicer/provision.js';
+import { boxMeetsZone, type Zone } from '../brain/courtesy.js';
 
 /**
  * The declarative build tools: the LLM writes a design (the shape), places it as a named structure (anchor, rotation)
@@ -213,9 +214,10 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       rotation: rotation.optional().describe('Clockwise from above: 0, 90, 180 or 270 (default 0)'),
       autoRepair: z.boolean().optional().describe('Put it back automatically when the daily check finds it changed (default: only report)'),
       level: z.boolean().optional().describe('Level the footprint first, to just under the floor (cut hills, fill holes)'),
-      notes: z.string().optional().describe('What it is for (kept in the file)')
+      notes: z.string().optional().describe('What it is for (kept in the file)'),
+      force: z.boolean().optional().describe("Build it even where it meets someone else's build (only when they agree)")
     },
-    async ({ name, design, anchor, rotation: rot, autoRepair, level, notes }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string }) => {
+    async ({ name, design, anchor, rotation: rot, autoRepair, level, notes, force = false }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string; force?: boolean }) => {
       try {
         if (!brain) return factory.createErrorResponse("Build jobs need the bot's brain (the client backend)");
         const w = await world();
@@ -236,6 +238,15 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         }
         const d = designOf(s.design);
         const c = compile(d, s.anchor, s.rotation ?? 0);
+        // not on someone else's build (a friend's house, a village): the bot would have to break into it
+        if (!force) {
+          const zones = (await rt.call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
+          const box = { x: c.box.x - 2, y: c.box.y - 1, z: c.box.z - 2, width: c.box.width + 4, height: c.box.height + 2, length: c.box.length + 4 };
+          const met = zones.filter(zn => boxMeetsZone(box, zn));
+          if (met.length) {
+            return factory.createErrorResponse(`"${name}" would stand on someone else's build (${met.slice(0, 3).map(zn => `${zn.sample ?? 'blocks'} round (${zn.x1}..${zn.x2}, ${zn.z1}..${zn.z2})`).join('; ')}): pick another spot (structure-site), or force: true if they agree.`);
+          }
+        }
         store.saveStructure(w, s);
         const changes = await plan(rt, c);
         const text = planText(`Plan for "${name}" (design ${d.name}, rotation ${s.rotation ?? 0})`, c, changes, await sourced(rt, brain, changes));
