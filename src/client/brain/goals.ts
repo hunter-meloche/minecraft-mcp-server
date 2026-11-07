@@ -127,7 +127,8 @@ export const breakOut: Goal = {
 
 /**
  * Home before dark, and into bed once it lets the bot sleep (skips phantoms and sets the respawn point). Stuck away
- * from home at night: wall in where it stands and wait for morning.
+ * from home at night, or home with no bed yet (a new bot's first nights: it stood in the open all night): wall in
+ * where it stands and wait for morning (the break-out goal digs it out by day).
  */
 export function shelterGoal(): Goal {
   let holedUp = false;
@@ -145,6 +146,7 @@ export function shelterGoal(): Goal {
       if (s.activity === 'return') return s.distHome > IN_YARD ? 'evening: head home before dark' : null;
       if (s.distHome > AT_HOME) return 'night: get home';
       if (s.activity === 'rest' && world.landmarks.bed) return 'night: go to bed';
+      if (s.activity === 'rest' && !s.boxedIn) return 'night: no bed yet: wall in';
       return null;
     },
     run: async ctx => {
@@ -177,6 +179,11 @@ export function shelterGoal(): Goal {
         }
         if (!sl.sleeping) throw new Error(`could not sleep: ${sl.reason ?? 'unknown'}`);
         did.push(`asleep in the bed at (${bed.x}, ${bed.y}, ${bed.z})`);
+      } else if (ctx.s.activity === 'rest' && !ctx.s.boxedIn) {
+        // no bed yet: the night in a box of its own blocks, not out in the open with the mobs
+        const w = await ctx.act('wall-in');
+        holedUp = true;
+        did.push(`no bed yet: ${w.text}`);
       }
       return did.join(', ') || 'home';
     }

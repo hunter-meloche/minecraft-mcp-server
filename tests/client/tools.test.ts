@@ -276,7 +276,37 @@ test('craft-item uses the inventory grid, and falls back to the nearest table', 
     'world.findBlocks': { positions: [] },
     inventory: { items: [], selectedSlot: 0, held: null }
   });
-  t.regex((await none.run('craft-item', { outputItem: 'wooden_pickaxe' })).text, /needs a crafting table and there is none within 48 blocks\. Craft a crafting_table/);
+  t.regex((await none.run('craft-item', { outputItem: 'wooden_pickaxe' })).text, /none within 48 blocks, and the bot could not make and place one \(it needs 4 planks or a log/);
+});
+
+test('craft-item with no table anywhere: a new bot with logs makes planks, a table, puts it down beside itself and crafts there', async (t) => {
+  const inv = new Map<string, number>([['oak_log', 3], ['stick', 2]]);
+  const crafts: string[] = [];
+  const box = { x: -2, y: 63, z: -2, width: 5, height: 3, length: 5 };
+  // grass under everything, air at the bot's height and over it
+  const region = Array.from({ length: 75 }, (_, i) => (Math.floor(i / 25) === 0 ? 'grass_block' : 'air'));
+  const { run, request } = setup({
+    status: () => ({ ...STATUS, position: { x: 0.5, y: 64, z: 0.5 }, block: { x: 0, y: 64, z: 0 } }),
+    inventory: () => ({ items: [...inv].map(([name, count], slot) => ({ slot, name, count })), selectedSlot: 0, held: null }),
+    craft: (p: Record<string, unknown>) => {
+      crafts.push(`${p.item}${p.x !== undefined ? ' at table' : ''}`);
+      if (p.item === 'oak_planks') { inv.set('oak_log', 2); inv.set('oak_planks', 4); return { crafted: 1, gained: { oak_planks: 4 } }; }
+      if (p.item === 'crafting_table') { inv.delete('oak_planks'); inv.set('crafting_table', 1); return { crafted: 1, gained: { crafting_table: 1 } }; }
+      if (p.x === undefined) throw new Error('needs_table: wooden_pickaxe needs a crafting table');
+      return { crafted: 1, gained: { wooden_pickaxe: 1 } };
+    },
+    'world.findBlocks': { positions: [] },
+    'world.region': (p: Record<string, unknown>) => { t.like(p, box); return { blocks: region }; },
+    'foreign.at': { inside: [true, false] },
+    'item.select': { held: 0 },
+    place: (p: Record<string, unknown>) => ({ placed: true, block: 'crafting_table', face: 'down', ...p }),
+    goto: { arrived: true, reason: 'done', seconds: 1, baritone: [], at: { x: 0, y: 64, z: 0 }, distance: 1 }
+  });
+  t.is((await run('craft-item', { outputItem: 'wooden_pickaxe' })).text, 'Successfully crafted wooden_pickaxe 1 time(s)');
+  t.deepEqual(crafts, ['wooden_pickaxe', 'oak_planks', 'crafting_table', 'wooden_pickaxe at table']);
+  // the first spot beside it (x+1) is in someone's build: the next one
+  const placed = request.getCalls().filter(c => c.args[0] === 'place').map(c => c.args[1] as Record<string, unknown>);
+  t.like(placed[0], { x: -1, y: 64, z: 0 });
 });
 
 test('smelt-item opens the furnace, adds only the fuel needed, and collects the output', async (t) => {

@@ -43,6 +43,8 @@ public final class Reconnect {
     private static boolean retry;
     private static long nextTry;
     private static int attempts;
+    /** checks (a second apart) it has sat dead on the death screen */
+    private static int deadChecks;
 
     /** The server the launcher told the game to join (--quickPlayMultiplayer host:port): rejoinable even if the first try failed. */
     private static String launchServer() {
@@ -57,6 +59,16 @@ public final class Reconnect {
 
     private static void tick(Minecraft mc) {
         if (mc.player != null && mc.level != null) {
+            // dead with no death reported (it died while nothing drove it, and joined again dead): Events only respawns
+            // on the kill packet, so the death screen stayed up for good
+            if (mc.player.isDeadOrDying() && mc.gui.screen() instanceof net.minecraft.client.gui.screens.DeathScreen) {
+                if (++deadChecks >= 2) {
+                    deadChecks = 0;
+                    ClaudeBridge.server.emit("death", obj("message", "found dead on the death screen (it died while nothing drove it)", "at", Json.pos(mc.player.blockPosition())));
+                    mc.player.respawn();
+                    mc.gui.setScreen(null);
+                }
+            } else deadChecks = 0;
             ServerData d = mc.getCurrentServer();
             if (d != null && d.ip != null && !d.ip.isBlank()) server = d.ip;
             attempts = 0;

@@ -641,6 +641,47 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   const goNear = (p: Pos, range: number, timeoutMs = 30_000) =>
     call<ProcessResult & { arrived: boolean }>('goto', { ...floorPos(p), range, timeoutMs }, timeoutMs + 15_000);
 
+  /**
+   * A crafting table where there is none: crafted in the inventory grid (from planks, or a log made into planks first)
+   * and placed on solid ground right beside the bot, never in someone else's build. Placed with place-block, so it's
+   * the bot's own, and at home the brain takes it for the home table. Undefined when it can't.
+   */
+  const firstTable = async (): Promise<Pos | undefined> => {
+    let { counts } = await inventoryCounts();
+    if (!counts.get('crafting_table')) {
+      const planks = () => [...counts].filter(([n]) => /_planks$/.test(n)).reduce((a, [, k]) => a + k, 0);
+      if (planks() < 4) {
+        const log = [...counts.keys()].find(n => /_(log|stem)$/.test(n) || /^stripped_.*_(log|stem)$/.test(n));
+        if (!log) return undefined;
+        await call('craft', { item: log.replace(/^stripped_/, '').replace(/_(log|stem)$/, '_planks'), count: 1 }, 30_000).catch(() => undefined);
+        ({ counts } = await inventoryCounts());
+        if (planks() < 4) return undefined;
+      }
+      await call('craft', { item: 'crafting_table', count: 1 }, 30_000).catch(() => undefined);
+      ({ counts } = await inventoryCounts());
+      if (!counts.get('crafting_table')) return undefined;
+    }
+    const s = await status();
+    const me = s.block!;
+    const box = { x: me.x - 2, y: me.y - 1, z: me.z - 2, width: 5, height: 3, length: 5 };
+    const { blocks } = await call<{ blocks: (string | null)[] }>('world.region', box);
+    const at = (dx: number, dy: number, dz: number) => (blocks[(dx + 2) + (dz + 2) * 5 + (dy + 1) * 25] ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+    const OPEN = /^(air|cave_air|short_grass|tall_grass|fern|large_fern|leaf_litter|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|wildflowers|pink_petals|snow)$/;
+    const SOLID = /^(?!air$|cave_air$|water$|lava$)(.*(dirt|grass_block|stone|deepslate|sand|gravel|planks|cobblestone|netherrack|podzol|mud|clay|terracotta|andesite|diorite|granite|tuff|calcite|mycelium|moss_block|snow_block|sandstone))$/;
+    const spots: Pos[] = [];
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+      if (OPEN.test(at(dx, 0, dz)) && SOLID.test(at(dx, -1, dz))) spots.push({ x: me.x + dx, y: me.y, z: me.z + dz });
+    }
+    if (!spots.length) return undefined;
+    const inside = (await call<{ inside?: boolean[] }>('foreign.at', { positions: spots.map(p => [p.x, p.y, p.z]) }).catch(() => ({ inside: [] as boolean[] }))).inside ?? [];
+    for (const [i, p] of spots.entries()) {
+      if (inside[i]) continue;
+      const r = await impl['place-block']({ ...p, item: 'crafting_table' });
+      if (!r.isError && /^Placed/.test(String(r.content.map(c => (c as { text?: string }).text ?? '').join(' ')))) return p;
+    }
+    return undefined;
+  };
+
   /** Open a chest: walks up to it if it's out of reach, and frees a lid weighed down by scaffold. */
   const openChest = async <T>(at: Pos): Promise<T> => {
     try { return await call<T>('chest.open', { ...at }); } catch { /* out of reach, or the lid */ }
@@ -763,12 +804,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (!msg.startsWith('needs_table')) return factory.createErrorResponse(msg);
         // Baritone walks well, so look further than arm's reach plus a few steps (the mineflayer backend's 16)
         const tables = await call<{ positions: Pos[] }>('world.findBlocks', { block: 'crafting_table', maxDistance: TABLE_SEARCH, count: 1 });
-        if (!tables.positions.length) {
-          const hasTable = (await call<Inventory>('inventory')).items.some(i => i.name === 'crafting_table');
-          return factory.createErrorResponse(`${item} needs a crafting table and there is none within ${TABLE_SEARCH} blocks. ` +
-            (hasTable ? 'Place the crafting_table from the inventory nearby, then craft again.' : 'Craft a crafting_table (4 planks), place it nearby, then craft again.'));
+        // none: make one and put it down beside the bot (a new bot's first table: without it no tool was ever made,
+        // and the brain's kit failed until it gave up for ten minutes, again and again)
+        const table = tables.positions[0] ?? await firstTable();
+        if (!table) {
+          return factory.createErrorResponse(`${item} needs a crafting table and there is none within ${TABLE_SEARCH} blocks, and the bot could not make and place one ` +
+            '(it needs 4 planks or a log, and solid ground beside it). Craft a crafting_table, place it nearby, then craft again.');
         }
-        const table = tables.positions[0];
         await goNear(table, 3);
         r = await call<Crafted>('craft', { item, count: amount, ...table }, 60_000);
       }
