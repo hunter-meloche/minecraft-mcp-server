@@ -2,6 +2,7 @@ import type { ChildProcess } from 'child_process';
 import { BridgeClient, type BridgeEvent } from './bridge-client.js';
 import { AlertCollector, parsePlayerChat } from './alerts.js';
 import { launchClient, prepareLaunch, type LaunchOptions, type LaunchPlan } from './launcher.js';
+import type { InstanceLock } from './instance-lock.js';
 
 /**
  * The client backend's connection: launches the modded game client, connects to its bridge, and keeps both alive.
@@ -13,6 +14,8 @@ type State = 'disconnected' | 'launching' | 'connected';
 export interface ClientConnectionCallbacks {
   onLog: (level: string, message: string) => void;
   onChatMessage: (username: string, message: string) => void;
+  /** this copy has the lock (at once, or once another copy let it go): the brain may start */
+  onLock?: () => void;
 }
 
 export interface ClientConnectionDeps {
@@ -22,6 +25,8 @@ export interface ClientConnectionDeps {
   /** how long to keep trying to reach the bridge after launching */
   connectTimeoutMs: number;
   retryDelayMs: number;
+  /** one copy of the server at a time drives the bot (none: no check) */
+  lock?: InstanceLock;
 }
 
 export class ClientConnection {
@@ -31,6 +36,9 @@ export class ClientConnection {
   private process: ChildProcess | null = null;
   private plan: LaunchPlan | null = null;
   private stopping = false;
+  /** another copy of the server holds the lock: its pid (NaN when unknown) */
+  private blockedBy: number | null = null;
+  private locked = false;
   private readonly deps: ClientConnectionDeps;
 
   constructor(
@@ -64,9 +72,25 @@ export class ClientConnection {
     return this.state === 'connected';
   }
 
+  /** Take the one-copy lock if there is one; false (and blockedBy set) when another copy holds it. */
+  private takeLock(): boolean {
+    if (!this.deps.lock || this.locked) return true;
+    const owner = this.deps.lock.acquire();
+    if (owner !== null) {
+      if (this.blockedBy === null) this.callbacks.onLog('warn', `Another copy of this server (pid ${Number.isNaN(owner) ? '?' : owner}) is already running the bot: not launching a second game client`);
+      this.blockedBy = owner;
+      return false;
+    }
+    this.locked = true;
+    this.blockedBy = null;
+    this.callbacks.onLock?.();
+    return true;
+  }
+
   /** Launch the client and connect in the background. */
   start(): void {
     if (this.state !== 'disconnected') return;
+    if (!this.takeLock()) return;
     this.state = 'launching';
     void this.launchAndConnect().catch(err => {
       this.state = 'disconnected';
@@ -109,6 +133,14 @@ export class ClientConnection {
   async checkConnectionAndReconnect(): Promise<{ connected: boolean; message?: string }> {
     if (this.state === 'connected' && this.bridge.connected) return { connected: true };
     if (this.state === 'disconnected') this.start();
+    if (this.blockedBy !== null) {
+      return {
+        connected: false,
+        message: `Another copy of this MCP server${Number.isNaN(this.blockedBy) ? '' : ` (pid ${this.blockedBy})`} is already running the bot, ` +
+          'probably from another Claude session. Only one may: a second game client would log in as the same player and get one of them kicked. ' +
+          'Use the session that has it, or close that one and try again here.'
+      };
+    }
     return {
       connected: false,
       message: 'The game client is starting or reconnecting (this takes about a minute the first time). Try again shortly.'
@@ -125,6 +157,7 @@ export class ClientConnection {
 
   cleanup(): void {
     this.stopping = true;
+    if (this.locked) { this.deps.lock?.release(); this.locked = false; }
     this.bridge.close();
     this.process?.kill();
     this.process = null;

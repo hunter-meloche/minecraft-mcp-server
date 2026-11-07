@@ -71,3 +71,31 @@ test('when the game exits, the next check starts it again', async (t) => {
   c.cleanup();
   fake.server.close();
 });
+
+test('another copy holds the lock: no game client, a message saying why; once it lets go, this one launches', async (t) => {
+  const fake = await fakeBridge();
+  let owner: number | null = 777;
+  let locked = 0;
+  const proc = fakeProcess();
+  const launch = sinon.spy(() => proc);
+  const opts: LaunchOptions = { minecraftDir: '/mc', gameDir: '/g', username: 'ClaudeBot', server: 'localhost:25565', bridgePort: fake.port, offline: true };
+  const c = new ClientConnection(opts, { onLog: () => undefined, onChatMessage: () => undefined, onLock: () => { locked++; } }, {
+    prepare: () => ({ token: 'secret', java: 'java', args: [], cwd: '/g', tokenFile: '/g/t' }) as LaunchPlan,
+    launch, bridge: new BridgeClient(), connectTimeoutMs: 3000, retryDelayMs: 20,
+    lock: { acquire: () => owner, release: () => undefined }
+  });
+  c.start();
+  const r = await c.checkConnectionAndReconnect();
+  t.false(r.connected);
+  t.regex(r.message!, /Another copy of this MCP server \(pid 777\) is already running the bot/);
+  t.is(launch.callCount, 0);
+  t.is(locked, 0);
+  owner = null; // the other session closed
+  await c.checkConnectionAndReconnect();
+  t.is(launch.callCount, 1);
+  t.is(locked, 1);
+  await until(() => c.isConnected());
+  t.true(c.isConnected());
+  c.cleanup();
+  fake.server.close();
+});

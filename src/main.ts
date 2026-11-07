@@ -11,6 +11,7 @@ import { MessageStore } from './message-store.js';
 import { registerMineflayerTools } from './tools/register-all.js';
 import os from 'os';
 import path from 'path';
+import { fileLock } from './client/instance-lock.js';
 import { ClientConnection } from './client/client-connection.js';
 import { registerClientTools } from './client/tools.js';
 import { Brain } from './client/brain/brain.js';
@@ -54,9 +55,14 @@ async function main() {
         offline: true,
         passive: !config.interactiveClient
       },
-      { onLog: log, onChatMessage: (username, message) => messageStore.addMessage(username, message) }
+      {
+        onLog: log,
+        onChatMessage: (username, message) => messageStore.addMessage(username, message),
+        // the brain only in the copy that drives the bot (another session's copy may already be: see fileLock)
+        onLock: () => { if (config.autonomy) brain.setEnabled(true); }
+      },
+      { lock: fileLock(path.join(os.homedir(), '.minecraft-mcp-server')) }
     );
-    connection.start();
     const factory = new ToolFactory(server, connection, () => (connection.isConnected() ? connection.alerts.take() : null));
     const dataDir = path.join(os.homedir(), '.minecraft-mcp-server');
     const runtime = registerClientTools(factory, connection.bridge, messageStore, {
@@ -67,7 +73,7 @@ async function main() {
     runtime.setManualHook(tool => brain.manual(tool));
     registerBrainTools(factory, brain, runtime);
     registerStructureTools(factory, runtime, brain);
-    if (config.autonomy) brain.setEnabled(true);
+    connection.start();
     cleanup = () => { brain.setEnabled(false); connection.cleanup(); };
   } else {
     const connection = new BotConnection(
