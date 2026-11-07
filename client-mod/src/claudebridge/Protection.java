@@ -118,6 +118,18 @@ public final class Protection {
 
     private static int idleWhileSuspended = 0;
 
+    /**
+     * A narrow lift: the rule holds for every protected type but the one block kind a dig is after. The build job's
+     * clears dig a stray cobblestone with Baritone's help when no floor spot reaches it, and with the whole rule lifted
+     * Baritone broke the storage house's new planks and logs on its way there (the next package built them again).
+     */
+    private static final List<Block> only = new ArrayList<>();
+    private static int idleWhileNarrow = 0;
+
+    public static void allowOnly(Block target) { only.add(target); }
+
+    public static void endAllowOnly(Block target) { only.remove(target); }
+
     private static void tick(Minecraft mc) {
         // a process that ended without its end handler (its call was dropped) must not leave the rule lifted for good
         if (suspended > 0) {
@@ -125,6 +137,10 @@ public final class Protection {
             if (idleWhileSuspended >= 5) { suspended = 0; idleWhileSuspended = 0; }
         }
         if (suspended > 0) { apply(furnitureNear(mc)); return; }
+        if (!only.isEmpty()) {
+            idleWhileNarrow = Processes.active() == null ? idleWhileNarrow + 1 : 0;
+            if (idleWhileNarrow >= 5) { only.clear(); idleWhileNarrow = 0; }
+        }
         if (mc.player == null || mc.level == null) return;
         BlockPos me = mc.player.blockPosition();
         Set<Block> types = new LinkedHashSet<>();
@@ -135,8 +151,12 @@ public final class Protection {
             if (!st.isAir()) types.add(st.getBlock());
         }
         if (nearZone(me)) types.addAll(GROUND);
+        types.removeAll(only);
         apply(new ArrayList<>(types));
     }
+
+    /** Apply the rule now (a narrow lift starting or ending shouldn't wait for the next second's tick). */
+    static void refresh() { tick(Minecraft.getInstance()); }
 
     public static void register(BridgeServer s) {
         // the full list for the current dimension, replacing what was there

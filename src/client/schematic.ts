@@ -132,7 +132,7 @@ export function missingCells(layout: Schematic, world: (string | null)[]): Cell[
     const got = world[i] ? parseState(world[i]!) : null;
     if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) return;
     const x = i % layout.width, z = Math.floor(i / layout.width) % layout.length, y = Math.floor(i / (layout.width * layout.length));
-    out.push({ x, y, z, state: want.state, id: want.id, ...(want.props.facing ? { facing: want.props.facing } : {}) });
+    out.push({ x, y, z, state: want.state, id: want.id, ...(want.props.facing ? { facing: want.props.facing } : {}), ...(lying(want.props) ? { axis: want.props.axis } : {}) });
   });
   return out.sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
 }
@@ -162,13 +162,17 @@ export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCh
   return { placed, total, missing, misplaced };
 }
 
-export interface FacingCell { x: number; y: number; z: number; state: string; id: string; facing: string }
+export interface FacingCell { x: number; y: number; z: number; state: string; id: string; facing?: string; axis?: string }
 /** A structure cell (relative to the minimum corner) and the block it wants. */
-export interface Cell { x: number; y: number; z: number; state: string; id: string; facing?: string }
+export interface Cell { x: number; y: number; z: number; state: string; id: string; facing?: string; axis?: string }
+
+/** A log (pillar, column) lying on its side: Baritone pauses on it ("missing" with a stack in hand), so it's placed by hand. */
+const lying = (props: Record<string, string>) => props.axis === 'x' || props.axis === 'z';
 
 /**
  * Split a structure for building: Baritone gets every block except the ones with a `facing` (stairs on a roof edge must be
- * placed from outside the wall, which it can't stand at), which become structure_void (Baritone's skip list holds it);
+ * placed from outside the wall, which it can't stand at) and logs lying on their side (Baritone pauses on those as if it
+ * had none), which become structure_void (Baritone's skip list holds it);
  * those come back as cells, bottom up, for build-structure to place itself with the right facing.
  */
 export function splitDirectional(layout: Schematic): { baritone: Schematic; cells: FacingCell[] } {
@@ -176,9 +180,10 @@ export function splitDirectional(layout: Schematic): { baritone: Schematic; cell
   const remap = new Map<number, number>();
   const directional = new Map<number, string>();
   for (const [state, i] of Object.entries(layout.palette)) {
-    const facing = parseState(state).props.facing;
-    const keep = facing ? 'minecraft:structure_void' : state;
-    if (facing) directional.set(i, state);
+    const { props } = parseState(state);
+    const byHand = !!props.facing || lying(props);
+    const keep = byHand ? 'minecraft:structure_void' : state;
+    if (byHand) directional.set(i, state);
     if (!(keep in palette)) palette[keep] = Object.keys(palette).length;
     remap.set(i, palette[keep]);
   }
@@ -188,7 +193,7 @@ export function splitDirectional(layout: Schematic): { baritone: Schematic; cell
     if (state) {
       const { id, props } = parseState(state);
       const x = i % layout.width, z = Math.floor(i / layout.width) % layout.length, y = Math.floor(i / (layout.width * layout.length));
-      cells.push({ x, y, z, state, id, facing: props.facing });
+      cells.push({ x, y, z, state, id, ...(props.facing ? { facing: props.facing } : {}), ...(lying(props) ? { axis: props.axis } : {}) });
     }
     return remap.get(p)!;
   });

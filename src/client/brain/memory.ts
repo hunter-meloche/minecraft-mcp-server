@@ -42,12 +42,38 @@ export interface BuildJob {
   /** cells ("x,y,z") a package failed on, and how often: left alone after two */
   fails?: Record<string, number>;
   packages?: number;
+  /** the package count at the last tidy round (scaffold dug out round the site) */
+  tidiedAt?: number;
+  /** scaffold cells a tidy round couldn't dig, and how often: left after two */
+  tidyFails?: Record<string, number>;
+  /** the given-up cells had their one more go (they get it before the job is called done) */
+  secondChance?: boolean;
+  /** cells of a block nobody can get (farmland), left till the rest of the job is done */
+  parked?: string[];
+  /** packages in a row that ran out of a block (its cells don't count failures for that, up to a few) */
+  shortRuns?: number;
   /** the last shortfall of things to make (a repeat means the making failed) */
   lastShort?: string;
   /** the footprint was levelled (the structure's prepare.level) */
   prepared?: boolean;
   /** changes still to make when it started */
   total?: number;
+  /**
+   * Terraslicer's phases: sliced (the toolpath worked out), provisioning (the whole bill being secured in the home
+   * chests: nothing is built before it's all there), building (load by load), finishing. Undefined: the old package
+   * executor (kept for jobs started before, and as a fallback)
+   */
+  phase?: 'provisioning' | 'building' | 'finishing';
+  /** the bill being secured (what the toolpath places, scaffold at its peak, a spare) */
+  bill?: Record<string, number>;
+  /** Terraslicer's toolpath progress: loads done */
+  loadsDone?: number;
+  /** scaffold blocks the job put up and hasn't taken down yet ("x,y,z"): a new slice takes them down */
+  scaffold?: string[];
+  /** cells the executor failed on, and how often (re-sliced twice, then given up) */
+  misses?: Record<string, number>;
+  /** station spots Baritone couldn't walk to ("x,y,z"): later slices plan around them */
+  avoid?: string[];
 }
 
 export interface WorldMemory {
@@ -83,6 +109,11 @@ export interface WorldMemory {
   fenceClearFor?: string;
   /** the LLM's declarative builds, oldest first */
   buildJobs?: BuildJob[];
+  /**
+   * What the build jobs have secured in the home chests (job id -> item -> count): other chores take only what's
+   * beyond it (the kit, cooking, fuel, projects), and the stash never throws it away
+   */
+  reserved?: Record<string, Record<string, number>>;
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
 }
 

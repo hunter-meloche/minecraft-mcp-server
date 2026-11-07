@@ -14,6 +14,11 @@ import { jobsOf, jobText, queueJob } from './job.js';
 import { importChanges, importDesign } from './importer.js';
 import { readBox } from '../brain/milestones.js';
 import { rankSites, siteMap } from './site.js';
+import { tidyBox } from './tidy.js';
+import { Voxels } from './terraslicer/world.js';
+import { slice, type Toolpath } from './terraslicer/slicer.js';
+import { sliceText, stationsText } from './terraslicer/preview.js';
+import { release } from './terraslicer/provision.js';
 
 /**
  * The declarative build tools: the LLM writes a design (the shape), places it as a named structure (anchor, rotation)
@@ -62,8 +67,20 @@ export async function sourced(rt: ClientRuntime, brain: Brain | undefined, chang
   return sourceBill(billFor(changes), have);
 }
 
+/**
+ * Terraslicer's toolpath for a structure's changes: the world round it read in one go (its box and a margin), sliced
+ * from home (where a build starts, with its materials taken).
+ */
+export async function sliceFor(rt: ClientRuntime, c: Compiled, changes: Change[]): Promise<Toolpath> {
+  const box = tidyBox(c.box);
+  const v = new Voxels(box, await readBox(rt, box));
+  const st = await rt.status();
+  const p = rt.home(st) ?? st.position ?? { x: c.box.x, y: c.box.y, z: c.box.z };
+  return slice(v, changes, { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
+}
+
 /** A plan as the LLM reads it. */
-export function planText(title: string, c: Compiled, changes: Change[], bill: SourcedBill): string {
+export function planText(title: string, c: Compiled, changes: Change[], bill: SourcedBill, path?: Toolpath): string {
   const s = summary(changes);
   const managed = changes.filter(x => !x.second).length;
   const lines = [`${title}: box ${fmt(c.box)} ${c.box.width}x${c.box.height}x${c.box.length}, ${managed} managed cells.`];
@@ -88,8 +105,11 @@ export function planText(title: string, c: Compiled, changes: Change[], bill: So
     if (Object.keys(bill.gather).length) lines.push(`To gather: ${Object.entries(bill.gather).map(([k, v]) => `${k} x${v}`).join(', ')}.`);
     if (Object.keys(bill.missing).length) lines.push(`Missing (put these in a home chest, or change the design): ${Object.entries(bill.missing).map(([k, v]) => `${k} x${v}`).join(', ')}.`);
   }
-  const ps = packages(changes);
-  lines.push(`Work: ${ps.length} package(s) (${ps.filter(p => p.phase === 'clear').length} clearing, ${ps.filter(p => p.phase === 'build').length} building, ${ps.filter(p => p.phase === 'attach').length} attaching).`);
+  if (path) lines.push(sliceText(path));
+  else {
+    const ps = packages(changes);
+    lines.push(`Work: ${ps.length} package(s) (${ps.filter(p => p.phase === 'clear').length} clearing, ${ps.filter(p => p.phase === 'build').length} building, ${ps.filter(p => p.phase === 'attach').length} attaching).`);
+  }
   return lines.join('\n');
 }
 
@@ -153,14 +173,15 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
 
   factory.registerTool(
     'structure-plan',
-    'What building or repairing a structure would take, without doing anything: the cells to place, replace, turn round, clear or re-sign (compared with the world block by block), the materials (and where the bot gets each), and how the work splits up. Give `name` for a placed structure, or `design` + `anchor` (+ `rotation`) to try a placement.',
+    "What building or repairing a structure would take, without doing anything: the cells to place, replace, turn round, clear or re-sign (compared with the world block by block), the materials (and where the bot gets each), and Terraslicer's toolpath: the stations the bot would stand at in order, the scaffold it would put up and take down again, the loads from the chests and a time estimate (`stations` lists them). Give `name` for a placed structure, or `design` + `anchor` (+ `rotation`) to try a placement.",
     {
       name: z.string().optional().describe('A placed structure (from structure-apply)'),
       design: z.any().optional().describe('A saved design\'s name, or a design object'),
       anchor: pos.optional().describe('Where the design\'s minimum corner goes'),
-      rotation: rotation.optional().describe('Clockwise from above: 0, 90, 180 or 270 (default 0)')
+      rotation: rotation.optional().describe('Clockwise from above: 0, 90, 180 or 270 (default 0)'),
+      stations: z.number().int().min(0).max(500).optional().describe("List this many of Terraslicer's stations (where the bot stands and what it does there), in order")
     },
-    async ({ name, design, anchor, rotation: rot = 0 }: { name?: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation }) => {
+    async ({ name, design, anchor, rotation: rot = 0, stations = 0 }: { name?: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; stations?: number }) => {
       try {
         let d: Design, a: { x: number; y: number; z: number }, r: Rotation = rot, title: string;
         if (name && !design) {
@@ -173,7 +194,9 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         }
         const c = compile(d, a, r);
         const changes = await plan(rt, c);
-        return factory.createResponse(planText(title, c, changes, await sourced(rt, brain, changes)));
+        const path = await sliceFor(rt, c, changes).catch(() => undefined);
+        const text = planText(title, c, changes, await sourced(rt, brain, changes), path);
+        return factory.createResponse(path && stations ? [text, 'Stations:', stationsText(path, stations)].join('\n') : text);
       } catch (e) {
         return factory.createErrorResponse((e as Error).message);
       }
@@ -182,7 +205,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
 
   factory.registerTool(
     'structure-apply',
-    `Build (or repair) a structure: place a design under a name (design + anchor + rotation; saved as this world's structure file) or name one placed before, and the bot works on it at its own pace (priority 3.5: after staying alive, its gear and its food stock; before its chores and projects). It gathers and crafts the materials it can, fights or shelters when it must, and picks up where the world says it got to, block by block, until every cell matches. By day only. Returns the plan and the job; follow it with structure-status. A design can be a saved design's name or the design itself (see structure-design).`,
+    `Build (or repair) a structure: place a design under a name (design + anchor + rotation; saved as this world's structure file) or name one placed before, and the bot works on it at its own pace (priority 3.5: after staying alive, its gear and its food stock; before its chores and projects). Terraslicer runs it: first the whole bill is secured in the home chests and held for the job (gathered, crafted, smelted; nothing is built until it's all there, and what it can't get by itself stops the job with the reason), then the bot follows a toolpath worked out like a 3D printer's slicer: building by building, station by station, with scaffold (pillars, bridges, temporary supports) planned in and taken down again. It fights or shelters when it must and picks up where the world says it got to, slicing again each run, until every cell matches. By day only. Returns the plan and the job; follow it with structure-status. A design can be a saved design's name or the design itself (see structure-design).`,
     {
       name: z.string().describe("The structure's name in this world (letters, digits, - and _)"),
       design: z.any().optional().describe("A saved design's name, or a design object (saved under its own name)"),
@@ -255,7 +278,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       const mem = brain?.worldMemory();
       const jobs = mem ? jobsOf(mem).filter(j => j.structure === name && !['done', 'failed', 'cancelled'].includes(j.status)) : [];
       if (!jobs.length) return factory.createErrorResponse(`No job going for "${name}"`);
-      for (const j of jobs) { j.status = 'cancelled'; j.note = 'cancelled'; j.updatedAt = Date.now(); j.need = j.missing = j.carry = undefined; }
+      for (const j of jobs) { j.status = 'cancelled'; j.note = 'cancelled'; j.updatedAt = Date.now(); j.need = j.missing = j.carry = undefined; release(mem!, j.id); }
       brain!.saveMemory();
       return factory.createResponse(`Cancelled ${jobs.map(j => `#${j.id}`).join(', ')} for ${name}.`);
     }

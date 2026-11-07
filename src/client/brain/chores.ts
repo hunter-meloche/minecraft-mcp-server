@@ -2,7 +2,7 @@ import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import type { Goal, GoalContext, Snapshot } from './goals.js';
 import { COOKS_TO } from './food.js';
-import { chestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
+import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
 import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign } from './storage.js';
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
@@ -57,13 +57,24 @@ async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<
 // ------------------------------------------------------------------------------------------------ stash
 
 /** Empty the pockets into the home chests: when nearly full, and once in a while when home anyway. */
+/** Most slots used to set out on a materials trip (the stash makes room when one waits). */
+const STOCK_SLOTS = 30;
+/** How far out (the yard, a build job's site) the stash still goes home to make room for a waiting trip. */
+const TRIP_STASH_RANGE = 40;
+
 export const stash: Goal = {
   name: 'stash',
   priority: 60,
   timeoutMs: 6 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
-    if (!awakeAtHome(s) || !world.landmarks.chests.length) return null;
+    if (!world.landmarks.chests.length || s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
+    // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used) is worth the walk home: the
+    // build job keeps the bot at its site, 24 blocks out, where it waited all day at 31 slots
+    // (not while a build job carries its load: those pockets are full on purpose)
+    const tripWaits = s.slotsUsed >= STOCK_SLOTS && s.distHome <= TRIP_STASH_RANGE && stockShort(s, world).length > 0 &&
+      !activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
+    if (!awakeAtHome(s) && !tripWaits) return null;
     const plan = stashPlan(s.items, { foods: foods(), keep: projectCarry(world) });
     // only what can really go: a worse duplicate of a kept tool can't be told apart, and a project's materials stay
     // (a full pocket of planks for the storage house had the stash stop the build over and over, storing nothing)
@@ -72,6 +83,10 @@ export const stash: Goal = {
     if (!plan.deposit.length && !plan.drop.length) return null;
     // a project carrying its materials fills the pockets on purpose: only stop it when really full
     if (s.slotsUsed >= (world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27)) return `${s.slotsUsed}/36 slots used`;
+    // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used): make the room. Between the
+    // two limits the bot sat idle all day at 31 slots, its build job waiting on 77 logs and the pockets full of seeds
+    if (tripWaits) return `${s.slotsUsed}/36 slots used, and a materials trip waits for room`;
+    if (!awakeAtHome(s)) return null;
     if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
     return null;
   },
@@ -105,26 +120,36 @@ export const stash: Goal = {
       // farm round, then a fishing walk, brought back hundreds of dirt and leaf litter thrown minutes before): throw
       // them 8 blocks out from the fence on the side it walks least (the heat map), where they despawn in 5 minutes
       const yard = ctx.world.yard;
-      const dump = yard ? dumpSpot(yard, ctx.world.heat ? HeatMap.fromJSON(ctx.world.heat) : undefined) : (() => {
+      const dumps = yard ? dumpSpots(yard, ctx.world.heat ? HeatMap.fromJSON(ctx.world.heat) : undefined) : [(() => {
         const home = ctx.s.home!;
         const f = farmCentre(ctx.world);
         const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
         const len = Math.hypot(dx, dz) || 1;
         return { x: Math.round(home.x + dx / len * 14), y: home.y, z: Math.round(home.z + dz / len * 14) };
-      })();
-      try {
-        await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
-      } catch (e) {
-        // near enough will do, as long as it's well outside the fence
-        const me = (await ctx.status()).position;
-        if (!me || !yard || outsideBy(yard, me) < 4) throw e;
+      })()];
+      // the least walked side first, the next if it can't get there (the east spot was in a stone hill, and the stash
+      // failed there every time, storing nothing and dropping nothing, all day)
+      let there = false;
+      for (const dump of dumps) {
+        if (ctx.signal.aborted) break;
+        try {
+          await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
+          there = true;
+        } catch {
+          // near enough will do, as long as it's well outside the fence
+          const me = (await ctx.status()).position;
+          there = !!me && (!yard || outsideBy(yard, me) >= 4);
+        }
+        if (there) break;
       }
-      for (const e of plan.drop) {
-        const r = await ctx.act('drop-item', { item: e.name, count: e.count });
-        const m = /^Dropped (\d+)/.exec(r.text);
-        if (m) dropped += Number(m[1]);
-      }
-      await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 });
+      if (there) {
+        for (const e of plan.drop) {
+          const r = await ctx.act('drop-item', { item: e.name, count: e.count });
+          const m = /^Dropped (\d+)/.exec(r.text);
+          if (m) dropped += Number(m[1]);
+        }
+      } else ctx.progress('no dump spot outside the fence it could get to: the junk stays carried');
+      await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 }).catch(() => undefined);
     }
     ctx.progress(`stored ${stored}, dropped ${dropped}`);
     if (!stored && !dropped) throw new Error('nothing could be put away');
@@ -291,13 +316,13 @@ export const kit: Goal = {
   wants: (s, world) => {
     if (!awakeAtHome(s)) return null;
     if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return 'look in the home chests';
-    const needs = kitNeeds(s.items, chestTotals(world)).filter(doable);
+    const needs = kitNeeds(s.items, freeChestTotals(world)).filter(doable);
     return needs.length ? `needs ${needs.map(label).join(', ')}` : null;
   },
   run: async ctx => {
     await refreshChests(ctx, 0);
     const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
-    const needs = kitNeeds(inv.items, chestTotals(ctx.world));
+    const needs = kitNeeds(inv.items, freeChestTotals(ctx.world));
     const did: string[] = [];
     for (const need of needs.filter(doable)) {
       for (const step of need.plan) {
@@ -349,7 +374,8 @@ const gearShort = (s: Snapshot, world: WorldMemory) => stockShort(s, world).some
 
 /** How short the home is of each stock item (kit gathering needs on top), most urgent first. */
 export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp; gear: boolean }[] {
-  const chest = chestTotals(world);
+  // what a build job holds in the chests is its own, not the home's stock
+  const chest = freeChestTotals(world);
   const have = (re: RegExp) => [...s.counts].filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0) +
     Object.entries(chest).filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0);
   const extra: Record<string, number> = {};
@@ -386,7 +412,7 @@ export const stock: Goal = {
   retryMs: 8 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > world.leash) return null;
-    if (s.slotsUsed >= 30 || s.health < 14 || s.food < 10) return null;
+    if (s.slotsUsed >= STOCK_SLOTS || s.health < 14 || s.food < 10) return null;
     if (daylightLeft(s.timeOfDay) < 3000) return null; // under 2.5 minutes of daylight: not worth setting out
     if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return null; // the kit goal looks in them first
     const short = stockShort(s, world);
@@ -400,7 +426,8 @@ export const stock: Goal = {
     const budget = Math.min(6 * MINUTE, daylightLeft(ctx.s.timeOfDay) * 50 - 90_000);
     if (budget < 60_000) return 'too late in the day';
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
-    const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 64), timeoutMs: budget });
+    // as much as the trip's time allows (a build job's whole bill, not a stack at a time)
+    const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
     ctx.progress(r.text.slice(0, 160));
     if (/nothing gained|in sight outside the home area/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
     // a project's shortfall is served once per trip: the project works out what's still short when it next runs
@@ -472,6 +499,11 @@ const BAND = { from: 2, to: 12 };
 
 /** Where to throw junk: 8 out from the middle of the yard's least walked side (heat summed within 6 of each spot). */
 export function dumpSpot(yard: { x1: number; z1: number; x2: number; z2: number; y: number }, heat?: HeatMap): { x: number; y: number; z: number } {
+  return dumpSpots(yard, heat)[0];
+}
+
+/** The four dump spots, the least walked first: one may be in a hill or a lake (the east one was in stone). */
+export function dumpSpots(yard: { x1: number; z1: number; x2: number; z2: number; y: number }, heat?: HeatMap): { x: number; y: number; z: number }[] {
   const mx = Math.round((yard.x1 + yard.x2) / 2), mz = Math.round((yard.z1 + yard.z2) / 2), out = 8;
   const spots = [{ x: mx, z: yard.z1 - out }, { x: mx, z: yard.z2 + out }, { x: yard.x1 - out, z: mz }, { x: yard.x2 + out, z: mz }];
   const warmth = (p: { x: number; z: number }) => {
@@ -479,8 +511,7 @@ export function dumpSpot(yard: { x1: number; z1: number; x2: number; z2: number;
     for (let dz = -6; dz <= 6; dz++) for (let dx = -6; dx <= 6; dx++) h += heat?.get(p.x + dx, p.z + dz) ?? 0;
     return h;
   };
-  const best = spots.map(p => ({ p, h: warmth(p) })).sort((a, b) => a.h - b.h)[0].p;
-  return { ...best, y: yard.y + 1 };
+  return spots.map(p => ({ p, h: warmth(p) })).sort((a, b) => a.h - b.h).map(({ p }) => ({ ...p, y: yard.y + 1 }));
 }
 
 /** How far a point is outside a yard box (0 inside), in the larger of the two directions. */

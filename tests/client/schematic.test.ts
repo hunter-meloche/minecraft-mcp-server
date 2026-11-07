@@ -46,6 +46,15 @@ test('splitDirectional: Baritone gets structure_void where stairs go; the stairs
   t.deepEqual(cells.map(c => [c.x, c.y, c.z, c.id, c.facing]), [[0, 1, 0, 'oak_stairs', 'south'], [1, 1, 1, 'oak_stairs', 'north']]);
 });
 
+test('splitDirectional: logs on their side are placed by hand too, along their axis; upright ones go to Baritone', (t) => {
+  const s = layoutSpec({ palette: { Y: 'oak_log[axis=y]', X: 'oak_log[axis=x]', Z: 'oak_log[axis=z]' }, layers: [['YXZ']] });
+  const { baritone, cells } = splitDirectional(s);
+  t.deepEqual(baritone.palette, { 'minecraft:air': 0, 'minecraft:oak_log[axis=y]': 1, 'minecraft:structure_void': 2 });
+  t.deepEqual(baritone.blocks, [1, 2, 2]);
+  t.deepEqual(cells.map(c => [c.x, c.axis, c.facing]), [[1, 'x', undefined], [2, 'z', undefined]]);
+  t.deepEqual(missingCells(s, ['air', 'air', 'oak_log[axis=x]']).map(c => [c.x, c.axis]), [[0, undefined], [1, 'x'], [2, 'z']]);
+});
+
 test('placerFacing: stairs and doors face where the player looks, furnaces and chests face back', (t) => {
   t.is(placerFacing('oak_stairs', 'south'), 'south');
   t.is(placerFacing('oak_door', 'east'), 'east');

@@ -1,7 +1,7 @@
 import type { Goal, GoalContext } from './goals.js';
 import { daylightLeft } from './schedule.js';
 import { journal, nextMilestone, progressOf, recipeFor, type Milestone } from './progress.js';
-import { chestTotals, takeFromChests } from './chests.js';
+import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 
 /**
  * The project goal: works the next milestone of the long game, one step per slot of free daytime, so the bot keeps
@@ -105,21 +105,25 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   const raw = SMELTED[item];
   if (raw && ctx.world.landmarks.furnace) {
     const want = n - have;
-    let ore = await count(ctx, x => x === raw);
-    if (ore < want) { await takeFromChests(ctx, raw, want - ore); ore = await count(ctx, x => x === raw); }
+    // what the bill places as it is (a wall's cobblestone) isn't there to be smelted into something else
+    const spareOre = async () => Math.max(0, (await count(ctx, x => x === raw)) - (reserve[raw] ?? 0));
+    let ore = await spareOre();
+    if (ore < want) { await takeFromChests(ctx, raw, want - ore); ore = await spareOre(); }
     // not enough of what it smelts from: get that first (cobblestone for stone, stone for smooth stone...); with none
     // at all, what that's short of is what's short
     if (ore < want && depth < 6) {
       const sub = await prepare(ctx, raw, want, depth + 1, reserve);
-      ore = await count(ctx, x => x === raw);
+      ore = await spareOre();
       if (!ore) return Object.keys(sub).length ? sub : { [item]: want };
     }
     if (ore) {
-      const fuel = await fuelFor(ctx);
+      const fuel = await fuelFor(ctx, reserve);
       if (!fuel) return { coal: Math.max(1, Math.ceil(Math.min(ore, want, SMELT_BATCH) / 8)) };
       // a batch at a time (a stack of glass is 11 minutes at the furnace): the rest next run
       const k = Math.min(ore, want, SMELT_BATCH);
-      await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, takeOutput: true, timeoutMs: k * 10_500 + 15_000 });
+      // fuel the bill places (its logs, its planks) burns only beyond what the bill needs
+      const fuelCount = reserve[fuel] ? Math.max(1, (await count(ctx, x => x === fuel)) - reserve[fuel]) : undefined;
+      await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, ...(fuelCount ? { fuelCount } : {}), takeOutput: true, timeoutMs: k * 10_500 + 15_000 });
       have = await counted();
       if (have >= n) return {};
       return { [item]: n - have };
@@ -150,13 +154,19 @@ export const SMELTED: Record<string, string> = {
 export const SMELT_BATCH = 24;
 const FUEL = /^(coal|charcoal|(?!stripped_)[a-z_]+_log|[a-z_]+_planks)$/;
 
-/** Something to burn: carried, else coal or logs from the chests. */
-export async function fuelFor(ctx: GoalContext): Promise<string | undefined> {
-  const inv = await ctx.call<{ items: { name: string; slot: number }[] }>('inventory');
-  const carried = inv.items.find(i => i.slot < 36 && FUEL.test(i.name))?.name;
-  if (carried) return carried;
-  const stored = Object.entries(chestTotals(ctx.world)).filter(([n, k]) => k > 0 && FUEL.test(n))
-    .sort(([a], [b]) => Number(!/coal/.test(a)) - Number(!/coal/.test(b)))[0]?.[0];
+/**
+ * Something to burn: carried (coal first), else coal or logs from the chests. `keep` is what a bill places as it is: a
+ * kind carried only that many times over isn't fuel (a build's logs went into the furnace that smelted its stone).
+ */
+export async function fuelFor(ctx: GoalContext, keep: Record<string, number> = {}): Promise<string | undefined> {
+  const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
+  const carried = new Map<string, number>();
+  for (const i of inv.items) if (i.slot < 36 && FUEL.test(i.name)) carried.set(i.name, (carried.get(i.name) ?? 0) + i.count);
+  const coalFirst = ([a]: [string, number], [b]: [string, number]) => Number(!/coal/.test(a)) - Number(!/coal/.test(b));
+  const spare = [...carried].filter(([n, k]) => k > (keep[n] ?? 0)).sort(coalFirst)[0]?.[0];
+  if (spare) return spare;
+  // what a build job has secured isn't fuel
+  const stored = Object.entries(chestTotals(ctx.world)).filter(([n, k]) => k > reservedCount(ctx.world, n) && FUEL.test(n)).sort(coalFirst)[0]?.[0];
   if (stored && await takeFromChests(ctx, stored, 8)) return stored;
   return undefined;
 }
@@ -173,9 +183,10 @@ async function planksFor(ctx: GoalContext): Promise<string> {
 /** Prepare a whole bill; what's short goes to the stock trips (progress.need) and comes back. */
 export async function prepareBill(ctx: GoalContext, bill: Record<string, number>, opts: { record?: boolean } = {}): Promise<Record<string, number>> {
   const short: Record<string, number> = {};
-  // raw items first (they can't be crafted), and kept back from the crafting of the rest
+  // raw items first (they can't be crafted); everything the bill places is kept back from the making of the rest (its
+  // logs and planks out of the stairs, its cobblestone out of the furnace, none of them burnt as fuel)
   const raw = Object.entries(bill).filter(([item]) => !recipeFor(item));
-  const reserve = Object.fromEntries(raw);
+  const reserve = { ...bill };
   for (const [item, n] of [...raw, ...Object.entries(bill).filter(([item]) => recipeFor(item))]) {
     for (const [k, v] of Object.entries(await prepare(ctx, item, n, 0, reserve))) short[k] = (short[k] ?? 0) + v;
   }

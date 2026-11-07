@@ -1,5 +1,5 @@
 import test from 'ava';
-import { queueJob, specFor, activeJob, jobText } from '../../src/client/structures/job.js';
+import { queueJob, activeJob, jobText } from '../../src/client/structures/job.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 
 const world = (): WorldMemory => ({ landmarks: { chests: [], farmland: [] }, leash: 96 });
@@ -16,14 +16,17 @@ test('queueJob: one going job per structure; asking again replaces it', (t) => {
   t.regex(jobText(a), /#1 apply hut: cancelled/);
 });
 
-test('specFor: a package as a spec over its own box, letters per block, the rest left alone', (t) => {
-  const cells = [
-    { at: { x: 10, y: 64, z: 5 }, want: 'oak_planks' },
-    { at: { x: 12, y: 64, z: 5 }, want: 'stone' },
-    { at: { x: 10, y: 65, z: 6 }, want: 'oak_planks' }
-  ];
-  const { origin, spec } = specFor(cells);
-  t.deepEqual(origin, { x: 10, y: 64, z: 5 });
-  t.deepEqual(spec.palette, { A: 'oak_planks', B: 'stone' });
-  t.deepEqual(spec.layers, [['A B', '   '], ['   ', 'A  ']]);
+test('queueJob: a replaced job lets go of the materials it held in the chests', (t) => {
+  const w = world();
+  const a = queueJob(w, 'seed:1', 'hut', 'apply', 1000);
+  w.reserved = { [a.id]: { oak_log: 20 } };
+  queueJob(w, 'seed:1', 'hut', 'apply', 2000);
+  t.deepEqual(w.reserved, {});
+});
+
+test('jobText: Terraslicer\'s phase, loads done, scaffold up, cells given up on', (t) => {
+  const w = world();
+  const j = queueJob(w, 'seed:1', 'tower', 'apply', 1000);
+  Object.assign(j, { status: 'working', phase: 'building', loadsDone: 2, scaffold: ['1,2,3'], misses: { '0,0,0': 2, '1,0,0': 1 }, note: 'load done' });
+  t.regex(jobText(j), /#1 apply tower: working \[Terraslicer: building, 2 load\(s\) done, 1 scaffold block\(s\) up\] \(load done\); 1 cell\(s\) given up on/);
 });

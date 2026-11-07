@@ -1,20 +1,24 @@
 import type { Goal, GoalContext } from '../brain/goals.js';
-import type { BuildJob, WorldMemory } from '../brain/memory.js';
-import { prepareBill } from '../brain/project.js';
-import { chestTotals } from '../brain/chests.js';
-import { compile, type Cell, type Compiled } from './format.js';
+import type { BuildJob, Pos, WorldMemory } from '../brain/memory.js';
+import { compile, type Compiled } from './format.js';
 import { pending, type Change } from './diff.js';
-import { packages, type Package } from './order.js';
-import { billFor, sourceBill } from './bill.js';
 import { plan } from './scan.js';
+import { baseline, doorways, standSpots, strays, tidyBox, type Box } from './tidy.js';
+import { readBox } from '../brain/milestones.js';
 import type { StructureStore } from './store.js';
+import { Voxels, type P } from './terraslicer/world.js';
+import { slice } from './terraslicer/slicer.js';
+import { haveFor, provisionStep, release, reserve, toolpathBill, toolsFor } from './terraslicer/provision.js';
+import { runLoad } from './terraslicer/executor.js';
 
 /**
- * Build jobs: the LLM asks for a structure (structure-apply) and the brain works on it at priority 3.5, one package at
- * a time: below staying alive, the gear and the food stockpile (so a zombie, nightfall, hunger or a broken pickaxe
- * stops it, and those are seen to first), above home upkeep and the autopilot's own projects. Every run starts by
- * comparing the structure with the world, cell by cell, so a job stopped anywhere picks up exactly where the world
- * says it is: nothing is "remembered" as done that isn't standing.
+ * Build jobs: the LLM asks for a structure (structure-apply) and the brain works on it at priority 3.5, below staying
+ * alive, the gear and the food stockpile (so a zombie, nightfall, hunger or a broken pickaxe stops it, and those are
+ * seen to first), above home upkeep and the autopilot's own projects. Terraslicer does the work (terraslicer/): the
+ * whole bill secured in the chests first, then a toolpath worked out like a 3D printer's slicer, scaffold and all,
+ * carried out a load at a time. Every run starts by comparing the structure with the world, cell by cell, and slicing
+ * what's left, so a job stopped anywhere picks up exactly where the world says it is: nothing is "remembered" as done
+ * that isn't standing.
  */
 
 const MINUTE = 60_000;
@@ -30,7 +34,7 @@ export const activeJob = (world: WorldMemory, now: number) =>
 /** Queue a job for a structure (one going job per structure: asking again restarts it). */
 export function queueJob(world: WorldMemory, worldId: string, structure: string, mode: BuildJob['mode'], now: number): BuildJob {
   const jobs = jobsOf(world);
-  for (const j of jobs) if (j.structure === structure && !DONE.has(j.status)) { j.status = 'cancelled'; j.note = 'replaced by a new job'; j.updatedAt = now; }
+  for (const j of jobs) if (j.structure === structure && !DONE.has(j.status)) { j.status = 'cancelled'; j.note = 'replaced by a new job'; j.updatedAt = now; release(world, j.id); }
   const job: BuildJob = { id: Math.max(0, ...jobs.map(j => j.id)) + 1, world: worldId, structure, mode, status: 'queued', createdAt: now, updatedAt: now };
   jobs.push(job);
   // finished ones beyond the last 20 go
@@ -44,93 +48,185 @@ export function jobText(j: BuildJob): string {
   const extra = [
     j.need && `gathering ${Object.entries(j.need).map(([k, v]) => `${k} x${v}`).join(', ')}`,
     j.missing && `waiting for someone to put ${Object.entries(j.missing).map(([k, v]) => `${k} x${v}`).join(', ')} in a home chest`,
-    j.fails && Object.keys(j.fails).length && `${Object.values(j.fails).filter(n => n >= FAILS_ALLOWED).length} cell(s) given up on`
+    j.misses && Object.values(j.misses).some(n => n >= FAILS_ALLOWED) && `${Object.values(j.misses).filter(n => n >= FAILS_ALLOWED).length} cell(s) given up on`
   ].filter(Boolean).join('; ');
-  return `#${j.id} ${j.mode} ${j.structure}: ${j.status}${j.packages ? `, ${j.packages} package(s) done` : ''}${j.note ? ` (${j.note})` : ''}${extra ? `; ${extra}` : ''} [${when}]`;
+  const phase = j.phase && !DONE.has(j.status) ? ` [Terraslicer: ${j.phase}${j.phase === 'building' && j.loadsDone ? `, ${j.loadsDone} load(s) done` : ''}${j.scaffold?.length ? `, ${j.scaffold.length} scaffold block(s) up` : ''}]` : '';
+  return `#${j.id} ${j.mode} ${j.structure}: ${j.status}${phase}${j.note ? ` (${j.note})` : ''}${extra ? `; ${extra}` : ''} [${when}]`;
 }
 
-/** A spec for some cells, for build-structure: palette letters for their blocks, ' ' (left as it is) everywhere else. */
-export function specFor(cells: Cell[] | Change[]): { origin: { x: number; y: number; z: number }; spec: { palette: Record<string, string>; layers: string[][] } } {
-  const ats = cells.map(c => c.at);
-  const min = { x: Math.min(...ats.map(a => a.x)), y: Math.min(...ats.map(a => a.y)), z: Math.min(...ats.map(a => a.z)) };
-  const max = { x: Math.max(...ats.map(a => a.x)), y: Math.max(...ats.map(a => a.y)), z: Math.max(...ats.map(a => a.z)) };
-  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&*+-=?@^_~';
-  const palette: Record<string, string> = {};
-  const letterOf = new Map<string, string>();
-  const grid = new Map<string, string>();
-  for (const c of cells) {
-    if (!letterOf.has(c.want)) {
-      const l = letters[letterOf.size];
-      if (!l) throw new Error('too many kinds of block in one package');
-      letterOf.set(c.want, l);
-      palette[l] = c.want;
-    }
-    grid.set(key(c.at), letterOf.get(c.want)!);
+/** Scaffold blocks dug in one tidy round, at most. */
+const TIDY_BATCH = 48;
+
+/**
+ * Dig one block by hand, changing nothing else: from where the bot stands if it's in reach, else from a floor spot in
+ * reach (tidy.ts standSpots) walked to carefully (Baritone breaking and placing nothing on the way). Baritone's own
+ * dig walked into reach by breaking fences and walls and pillaring up on new scaffold. Returns why not, or ''.
+ */
+export async function digByHand(ctx: GoalContext, blocks: (string | null)[], box: Box, p: Pos, here: { at: Pos }, gone: Set<string>): Promise<string> {
+  type Dug = { dug: boolean; reason?: string };
+  const dig = () => ctx.call<Dug>('dig.here', { ...p, timeoutMs: 15_000 }, 25_000).catch(e => ({ dug: false, reason: (e as Error).message }));
+  let r = await dig();
+  if (r.dug || r.reason === 'air') return '';
+  let why = r.reason ?? 'not dug';
+  for (const spot of standSpots(blocks, box, p, here.at, gone, 3)) {
+    if (ctx.signal.aborted) return 'stopped';
+    const g = await ctx.call<{ arrived: boolean; at?: Pos }>('goto', { ...spot, range: 0, careful: true, timeoutMs: 30_000 }, 45_000)
+      .catch(() => ({ arrived: false, at: undefined }));
+    if (g.at) here.at = g.at;
+    if (!g.arrived) { why = 'no way there on foot'; continue; }
+    r = await dig();
+    if (r.dug || r.reason === 'air') return '';
+    why = r.reason ?? 'not dug';
   }
-  const layers: string[][] = [];
-  for (let y = min.y; y <= max.y; y++) {
-    const rows: string[] = [];
-    for (let z = min.z; z <= max.z; z++) {
-      let row = '';
-      for (let x = min.x; x <= max.x; x++) row += grid.get(key({ x, y, z })) ?? ' ';
-      rows.push(row);
-    }
-    layers.push(rows);
-  }
-  return { origin: min, spec: { palette, layers } };
+  return why;
 }
 
-const isSign = (c: Change) => /_sign\[/.test(c.want) || !!c.sign;
-/** The side of a sign's cell its support is on: behind a wall sign, under a standing one. */
-const supportSide = (want: string) => (!/_wall_sign/.test(want) ? 'down'
-  : ({ north: 'south', south: 'north', east: 'west', west: 'east' } as Record<string, string>)[/facing=(north|south|east|west)/.exec(want)?.[1] ?? 'north']);
-
-async function near(ctx: GoalContext, at: { x: number; y: number; z: number }, range = 3) {
-  await ctx.act('move-to-position', { ...at, range, timeoutMs: 90_000 }).catch(() => undefined);
-}
-
-/** Do one package; returns what it did. */
-async function work(ctx: GoalContext, job: BuildJob, p: Package): Promise<string> {
-  if (p.phase === 'clear') {
-    let dug = 0;
-    for (const c of p.changes) {
-      if (ctx.signal.aborted) break;
-      const r = await ctx.act('dig-block', { ...c.at, collect: true }).catch(e => ({ ok: false, text: (e as Error).message }));
-      if (r.ok && /^Dug/.test(r.text)) dug++;
-    }
-    return `cleared ${dug} of ${p.changes.length}`;
-  }
-  const blocks = p.changes.filter(c => !isSign(c));
-  const signs = p.changes.filter(isSign);
-  const done: string[] = [];
-  if (blocks.length) {
-    const { origin, spec } = specFor(blocks);
-    const r = await ctx.act('build-structure', { ...origin, spec, name: `job-${job.structure}`, timeoutMs: 5 * MINUTE }).catch(e => ({ ok: false, text: (e as Error).message }));
-    done.push(r.text.split('\n')[0].slice(0, 120));
-  }
-  for (const c of signs) {
+/** Dig the scaffold round the site (tidy.ts strays), a batch at a time, by hand; what it couldn't dig twice is left. */
+async function tidyRound(ctx: GoalContext, job: BuildJob, c: Compiled, keep: Set<string>): Promise<{ dug: number; failed: number; text: string }> {
+  ctx.progress(`${job.structure}: looking for scaffold left round the site`);
+  const tb = tidyBox(c.box);
+  const managed = new Set(c.cells.map(x => key(x.at)));
+  const doors = doorways(c.cells);
+  // a doorway is dug out even of what stood there before the job: a door has to lead somewhere
+  keep = new Set([...keep].filter(k => !doors.has(k)));
+  job.tidyFails ??= {};
+  const skip = new Set(Object.entries(job.tidyFails).filter(([, n]) => n >= FAILS_ALLOWED).map(([k]) => k));
+  const blocks = await readBox(ctx, tb);
+  const list = strays(blocks, tb, keep, managed, skip);
+  const here = { at: ctx.s.position };
+  const gone = new Set<string>();
+  let dug = 0, failed = 0;
+  const whys = new Map<string, number>();
+  for (const p of list.slice(0, TIDY_BATCH)) {
     if (ctx.signal.aborted) break;
-    await near(ctx, c.at, 2);
-    if (c.kind === 'sign' || /_sign/.test(c.have)) await ctx.act('dig-block', { ...c.at, collect: true }).catch(() => undefined);
-    const r = await ctx.call<{ placed: boolean; reason?: string }>('sign.place', { ...c.at, face: supportSide(c.want), lines: c.sign ?? [] }, 15_000)
-      .catch(e => ({ placed: false, reason: (e as Error).message }));
-    done.push(r.placed ? `sign at ${key(c.at)}` : `sign at ${key(c.at)}: ${r.reason}`);
+    ctx.progress(`${job.structure}: digging scaffold ${dug + failed + 1}/${Math.min(list.length, TIDY_BATCH)} at ${key(p)}`);
+    const why = await digByHand(ctx, blocks, tb, p, here, gone);
+    if (ctx.signal.aborted) break;
+    if (!why) { dug++; gone.add(key(p)); delete job.tidyFails[key(p)]; continue; }
+    failed++;
+    whys.set(why, (whys.get(why) ?? 0) + 1);
+    job.tidyFails[key(p)] = (job.tidyFails[key(p)] ?? 0) + 1;
   }
-  return done.join('; ');
+  // a round counts once its list is worked through: one stopped for the evening, or longer than a batch, goes on next run
+  if (!ctx.signal.aborted && list.length <= TIDY_BATCH) job.tidiedAt = job.packages ?? 0;
+  const reasons = [...whys].map(([w, n]) => `${n} ${w}`).join(', ');
+  const text = list.length ? `tidied ${dug} of ${list.length} scaffold block(s)${failed ? ` (not dug: ${reasons})` : ''}` : 'no scaffold left round the site';
+  job.note = text;
+  return { dug, failed, text };
 }
 
-/** After a package: the cells still not right count a failure each; two and they're left (and reported). */
-function countFails(job: BuildJob, before: Change[], after: Change[]) {
-  const still = new Set(pending(after).map(c => key(c.at)));
-  job.fails ??= {};
-  for (const c of before) {
-    const k = key(c.at);
-    if (still.has(k)) job.fails[k] = (job.fails[k] ?? 0) + 1;
-    else delete job.fails[k];
+const parseKey = (k: string): P => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; };
+/**
+ * What scaffold is made of (the bot's throwaway blocks): a stray one round the site is scaffold to take down. Not dirt:
+ * the baseline doesn't record it, and every dirt block of the ground would be "new".
+ */
+const SCAFFOLDISH = /^(cobblestone|cobbled_deepslate|netherrack|andesite|diorite|granite|tuff)$/;
+const floorOf = (p: { x: number; y: number; z: number }): P => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
+
+/**
+ * A run of a Terraslicer job: slice what's left against the world as it is (from home while provisioning, from where
+ * it is while building), then one step of the phase it's in: provisioning secures the whole bill in the chests (no
+ * block goes down before it's all there), building carries out the next load, finishing tidies up and calls it done.
+ * Every run slices afresh, so an interruption, a broken block or a failed step just shows in the next slice.
+ */
+async function terraslice(
+  ctx: GoalContext, job: BuildJob, c: Compiled, changes: Change[], keep: Set<string>,
+  stamp: (note: string, status?: BuildJob['status']) => void, finish: (left: number) => string,
+  protect?: (blocks: { at: Pos; state: string }[]) => void, built?: (center: Pos, radius: number) => { at: Pos }[]
+): Promise<string> {
+  const misses = job.misses ?? {};
+  const given = new Set(Object.entries(misses).filter(([, n]) => n >= FAILS_ALLOWED).map(([k]) => k));
+  job.phase ??= 'provisioning';
+  const box = tidyBox(c.box);
+  ctx.progress(`${job.structure}: slicing what's left`);
+  const blocks = await readBox(ctx, box);
+  const v = new Voxels(box, blocks);
+  const from = job.phase === 'provisioning' ? (ctx.s.home ?? ctx.s.position) : ctx.s.position;
+  // scaffold to take down: what the job knows it put up, and any throwaway block round the site that neither stood
+  // there when the job started nor is the design's (a load stopped mid-batch left two bridge blocks up the tower that
+  // the job never heard back about, and the tidy round could only dig from the ground)
+  const managed = new Set(c.cells.map(x => key(x.at)));
+  // what the bot built (any structure's, protected) is never scaffold
+  for (const b of built?.({ x: box.x + box.width / 2, y: box.y + box.height / 2, z: box.z + box.length / 2 }, Math.max(box.width, box.height, box.length)) ?? []) managed.add(key(b.at));
+  const standing = new Set(job.scaffold ?? []);
+  blocks.forEach((b, i) => {
+    if (!b || !SCAFFOLDISH.test(b.replace(/^minecraft:/, ''))) return;
+    const k = key(v.at(i));
+    if (!keep.has(k) && !managed.has(k)) standing.add(k);
+  });
+  const path = slice(v, changes.filter(x => !given.has(key(x.at))), floorOf(from), { scaffold: [...standing].map(parseKey), avoid: job.avoid ?? [] });
+  job.total ??= path.stats.place + path.stats.dig + path.stats.work + path.stats.sign;
+  if (!path.stations.length) {
+    // nothing more it can do: the safety net for stray scaffold, then done (what's left reported)
+    job.phase = 'finishing';
+    stamp('tidying up', 'working');
+    const t = await tidyRound(ctx, job, c, keep);
+    if (ctx.signal.aborted) return `${job.structure}: stopped tidying (${t.text})`;
+    if (t.dug || t.failed) return `${job.structure}: ${t.text}`;
+    job.scaffold = undefined;
+    // what's still wrong, not what it once gave up on (the tidy round may have put that right)
+    return finish(path.stuck.length + path.skipped.length + pending(changes).filter(x => given.has(key(x.at))).length);
   }
+  const bill = toolpathBill(path);
+  if (job.phase === 'provisioning' || job.phase === 'finishing') {
+    job.phase = 'provisioning';
+    job.bill = bill;
+    const step = await provisionStep(ctx, job, bill, toolsFor(path));
+    job.need = step.need;
+    job.missing = step.missing;
+    if (step.ready) {
+      job.phase = 'building';
+      job.need = job.missing = undefined;
+      stamp(`ready to build: ${step.note}; ${path.stats.stations} station(s) in ${path.stats.loads} load(s), about ${Math.round(path.stats.buildSeconds / 60)} min`, 'working');
+      return jobText(job);
+    }
+    if (step.missing) job.retryAt = ctx.s.now + 10 * MINUTE;
+    stamp(step.note, step.missing ? 'waiting' : step.need ? 'gathering' : 'working');
+    return jobText(job);
+  }
+  // building: the bill must still be covered (something took from it, or the world changed): else secure it again
+  reserve(ctx.world, job.id, bill);
+  const items = (await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory')).items;
+  const have = haveFor(ctx.world, items, job.id);
+  const short = Object.entries(toolpathBill(path, false)).filter(([k, n]) => (have[k] ?? 0) < n);
+  if (short.length) {
+    job.phase = 'provisioning';
+    stamp(`short of ${short.map(([k, n]) => `${n - (have[k] ?? 0)} ${k}`).join(', ')}: securing it again`, 'working');
+    return jobText(job);
+  }
+  const load = path.loads[0];
+  job.carry = [...new Set([...Object.keys(load.items), path.scaffoldItem])];
+  stamp(`building: ${path.stats.stations} station(s) in ${path.stats.loads} load(s) left, about ${Math.round(path.stats.buildSeconds / 60)} min`, 'working');
+  const r = await runLoad(ctx, job, path, load, protect);
+  // for the next slice: the scaffold standing, and the cells it failed on (twice and they're left)
+  const up = new Set(job.scaffold ?? []);
+  for (const k of r.scaffoldUp) up.add(k);
+  for (const k of r.scaffoldDown) up.delete(k);
+  job.scaffold = up.size ? [...up] : undefined;
+  // spots Baritone couldn't walk to: the next slices plan around them (else the same plan, the same failure, round again)
+  if (r.unreached.length) job.avoid = [...new Set([...(job.avoid ?? []), ...r.unreached])].slice(-60);
+  if (!r.stopped) {
+    // a station's first failure is what went wrong there; the rest followed from it (a floor block missing, the wall
+    // on it can't go up), and walking that failed is the world's doing: those aren't the cells' fault
+    const seen = new Set<number>();
+    for (const f of r.failed) {
+      if (seen.has(f.station) || /could not walk/.test(f.why)) continue;
+      seen.add(f.station);
+      misses[key(f.at)] = (misses[key(f.at)] ?? 0) + 1;
+    }
+    job.misses = Object.keys(misses).length ? misses : undefined;
+    job.loadsDone = (job.loadsDone ?? 0) + 1;
+  }
+  stamp(`${r.stopped ? 'stopped midway' : 'load done'}: ${r.text}`);
+  return `${job.structure}: ${r.text}`;
 }
 
-export function structureGoal(store: StructureStore): Goal {
+/**
+ * `protect`: the runtime's protectBuilt. A job protected only what stood of each package when it ran, so most of a
+ * redesigned house wasn't the bot's yet, and the wood trip's miner felled the cottage's new corner logs for the oak.
+ */
+export function structureGoal(store: StructureStore, protect?: (blocks: { at: Pos; state: string }[]) => void,
+  built?: (center: Pos, radius: number) => { at: Pos }[]): Goal {
   return {
     name: 'build',
     priority: BUILD_PRIORITY,
@@ -140,6 +236,9 @@ export function structureGoal(store: StructureStore): Goal {
       // by day only (the user's choice): the shelter brings it home at dusk and the job goes on in the morning
       if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || s.slotsUsed >= 34) return null;
       const j = activeJob(world, s.now);
+      // gathering: the stock trip clears job.need when it's back; until then (10 minutes at most) don't stop it for
+      // the two logs it has so far (the job did, a minute into each trip, and built a package of one block)
+      if (j?.status === 'gathering' && j.need && Object.keys(j.need).length && s.now - j.updatedAt < 10 * MINUTE) return null;
       return j ? `${j.mode} ${j.structure}${j.note ? `: ${j.note}` : ''}` : null;
     },
     run: async ctx => {
@@ -150,11 +249,6 @@ export function structureGoal(store: StructureStore): Goal {
       if (!s) { stamp('its structure file is gone', 'failed'); return job.note!; }
       let c: Compiled;
       try { c = compile(store.designOf(s), s.anchor, s.rotation ?? 0); } catch (e) { stamp((e as Error).message, 'failed'); return job.note!; }
-      const centre = { x: c.box.x + Math.floor(c.box.width / 2), y: c.box.y, z: c.box.z + Math.floor(c.box.length / 2) };
-      if (Math.hypot(ctx.s.position.x - centre.x, ctx.s.position.z - centre.z) > 24) {
-        ctx.progress(`${job.structure}: walking to the site`);
-        await near(ctx, centre, 6);
-      }
       // the ground first, if asked: the footprint levelled to just under the floor (hills cut, holes filled)
       if (s.prepare?.level && !job.prepared) {
         stamp('levelling the site', 'working');
@@ -164,64 +258,33 @@ export function structureGoal(store: StructureStore): Goal {
         if (!/Now level|Already level/.test(r.text)) return `${job.structure}: levelling the site: ${r.text.split('\n').pop()?.slice(0, 120)}`;
         job.prepared = true;
       }
+      // what scaffold-like blocks stand round the site before the job puts any up: its tidy rounds leave those
+      const st0 = store.loadState(job.world, job.structure);
+      if (st0.tidy?.job !== job.id || st0.tidy.pending) {
+        const tb = tidyBox(c.box);
+        const seed = st0.tidy?.job === job.id && st0.tidy.within ? { keep: st0.tidy.keep, within: st0.tidy.within } : undefined;
+        st0.tidy = { job: job.id, keep: baseline(await readBox(ctx, tb), tb, seed) };
+        store.saveState(job.world, job.structure, st0);
+      }
       ctx.progress(`${job.structure}: checking it block by block`);
       const changes = await plan(ctx, c);
-      const given = new Set(Object.entries(job.fails ?? {}).filter(([, n]) => n >= FAILS_ALLOWED).map(([k]) => k));
-      const todo = pending(changes).filter(x => !given.has(key(x.at)));
-      if (!todo.length) {
+      // what stands right is the bot's now: Baritone's walks and mining leave it alone (the mod's no-break rule)
+      protect?.(changes.filter(x => x.kind === 'ok' && x.want !== 'air' && x.have && !/^(minecraft:)?(air|cave_air)$/.test(x.have))
+        .map(x => ({ at: x.at, state: x.have })));
+      const finish = (leftCells: number) => {
         const st = store.loadState(job.world, job.structure);
         st.completeAt = ctx.s.now;
         st.verified = Object.fromEntries(changes.map(x => [key(x.at), x.have]));
         st.drift = undefined;
-        const left = given.size ? `, ${given.size} cell(s) it could not get right` : '';
+        const left = leftCells ? `, ${leftCells} cell(s) it could not get right` : '';
         st.history.push({ at: ctx.s.now, text: `${job.mode} complete${left}` });
         store.saveState(job.world, job.structure, st);
         job.need = job.missing = job.carry = undefined;
+        release(ctx.world, job.id);
         stamp(`complete${left}`, 'done');
         return `${job.structure} complete${left}`;
-      }
-      job.total ??= todo.length;
-      const p = packages(changes.filter(x => !given.has(key(x.at))))[0];
-      // materials for this package: from the chests, crafted, smelted; what's short goes to the stock trips, and what
-      // nobody can make waits for someone to put it in a chest
-      if (p.phase !== 'clear') {
-        const bill = billFor(p.changes);
-        job.carry = [...Object.keys(bill), 'stick', ...Object.keys(bill).filter(i => /_planks$/.test(i)).map(i => i.replace(/_planks$/, '_log'))];
-        ctx.progress(`${job.structure}: getting ${Object.entries(bill).map(([k, v]) => `${v} ${k}`).join(', ')} ready`);
-        const short = await prepareBill(ctx, bill, { record: false });
-        if (Object.keys(short).length) {
-          // sourced against what there is now: sand on hand means more glass to smelt, not a trip for sand
-          const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
-          const have: Record<string, number> = { ...chestTotals(ctx.world) };
-          for (const i of inv.items) if (i.slot < 36) have[i.name] = (have[i.name] ?? 0) + i.count;
-          const src = sourceBill(short, have);
-          job.need = Object.keys(src.gather).length ? src.gather : undefined;
-          job.missing = Object.keys(src.missing).length ? src.missing : undefined;
-          if (!job.need && !job.missing) {
-            // only more crafting or smelting (a batch at a time): straight on with it next run; but the same shortfall
-            // as last time means the making failed (no table in reach, a recipe it can't do): wait, don't spin
-            const sig = JSON.stringify(short);
-            const same = job.lastShort === sig;
-            job.lastShort = sig;
-            if (same) job.retryAt = ctx.s.now + 5 * MINUTE;
-            stamp(`${same ? 'could not make' : 'making more'}: ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 'working');
-            return jobText(job);
-          }
-          job.lastShort = undefined;
-          job.retryAt = ctx.s.now + (job.missing ? 10 : 3) * MINUTE;
-          stamp(job.missing ? 'waiting for materials it cannot get' : 'gathering materials', job.missing ? 'waiting' : 'gathering');
-          return jobText(job);
-        }
-        job.need = job.missing = undefined;
-      }
-      stamp(`${p.phase}: ${p.changes.length} cell(s) at y ${p.changes[0].at.y}`, 'working');
-      ctx.progress(`${job.structure}: ${p.phase} ${p.changes.length} cell(s), ${todo.length} to go`);
-      const did = await work(ctx, job, p);
-      if (ctx.signal.aborted) return `${job.structure}: stopped midway (${did})`;
-      countFails(job, p.changes, await plan(ctx, c));
-      job.packages = (job.packages ?? 0) + 1;
-      stamp(`${p.phase} package done: ${did.slice(0, 120)}`);
-      return `${job.structure}: ${did}`;
+      };
+      return terraslice(ctx, job, c, changes, new Set(st0.tidy!.keep), stamp, finish, protect, built);
     }
   };
 }

@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind } from '../../src/client/tools.js';
+import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -686,4 +686,11 @@ test('build-structure takes down scaffolding the build left beside it', async (t
   const r = await run('build-structure', { x: 0, y: 64, z: 0, spec: { palette: { L: 'oak_log[axis=y]' }, layers: [['L']] }, name: 'post' });
   t.regex(r.text, /all 1 blocks in place; took down 2 scaffold block\(s\) it left/);
   t.like(digs, [{ x: 2, y: 65, z: 0 }, { x: 2, y: 64, z: 0 }]); // top down
+});
+
+test('pausedFor reads the blocks Baritone paused for', t => {
+  t.deepEqual(pausedFor(['[Baritone] Missing materials for at least:', '[Baritone] 1x Block{minecraft:lantern}[hanging=false,waterlogged=false]',
+    '[Baritone] Unable to do it. Pausing. resume to resume, cancel to cancel']), [{ id: 'lantern', count: 1 }]);
+  t.deepEqual(pausedFor(['[Baritone] 10x Block{minecraft:oak_stairs}[facing=west]']), [{ id: 'oak_stairs', count: 10 }]);
+  t.deepEqual(pausedFor(['[Baritone] Done building']), []);
 });

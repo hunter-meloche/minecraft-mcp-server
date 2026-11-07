@@ -6,7 +6,35 @@ import type { Pos, WorldMemory } from './memory.js';
 export const key = (p: Pos) => `${p.x},${p.y},${p.z}`;
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 
-/** What's in a chest (walks up to it first); remembered for planning. */
+/** Baritone's throwaway blocks (and dirt): what can sit on a chest's lid by accident. */
+const THROWAWAY = /^(minecraft:)?(cobblestone|cobbled_deepslate|netherrack|andesite|diorite|granite|tuff|dirt)$/;
+
+type Call = <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>;
+
+/**
+ * Throwaway blocks on a chest's lid, or on its other half's: dug, so it opens (a build left cobblestone on three home
+ * chests and the kit couldn't get at them). Anything else on a lid is someone's building and stays. Returns what it dug.
+ */
+export async function freeLid(call: Call, at: Pos): Promise<Pos[]> {
+  type B = { name?: string; properties?: Record<string, string> };
+  const block = (p: Pos) => call<B>('world.block', { ...p }).catch(() => ({} as B));
+  const halves = [at];
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const n = { x: at.x + dx, y: at.y, z: at.z + dz };
+    const b = await block(n);
+    if (/chest/.test(b.name ?? '') && b.properties?.type && b.properties.type !== 'single') halves.push(n);
+  }
+  const dug: Pos[] = [];
+  for (const h of halves) {
+    const top = { x: h.x, y: h.y + 1, z: h.z };
+    if (!THROWAWAY.test((await block(top)).name ?? '')) continue;
+    const r = await call<{ dug: boolean }>('dig', { ...top, timeoutMs: 20_000 }, 35_000).catch(() => ({ dug: false }));
+    if (r.dug) dug.push(top);
+  }
+  return dug;
+}
+
+/** What's in a chest (walks up to it first, frees a lid weighed down by scaffold); remembered for planning. */
 export async function peekChest(ctx: GoalContext, at: Pos): Promise<Record<string, number>> {
   const open = () => ctx.call<{ items: Record<string, number> }>('chest.open', { ...at });
   try {
@@ -14,7 +42,10 @@ export async function peekChest(ctx: GoalContext, at: Pos): Promise<Record<strin
     try { items = (await open()).items; } catch {
       const r = await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 });
       if (!r.ok) throw new Error(`could not reach the chest at ${fmt(at)}: ${r.text}`);
-      items = (await open()).items;
+      try { items = (await open()).items; } catch (e) {
+        if (!/did not open/.test((e as Error).message) || !(await freeLid(ctx.call, at)).length) throw e;
+        items = (await open()).items;
+      }
     }
     remember(ctx.world, at, items);
     return items;
@@ -58,8 +89,31 @@ export function rememberReply(world: WorldMemory, at: Pos, text: string): void {
   remember(world, at, items);
 }
 
-/** Take an item from whichever home chests hold it; returns how many it got. */
-export async function takeFromChests(ctx: GoalContext, item: string, count: number): Promise<number> {
+/**
+ * The home chests less what the build jobs hold there: what the kit, the cook and the projects can count on (the kit
+ * planned to take torches a job held, found none, and never made any: over and over, stopping the job each time).
+ */
+export function freeChestTotals(world: WorldMemory): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [n, k] of Object.entries(chestTotals(world))) { const free = k - reservedCount(world, n); if (free > 0) out[n] = free; }
+  return out;
+}
+
+/** How many of an item the build jobs hold in the chests (all of them, or all but `except`'s). */
+export function reservedCount(world: WorldMemory, item: string, except?: number): number {
+  let n = 0;
+  for (const [job, items] of Object.entries(world.reserved ?? {})) if (Number(job) !== except) n += items[item] ?? 0;
+  return n;
+}
+
+/**
+ * Take an item from whichever home chests hold it; returns how many it got. What a build job has secured there is
+ * left alone, unless `forJob` is that job (its materials stay its own: the kit, the cook and the fuel take the rest).
+ */
+export async function takeFromChests(ctx: GoalContext, item: string, count: number, opts: { forJob?: number } = {}): Promise<number> {
+  const held = reservedCount(ctx.world, item, opts.forJob);
+  if (held) count = Math.min(count, Math.max(0, (chestTotals(ctx.world)[item] ?? 0) - held));
+  if (count <= 0) return 0;
   let got = 0;
   for (const c of chestsWith(ctx.world, item)) {
     if (got >= count) break;

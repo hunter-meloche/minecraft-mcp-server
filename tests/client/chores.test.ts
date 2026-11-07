@@ -34,11 +34,22 @@ test('ready food counts cooked food and bread, not raw meat or poison', (t) => {
 test('stash: when nearly full, or now and then with things to put away; never away from home', (t) => {
   const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: `oak_log`, count: 64 }));
   t.regex(stash.wants(snap([...gear(), ...junk]), world()) ?? '', /slots used/);
-  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 30 }), world()), null);
+  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 60 }), world()), null);
   t.is(stash.wants(snap(gear()), world()), null);
   t.regex(stash.wants(snap([...gear(), ...junk.slice(0, 3).map((j, i) => ({ ...j, name: ['oak_log', 'bone', 'string'][i] }))]), world()) ?? '', /3 kinds/);
   t.is(stash.wants(snap([...gear(), ...junk.slice(0, 3).map((j, i) => ({ ...j, name: ['oak_log', 'bone', 'string'][i] }))]),
     world({ lastDone: { stash: 10 * 60 * 60_000 - 60_000 } })), null); // put away a minute ago
+});
+
+test('stash: makes room when a build job materials trip waits on the pockets (stock sets out under 30 slots)', (t) => {
+  const seeds = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'wheat_seeds', count: 64 }));
+  const items = [...gear(), ...seeds]; // 31 slots
+  const job = { id: 5, world: 'w', structure: 'home', mode: 'repair' as const, status: 'gathering' as const, createdAt: 0, updatedAt: 0, need: { oak_log: 77 }, carry: ['oak_log'] };
+  t.is(stock.wants(snap(items), world({ buildJobs: [job] })), null); // too full to set out
+  t.regex(stash.wants(snap(items), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room/);
+  // from the job's site too, 24 blocks out (the plain at-home stash doesn't go that far)
+  t.regex(stash.wants(snap(items, { distHome: 24 }), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room/);
+  t.is(stash.wants(snap(gear(), { distHome: 24 }), world({ buildJobs: [job] })), null);
 });
 
 test('smelt: raw ore and fuel at home', (t) => {
@@ -229,6 +240,11 @@ test('dumpSpot: 8 out from the side the bot walks least', async (t) => {
   // the walk south to the lake, west and north: east is the quiet side
   for (let i = 0; i < 20; i++) { heat.visit({ x: 10, z: 18 + (i % 2) }); heat.visit({ x: -8 + (i % 2), z: 5 }); heat.visit({ x: 10, z: -8 + (i % 2) }); }
   t.deepEqual(dumpSpot(yard, heat), { x: 28, y: 65, z: 5 });
+  // all four, quietest first: the next to try when one can't be reached (the east one was in a stone hill)
+  const { dumpSpots } = await import('../../src/client/brain/chores.js');
+  const all = dumpSpots(yard, heat);
+  t.is(all.length, 4);
+  t.deepEqual(all[0], { x: 28, y: 65, z: 5 });
 });
 
 test('smelt: ore still carried after the smelt is a failure, not "done" (the 7 raw copper smelted every 5 seconds)', async (t) => {

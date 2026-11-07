@@ -164,6 +164,9 @@ export const pens: Goal = {
         ctx.progress(out.at(-1)!);
       }
     }
+    // empty pens and no animal near to lure: nothing changes in six minutes, and each look stopped whatever ran
+    // (a wood trip for the homestead, twice): look again in half an hour
+    if (out.length && out.every(o => /: 0 \w+ in the pen and none within \d+ to lure/.test(o))) ctx.world.lastDone.pens = ctx.s.now + 24 * MINUTE;
     return out.join('; ') || 'nothing to do at the pens';
   }
 };

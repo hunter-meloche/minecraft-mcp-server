@@ -268,10 +268,20 @@ public final class Handlers {
             int awayFrom = intParam(p, "away", 0);
             // xz: any height at that x/z (long trips over land the bot hasn't seen, where the ground height is unknown)
             boolean xz = p.has("xz") && p.get("xz").getAsBoolean();
+            // careful: walk only, breaking and placing nothing (the build job's tidy rounds: Baritone's builder walked
+            // into reach of scaffold by breaking the homestead's fences and walls and pillaring up on new scaffold)
+            boolean careful = p.has("careful") && p.get("careful").getAsBoolean();
+            java.util.concurrent.atomic.AtomicBoolean ended = new java.util.concurrent.atomic.AtomicBoolean(false);
+            Runnable end = () -> { if (careful && ended.compareAndSet(false, true)) Careful.end(); };
+            if (careful) {
+                Careful.begin();
+                Ticker.add(m -> { if (!c.isDone()) return false; end.run(); return true; }); // ended any way at all
+            }
             Processes.baritone().getCustomGoalProcess().setGoalAndPath(xz ? new baritone.api.pathing.goals.GoalXZ(target.getX(), target.getZ())
                 : awayFrom > 0 ? new baritone.api.pathing.goals.GoalRunAway(awayFrom, target)
                 : range <= 0 ? new GoalBlock(target) : new GoalNear(target, range));
             Processes.watch(c, seq, timeoutTicks, reason -> {
+                end.run();
                 LocalPlayer now = Minecraft.getInstance().player;
                 BlockPos at = now == null ? pl.blockPosition() : now.blockPosition();
                 double away = xz ? Math.hypot(at.getX() - target.getX(), at.getZ() - target.getZ()) : Math.sqrt(at.distSqr(target));
@@ -344,9 +354,12 @@ public final class Handlers {
             long seq = Events.baritoneLogSeq();
             boolean loaded = Processes.baritone().getBuilderProcess().build(file.getName(), file, origin);
             if (!loaded) throw new IllegalStateException("Baritone could not load the schematic " + file.getName());
-            Protection.suspend(null); // the builder replaces wrong blocks inside its own box (furniture excepted)
+            // the builder replaces wrong blocks inside its own box (furniture excepted); keepProtection (the build
+            // jobs, which dig first) keeps everything the bot built unbreakable, so it can't cut its way to a cell
+            boolean keep = p.has("keepProtection") && p.get("keepProtection").getAsBoolean();
+            if (!keep) Protection.suspend(null);
             Processes.watch(c, seq, timeoutTicks, reason -> {
-                Protection.resume(null);
+                if (!keep) Protection.resume(null);
                 Map<String, Integer> after = Processes.inventoryCounts(Minecraft.getInstance());
                 Map<String, Integer> used = Processes.gained(after, before); // what went down
                 return obj("used", used, "at", pos(Minecraft.getInstance().player.blockPosition()));

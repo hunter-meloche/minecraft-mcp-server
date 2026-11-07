@@ -39,7 +39,7 @@ public final class Interact {
     private Interact() { }
 
     // Right-clicking these uses them instead of placing against them (same list as the Node side).
-    private static final Pattern ACTIVATABLE = Pattern.compile(
+    static final Pattern ACTIVATABLE = Pattern.compile(
         "^(crafting_table|crafter|(blast_)?furnace|smoker|(trapped_)?chest|ender_chest|barrel|.*shulker_box|hopper|dispenser|dropper|brewing_stand|"
             + "enchanting_table|(chipped_|damaged_)?anvil|grindstone|stonecutter|loom|cartography_table|smithing_table|fletching_table|lectern|beacon|"
             + "bell|note_block|jukebox|lever|respawn_anchor|.*_(door|trapdoor|fence_gate|bed|button|sign|hanging_sign))$");
@@ -142,6 +142,58 @@ public final class Interact {
 
     // ---------------------------------------------------------------- blocks
 
+    /** Where and how to click to place a block: the click, or why not (aimed and turned already when there is one). */
+    static final class Aim {
+        BlockPos target; BlockHitResult click; String face; String reason; double distance = -1;
+        static Aim no(String why) { Aim a = new Aim(); a.reason = why; return a; }
+        static Aim no(String why, double d) { Aim a = no(why); a.distance = d; return a; }
+    }
+
+    /**
+     * Aim to place {x, y, z, item?, face?: the side of the target to click against first, axis?: only faces on that axis
+     * (logs, pillars), facing?: the yaw to place with (stairs, doors...), top?: click a side face high (a top half)}.
+     * Selects the item when one is given, looks at the face, turns: the caller clicks a tick or two later (the server
+     * reads the rotation from the next movement packet).
+     */
+    static Aim aimPlace(LocalPlayer pl, com.google.gson.JsonObject p) {
+        Minecraft mc = Minecraft.getInstance();
+        BlockPos target = blockPos(p);
+        if (!replaceable(mc.level.getBlockState(target))) return Aim.no("occupied by " + Names.block(mc.level.getBlockState(target)));
+        if (pl.blockPosition().equals(target) || pl.blockPosition().above().equals(target)) return Aim.no("the bot is standing there");
+        List<Direction> order = new ArrayList<>(List.of(Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP));
+        String preferred = strParam(p, "face", null);
+        if (preferred != null && Direction.byName(preferred) != null) { order.remove(Direction.byName(preferred)); order.addFirst(Direction.byName(preferred)); }
+        // a log, a pillar or a basalt column lies along the axis of the face clicked: only faces on that axis will do
+        String axis = strParam(p, "axis", null);
+        if (axis != null) {
+            Direction.Axis ax = Direction.Axis.byName(axis);
+            if (ax == null) throw new IllegalArgumentException("axis must be x, y or z");
+            order.removeIf(d -> d.getAxis() != ax);
+        }
+        boolean top = p.has("top") && p.get("top").getAsBoolean();
+        for (Direction toRef : order) {
+            BlockPos ref = target.relative(toRef);
+            BlockState rs = mc.level.getBlockState(ref);
+            if (replaceable(rs) || ACTIVATABLE.matcher(Names.block(rs)).matches()) continue;
+            Direction face = toRef.getOpposite(); // the reference block's face that points at the target
+            // click a side face low, so stairs and slabs come out as bottom halves (the exact middle is a coin toss),
+            // or high for a top half
+            Vec3 hit = faceCenter(ref, face).add(0, face.getAxis().isHorizontal() ? (top ? 0.25 : -0.25) : 0, 0);
+            double d = pl.getEyePosition().distanceTo(hit);
+            if (d > 4.5) return Aim.no("too far", d);
+            String item = strParam(p, "item", null);
+            if (item != null) select(item);
+            pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
+            // directional blocks (stairs, doors, furnaces...) take the way the player faces: turn to `facing` if asked
+            Direction facing = Direction.byName(strParam(p, "facing", ""));
+            if (facing != null && facing.getAxis().isHorizontal()) pl.setYRot(facing.toYRot());
+            Aim a = new Aim();
+            a.target = target; a.face = toRef.getSerializedName(); a.click = new BlockHitResult(hit, face, ref, false);
+            return a;
+        }
+        return Aim.no(axis != null ? "nothing solid on its " + axis + " sides to place against" : "nothing solid next to it to place against");
+    }
+
     static boolean replaceable(BlockState s) {
         return s.isAir() || s.canBeReplaced();
     }
@@ -202,23 +254,29 @@ public final class Interact {
             Minecraft mc = Minecraft.getInstance();
             double tx = Double.parseDouble(required(p, "x")), ty = Double.parseDouble(required(p, "y")), tz = Double.parseDouble(required(p, "z"));
             int timeout = intParam(p, "timeoutMs", 5000) / 50;
+            // within: how close (horizontally) is there (Terraslicer centres the bot in its cell to place next to it);
+            // sneak: slow and never off an edge (on scaffold)
+            double within = p.has("within") ? p.get("within").getAsDouble() : 0.5;
+            boolean sneak = p.has("sneak") && p.get("sneak").getAsBoolean();
             Ticker.add(new Ticker.Task() {
                 int age = 0;
                 @Override public boolean tick(Minecraft m) {
                     LocalPlayer pl = m.player;
                     double dx = tx - pl.getX(), dz = tz - pl.getZ();
                     double dist = Math.sqrt(dx * dx + dz * dz);
-                    boolean done = dist < 0.5 || ++age >= timeout;
+                    boolean done = dist < within || ++age >= timeout;
                     if (!done) {
                         pl.setYRot((float) (Math.toDegrees(Math.atan2(-dx, dz))));
                         m.options.keyUp.setDown(true);
+                        m.options.keyShift.setDown(sneak);
                         // keep the head up in water, and hop small steps on land
-                        m.options.keyJump.setDown(pl.isInWater() ? pl.getY() < ty + 0.2 : pl.horizontalCollision);
+                        m.options.keyJump.setDown(!sneak && (pl.isInWater() ? pl.getY() < ty + 0.2 : pl.horizontalCollision));
                         return false;
                     }
                     m.options.keyUp.setDown(false);
                     m.options.keyJump.setDown(false);
-                    c.ok(obj("reached", dist < 0.5, "distance", Json.round(dist), "at", pos(pl.blockPosition())));
+                    if (sneak) m.options.keyShift.setDown(false);
+                    c.ok(obj("reached", dist < within, "distance", Json.round(dist), "at", pos(pl.blockPosition())));
                     return true;
                 }
             });
@@ -271,47 +329,21 @@ public final class Interact {
         });
 
         s.register("place", true, (p, c) -> {
-            Minecraft mc = Minecraft.getInstance();
-            LocalPlayer pl = player();
-            BlockPos target = blockPos(p);
-            if (!replaceable(mc.level.getBlockState(target))) {
-                return obj("placed", false, "reason", "occupied by " + Names.block(mc.level.getBlockState(target)));
-            }
-            if (pl.blockPosition().equals(target) || pl.blockPosition().above().equals(target)) {
-                return obj("placed", false, "reason", "the bot is standing there");
-            }
-            List<Direction> order = new ArrayList<>(List.of(Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP));
-            String preferred = strParam(p, "face", null);
-            if (preferred != null && Direction.byName(preferred) != null) { order.remove(Direction.byName(preferred)); order.addFirst(Direction.byName(preferred)); }
-            for (Direction toRef : order) {
-                BlockPos ref = target.relative(toRef);
-                BlockState rs = mc.level.getBlockState(ref);
-                if (replaceable(rs) || ACTIVATABLE.matcher(Names.block(rs)).matches()) continue;
-                Direction face = toRef.getOpposite(); // the reference block's face that points at the target
-                // click a side face low, so stairs and slabs come out as bottom halves (the exact middle is a coin toss)
-                Vec3 hit = faceCenter(ref, face).add(0, face.getAxis().isHorizontal() ? -0.25 : 0, 0);
-                if (pl.getEyePosition().distanceTo(hit) > 4.5) return obj("placed", false, "reason", "too far", "distance", round(pl.getEyePosition().distanceTo(hit)));
-                pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
-                // directional blocks (stairs, doors, furnaces...) take the way the player faces: turn to `facing` if asked
-                Direction facing = Direction.byName(strParam(p, "facing", ""));
-                if (facing != null && facing.getAxis().isHorizontal()) pl.setYRot(facing.toYRot());
-                String faceName = toRef.getSerializedName();
-                BlockHitResult click = new BlockHitResult(hit, face, ref, false);
-                // the server reads the rotation from the last movement packet, which the client sends on its next tick: place after it
-                Ticker.add(new Ticker.Task() {
-                    int wait = 5;
-                    @Override public boolean tick(Minecraft m) {
-                        wait--;
-                        if (wait == 3) m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click);
-                        if (wait > 0) return false;
-                        BlockState now = m.level.getBlockState(target);
-                        c.ok(obj("placed", !replaceable(now), "block", Names.block(now), "face", faceName));
-                        return true;
-                    }
-                });
-                return BridgeServer.LATER;
-            }
-            return obj("placed", false, "reason", "nothing solid next to it to place against");
+            Aim aim = aimPlace(player(), p);
+            if (aim.reason != null) return obj("placed", false, "reason", aim.reason, "distance", aim.distance >= 0 ? round(aim.distance) : null);
+            // the server reads the rotation from the last movement packet, which the client sends on its next tick: place after it
+            Ticker.add(new Ticker.Task() {
+                int wait = 5;
+                @Override public boolean tick(Minecraft m) {
+                    wait--;
+                    if (wait == 3) m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, aim.click);
+                    if (wait > 0) return false;
+                    BlockState now = m.level.getBlockState(aim.target);
+                    c.ok(obj("placed", !replaceable(now), "block", Names.block(now), "face", aim.face));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
         });
 
         s.register("dig", true, (p, c) -> {
@@ -320,13 +352,80 @@ public final class Interact {
             BlockState before = mc.level.getBlockState(target);
             if (before.isAir()) return obj("dug", false, "reason", "air");
             long seq = Events.baritoneLogSeq();
-            Protection.suspend(before.getBlock()); // breaking this one is the point (it may be a protected block the user asked to dig)
+            // breaking this one is the point (it may be a protected block the user asked to dig); narrow: only its kind
+            // may be broken on the way, the rest of what the bot built stays protected
+            boolean narrow = p.has("narrow") && p.get("narrow").getAsBoolean();
+            if (narrow) { Protection.allowOnly(before.getBlock()); Protection.refresh(); } else Protection.suspend(before.getBlock());
             Processes.baritone().getBuilderProcess().clearArea(target, target); // walks into reach, picks the tool, digs
             Processes.watch(c, seq, intParam(p, "timeoutMs", 60_000) / 50, reason -> {
-                Protection.resume(before.getBlock());
+                if (narrow) { Protection.endAllowOnly(before.getBlock()); Protection.refresh(); } else Protection.resume(before.getBlock());
                 BlockState now = Minecraft.getInstance().level.getBlockState(target);
                 ItemStack held = Minecraft.getInstance().player.getMainHandItem();
                 return obj("dug", replaceable(now), "block", Names.block(before), "tool", held.isEmpty() ? null : Names.item(held));
+            });
+            return BridgeServer.LATER;
+        });
+
+        // break a block from where the bot stands: no walking and no Baritone, so nothing else is broken or placed (the
+        // tidy rounds dig scaffold this way; Baritone's builder reached it by breaking fences and walls and pillaring up)
+        s.register("dig.here", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            BlockPos target = blockPos(p);
+            BlockState before = mc.level.getBlockState(target);
+            if (before.isAir()) return obj("dug", false, "reason", "air");
+            Vec3 eye = pl.getEyePosition();
+            double reach = pl.blockInteractionRange();
+            // the face seen from the eye: the nearest open face whose centre a ray from the eye hits on this block
+            Direction face = null;
+            Vec3 aim = null;
+            for (Direction d : Direction.values()) {
+                if (!replaceable(mc.level.getBlockState(target.relative(d)))) continue; // covered: not seen
+                Vec3 fc = Vec3.atCenterOf(target).add(d.getUnitVec3().scale(0.49));
+                if (fc.distanceTo(eye) > reach - 0.1) continue;
+                var hit = mc.level.clip(new net.minecraft.world.level.ClipContext(eye, fc, net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                    net.minecraft.world.level.ClipContext.Fluid.NONE, pl));
+                if (hit.getType() != net.minecraft.world.phys.HitResult.Type.BLOCK || !hit.getBlockPos().equals(target)) continue;
+                if (aim == null || fc.distanceTo(eye) < aim.distanceTo(eye)) { face = d; aim = fc; }
+            }
+            // a small block (a torch, a flower, grass): its outline is nowhere near a face's middle, so no ray to one
+            // hits it (a torch on a build's floor cell was "out of reach or out of sight" from a block away, and the
+            // floor and everything on it after it failed). Aim at the middle of its outline instead
+            if (face == null && !before.isCollisionShapeFullBlock(mc.level, target)) {
+                var shape = before.getShape(mc.level, target);
+                if (!shape.isEmpty()) {
+                    Vec3 mid = shape.bounds().getCenter().add(target.getX(), target.getY(), target.getZ());
+                    var hit = mc.level.clip(new net.minecraft.world.level.ClipContext(eye, mid, net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                        net.minecraft.world.level.ClipContext.Fluid.NONE, pl));
+                    if (mid.distanceTo(eye) <= reach - 0.1 && hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK && hit.getBlockPos().equals(target)) {
+                        face = hit.getDirection();
+                        aim = mid;
+                    }
+                }
+            }
+            if (face == null) return obj("dug", false, "reason", "out of reach or out of sight", "block", Names.block(before));
+            final Direction f = face;
+            final Vec3 a = aim;
+            final int max = intParam(p, "timeoutMs", 15_000) / 50;
+            Ticker.add(new Ticker.Task() {
+                int age = 0;
+                @Override public boolean tick(Minecraft m) {
+                    if (c.isDone()) { if (m.gameMode != null) m.gameMode.stopDestroyBlock(); return true; }
+                    age++;
+                    if (m.player == null || m.level == null) { c.fail("not in a world"); return true; }
+                    if (replaceable(m.level.getBlockState(target))) {
+                        ItemStack held = m.player.getMainHandItem();
+                        c.ok(obj("dug", true, "block", Names.block(before), "tool", held.isEmpty() ? null : Names.item(held)));
+                        return true;
+                    }
+                    if (age > max) { m.gameMode.stopDestroyBlock(); c.ok(obj("dug", false, "reason", "timeout", "block", Names.block(before))); return true; }
+                    m.player.lookAt(EntityAnchorArgument.Anchor.EYES, a);
+                    Tools.holdFor(target);
+                    if (age < 3) return false; // the rotation and the tool go out first
+                    if (age == 3) m.gameMode.startDestroyBlock(target, f);
+                    else m.gameMode.continueDestroyBlock(target, f); // the arm swing is only for show: left out
+                    return false;
+                }
             });
             return BridgeServer.LATER;
         });

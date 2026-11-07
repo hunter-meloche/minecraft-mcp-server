@@ -18,6 +18,12 @@ export interface StructureState {
   /** the last drift check: when, and how many cells differed */
   drift?: { at: number; changes: number; sample: string[] };
   history: { at: number; text: string }[];
+  /**
+   * The throwaway blocks round the site when build job `job` started ("x,y,z"): its tidy rounds leave these alone.
+   * `within` with `pending`: a baseline seeded once the job was under way (from the structure's import), completed
+   * from the world on the job's next run (inside `within` only the seed's and natural stone count; outside, all).
+   */
+  tidy?: { job: number; keep: string[]; within?: { x: number; y: number; z: number; width: number; height: number; length: number }; pending?: boolean };
 }
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,47}$/i;

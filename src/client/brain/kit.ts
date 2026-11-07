@@ -386,7 +386,8 @@ export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { de
     } else totals.set(i.name, (totals.get(i.name) ?? 0) + i.count);
   }
   for (const [name, count] of totals) {
-    const junk = DROP_BEYOND.find(([re]) => re.test(name));
+    // what a project or a build job carries is never junk (a job's dirt for its farmland, its scaffold)
+    const junk = opts.keep?.has(name) ? undefined : DROP_BEYOND.find(([re]) => re.test(name));
     if (junk) {
       if (count > junk[1]) drop.push({ name, count: count - junk[1] });
       continue;

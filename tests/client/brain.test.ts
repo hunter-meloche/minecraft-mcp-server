@@ -85,7 +85,7 @@ function fakeRuntime(state: { pos: { x: number; y: number; z: number }; time: nu
     setManualHook: () => undefined,
     builtNear: () => [],
     setHomeZone: () => undefined,
-    restoreBlock: async () => undefined, adoptStates: () => undefined
+    restoreBlock: async () => undefined, adoptStates: () => undefined, protectBuilt: () => undefined
   };
   return { rt, calls };
 }

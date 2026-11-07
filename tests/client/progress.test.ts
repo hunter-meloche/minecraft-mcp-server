@@ -103,3 +103,25 @@ test('prepareBill keeps the logs a bill needs as logs out of the planks', async 
   t.deepEqual(acts, []);
   t.deepEqual(progressOf(w).need, { birch_log: 1 });
 });
+
+test('prepareBill keeps what the bill places out of the furnace: not smelted, not burnt', async (t) => {
+  const acts: string[] = [];
+  const smelts: Record<string, unknown>[] = [];
+  const inv = new Map([['cobblestone', 20], ['oak_log', 8]]);
+  const w = world();
+  w.landmarks.furnace = { x: 1, y: 64, z: 1 };
+  const ctx = ctxFor(w, snap(), acts, inv);
+  const act = ctx.act;
+  ctx.act = (async (tool: string, a: Record<string, unknown> = {}) => {
+    if (tool === 'smelt-item') { smelts.push(a); inv.set('cobblestone', inv.get('cobblestone')! - Number(a.inputCount)); inv.set('stone', (inv.get('stone') ?? 0) + Number(a.inputCount)); return { ok: true, text: 'ok' }; }
+    return act(tool, a);
+  }) as GoalContext['act'];
+  // 16 cobblestone and 6 logs go in the wall as they are: 4 cobblestone to smelt, 2 logs to burn
+  const short = await prepareBill(ctx, { cobblestone: 16, oak_log: 6, stone: 8 });
+  t.is(smelts.length, 1);
+  t.is(smelts[0].inputCount, 4);
+  t.is(smelts[0].fuelItem, 'oak_log');
+  t.is(smelts[0].fuelCount, 2); // 8 logs carried, 6 for the wall
+  t.deepEqual(short, { stone: 4 });
+  t.true(inv.get('cobblestone')! >= 16);
+});

@@ -14,6 +14,7 @@ import { planLevel } from './level.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
 import { checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import { itemOf } from './brain/blueprints.js';
+import { freeLid } from './brain/chests.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -158,6 +159,15 @@ function timeLine(t: number): string {
   return `Time of day ${t} (${night ? `night; dawn in ${minutes} min` : `day; night in ${minutes} min`})`;
 }
 
+/**
+ * The blocks Baritone's builder paused for ("Missing materials for at least:" then "1x Block{minecraft:lantern}[...]").
+ * It says so for blocks the bot does carry when no item of them places the state it wants as it reckons it (a lantern
+ * on the floor): those go to the hand pass instead.
+ */
+export function pausedFor(lines: string[]): { id: string; count: number }[] {
+  return lines.flatMap(l => [...l.matchAll(/(\d+)x Block\{(?:minecraft:)?([a-z0-9_]+)\}/g)].map(m => ({ id: m[2], count: +m[1] })));
+}
+
 function baritoneSaid(lines: string[], max = 3): string {
   const said = lines.map(l => l.replace(/^\[Baritone\]\s*/, '')).filter(l => l.trim()).slice(-max);
   return said.length ? ` Baritone: ${said.join(' | ')}` : '';
@@ -208,6 +218,8 @@ export interface ClientRuntime {
   restoreBlock: (at: Pos, item: string, facing?: string) => Promise<string | undefined>;
   /** Remember the block state of built positions that have none yet (protected before states were kept). */
   adoptStates: (blocks: { at: Pos; state: string }[]) => void;
+  /** Protect built positions with the state they stand in now (a build job's cells, as they come right). */
+  protectBuilt: (blocks: { at: Pos; state: string }[]) => void;
 }
 
 export interface ClientToolOptions {
@@ -568,12 +580,12 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   };
 
   /** Place `item` at `at` while facing `look` (clearing a wrong block first); returns why not, or undefined when placed. */
-  const placeFacing = async (at: Pos, block: string, look?: string, attach?: string): Promise<string | undefined> => {
+  const placeFacing = async (at: Pos, block: string, look?: string, attach?: string, axis?: string): Promise<string | undefined> => {
     type Placed = { placed: boolean; block?: string; reason?: string };
     // the item that places the block (a wall torch is a torch); a wall-mounted one goes on the block on its `attach` side
     const item = itemOf(block);
     try { await call('item.select', { name: item }); } catch { return `no ${item} in the inventory`; }
-    const attempt = () => call<Placed>('place', { ...at, face: attach ?? 'down', ...(look ? { facing: look } : {}) });
+    const attempt = () => call<Placed>('place', { ...at, face: attach ?? 'down', ...(look ? { facing: look } : {}), ...(axis ? { axis } : {}) });
     let r = await attempt();
     if (!r.placed && r.reason?.startsWith('occupied by')) {
       await call('dig', { ...at }, 75_000).catch(() => undefined);
@@ -604,6 +616,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     [...after].filter(([n, c]) => c > (before.get(n) ?? 0)).map(([n, c]) => `${n} x${c - (before.get(n) ?? 0)}`).join(', ');
   const goNear = (p: Pos, range: number, timeoutMs = 30_000) =>
     call<ProcessResult & { arrived: boolean }>('goto', { ...floorPos(p), range, timeoutMs }, timeoutMs + 15_000);
+
+  /** Open a chest: walks up to it if it's out of reach, and frees a lid weighed down by scaffold. */
+  const openChest = async <T>(at: Pos): Promise<T> => {
+    try { return await call<T>('chest.open', { ...at }); } catch { /* out of reach, or the lid */ }
+    await goNear(at, 2);
+    try { return await call<T>('chest.open', { ...at }); } catch (e) {
+      const freed = /did not open/.test((e as Error).message) ? await freeLid(call, at) : [];
+      if (!freed.length) throw e;
+      const dim = await dimension();
+      for (const p of freed) protection.remove(dim, p);
+      return await call<T>('chest.open', { ...at });
+    }
+  };
 
   /** Walk onto the drops near a broken block (they pop out and may fall a few blocks). */
   const collectDropsNear = async (p: Pos) => {
@@ -885,8 +910,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       name: z.string().regex(/^[\w-]+$/).optional().describe('Name for the schematic file (default: structure)'),
       timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 600000)')
     },
-    buildStructure = async ({ x, y, z: zz, spec, file, name = 'structure', timeoutMs = 600_000 }: {
-      x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number
+    buildStructure = async ({ x, y, z: zz, spec, file, name = 'structure', timeoutMs = 600_000, keepProtection = false }: {
+      x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number;
+      /** the build jobs' packages: Baritone may break nothing the bot built (their clears are done first, by hand) */
+      keepProtection?: boolean
     }) => {
       const origin = floorPos({ x, y, z: zz });
       let schematicFile: string;
@@ -931,7 +958,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const around = layout ? { x: origin.x - SCAFFOLD_MARGIN, y: origin.y - 2, z: origin.z - SCAFFOLD_MARGIN,
         width: layout.width + 2 * SCAFFOLD_MARGIN, height: layout.height + 8, length: layout.length + 2 * SCAFFOLD_MARGIN } : undefined;
       const aroundBefore = around ? await readRegion(around).catch(() => undefined) : undefined;
-      const building = call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs }, timeoutMs + 15_000);
+      const building = call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs, ...(keepProtection ? { keepProtection } : {}) }, timeoutMs + 15_000);
       // Baritone can stand still for minutes when nothing left is placeable from where it can stand (a log over a
       // doorway, a ridge with no stairs under it yet): when the box hasn't changed for STALL_MS, stop it and finish by hand
       let stalled = false;
@@ -956,6 +983,15 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const used = [placedItems, worn.length ? `wore out: ${worn.map(([n, c]) => c > 1 ? `${n} x${c}` : n).join(', ')}` : '']
         .filter(Boolean).join('; ');
       if (r.reason === 'paused') {
+        // paused "for" blocks the bot carries: Baritone's mistake, not a shortage; the hand pass places them
+        const wanted = pausedFor(r.baritone);
+        const { counts } = await inventoryCounts();
+        if (layout && wanted.length && wanted.every(w => (counts.get(itemOf(w.id)) ?? 0) >= w.count)) {
+          await call('cancel').catch(() => undefined);
+          stalled = true;
+        }
+      }
+      if (r.reason === 'paused' && !stalled) {
         return factory.createErrorResponse(`Build paused after ${r.seconds}s (probably out of a block it needs).${baritoneSaid(r.baritone)}`);
       }
       let placedByHand = 0;
@@ -973,7 +1009,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
             const at = { x: origin.x + cell.x, y: origin.y + cell.y, z: origin.z + cell.z };
             // wall torches and ladders hang on the block behind them (the side opposite their facing)
             const attach = cell.facing && WALL_MOUNTED.test(cell.id) ? OPPOSITE[cell.facing] : undefined;
-            const why = await placeFacing(at, cell.id, cell.facing ? placerFacing(cell.id, cell.facing) : undefined, attach);
+            const why = await placeFacing(at, cell.id, cell.facing ? placerFacing(cell.id, cell.facing) : undefined, attach, cell.axis);
             if (why) failures.set(fmt(at), `${cell.id} at ${fmt(at)}: ${why}`);
             else { failures.delete(fmt(at)); progress++; placedByHand++; }
           }
@@ -1503,7 +1539,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!/chest|barrel/.test(block.name ?? '')) return factory.createErrorResponse(`No chest at ${fmt(at)} (found ${block.name ?? 'nothing'})`);
       type Chest = { slots: number; free: number; items: Record<string, number>; moved?: number };
       try {
-        try { await call<Chest>('chest.open', { ...at }); } catch { await goNear(at, 2); await call<Chest>('chest.open', { ...at }); }
+        await openChest<Chest>(at);
         const r = await call<Chest>('chest.deposit', { name, ...(count ? { count } : {}) });
         const holds = Object.entries(r.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing';
         const short = (r.moved ?? 0) < Math.min(count ?? have, have) ? ' (the chest is full)' : '';
@@ -1532,7 +1568,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       type Chest = { slots: number; free: number; items: Record<string, number>; moved?: number };
       try {
         let opened: Chest;
-        try { opened = await call<Chest>('chest.open', { ...at }); } catch { await goNear(at, 2); opened = await call<Chest>('chest.open', { ...at }); }
+        opened = await openChest<Chest>(at);
         const inside = opened.items[name] ?? 0;
         if (!inside) return factory.createErrorResponse(`The chest at ${fmt(at)} has no ${name}. It holds: ${Object.entries(opened.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing'}`);
         const r = await call<Chest>('chest.withdraw', { name, ...(count ? { count } : {}) });
@@ -1574,6 +1610,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       // the bot's again (the state it was built with is kept: a torch put back on the floor is still the wall torch)
       if (!why) protection.add(await dimension(), [p]);
       return why;
+    },
+    protectBuilt: blocks => {
+      if (blocks.length) protection.add(lastDimension, blocks.map(b => b.at), blocks.map(b => b.state.replace(/^minecraft:/, '')));
     },
     adoptStates: blocks => {
       const fresh = blocks.filter(b => !protection.stateOf(lastDimension, b.at));
