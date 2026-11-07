@@ -254,3 +254,44 @@ test('decide uses a goal\'s urgency when it has one', (t) => {
   t.is(decide(snap({ now: 1000 }), world, [chores, late], new Map())?.goal.name, 'chores');
   t.is(decide(snap({ now: 9000 }), world, [chores, late], new Map())?.goal.name, 'project');
 });
+
+test('idle watchdog: by day, standing still with nothing to do, it lets go of every hold at 3 min and forages at 6', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000;
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [goal('never', 1, false)] });
+  brain.setEnabled(true);
+  await brain.tick();
+  clock += 2 * 60_000;
+  await brain.tick();
+  t.notRegex(brain.status(), /idle \d+ min/);
+  clock += 61_000;
+  await brain.tick();
+  t.regex(brain.status(), /idle 3 min by day: let go of/);
+  clock += 3 * 60_000;
+  await brain.tick();
+  await settle();
+  t.regex(brain.status(), /start forage: idle 6 min by day/);
+  // walking off starts the count again
+  state.pos = { x: 20, y: 64, z: 0 };
+  clock += 4 * 60_000;
+  await brain.tick();
+  t.is((brain.status().match(/idle \d+ min by day: let go/g) ?? []).length, 1);
+});
+
+test('a goal left "until the morning" may go again when the game morning comes, slept through or not', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000;
+  const flaky: Goal = { name: 'flaky', priority: 5, wants: () => 'wants', run: async () => { throw new Error('in the way'); }, timeoutMs: 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [flaky] });
+  brain.setEnabled(true);
+  for (let i = 0; i < 3; i++) { await brain.tick(); await settle(); clock += 2000; }
+  t.regex(brain.status(), /flaky failed 3 times in a row: left until the morning/);
+  t.regex(brain.status(), /Retrying later: flaky \d+s/);
+  state.time = 12_900; await brain.tick(); await settle();
+  state.time = 100; // the night skipped in a bed: morning at once, long before the real-time hold runs out
+  clock += 2000;
+  await brain.tick(); await settle();
+  t.regex(brain.status(), /morning: flaky may try again/);
+});

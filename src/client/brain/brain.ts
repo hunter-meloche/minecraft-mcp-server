@@ -5,6 +5,7 @@ import { worldIdFromSeed } from '../../build-protection.js';
 import { activityAt } from './schedule.js';
 import { BrainMemory, findLandmarks, type Pos, type WorldMemory } from './memory.js';
 import { tidyGoal } from './tidy.js';
+import { IDLE_FIRST, IDLE_FORAGE, forage } from './idle.js';
 import { treeFarm } from './farming.js';
 import { pens } from './pens.js';
 import { deepTrip } from './deep.js';
@@ -80,6 +81,12 @@ export class Brain {
   /** where the bot has stood still since when, while a Baritone process runs (the stuck watchdog) */
   private stillAt = '';
   private stillSince = 0;
+  /** goals left "until the morning": let go when the game's morning comes (sleeping brings it at once) */
+  private morningHold = new Set<string>();
+  /** the idle watchdog: where the bot has stood by day since when, and how far it has escalated */
+  private idleAt?: { x: number; z: number };
+  private idleSince = 0;
+  private idleStage = 0;
   /** today's daytime ticks, and how many of them had nothing to do */
   private day = { tod: 0, work: 0, idle: 0, lastIdle: 0 };
   private worldId?: string;
@@ -144,6 +151,7 @@ export class Brain {
         const y = world.yard;
         this.rt.setHomeZone?.({ x1: y.x1, z1: y.z1, x2: y.x2, z2: y.z2 });
       }
+      this.idleTrack(s);
       const r = this.running;
       if (r) {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
@@ -166,6 +174,7 @@ export class Brain {
         if (next) await this.stopRunning(`${next.goal.name} is more urgent (${next.reason})`);
         return;
       }
+      if (this.idleWatch(s, world)) return;
       const choice = decide(s, world, this.goals, this.retryAt);
       if (choice) this.start(choice.goal, choice.reason, s, world);
     } catch (e) {
@@ -174,6 +183,50 @@ export class Brain {
       this.ticking = false;
       await this.show();
     }
+  }
+
+  /** Where the bot stands, for the idle watchdog: moving 3 blocks (or night, or no home) starts the count again. */
+  private idleTrack(s: Snapshot): void {
+    const here = { x: s.position.x, z: s.position.z };
+    const moved = !this.idleAt || Math.hypot(here.x - this.idleAt.x, here.z - this.idleAt.z) > 3;
+    if (moved || s.activity !== 'work' || s.sleeping || !s.home) {
+      this.idleAt = here;
+      this.idleSince = this.now();
+      this.idleStage = 0;
+    }
+  }
+
+  /**
+   * By day with nothing running, standing still: after IDLE_FIRST every hold is let go (backoffs, a goal left until
+   * the morning, wood or ore marked fruitless) so whatever was waiting tries again; after IDLE_FORAGE it forages
+   * (food when hungry, else what's short). Then it waits ten minutes before going round again. True when it started
+   * something.
+   */
+  private idleWatch(s: Snapshot, world: WorldMemory): boolean {
+    if (s.activity !== 'work' || s.sleeping || !s.home) return false;
+    const idle = this.now() - this.idleSince;
+    const mins = Math.round(idle / 60_000);
+    if (this.idleStage === 0 && idle >= IDLE_FIRST) {
+      this.idleStage = 1;
+      const held = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
+      const fruitless = Object.keys(world.lastDone ?? {}).filter(k => k.startsWith('fruitless:'));
+      this.retryAt.clear();
+      this.fails.clear();
+      this.morningHold.clear();
+      for (const k of fruitless) delete world.lastDone![k];
+      this.note(`idle ${mins} min by day: let go of ${[...held, ...fruitless].join(', ') || 'nothing (nothing was held)'}`);
+      return false;
+    }
+    if (this.idleStage === 1 && idle >= IDLE_FORAGE) {
+      this.idleStage = 2;
+      this.start(forage, `idle ${mins} min by day`, s, world);
+      return true;
+    }
+    if (this.idleStage === 2 && idle >= IDLE_FORAGE + 10 * 60_000) {
+      this.idleStage = 0;
+      this.idleSince = this.now();
+    }
+    return false;
   }
 
   status(): string {
@@ -247,6 +300,11 @@ export class Brain {
       if (this.heat) { this.heat.map.decay(0.9); if (this.worldId) this.memory.world(this.worldId).heat = this.heat.map.toJSON(); }
       if (this.day.work) this.day.lastIdle = Math.round(100 * this.day.idle / this.day.work);
       this.day.work = this.day.idle = 0;
+      if (this.morningHold.size) {
+        for (const g of this.morningHold) this.retryAt.delete(g);
+        this.note(`morning: ${[...this.morningHold].join(', ')} may try again`);
+        this.morningHold.clear();
+      }
     }
     this.day.tod = s.timeOfDay;
     if (s.activity !== 'work' || s.sleeping) return;
@@ -428,6 +486,7 @@ export class Brain {
             const tod = this.last?.timeOfDay ?? s.timeOfDay;
             const toMorning = (((24_000 - tod) % 24_000) || 24_000) * 50;
             this.retryAt.set(goal.name, this.now() + toMorning);
+            this.morningHold.add(goal.name);
             this.fails.delete(goal.name);
             this.note(`${goal.name} failed 3 times in a row: left until the morning`);
           }

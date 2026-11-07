@@ -68,39 +68,8 @@ function canFirstChest(s: Snapshot): boolean {
   return (s.counts.get('chest') ?? 0) > 0 || planks >= 8;
 }
 
-/**
- * The first chest, before the storage house: on solid ground 2 to 4 blocks from home, room over it to open the lid,
- * clear of the sites the yard's projects keep (the storage house, the plot...). A new bot's pockets filled before
- * its storage house could be built (it needed logs, and a wood trip won't set out at 30 slots): it stood all day.
- */
-export async function firstChest(ctx: Pick<GoalContext, 'call' | 'act' | 's' | 'world'>): Promise<Pos | undefined> {
-  const home = ctx.s.home!;
-  if (!(ctx.s.counts.get('chest') ?? 0)) {
-    const r = await ctx.act('craft-item', { outputItem: 'chest', amount: 1 });
-    if (!r.ok) return undefined;
-  }
-  const box = { x: home.x - 4, y: home.y - 1, z: home.z - 4, width: 9, height: 3, length: 9 };
-  const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', box);
-  const at = (x: number, y: number, z: number) => (blocks[(x - box.x) + (z - box.z) * 9 + (y - box.y) * 81] ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
-  const OPEN = /^(air|cave_air|short_grass|tall_grass|fern|leaf_litter|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|wildflowers|pink_petals|snow)$/;
-  const SOLID = /^(dirt|grass_block|coarse_dirt|podzol|stone|cobblestone|deepslate|cobbled_deepslate|sand|sandstone|.*_planks|andesite|diorite|granite|tuff|mud|moss_block)$/;
-  // the yard's zones, and the site the project under way has picked (the storage house's, before it stands)
-  const picked = ctx.world.progress?.current?.data?.site as { x: number; z: number; width?: number; length?: number } | undefined;
-  const kept = [...Object.values(ctx.world.zones ?? {}).flat(), ...(picked ? [{ ...picked, y: 0 }] : [])].filter(b => b.width && b.length);
-  const inSite = (x: number, z: number) => kept.some(b => x >= b.x && x < b.x + b.width! && z >= b.z && z < b.z + b.length!);
-  const spots: (Pos & { d: number })[] = [];
-  for (let dz = -4; dz <= 4; dz++) for (let dx = -4; dx <= 4; dx++) {
-    const d = Math.max(Math.abs(dx), Math.abs(dz));
-    const x = home.x + dx, z = home.z + dz;
-    if (d < 2 || inSite(x, z)) continue;
-    if (OPEN.test(at(x, home.y, z)) && OPEN.test(at(x, home.y + 1, z)) && SOLID.test(at(x, home.y - 1, z))) spots.push({ x, y: home.y, z, d });
-  }
-  for (const p of spots.sort((a, b) => a.d - b.d).slice(0, 4)) {
-    const r = await ctx.act('place-block', { x: p.x, y: p.y, z: p.z, item: 'chest' });
-    if (r.ok && /^Placed/.test(r.text)) return { x: p.x, y: p.y, z: p.z };
-  }
-  return undefined;
-}
+export { firstChest } from './firsts.js';
+import { firstChest } from './firsts.js';
 
 export const stash: Goal = {
   name: 'stash',

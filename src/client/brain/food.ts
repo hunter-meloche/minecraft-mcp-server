@@ -6,6 +6,7 @@ import { daylightLeft } from './schedule.js';
 import { farmAll } from './chores.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
+import { placeNearHome } from './firsts.js';
 
 /** How far round the bot the hunt looks for game. */
 const HUNT_RANGE = 64;
@@ -152,6 +153,12 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
 
   // 3. cook what it carries
   const cook = async () => {
+    // a new bot with meat and no furnace yet: one from 8 cobblestone beside home (raw meat isn't ready food)
+    if (!landmarks.furnace && Object.keys(COOKS_TO).some(raw => (have.get(raw) ?? 0) > 0) && ctx.s.home &&
+      ((have.get('furnace') ?? 0) > 0 || (have.get('cobblestone') ?? 0) + (have.get('cobbled_deepslate') ?? 0) >= 8)) {
+      const at = await placeNearHome(ctx, 'furnace');
+      if (at) { landmarks.furnace = at; say(`put a furnace down at (${at.x}, ${at.y}, ${at.z})`); }
+    }
     if (!landmarks.furnace) return;
     for (const [raw] of Object.entries(COOKS_TO)) {
       const n = have.get(raw) ?? 0;
@@ -209,7 +216,9 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
     // 64 round: out on the plains the herds grazed 40 to 65 blocks off, never 3 of a kind within 32, and it went hungry
     const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: HUNT_RANGE });
     const wild = entities.filter(e => !someones(e, ctx.world.yard));
-    const kind = GAME.find(g => wild.filter(e => e.name === g).length >= 3);
+    // fed, it leaves two of a kind to breed; hungry, a lone one will do (the herds had moved off, one of each stayed)
+    const hungry = ctx.s.food < 14;
+    const kind = GAME.find(g => wild.filter(e => e.name === g).length >= (hungry ? 1 : 3));
     const prey = kind ? wild.filter(e => e.name === kind).sort((a, b) => a.distance - b.distance)[0] : undefined;
     if (kind && prey) {
       const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: HUNT_RANGE, timeoutMs: 45_000 });
