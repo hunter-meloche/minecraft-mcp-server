@@ -3,6 +3,7 @@ import type { ToolFactory } from '../../tool-factory.js';
 import type { Brain } from './brain.js';
 import type { ClientRuntime } from '../tools.js';
 import { lightArea, YARD_RADIUS } from './chores.js';
+import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 
 /** Tools to switch the brain on and off and see what it is doing. They never take control from it. */
 export function registerBrainTools(factory: ToolFactory, brain: Brain, rt: ClientRuntime): void {
@@ -66,4 +67,114 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
         `${r.left.length} dark spot(s) left${r.left.length ? `: ${list(r.left)} (no torch spot within reach of them, or walled off)` : ''}.`);
     }
   );
+
+  factory.registerTool(
+    'community-chest',
+    "The community chests: chests on a shared server where players and bots leave surplus for each other. The bot only ever puts things in them, never takes, and they are never its own storage. Now and then it gives its precious surplus there (diamonds once its diamond kit is done and beyond 8, emeralds, gold beyond 16, iron beyond 48). Give name with x, y, z to add one (or move it), name with remove to forget it, nothing to list them.",
+    {
+      name: z.string().regex(/^[a-z0-9_-]{1,32}$/i).optional().describe('Its label, e.g. "community1"'),
+      x: z.coerce.number().optional().describe('X of the chest'),
+      y: z.coerce.number().optional().describe('Y of the chest'),
+      z: z.coerce.number().optional().describe('Z of the chest'),
+      remove: z.boolean().optional().describe('Forget it')
+    },
+    async ({ name, x, y, z: zz, remove }: { name?: string; x?: number; y?: number; z?: number; remove?: boolean }) => {
+      const world = brain.worldMemory();
+      if (!world) return factory.createErrorResponse('Not in a world yet');
+      const c = community(world);
+      if (name && remove) {
+        if (!c.chests[name]) return factory.createErrorResponse(`No community chest called ${name}`);
+        if (activeMissions(world).some(m => m.chest === name)) return factory.createErrorResponse(`Missions are still going for ${name}: cancel them first (community-mission cancel)`);
+        delete c.chests[name];
+        brain.saveMemory();
+        return factory.createResponse(`Forgot the community chest ${name}.`);
+      }
+      if (name && x !== undefined && y !== undefined && zz !== undefined) {
+        const at = { x: Math.floor(x), y: Math.floor(y), z: Math.floor(zz) };
+        if (world.landmarks.chests.some(h => h.x === at.x && h.y === at.y && h.z === at.z)) return factory.createErrorResponse(`(${at.x}, ${at.y}, ${at.z}) is one of the bot's home chests`);
+        const found = await findLabelledChest(rt, at, name);
+        if (found.error) return factory.createErrorResponse(found.error);
+        const p = found.at ?? at;
+        c.chests[name] = p;
+        brain.saveMemory();
+        return factory.createResponse(`Community chest ${name} at (${p.x}, ${p.y}, ${p.z}) (${found.seen}).`);
+      }
+      if (name || x !== undefined) return factory.createErrorResponse('Give name with x, y and z to add one, or name with remove: true');
+      return factory.createResponse(communityStatus(world).join('\n') || 'No community chests yet.');
+    }
+  );
+
+  factory.registerTool(
+    'community-mission',
+    "Gather something for a community chest, only when the user says it's for the community (\"gather 64 diamond for the community1 chest\"); otherwise what the bot gathers stays its own. The bot works on it by itself (ranked just under the build jobs: after staying alive, its gear and its food), trip by trip, and carries each load over. What it gathers for a mission is held apart from its own things until delivered. Item is what the chest gets: ores come from trips under ground (iron_ingot and gold_ingot are mined raw and smelted), blocks like oak_log, sand or cobblestone from runs on the surface. Give cancel with an id to stop one; nothing to list them.",
+    {
+      item: z.string().optional().describe("What the chest gets, e.g. 'diamond', 'iron_ingot', 'oak_log'"),
+      count: z.coerce.number().int().min(1).max(2304).optional().describe('How many'),
+      chest: z.string().optional().describe('The community chest (default: the only one)'),
+      cancel: z.coerce.number().int().optional().describe('A mission id to cancel')
+    },
+    async ({ item, count, chest, cancel }: { item?: string; count?: number; chest?: string; cancel?: number }) => {
+      const world = brain.worldMemory();
+      if (!world) return factory.createErrorResponse('Not in a world yet');
+      const c = community(world);
+      if (cancel !== undefined) {
+        const m = c.missions.find(x => x.id === cancel && x.status === 'active');
+        if (!m) return factory.createErrorResponse(`No active mission #${cancel}`);
+        m.status = 'cancelled';
+        m.note = `cancelled with ${m.delivered} delivered${owed(m) ? `; ${owed(m)} gathered for it are the bot's again` : ''}`;
+        m.updatedAt = Date.now();
+        syncReserve(world);
+        brain.saveMemory();
+        return factory.createResponse(`Cancelled mission #${m.id} (${m.note}).`);
+      }
+      if (!item || !count) return factory.createResponse(communityStatus(world).join('\n') || 'No community chests or missions yet.');
+      const names = Object.keys(c.chests);
+      const to = chest ?? (names.length === 1 ? names[0] : undefined);
+      if (!to) return factory.createErrorResponse(names.length ? `Which chest? ${names.join(', ')}` : 'No community chest yet: add one with community-chest');
+      if (!c.chests[to]) return factory.createErrorResponse(`No community chest called ${to} (there are: ${names.join(', ') || 'none'})`);
+      const name = item.replace(/^minecraft:/, '').trim();
+      const src = sourceOf(name);
+      if ('error' in src) return factory.createErrorResponse(`Can't take that on: ${src.error}`);
+      const m = { id: c.nextId++, item: name, count, chest: to, gathered: 0, delivered: 0, status: 'active' as const, createdAt: Date.now(), updatedAt: Date.now() };
+      c.missions.push(m);
+      brain.saveMemory();
+      const queue = activeMissions(world);
+      const ahead = queue.length > 1 ? ` ${queue.length - 1} mission(s) ahead of it.` : '';
+      const how = src.underground ? `trips under ground for ${src.mine.split(',')[0]} (by day, kitted out like a deep trip, up to 16 a trip${src.gives !== name ? `, smelted into ${name}` : ''})` : `runs for ${src.mine}`;
+      const off = brain.enabled ? '' : " The bot's autonomy is off: it starts once set-autonomy turns it on.";
+      return factory.createResponse(`Mission #${m.id}: ${count} ${name} for the ${to} chest, by ${how}; each load is carried over as it comes (${left(m)} to go).${ahead}${off}`);
+    }
+  );
+}
+
+type P = { x: number; y: number; z: number };
+
+/**
+ * The chest meant by a point someone read off their screen: the point itself when a chest is there, else the chest
+ * within 2 blocks whose sign (over it, or on a side of it) reads the name, else the only chest within 2 (the F3
+ * screen shows where the player stands, a block off the chest). Out of sight, the point is taken as given.
+ */
+async function findLabelledChest(rt: ClientRuntime, at: P, name: string): Promise<{ at?: P; seen: string; error?: string }> {
+  const block = (p: P) => rt.call<{ name?: string }>('world.block', { ...p }).then(b => b.name ?? '').catch(() => '');
+  const isChest = (n: string) => /(^|:)(chest|trapped_chest|barrel)$/.test(n.replace(/\[.*$/, ''));
+  const here = await block(at);
+  if (!here) return { seen: 'not in sight from here: checked on the first trip' };
+  const signOf = async (p: P): Promise<string[]> => {
+    const out: string[] = [];
+    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 1], [0, 1, -1], [1, 1, 0], [-1, 1, 0]]) {
+      const r = await rt.call<{ sign: boolean; lines?: string[] }>('sign.read', { x: p.x + dx, y: p.y + dy, z: p.z + dz }).catch(() => ({ sign: false }));
+      if (r.sign && 'lines' in r && r.lines) out.push(r.lines.join(' ').trim());
+    }
+    return out;
+  };
+  const label = (lines: string[]) => lines.some(l => l.toLowerCase().replace(/\s+/g, '').includes(name.toLowerCase()));
+  if (isChest(here)) return { at, seen: label(await signOf(at)) ? `a chest labelled ${name} is there` : 'a chest is there' };
+  const chests: P[] = [];
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    const p = { x: at.x + dx, y: at.y + dy, z: at.z + dz };
+    if (isChest(await block(p))) chests.push(p);
+  }
+  for (const p of chests) if (label(await signOf(p))) return { at: p, seen: `the chest labelled ${name}, ${Math.round(Math.hypot(p.x - at.x, p.y - at.y, p.z - at.z))} block(s) from the point given` };
+  if (chests.length === 1) return { at: chests[0], seen: `the one chest by the point given (no sign reading ${name} found)` };
+  return { seen: "", error: `No chest at (${at.x}, ${at.y}, ${at.z}) (${here.replace(/\[.*$/, '')} there)${chests.length ? `, and ${chests.length} chests near it with no sign reading ${name}: give the chest's own position` : ', nor within 2 blocks'}` };
 }

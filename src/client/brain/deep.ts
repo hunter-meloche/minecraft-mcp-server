@@ -3,7 +3,8 @@ import type { WorldMemory } from './memory.js';
 import { MINE_FROM_BUILDS, deepTripReady, pickMineStart, tripBudgetMs } from './mine.js';
 import { readyFoodPoints } from './food.js';
 import { tier } from './kit.js';
-import { chestTotals } from './chests.js';
+import { chestTotals, freeChestTotals } from './chests.js';
+import { ownItems } from './community.js';
 import { nearestZone, type Zone } from './courtesy.js';
 
 /**
@@ -27,7 +28,8 @@ export function diamondsWanted(s: Pick<Snapshot, 'items'>, world: WorldMemory): 
       ...Object.keys(chestTotals(world)).filter(i => new RegExp(`_${kind}$`).test(i)).map(i => tier(i)));
     if (best < tier(`diamond_${kind}`)) want += n;
   }
-  const have = (s.items.filter(i => i.name === 'diamond').reduce((a, i) => a + i.count, 0)) + (chestTotals(world).diamond ?? 0);
+  // its own diamonds only: what a community mission gathered isn't the bot's
+  const have = ownItems(s.items, world).filter(i => i.name === 'diamond').reduce((a, i) => a + i.count, 0) + (freeChestTotals(world).diamond ?? 0);
   return Math.max(0, want - have);
 }
 

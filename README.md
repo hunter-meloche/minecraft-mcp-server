@@ -175,6 +175,20 @@ Good to know:
 - It picks up items lying where it walks, like any player. Its sleeping skips the night only if enough players sleep.
 - It starts on a new server with nothing, so the first night is the riskiest.
 
+**Community chests.** A chest where players and bots share surplus. Register it with `community-chest`
+(`name`, `x`, `y`, `z`). The bot only puts things in it, never takes, and it is never the bot's storage. Two things go
+there:
+- Donations, every few hours of play: precious things beyond what the bot keeps for itself. That is diamonds beyond
+  8 (only once its own diamond kit is done), any emeralds, gold beyond 16 and iron beyond 48. Each goes in lots of at
+  least 4, 4, 8 and 16.
+- Missions, only when asked for one (`community-mission` with `item`, `count`, `chest`, e.g. "gather 64 diamond for
+  the community1 chest").
+  - It works on a mission by itself, just after the build jobs. Ores come from trips under ground, kitted out like a
+    deep trip; iron and gold are mined raw and smelted. Blocks like logs or sand come from runs on the surface.
+  - It carries each load over as it comes.
+  - What it gathers for a mission is kept apart from its own things until delivered. Anything gathered without
+    mention of the community stays its own.
+
 ## Lab scenarios (regression tests in a live world)
 
 `scripts/lab/` runs repeatable survival scenarios in a world opened to LAN with **Allow Commands** on. A game-master

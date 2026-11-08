@@ -118,6 +118,8 @@ export interface WorldMemory {
    * beyond it (the kit, cooking, fuel, projects), and the stash never throws it away
    */
   reserved?: Record<string, Record<string, number>>;
+  /** community chests (shared with other players and bots), the missions for them and what was donated */
+  community?: import('./community.js').CommunityMemory;
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
 }
 

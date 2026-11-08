@@ -2,6 +2,7 @@ import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
 import type { Goal, GoalContext, Snapshot } from './goals.js';
 import { COOKS_TO } from './food.js';
+import { ownItems } from './community.js';
 import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
 import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign } from './storage.js';
 import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
@@ -333,13 +334,14 @@ export const kit: Goal = {
   wants: (s, world) => {
     if (!awakeAtHome(s)) return null;
     if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return 'look in the home chests';
-    const needs = kitNeeds(s.items, freeChestTotals(world)).filter(doable);
+    const needs = kitNeeds(ownItems(s.items, world), freeChestTotals(world)).filter(doable);
     return needs.length ? `needs ${needs.map(label).join(', ')}` : null;
   },
   run: async ctx => {
     await refreshChests(ctx, 0);
     const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
-    const needs = kitNeeds(inv.items, freeChestTotals(ctx.world));
+    // what it carries for a community mission is not its own to craft with
+    const needs = kitNeeds(ownItems(inv.items, ctx.world), freeChestTotals(ctx.world));
     const did: string[] = [];
     for (const need of needs.filter(doable)) {
       for (const step of need.plan) {

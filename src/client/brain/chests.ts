@@ -99,10 +99,10 @@ export function freeChestTotals(world: WorldMemory): Record<string, number> {
   return out;
 }
 
-/** How many of an item the build jobs hold in the chests (all of them, or all but `except`'s). */
-export function reservedCount(world: WorldMemory, item: string, except?: number): number {
+/** How many of an item the build jobs (and the community's missions, key 'community') hold in the chests (all, or all but `except`'s). */
+export function reservedCount(world: WorldMemory, item: string, except?: number | string): number {
   let n = 0;
-  for (const [job, items] of Object.entries(world.reserved ?? {})) if (Number(job) !== except) n += items[item] ?? 0;
+  for (const [job, items] of Object.entries(world.reserved ?? {})) if (except === undefined || job !== String(except)) n += items[item] ?? 0;
   return n;
 }
 
@@ -110,7 +110,7 @@ export function reservedCount(world: WorldMemory, item: string, except?: number)
  * Take an item from whichever home chests hold it; returns how many it got. What a build job has secured there is
  * left alone, unless `forJob` is that job (its materials stay its own: the kit, the cook and the fuel take the rest).
  */
-export async function takeFromChests(ctx: GoalContext, item: string, count: number, opts: { forJob?: number } = {}): Promise<number> {
+export async function takeFromChests(ctx: GoalContext, item: string, count: number, opts: { forJob?: number | string } = {}): Promise<number> {
   const held = reservedCount(ctx.world, item, opts.forJob);
   if (held) count = Math.min(count, Math.max(0, (chestTotals(ctx.world)[item] ?? 0) - held));
   if (count <= 0) return 0;
