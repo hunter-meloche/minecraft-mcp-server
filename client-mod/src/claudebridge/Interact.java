@@ -356,6 +356,8 @@ public final class Interact {
             BlockState before = mc.level.getBlockState(target);
             if (before.isAir()) return obj("dug", false, "reason", "air");
             if (Foreign.guarded(target, before) && !flag(p, "force")) return obj("dug", false, "reason", "someone else's build (force: true to dig it anyway)", "block", Names.block(before));
+            // a lit nether portal's frame: never, not even when asked (it would put the portal out for everyone)
+            if (Protection.portalFrame(target, before)) return obj("dug", false, "reason", "part of a lit nether portal's frame", "block", Names.block(before));
             long seq = Events.baritoneLogSeq();
             // breaking this one is the point (it may be a protected block the user asked to dig); narrow (the default):
             // only its kind may be broken on the way, the rest of what the bot built (and the yard's ground) stays
@@ -383,6 +385,8 @@ public final class Interact {
             if (before.isAir()) return obj("dug", false, "reason", "air");
             // someone else's build: not the bot's to dig, unless a person asked for this very block
             if (Foreign.guarded(target, before) && !flag(p, "force")) return obj("dug", false, "reason", "someone else's build (force: true to dig it anyway)", "block", Names.block(before));
+            // a lit nether portal's frame: never, not even when asked (it would put the portal out for everyone)
+            if (Protection.portalFrame(target, before)) return obj("dug", false, "reason", "part of a lit nether portal's frame", "block", Names.block(before));
             Vec3 eye = pl.getEyePosition();
             double reach = pl.blockInteractionRange();
             // the face seen from the eye: the nearest open face whose centre a ray from the eye hits on this block

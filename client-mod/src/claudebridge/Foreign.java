@@ -221,6 +221,19 @@ public final class Foreign {
         try { scan(mc); } catch (RuntimeException e) { /* a chunk unloading under it: the zones as they were */ }
     }
 
+    /**
+     * Lit nether portals seen, by chunk: every one (the bot's own too), not only others'. A portal's frame is obsidian,
+     * the very block the enchanting room's trip goes out to mine: no obsidian is broken near a lit portal, whoever's.
+     */
+    private static final Map<Long, List<BlockPos>> PORTALS = new HashMap<>();
+
+    /** A lit nether portal within `radius` of p (as last scanned). */
+    static boolean portalNear(BlockPos p, int radius) {
+        long r2 = (long) radius * radius;
+        for (List<BlockPos> l : PORTALS.values()) for (BlockPos q : l) if (q.distSqr(p) <= r2) return true;
+        return false;
+    }
+
     static void scan(Minecraft mc) {
         ClientLevel level = mc.level;
         if (mc.player == null || level == null || !Protection.synced()) return;
@@ -233,6 +246,7 @@ public final class Foreign {
                 LevelChunk ch = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
                 if (ch == null) continue;
                 List<Mark> marks = new ArrayList<>();
+                List<BlockPos> portals = new ArrayList<>();
                 LevelChunkSection[] sections = ch.getSections();
                 for (int si = 0; si < sections.length; si++) {
                     LevelChunkSection sec = sections[si];
@@ -242,11 +256,13 @@ public final class Foreign {
                         BlockState st = sec.getBlockState(x, y, z);
                         if (!marker(st)) continue;
                         BlockPos at = new BlockPos((cx << 4) + x, by + y, (cz << 4) + z);
+                        if (st.is(net.minecraft.world.level.block.Blocks.NETHER_PORTAL)) portals.add(at);
                         if (Protection.isOwn(at)) continue;
                         marks.add(new Mark(at, st.getBlock(), skyBeside(level, at, side)));
                     }
                 }
                 long key = (((long) cx) << 32) ^ (cz & 0xffffffffL);
+                if (portals.isEmpty()) PORTALS.remove(key); else PORTALS.put(key, portals);
                 List<Mark> before = BY_CHUNK.get(key);
                 if (marks.isEmpty()) { if (before != null) { BY_CHUNK.remove(key); changed = true; } }
                 else if (!marks.equals(before)) { BY_CHUNK.put(key, marks); changed = true; }

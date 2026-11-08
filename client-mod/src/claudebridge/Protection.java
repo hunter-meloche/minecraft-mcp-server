@@ -8,6 +8,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 
 import static claudebridge.Json.intParam;
 
@@ -86,7 +87,18 @@ public final class Protection {
             if (furniture(b) && !digging.contains(b)) types.add(b);
         }
         types.addAll(Foreign.typesNear(me, RADIUS));
+        portalGuard(me, types);
         return new ArrayList<>(types);
+    }
+
+    /** By a lit nether portal (anyone's), its frame can't break: obsidian stays unbreakable whatever a lift allows. */
+    private static void portalGuard(BlockPos me, Set<Block> types) {
+        if (Foreign.portalNear(me, RADIUS)) { types.add(Blocks.OBSIDIAN); types.add(Blocks.CRYING_OBSIDIAN); }
+    }
+
+    /** Obsidian next to a lit portal: its frame (an explicit dig refuses it). */
+    static boolean portalFrame(BlockPos p, BlockState st) {
+        return (st.is(Blocks.OBSIDIAN) || st.is(Blocks.CRYING_OBSIDIAN)) && Foreign.portalNear(p, 3);
     }
 
     /** The bot's own: a block it built, or anywhere in its home zone (its yard). */
@@ -182,6 +194,7 @@ public final class Protection {
         types.removeAll(only);
         // other players' builds nearby: every kind in them, whatever a narrow lift allows
         types.addAll(Foreign.typesNear(me, RADIUS));
+        portalGuard(me, types);
         apply(new ArrayList<>(types));
     }
 
