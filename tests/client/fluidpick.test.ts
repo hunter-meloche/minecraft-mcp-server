@@ -42,6 +42,9 @@ test('open to the sky: every block above it air, all the way up; a cave roof or 
   t.false(openToSky([...Array(10).fill('minecraft:air'), 'minecraft:stone', ...Array(SKY - 11).fill('minecraft:air')]));
   t.false(openToSky([...Array(SKY - 1).fill('minecraft:air'), null]));
   t.false(openToSky(Array(5).fill('minecraft:air')));
+  // a tree over a surface pool is no cave
+  t.true(openToSky([...Array(6).fill('minecraft:air'), 'minecraft:oak_leaves[distance=1,persistent=false]', 'minecraft:vine[east=true]', ...Array(SKY - 8).fill('minecraft:air')]));
+  t.false(openToSky([...Array(6).fill('minecraft:air'), 'minecraft:oak_log[axis=y]', ...Array(SKY - 7).fill('minecraft:air')]));
 });
 
 test('water: one from the source will do', (t) => {

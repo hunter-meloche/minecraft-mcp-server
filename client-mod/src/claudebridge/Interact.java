@@ -322,10 +322,13 @@ public final class Interact {
                         // since: look again now, at the fluid itself. Every fill at the lake was "use: Fail": the aim hit
                         // the grass
                         if (held.endsWith("bucket")) {
-                            // just under the surface (a source fills to 8/9 of the cell): aimed at the middle, the line
-                            // from the shore clipped the shore block's corner ("aim: BLOCK ... grass_block"); this is the
-                            // point the brain's sight-line check (fluidpick.ts) looks at too
-                            m.player.lookAt(EntityAnchorArgument.Anchor.EYES, new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5));
+                            // an empty bucket: at the fluid just under its surface (a source fills to 8/9 of the cell):
+                            // aimed at the middle, the line from the shore clipped the shore block's corner ("aim: BLOCK
+                            // ... grass_block"); the point the brain's sight-line check (fluidpick.ts) looks at too. A full
+                            // one pours next to the face clicked: aimed at that face (aimed into the block, the line hit
+                            // the pit's upper wall and the lava went in a cell too high)
+                            m.player.lookAt(EntityAnchorArgument.Anchor.EYES, held.equals("bucket")
+                                ? new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5) : hit);
                             // what the bucket's aim hits, the way BucketItem traces it (sources only), for the reply
                             Vec3 eye = m.player.getEyePosition(), end = eye.add(m.player.getViewVector(1f).scale(m.player.blockInteractionRange()));
                             var pov = m.level.clip(new net.minecraft.world.level.ClipContext(eye, end, net.minecraft.world.level.ClipContext.Block.OUTLINE,

@@ -1,7 +1,7 @@
 import test from 'ava';
 import { CAST_TIMING, castObsidian, castSite } from '../../src/client/brain/cast.js';
 
-Object.assign(CAST_TIMING, { settle: 0, float: 0, drain: 0 });
+Object.assign(CAST_TIMING, { settle: 0, float: 0, floatTries: 3, drain: 0 });
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 
@@ -41,7 +41,9 @@ test('the cast site: plain lawn with sealed walls, nothing built or burning with
   t.is(castSite(f.read(f.box), f.box, 62, home), undefined);
 });
 
-test('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated up; the pit filled after', async (t) => {
+let floats = true;
+
+test.serial('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated up; the pit filled after', async (t) => {
   const { world, read } = lawn();
   const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 1], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
   const site = { x: 4, y: 62, z: 4 };
@@ -80,7 +82,7 @@ test('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated 
         inv.set('water_bucket', 0); inv.set('bucket', inv.get('bucket')! + 1);
         const below = { ...into, y: into.y - 1 };
         if (/^lava/.test(get(below))) set(below, 'obsidian');
-        if (lying) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; } // floats up within reach
+        if (lying && floats) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; } // floats up within reach
       } else if (item === 'bucket' && /^water/.test(get(q))) { set(q, 'air'); inv.set('water_bucket', 1); inv.set('bucket', inv.get('bucket')! - 1); }
       else if (item === 'dirt') { set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1); }
       return { ok: true, text: 'Used' };
@@ -94,6 +96,60 @@ test('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated 
   t.is(get({ x: 4, y: 61, z: 4 }), 'dirt');
   t.is(get({ x: 4, y: 62, z: 4 }), 'dirt');
   t.is(inv.get('water_bucket'), 1);
+});
+
+test.serial('a drop that does not float up: no more lava on it, the rest kept, the pit left open', async (t) => {
+  floats = false;
+  const { world, read } = lawn();
+  const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 1], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
+  const site = { x: 4, y: 62, z: 4 };
+  const w: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard: { x1: 0, z1: 0, x2: 19, z2: 19, y: 62 }, zones: { 'obsidian:cast': [site] }, lavaCasting: true };
+  let feet: P = { x: 10, y: 63, z: 10 };
+  let lying = 0; // obsidian at the pit's bottom, not picked up yet
+  const set = (p: P, b: string) => world.set(k(p), `minecraft:${b}`);
+  const get = (p: P) => (world.get(k(p)) ?? 'minecraft:air').replace('minecraft:', '');
+  const ctx = {
+    s: { position: feet, home: { x: 10, y: 63, z: 10, dimension: 'overworld' } } as unknown as Snapshot, world: w,
+    signal: new AbortController().signal, progress: () => undefined, status: async () => ({}) as never,
+    call: async <T>(method: string, p: Record<string, unknown> = {}): Promise<T> => {
+      const q = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+      if (method === 'inventory') return { items: [...inv].filter(([, n]) => n > 0).map(([name, count], slot) => ({ name, count, slot })) } as T;
+      if (method === 'world.region') return { blocks: read({ ...q, width: Number(p.width), height: Number(p.height), length: Number(p.length) }) } as T;
+      if (method === 'goto') { feet = q; return { arrived: true } as T; }
+      if (method === 'item.select') return {} as T;
+      if (method === 'dig.here') {
+        const b = get(q);
+        if (b === 'obsidian') lying++;
+        else if (/dirt|grass/.test(b)) inv.set('dirt', inv.get('dirt')! + 1);
+        set(q, 'air');
+        return { dug: true } as T;
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      if (tool !== 'use-item-on-block') return { ok: true, text: 'ok' };
+      t.deepEqual(feet, { x: 3, y: 63, z: 4 }, 'always beside the pit, never in it');
+      const q = { x: Number(a.x), y: Number(a.y), z: Number(a.z) };
+      const into = a.face === 'west' ? { ...q, x: q.x - 1 } : q; // the west face of the wall: the pit cell
+      const item = String(a.item);
+      if (item === 'lava_bucket') { set(into, 'lava[level=0]'); inv.set('lava_bucket', inv.get('lava_bucket')! - 1); inv.set('bucket', inv.get('bucket')! + 1); }
+      else if (item === 'water_bucket') {
+        set(into, 'water[level=0]');
+        inv.set('water_bucket', 0); inv.set('bucket', inv.get('bucket')! + 1);
+        const below = { ...into, y: into.y - 1 };
+        if (/^lava/.test(get(below))) set(below, 'obsidian');
+        if (lying && floats) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; } // floats up within reach
+      } else if (item === 'bucket' && /^water/.test(get(q))) { set(q, 'air'); inv.set('water_bucket', 1); inv.set('bucket', inv.get('bucket')! - 1); }
+      else if (item === 'dirt') { set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1); }
+      return { ok: true, text: 'Used' };
+    }
+  } as unknown as GoalContext;
+  const r = await castObsidian(ctx, 4);
+  floats = true;
+  t.is(r.have, 0, r.text);
+  t.regex(r.text, /didn't float up/);
+  t.is(inv.get('lava_bucket'), 1, 'the second lava bucket kept, not poured onto the drop');
+  t.is(get({ x: 4, y: 61, z: 4 }), 'air', 'the pit left open over it');
 });
 
 test('casting is off until it is turned on: no lava fetched, nothing cast', async (t) => {

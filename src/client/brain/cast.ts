@@ -1,6 +1,7 @@
 import type { GoalContext } from './goals.js';
 import { readBox } from './milestones.js';
 import { prepare } from './project.js';
+import { chestTotals, takeFromChests } from './chests.js';
 import { fillAt, sourcesInSight } from './fluidpick.js';
 
 /**
@@ -54,7 +55,7 @@ export function castSite(blocks: (string | null)[], box: P & { width: number; he
 }
 
 /** How long the water takes (ms): to turn the lava, to float the dropped obsidian up, to drain. Tests set them to 0. */
-export const CAST_TIMING = { settle: 1500, float: 2500, drain: 1500 };
+export const CAST_TIMING = { settle: 1500, float: 500, floatTries: 16, drain: 1500 };
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 const countOf = async (ctx: GoalContext, item: string) =>
@@ -83,6 +84,9 @@ export async function bucketsFor(ctx: GoalContext, lava: number): Promise<string
 export async function fetchLava(ctx: GoalContext, want: number): Promise<number> {
   let have = await countOf(ctx, 'lava_bucket');
   if (have >= want || !ctx.world.lavaCasting) return have;
+  // what's in the chests first (the stash had put four away)
+  if ((chestTotals(ctx.world).lava_bucket ?? 0) > 0) { await takeFromChests(ctx, 'lava_bucket', want - have); have = await countOf(ctx, 'lava_bucket'); }
+  if (have >= want) return have;
   // the ground level: the yard's (the land round here; under its feet it was in a dip at y 53, or a cave)
   const pos = (await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P })).position ?? ctx.s.position;
   const ground = ctx.world.yard?.y ?? Math.floor(pos.y) - 1;
@@ -143,6 +147,8 @@ async function siteOf(ctx: GoalContext): Promise<P | undefined> {
 export async function castObsidian(ctx: GoalContext, want: number): Promise<{ have: number; text: string }> {
   let have = await countOf(ctx, 'obsidian');
   if (!ctx.world.lavaCasting) return { have, text: 'obsidian casting is off (lava-casting turns it on)' };
+  if (!(await countOf(ctx, 'lava_bucket')) && (chestTotals(ctx.world).lava_bucket ?? 0) > 0) await takeFromChests(ctx, 'lava_bucket', want - have);
+  if (!(await countOf(ctx, 'water_bucket')) && (chestTotals(ctx.world).water_bucket ?? 0) > 0) await takeFromChests(ctx, 'water_bucket', 1);
   const c = await siteOf(ctx);
   if (!c) return { have, text: 'no lawn in the yard to cast obsidian in (a 5 x 5 patch of plain ground, nothing built or burning by it)' };
   const pit = { x: c.x, y: c.y - 1, z: c.z }, top = { ...c };
@@ -184,15 +190,27 @@ export async function castObsidian(ctx: GoalContext, want: number): Promise<{ ha
     await ctx.call('item.select', { name: 'diamond_pickaxe' }).catch(() => undefined);
     const d = await ctx.call<{ dug: boolean; reason?: string }>('dig.here', { ...pit, timeoutMs: 20_000 }, 30_000).catch(e => ({ dug: false, reason: (e as Error).message }));
     if (!d.dug) { notes.push(`couldn't mine it: ${d.reason}`); break; }
-    // the obsidian lies at the pit's bottom: water in, it floats up within reach, water out again
-    await use(wallHigh, 'water_bucket', 'west');
-    await sleep(CAST_TIMING.float);
-    await use(top, 'bucket', 'up');
+    // the obsidian lies at the pit's bottom: water in, it floats up within reach, water out again. Checked, not
+    // assumed: the first live run cast 4 and picked up 1, the next lava poured onto the other three and burned them.
+    // Waited for (a poll, up to FLOAT_TRIES), the water poured once more if need be; still not in hand, no more lava
+    const before = have;
+    let got = false;
+    for (let pour = 0; pour < 2 && !got; pour++) {
+      await use(wallHigh, 'water_bucket', 'west');
+      for (let i = 0; i < CAST_TIMING.floatTries && !got; i++) {
+        await sleep(CAST_TIMING.float);
+        got = (await countOf(ctx, 'obsidian')) > before;
+      }
+      await use(top, 'bucket', 'up');
+    }
     casts++;
     have = await countOf(ctx, 'obsidian');
+    if (!got) { notes.push(`the obsidian didn't float up within reach (it's at the pit's bottom): no more lava poured on it`); break; }
   }
-  // the lawn back: the pit filled with dirt (a block dug up from it, or what's carried)
-  for (const [p, wall] of [[pit, wallLow], [top, wallHigh]] as const) {
+  // the lawn back: the pit filled with dirt (a block dug up from it, or what's carried); not over an obsidian left
+  // lying at its bottom (the next run floats it up)
+  const left = notes.some(n => /didn't float up/.test(n));
+  for (const [p, wall] of (left ? [] : [[pit, wallLow], [top, wallHigh]]) as [P, P][]) {
     if (/^(air|cave_air|water)/.test(await blockAt(ctx, p)) && (await countOf(ctx, 'dirt'))) await use(wall, 'dirt', 'west').catch(() => undefined);
   }
   return { have, text: `cast ${casts} obsidian at (${c.x}, ${c.y}, ${c.z})${notes.length ? `; ${notes.join('; ')}` : ''}` };

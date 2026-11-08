@@ -41,7 +41,9 @@ function foods(): Set<string> {
 
 /** What the project in hand and the build jobs are gathering and building with: stays carried (the stash put a trip's logs away). */
 function projectCarry(world: WorldMemory): Set<string> {
-  return new Set([...(world.progress?.carry ?? []), ...activeJobs(world).flatMap(j => j.carry ?? [])]);
+  // the obsidian casting's buckets stay carried (the stash put four lava buckets in the gear chest mid-test)
+  const casting = world.lavaCasting ? ['lava_bucket', 'water_bucket', 'bucket'] : [];
+  return new Set([...(world.progress?.carry ?? []), ...activeJobs(world).flatMap(j => j.carry ?? []), ...casting]);
 }
 
 /** The LLM's build jobs still going. */

@@ -33,9 +33,14 @@ const NOT_FLOOR = /^(air|cave_air|void_air|water|lava|fire|soul_fire|magma_block
 /** The region of blocks round a source a stand spot is chosen from (feet levels from one under it to two over). */
 export const aroundBox = (t: P): Box => ({ x: t.x - AROUND, y: t.y - 1, z: t.z - AROUND, width: 2 * AROUND + 1, height: 5, length: 2 * AROUND + 1 });
 
-/** Every block above a source, up to SKY, is air: a pool under the open sky, not a cave. */
+/**
+ * Nothing solid above a source, up to SKY: a pool under the open sky, not a cave. Leaves, plants, vines and snow
+ * don't count: requiring air all the way up refused every surface pool the scout found (a tree over it, a branch),
+ * three of them, as "a cave". Rock overhead is what makes a cave; unknown (unloaded) is no.
+ */
+const SEE_THROUGH = /^(air|void_air|cave_air|.*_leaves|short_grass|tall_grass|fern|large_fern|vine|cave_vines.*|.*_vines|glow_lichen|snow|leaf_litter|dandelion|poppy|.*_tulip|oxeye_daisy|cornflower|azure_bluet|allium|wildflowers|pink_petals|.*_sapling|sugar_cane|bamboo|cobweb)(\[|$)/;
 export function openToSky(column: (string | null)[]): boolean {
-  return column.length >= SKY && column.every(b => b !== null && /^(air|void_air)$/.test(id(b)));
+  return column.length >= SKY && column.every(b => b !== null && SEE_THROUGH.test(id(b)));
 }
 
 /**
