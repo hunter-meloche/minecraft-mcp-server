@@ -7,6 +7,7 @@ import { enchantingMilestone } from './enchant.js';
 import { buildStep, siteStep, yardOf } from './milestones.js';
 import type { Milestone, MilestoneState } from './progress.js';
 import type { GoalContext } from './goals.js';
+import { homeMilestone } from './home.js';
 
 /**
  * The bot's long game, in order. Each milestone is done once the world shows it (a zone the build registered), so
@@ -23,7 +24,8 @@ function doorTowardHome(st: MilestoneState, home: { x: number; z: number }): Sid
 const storage: Milestone = {
   id: 'storage',
   title: 'storage house',
-  prereqs: [],
+  // a bed under a roof first: the first nights are the dangerous ones
+  prereqs: ['home'],
   done: v => !!v.world.zones?.storage?.length,
   steps: [
     siteStep('storage', 7, 9),
@@ -273,6 +275,6 @@ const moreChests: Milestone = {
   }]
 };
 
-export const TREE: Milestone[] = [storage, moreChests, perimeter, fenceClear, yardLevel, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
+export const TREE: Milestone[] = [homeMilestone, storage, moreChests, perimeter, fenceClear, yardLevel, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
   penMilestone('cow', ['plot1']), penMilestone('sheep', ['pen-cow']),
   caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow'])];

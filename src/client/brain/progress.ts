@@ -1,6 +1,7 @@
 import type { GoalContext, Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { chestTotals } from './chests.js';
+import { COLOURS } from './blueprints.js';
 
 /**
  * The bot's long game: a tree of milestones (a storage house, a fence round the yard, farms, pens, a mine, diamond
@@ -85,6 +86,8 @@ export function nextMilestone(tree: Milestone[], s: Snapshot, world: WorldMemory
 
 /** Crafting recipes for building items: what one craft makes, from what. Wood is any log or planks. */
 export const RECIPES: Record<string, { makes: number; from: Record<string, number> }> = {
+  // a bed of each colour, from three wool of it (wild sheep's wool: the home milestone's bed)
+  ...Object.fromEntries(COLOURS.map(c => [`${c}_bed`, { makes: 1, from: { [`${c}_wool`]: 3, planks: 3 } }])),
   planks: { makes: 4, from: { log: 1 } },
   stick: { makes: 4, from: { planks: 2 } },
   chest: { makes: 1, from: { planks: 8 } },

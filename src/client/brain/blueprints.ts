@@ -296,6 +296,42 @@ export function storageHouse(opts: { chests?: number; doorSide?: Side } = {}): B
   return rotate(bp, TURNS_FROM_SOUTH[doorSide]);
 }
 
+/** The 16 dye colours, for wool and beds. */
+export const COLOURS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple',
+  'blue', 'brown', 'green', 'red', 'black'] as const;
+
+/**
+ * The first home: a 5 x 7 oak cabin drawn with its door on the south wall (log corners, plank walls 3 high, a flat
+ * plank roof), a bed in the back corner with its head to the back wall, a crafting table and a furnace along the
+ * other side, and a floor torch inside: the first nights' bed and workbench under a roof. Without `bed` the two bed
+ * cells are left as they are (the bed comes later, by hand). Landmarks: 'bed' (its head), 'bed-foot', 'table',
+ * 'furnace', 'torch', 'door'.
+ */
+export function cabin(opts: { bed?: string; doorSide?: Side } = {}): Blueprint {
+  const doorSide = opts.doorSide ?? 'south';
+  checkSide(doorSide);
+  if (opts.bed && !/^[a-z_]+_bed$/.test(opts.bed)) throw new Error(`a bed is a "<colour>_bed", not "${opts.bed}"`);
+  const { g, door } = room(5, 7, 3);
+  const head = { x: 1, y: 0, z: 1 }, foot = { x: 1, y: 0, z: 2 };
+  const table = { x: 3, y: 0, z: 1 }, furnace = { x: 3, y: 0, z: 2 }, torch = { x: 3, y: 0, z: 4 };
+  g.set(head.x, 0, head.z, opts.bed ? 'H' : ' ');
+  g.set(foot.x, 0, foot.z, opts.bed ? 'F' : ' ');
+  g.set(table.x, 0, table.z, 'C');
+  g.set(furnace.x, 0, furnace.z, 'K');
+  g.set(torch.x, 0, torch.z, 'T');
+  const palette: Record<string, string> = { ...ROOM_PALETTE, C: 'crafting_table', K: 'furnace[facing=west]' };
+  if (opts.bed) {
+    palette.H = `${opts.bed}[facing=north,part=head]`;
+    palette.F = `${opts.bed}[facing=north,part=foot]`;
+  }
+  const landmarks: Landmark[] = [
+    { kind: 'bed', at: head }, { kind: 'bed-foot', at: foot }, { kind: 'table', at: table }, { kind: 'furnace', at: furnace },
+    { kind: 'torch', at: torch }, { kind: 'door', at: door }
+  ];
+  const bp = blueprint('cabin', { palette, layers: g.layers() }, { entrances: [{ ...door, facing: 'south' }], landmarks });
+  return rotate(bp, TURNS_FROM_SOUTH[doorSide]);
+}
+
 /**
  * A 7 x 7 enchanting room: walls 4 high and a roof like the storage house, the enchanting table in the middle, and 15
  * bookshelves on the ground around it at distance 2 (the vanilla layout: an air ring between table and shelves, which

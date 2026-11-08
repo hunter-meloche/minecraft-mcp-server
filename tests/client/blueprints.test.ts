@@ -2,7 +2,7 @@ import test from 'ava';
 import { checkBuild, layoutSpec, LEAVE, parseState, splitDirectional, type StructureSpec } from '../../src/client/schematic.js';
 import {
   billOf, caneStrip, chestPartner, cropPlot, enchantRoom, fenceRing, itemOf, mineStairs, pen, rotate, rotatePos, rotateSpec,
-  rotateState, storageHouse, treeGrid, turn, type Blueprint, type Side
+  rotateState, storageHouse, treeGrid, turn, cabin, type Blueprint, type Side
 } from '../../src/client/brain/blueprints.js';
 import type { Pos } from '../../src/client/survey.js';
 
@@ -41,7 +41,8 @@ function builtWorld(bp: Blueprint): string[] {
 const all = (): [string, Blueprint][] => [
   ['storageHouse', storageHouse()], ['storageHouse east', storageHouse({ doorSide: 'east', chests: 6 })],
   ['fenceRing', fenceRing({ width: 10, length: 8 }, [{ side: 'south', offset: 4 }])], ['pen', pen()],
-  ['cropPlot', cropPlot()], ['treeGrid', treeGrid(3, 2)], ['caneStrip', caneStrip(5)], ['enchantRoom', enchantRoom()]
+  ['cropPlot', cropPlot()], ['treeGrid', treeGrid(3, 2)], ['caneStrip', caneStrip(5)], ['enchantRoom', enchantRoom()],
+  ['cabin', cabin({ bed: 'white_bed' })], ['cabin east, no bed', cabin({ doorSide: 'east' })]
 ];
 
 test('every blueprint lays out, and its size is the layout\'s', (t) => {
@@ -301,4 +302,27 @@ test('billLeft: cells already holding their block cost nothing, whatever their s
   const spec = { palette: { F: 'minecraft:oak_fence', T: 'minecraft:torch' }, layers: [['FFF'], ['T  ']] };
   const blocks = ['minecraft:oak_fence[east=true,north=false]', 'air', 'air', 'air', 'air', 'air'];
   t.deepEqual(billLeft(spec, blocks, { width: 3, length: 1 }), { oak_fence: 2, torch: 1 });
+});
+
+test('cabin: 5 x 4 x 7, bed in the back corner head to the wall, table, furnace and a torch inside, door south', (t) => {
+  const bp = cabin({ bed: 'red_bed' });
+  t.deepEqual(bp.size, { width: 5, height: 4, length: 7 });
+  t.is(stateAt(bp.spec, { x: 1, y: 0, z: 1 }), 'red_bed[facing=north,part=head]');
+  t.is(stateAt(bp.spec, { x: 1, y: 0, z: 2 }), 'red_bed[facing=north,part=foot]');
+  t.is(stateAt(bp.spec, { x: 3, y: 0, z: 1 }), 'crafting_table');
+  t.is(stateAt(bp.spec, { x: 3, y: 0, z: 2 }), 'furnace[facing=west]');
+  t.is(stateAt(bp.spec, { x: 2, y: 0, z: 6 }), 'oak_door[facing=south,half=lower]');
+  // the way in stays clear
+  t.is(cell(bp.spec, { x: 2, y: 0, z: 5 }), '.');
+  // one bed, one table, one furnace, one door; logs and planks for the shell (a cheap first house)
+  t.like(bp.bill, { red_bed: 1, crafting_table: 1, furnace: 1, oak_door: 1, torch: 1, oak_log: 12 });
+  t.true(bp.bill.oak_planks < 90);
+  t.deepEqual(bp.landmarks.find(l => l.kind === 'bed')!.at, { x: 1, y: 0, z: 1 });
+  // without a bed its cells are left as they are (the bed comes later)
+  const bare = cabin();
+  t.is(cell(bare.spec, { x: 1, y: 0, z: 1 }), ' ');
+  t.false("white_bed" in bare.bill);
+  t.throws(() => cabin({ bed: 'oak_planks' }));
+  // turned for a door east: 7 x 7 round, the bed's head still against the wall
+  t.deepEqual(cabin({ doorSide: 'east', bed: 'white_bed' }).size, { width: 7, height: 4, length: 5 });
 });
