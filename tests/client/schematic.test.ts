@@ -100,3 +100,15 @@ test('breakKinds: only what stands where the build clears or replaces, never wha
   t.deepEqual(breakKinds(layout, ['minecraft:air', 'minecraft:oak_planks', null]), []);
   t.deepEqual(breakKinds(layout, ['minecraft:cobblestone', 'minecraft:air', null], i => i === 0), []);
 });
+
+test('a fence gate stands either way along its line (opening it turns it), not across it', (t) => {
+  // the fence build re-ran 516 times on 2 gates facing back into the yard after use
+  const s = layoutSpec({ palette: { G: 'oak_fence_gate[facing=south]', S: 'oak_stairs[facing=south]' }, layers: [['GS']] });
+  const used = ['oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]', 'oak_stairs[facing=south,half=bottom]'];
+  t.deepEqual(checkBuild(s, used), { placed: 2, total: 2, missing: {}, misplaced: {} });
+  t.deepEqual(missingCells(s, used), []);
+  // across the line it no longer closes the fence; and a stair turned round is still wrong
+  const off = ['oak_fence_gate[facing=east]', 'oak_stairs[facing=north]'];
+  t.deepEqual(checkBuild(s, off).misplaced, { oak_fence_gate: 1, oak_stairs: 1 });
+  t.deepEqual(missingCells(s, off).map(c => c.id), ['oak_fence_gate', 'oak_stairs']);
+});

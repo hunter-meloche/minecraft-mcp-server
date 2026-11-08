@@ -121,6 +121,17 @@ export function parseState(state: string): { id: string; props: Record<string, s
   return { id: m?.[1] ?? state, props };
 }
 
+/**
+ * Does `got` stand for `want`: the same block with the properties the spec names. A fence gate's facing may be either
+ * way along its line: opening one turns it toward whoever opens it, so a used gate faces back into the yard. The fence
+ * build asked for the 2 gates "facing out" again and again (no spare gate to re-place them with): 516 runs in 2.5 h.
+ */
+export function stands(want: { id: string; props: Record<string, string> }, got: { id: string; props: Record<string, string> }): boolean {
+  if (got.id !== want.id) return false;
+  const gate = /fence_gate$/.test(want.id);
+  return Object.entries(want.props).every(([k, v]) => got.props[k] === v || (gate && k === 'facing' && got.props[k] === OPPOSITE[v]));
+}
+
 /** The structure's blocks that the world doesn't have yet, bottom up (then x, then z), so supports come first. */
 export function missingCells(layout: Schematic, world: (string | null)[]): Cell[] {
   const byIndex = new Map(Object.entries(layout.palette).map(([state, i]) => [i, { state, ...parseState(state) }]));
@@ -130,7 +141,7 @@ export function missingCells(layout: Schematic, world: (string | null)[]): Cell[
     const want = byIndex.get(p)!;
     if (want.state === LEAVE) return;
     const got = world[i] ? parseState(world[i]!) : null;
-    if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) return;
+    if (got && stands(want, got)) return;
     const x = i % layout.width, z = Math.floor(i / layout.width) % layout.length, y = Math.floor(i / (layout.width * layout.length));
     out.push({ x, y, z, state: want.state, id: want.id, ...(want.props.facing ? { facing: want.props.facing } : {}), ...(lying(want.props) ? { axis: want.props.axis } : {}) });
   });
@@ -153,7 +164,7 @@ export function checkBuild(layout: Schematic, world: (string | null)[]): BuildCh
     total++;
     const want = byIndex.get(p)!;
     const got = world[i] ? parseState(world[i]!) : null;
-    if (got && got.id === want.id && Object.entries(want.props).every(([k, v]) => got.props[k] === v)) placed++;
+    if (got && stands(want, got)) placed++;
     else if (!secondHalf(byState.get(p)!)) { // a missing door top or bed head needs no item of its own
       missing[want.id] = (missing[want.id] ?? 0) + 1;
       if (got?.id === want.id) misplaced[want.id] = (misplaced[want.id] ?? 0) + 1;

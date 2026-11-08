@@ -12,7 +12,7 @@ import { ClientProtection } from './protection.js';
 import { survey, type Cluster } from './survey.js';
 import { planLevel } from './level.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
-import { breakKinds, checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
+import { breakKinds, checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, parseState, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import { itemOf } from './brain/blueprints.js';
 import { freeLid } from './brain/chests.js';
 import type { Item } from 'prismarine-item';
@@ -608,7 +608,15 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     type Placed = { placed: boolean; block?: string; reason?: string };
     // the item that places the block (a wall torch is a torch); a wall-mounted one goes on the block on its `attach` side
     const item = itemOf(block);
-    try { await call('item.select', { name: item }); } catch { return `no ${item} in the inventory`; }
+    try { await call('item.select', { name: item }); } catch {
+      // the right block in the wrong state (a stair turned round) is the item to re-place it with: break it first. The
+      // hand pass gave up on "no oak_fence_gate in the inventory" with the gate standing right there.
+      const { blocks: [b] } = await call<{ blocks: (string | null)[] }>('world.region', { ...at, width: 1, height: 1, length: 1 }).catch(() => ({ blocks: [null] }));
+      if (!b || parseState(b).id !== parseState(block).id) return `no ${item} in the inventory`;
+      await call('dig', { ...at }, 75_000).catch(() => undefined);
+      await new Promise(res => setTimeout(res, 500)); // the drop to fly into the pockets
+      try { await call('item.select', { name: item }); } catch { return `no ${item} in the inventory (broke the one standing there)`; }
+    }
     const attempt = () => call<Placed>('place', { ...at, face: attach ?? 'down', ...(look ? { facing: look } : {}), ...(axis ? { axis } : {}) });
     let r = await attempt();
     if (!r.placed && r.reason?.startsWith('occupied by')) {
