@@ -115,12 +115,14 @@ public final class Guardian {
         if (eating || Interact.using || Interact.handsBusy || melee != null) return;
         // during a Baritone job only when it matters (hurt): the job is paused for the bite (EatPause)
         boolean job = Processes.active() != null && !"Eating".equals(Processes.active());
-        String choice = Combat.chooseFood(false);
+        // desperate (starving, or nearly dead): raw chicken and rotten flesh too; else they wait (they can poison)
+        String choice = Combat.chooseFood(food <= 2 || p.getHealth() <= 6);
         if (choice == null) return;
         boolean room = food <= 20 - Combat.nutrition(choice);
         if (job ? !(hurt && food < 18) && food > 14 : !((hurt && food < 18) || food <= 6 || room)) return;
-        // raw meat and fish give a third of what cooked does: keep them for the furnace unless really hungry
-        if (food > 6 && RAW.contains(choice)) return;
+        // raw meat and fish give a third of what cooked does: kept for the furnace (the food goal cooks them at home)
+        // unless really hungry or hurt and hungry. At 6 it ate the one chicken the hunt brought back, raw
+        if (RAW.contains(choice) && !(food <= 4 || (hurt && food < 10))) return;
         eating = true;
         if (job) EatPause.eating = true;
         // give Baritone a tick to pause before taking the hand

@@ -171,7 +171,10 @@ public final class Combat {
         if (mc.player.isUsingItem()) mc.gameMode.releaseUsingItem(mc.player);
     }
 
-    /** Best safe food carried (rotten flesh allowed at low health), or null. */
+    /** Can poison: eaten only when desperate (raw chicken: hunger 30% of the time). */
+    static final Set<String> DESPERATE_ONLY = Set.of("rotten_flesh", "chicken");
+
+    /** Best safe food carried (rotten flesh and raw chicken only when desperate), or null. */
     static String chooseFood(boolean desperate) {
         Inventory inv = Minecraft.getInstance().player.getInventory();
         String best = null;
@@ -182,6 +185,7 @@ public final class Combat {
             if (food == null) continue;
             String name = Names.item(s);
             if (AVOID_FOOD.contains(name) && !(desperate && name.equals("rotten_flesh"))) continue;
+            if (!desperate && DESPERATE_ONLY.contains(name)) continue;
             float score = food.nutrition() + food.saturation();
             if (score > bestScore) { best = name; bestScore = score; }
         }

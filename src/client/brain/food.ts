@@ -10,6 +10,8 @@ import { placeNearHome } from './firsts.js';
 
 /** How far round the bot the hunt looks for game. */
 const HUNT_RANGE = 64;
+/** Most animals one food round hunts. */
+const HUNT_MAX = 4;
 
 /**
  * Food: keep enough ready-to-eat food on the bot that the Guardian can always heal it, the cheapest way first:
@@ -211,22 +213,44 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
   }
 
   // 6. hunt, keeping two of each kind: wild ones only (never named, tamed, on a lead, in someone's pen, or grazing by
-  // someone's builds: on a friend's server those are theirs), and one in particular, not "the nearest cow"
+  // someone's builds: on a friend's server those are theirs), one in particular each time, not "the nearest cow".
+  // As many as it takes (up to HUNT_MAX) for what it carries to cook into the target, then all of it cooked: a trip
+  // came back with one chicken, and the bot ate it raw
   if (!enough() && working) {
-    // 64 round: out on the plains the herds grazed 40 to 65 blocks off, never 3 of a kind within 32, and it went hungry
-    const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: HUNT_RANGE });
-    const wild = entities.filter(e => !someones(e, ctx.world.yard));
-    // fed, it leaves two of a kind to breed; hungry, a lone one will do (the herds had moved off, one of each stayed)
     const hungry = ctx.s.food < 14;
-    const kind = GAME.find(g => wild.filter(e => e.name === g).length >= (hungry ? 1 : 3));
-    const prey = kind ? wild.filter(e => e.name === kind).sort((a, b) => a.distance - b.distance)[0] : undefined;
-    if (kind && prey) {
+    const cookable = () => [...have].reduce((a, [n, k]) => a + (COOKS_TO[n] && foods[COOKS_TO[n]] ? k * foods[COOKS_TO[n]].foodPoints : 0), 0);
+    const hunted = new Map<string, number>();
+    // hungry with nothing to hunt round here (the herds near home hunted out, a horse left): out looking for game,
+    // a side at a time within the leash, and the hunt goes on from where it found some
+    if (hungry) {
+      const near = (await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: HUNT_RANGE })).entities
+        .filter(e => !someones(e, ctx.world.yard) && GAME.includes(e.name));
+      if (!near.length) {
+        const sides = ['north', 'east', 'south', 'west'] as const;
+        for (let i = 0; i < sides.length && !ctx.signal.aborted; i++) {
+          const target = GAME[i % GAME.length];
+          const r = await ctx.act('explore', { target, direction: sides[i], maxDistance: Math.min(ctx.world.leash ?? 96, 128), step: 32, timeoutMs: 90_000 });
+          if (/^Found /.test(r.text)) { say(`found ${target} to the ${sides[i]}`); break; }
+          await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+        }
+      }
+    }
+    for (let kills = 0; kills < HUNT_MAX && readyFoodPoints(have) + cookable() < target && !ctx.signal.aborted; kills++) {
+      // 64 round: out on the plains the herds grazed 40 to 65 blocks off, never 3 of a kind within 32
+      const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: HUNT_RANGE });
+      const wild = entities.filter(e => !someones(e, ctx.world.yard));
+      // fed, it leaves two of a kind to breed; hungry, a lone one will do (the herds had moved off, one of each stayed)
+      const kind = GAME.find(g => wild.filter(e => e.name === g).length >= (hungry ? 1 : 3));
+      const prey = kind ? wild.filter(e => e.name === kind).sort((a, b) => a.distance - b.distance)[0] : undefined;
+      if (!kind || !prey) break;
       const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: HUNT_RANGE, timeoutMs: 45_000 });
-      say(r.ok ? `hunted a ${kind}` : `could not hunt a ${kind}`);
+      if (!r.ok) { say(`could not hunt a ${kind}`); break; }
+      hunted.set(kind, (hunted.get(kind) ?? 0) + 1);
       await ctx.act('collect-items', { radius: 6, timeoutMs: 30_000 }).catch(() => undefined);
       await refresh();
-      await cook();
     }
+    if (hunted.size) say(`hunted ${[...hunted].map(([k, n]) => `${n} ${k}`).join(', ')}`);
+    await cook();
   }
 
   const points = readyFoodPoints(have);

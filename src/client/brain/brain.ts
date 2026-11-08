@@ -300,11 +300,13 @@ export class Brain {
       if (this.heat) { this.heat.map.decay(0.9); if (this.worldId) this.memory.world(this.worldId).heat = this.heat.map.toJSON(); }
       if (this.day.work) this.day.lastIdle = Math.round(100 * this.day.idle / this.day.work);
       this.day.work = this.day.idle = 0;
-      if (this.morningHold.size) {
-        for (const g of this.morningHold) this.retryAt.delete(g);
-        this.note(`morning: ${[...this.morningHold].join(', ')} may try again`);
-        this.morningHold.clear();
-      }
+      // a new day: what failed in the dark (no hunting at night) or waited a while may try again now; with a bed
+      // the morning comes a minute after dusk, and the food goal sat out a 5 minute retry, hungry, in daylight
+      const waiting = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g]) => g);
+      if (waiting.length) this.note(`morning: ${waiting.join(', ')} may try again`);
+      this.retryAt.clear();
+      this.fails.clear();
+      this.morningHold.clear();
     }
     this.day.tod = s.timeOfDay;
     if (s.activity !== 'work' || s.sleeping) return;
