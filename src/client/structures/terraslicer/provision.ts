@@ -1,3 +1,4 @@
+import { recipeFor } from '../../brain/progress.js';
 import type { GoalContext } from '../../brain/goals.js';
 import type { BuildJob, WorldMemory } from '../../brain/memory.js';
 import { chestTotals, reservedCount, storeInChests } from '../../brain/chests.js';
@@ -109,7 +110,11 @@ export async function provisionStep(ctx: GoalContext, job: BuildJob, bill: Recor
   if (Object.keys(src.gather).length) return { ready: false, note: `gathering ${list(src.gather)}`, need: src.gather };
   // only making left: one kind a run, in a batch, into the chests (what's held for the job stays where it is: prepare
   // takes only what's beyond the reservation, so it makes the shortfall)
-  const make = src.lines.find(l => l.source === 'craft' || l.source === 'smelt');
+  // what other lines are made from goes first (the walls' oak planks before the fence made of oak planks): made the
+  // other way round, the fence's fresh planks counted as the walls' 51 still to make, and it waited for planks forever
+  const makes = src.lines.filter(l => (l.source === 'craft' || l.source === 'smelt') && l.need > (have[l.item] ?? 0));
+  const usedBy = (l: { item: string }) => makes.some(o => o !== l && (recipeFor(o.item)?.from[l.item] ?? 0) > 0);
+  const make = makes.find(usedBy) ?? makes[0];
   if (make) {
     const short = make.need - Math.min(make.need, have[make.item] ?? 0);
     // prepare holds back what the bill places as it is from what's carried: here that's in the chests, held by the

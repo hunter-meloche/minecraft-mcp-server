@@ -109,6 +109,19 @@ test('provisionStep: missing stops it with the reason; short goes to the stock t
   t.deepEqual(provisioned(w, { ...j, bill: { oak_log: 10 } }), { held: 10, total: 10, short: {} });
 });
 
+test('provisionStep: makes what other lines are made from first (the oak planks for the walls before the fence)', async t => {
+  const w = world({ oak_log: 50 });
+  const { ctx } = fakeCtx(w, new Map());
+  // the fence is listed first in the bill, as the slicer had it; its planks are the walls' planks too
+  const step = await provisionStep(ctx, job(), { oak_fence: 4, oak_planks: 60 }, []);
+  t.false(step.ready);
+  t.regex(step.note, /^(made|making) oak_planks/, step.note);
+  // the planks all there and held: the fence next, not the planks over and over
+  w.chestItems!['1,64,1'].oak_planks = 61;
+  const next = await provisionStep(ctx, job(), { oak_fence: 4, oak_planks: 60 }, []);
+  t.regex(next.note, /oak_fence/, next.note);
+});
+
 test('provisionStep: a hoe to till with comes on the bill when there is none', async t => {
   const w = world({});
   const { ctx } = fakeCtx(w, new Map());

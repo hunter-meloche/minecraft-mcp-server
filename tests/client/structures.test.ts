@@ -119,6 +119,12 @@ test('planText and render: what the LLM reads', async (t) => {
   t.regex(text, /Work: \d+ package/);
   const upToDate = planText('x', c, diff(c.cells, c.cells.map(k => k.want), { '1,66,1': ['food1'] }), sourceBill({}, {}));
   t.regex(upToDate, /Up to date/);
+  // out of sight (unloaded chunks): never "up to date" (a job planned from 160 blocks off called itself complete)
+  const unloaded = diff(c.cells, c.cells.map(() => null));
+  t.true(unloaded.every(x => x.kind === 'ok' && x.unknown));
+  const blind = planText('x', c, unloaded, sourceBill({}, {}));
+  t.notRegex(blind, /Up to date/);
+  t.regex(blind, /out of sight \(their chunks aren't loaded\)/);
   const pic = render(hut, c);
   t.regex(pic, /y 65:\n {2}LPPPL/);
   t.regex(pic, /Other blocks: .*oak_door\[facing=south,half=upper\]/);

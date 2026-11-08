@@ -267,7 +267,17 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
         store.saveState(job.world, job.structure, st0);
       }
       ctx.progress(`${job.structure}: checking it block by block`);
-      const changes = await plan(ctx, c);
+      let changes = await plan(ctx, c);
+      // out of sight (its chunks not loaded: the bot off at the woods) is no answer: go and look, and never call a
+      // job complete on cells it can't see (the cottage's first job did, from 160 blocks off, before a block was laid)
+      if (changes.some(x => x.unknown)) {
+        const mid = { x: c.box.x + Math.floor(c.box.width / 2), y: c.box.y, z: c.box.z + Math.floor(c.box.length / 2) };
+        ctx.progress(`${job.structure}: out of sight from here: going to look`);
+        await ctx.call('goto', { ...mid, xz: true, range: 8, careful: true, timeoutMs: 120_000 }, 135_000).catch(() => undefined);
+        changes = await plan(ctx, c);
+        const unseen = changes.filter(x => x.unknown).length;
+        if (unseen) return `${job.structure}: ${unseen} cell(s) still out of sight (not loaded): later`;
+      }
       // what stands right is the bot's now: Baritone's walks and mining leave it alone (the mod's no-break rule)
       protect?.(changes.filter(x => x.kind === 'ok' && x.want !== 'air' && x.have && !/^(minecraft:)?(air|cave_air)$/.test(x.have))
         .map(x => ({ at: x.at, state: x.have })));

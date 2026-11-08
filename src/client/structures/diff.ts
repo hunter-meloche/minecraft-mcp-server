@@ -12,7 +12,11 @@ import type { Cell, Pos } from './format.js';
  */
 
 export type ChangeKind = 'ok' | 'place' | 'replace' | 'restate' | 'clear' | 'sign';
-export interface Change { at: Pos; kind: ChangeKind; want: string; have: string; sign?: string[]; second?: boolean }
+export interface Change {
+  at: Pos; kind: ChangeKind; want: string; have: string; sign?: string[]; second?: boolean;
+  /** its chunk isn't loaded: counted as ok, but nothing is known (a job checked from afar called itself complete) */
+  unknown?: boolean;
+}
 
 const AIR = /^(air|cave_air|void_air)$/;
 /** What a placed block simply replaces. */
@@ -64,7 +68,7 @@ export function diff(cells: Cell[], world: (string | null)[], signText: Record<s
   return cells.map((c, i): Change => {
     const have = (world[i] ?? '').replace(/^minecraft:/, '');
     const base = { at: c.at, want: c.want, have, ...(c.sign ? { sign: c.sign } : {}), ...(c.second ? { second: true } : {}) };
-    if (world[i] === null || world[i] === undefined) return { ...base, kind: 'ok' };
+    if (world[i] === null || world[i] === undefined) return { ...base, kind: 'ok', unknown: true };
     // kept clear: plants, snow and water in it count too (an interior full of grass or flooded isn't clear)
     if (c.want === 'air') return { ...base, kind: !have || AIR.test(parse(have).id) ? 'ok' : 'clear' };
     const cmp = sameBlock(c.want, have);

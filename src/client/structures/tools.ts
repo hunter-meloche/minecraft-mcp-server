@@ -86,10 +86,13 @@ export function planText(title: string, c: Compiled, changes: Change[], bill: So
   const managed = changes.filter(x => !x.second).length;
   const lines = [`${title}: box ${fmt(c.box)} ${c.box.width}x${c.box.height}x${c.box.length}, ${managed} managed cells.`];
   const todo = s.place + s.replace + s.restate + s.clear + s.sign;
+  const unseen = changes.filter(x => x.unknown && !x.second).length;
   if (!todo) {
-    lines.push('Up to date: every managed cell holds what it should.');
+    lines.push(unseen ? `${unseen} managed cell(s) are out of sight (their chunks aren't loaded): nothing known about them; plan again from nearer.`
+      : 'Up to date: every managed cell holds what it should.');
     return lines.join('\n');
   }
+  if (unseen) lines.push(`(${unseen} cell(s) out of sight, not loaded: counted as fine for now.)`);
   lines.push(`Changes: ${s.place} to place, ${s.replace} to replace, ${s.restate} to turn round, ${s.clear} to clear, ${s.sign} sign(s) to rewrite; ${s.ok} ok.`);
   const sample = (kind: Change['kind'], label: string) => {
     const xs = changes.filter(x => x.kind === kind && !x.second).slice(0, 4);
