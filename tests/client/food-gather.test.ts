@@ -93,3 +93,39 @@ test('gatherFood: hungry and nothing to hunt round home: goes looking, and hunts
   t.regex(text, /hunted 2 cow/);
   t.regex(text, /cooked 4 beef/);
 });
+
+test('gatherFood: hungry, the only game it found past the hunting range: walks over to it and hunts it', async t => {
+  // explore said "Found cow" for one 68 blocks off without walking a step, the hunt looks 64 round: the food goal
+  // ran 311 times in 7 min, each "found cow to the north; now carrying 0 food points"
+  const inv = new Map<string, number>([['coal', 4]]);
+  const acts: string[] = [];
+  const world = { landmarks: { chests: [], farmland: [], furnace: { x: 2, y: 64, z: 0 } }, leash: 96, zones: {} } as unknown as WorldMemory;
+  const s = { food: 0, home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, counts: inv, position: { x: 0, y: 64, z: 0 } } as unknown as Snapshot;
+  let there = false, id = 70;
+  const ctx = {
+    s, world, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ timeOfDay: 2000 }),
+    call: (async (m: string, a: Record<string, unknown> = {}) => {
+      if (m === 'inventory') return { items: [...inv].map(([name, count], slot) => ({ slot, name, count })) };
+      if (m === 'goto') { acts.push(`goto ${a.x}`); there = true; return {}; }
+      if (m === 'world.entities') {
+        const cows = [0, 1, 2].map(i => ({ id: id + i, name: 'cow', category: 'creature', distance: there ? 6 : 68, position: { x: 68, y: 64, z: i } }));
+        return { entities: cows.filter(c => c.distance <= (a.maxDistance as number)) };
+      }
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      acts.push(tool === 'explore' ? `explore ${a.target} ${a.direction}` : tool);
+      if (tool === 'explore') return { ok: true, text: 'Found cow at (68, 64, 0)' };
+      if (tool === 'attack-entity') { id++; inv.set('beef', (inv.get('beef') ?? 0) + 2); return { ok: true, text: 'Killed cow' }; }
+      if (tool === 'smelt-item') { const n = inv.get('beef') ?? 0; inv.delete('beef'); inv.set('cooked_beef', n); return { ok: true, text: 'Smelted' }; }
+      return { ok: true, text: 'ok' };
+    }
+  } as unknown as GoalContext;
+  const text = await gatherFood(ctx, 20, true);
+  t.true(acts.includes('goto 68'), acts.join(', '));
+  t.true(acts.indexOf('goto 68') < acts.indexOf('attack-entity'), acts.join(', '));
+  t.regex(text, /walking over to a cow 68 blocks off/);
+  t.regex(text, /hunted \d+ cow/);
+  t.notRegex(text, /now carrying 0 food points/);
+});
