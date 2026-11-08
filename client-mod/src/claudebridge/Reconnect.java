@@ -34,6 +34,17 @@ public final class Reconnect {
         "disconnect.endOfStream", "disconnect.genericReason", "disconnect.packetError", "disconnect.unknownHost",
         "connect.failed", "connect.failed.transfer");
     private static final long[] WAIT_SECONDS = {30, 60, 120, 300};
+    /**
+     * Off the server this long (ticks) on any screen but the disconnected one, after having been on it or tried: the
+     * attempt hung. An attempt during a home internet outage died inside the game's ConnectScreen (a
+     * NullPointerException on a null exception message), no disconnected screen ever came, and the bot sat
+     * "connecting" for good; even server.rejoin refused ("already connecting") until the client was restarted.
+     */
+    private static final long STUCK_TICKS = 120 * 20;
+    /** a manual rejoin may break into a hung attempt this soon (ticks) */
+    private static final long STUCK_MANUAL_TICKS = 30 * 20;
+    /** when it was last seen off the server and not on the disconnected screen (-1: on it, or on the server) */
+    private static long offSince = -1;
 
     /** the server last played on ("host:port"); at first the one the game was launched to join */
     private static String server = launchServer();
@@ -74,7 +85,15 @@ public final class Reconnect {
             attempts = 0;
             handled = null;
             reason = key = null;
+            offSince = -1;
             return;
+        }
+        if (mc.gui.screen() instanceof DisconnectedScreen) offSince = -1;
+        else if (reason != null || attempts > 0) {
+            // off the server after being on it (or after a try), and no disconnected screen: an attempt in progress, or
+            // one that hung. Given long enough, it counts as a failed connection and the normal schedule takes over
+            if (offSince < 0) offSince = Ticker.ticks();
+            else if (Ticker.ticks() - offSince > STUCK_TICKS) giveUpAttempt(mc, "the attempt to rejoin hung");
         }
         if (mc.gui.screen() instanceof DisconnectedScreen ds && ds != handled) {
             handled = ds;
@@ -87,6 +106,13 @@ public final class Reconnect {
             ClaudeBridge.server.emit("disconnected", obj("reason", reason, "key", key, "rejoin", retry && server != null, "inSeconds", retry ? wait : null));
         }
         if (handled != null && mc.gui.screen() == handled && retry && server != null && Ticker.ticks() >= nextTry) connect(mc);
+    }
+
+    /** A hung attempt: shown as a timed-out connection, so the disconnected-screen handling retries it on its schedule. */
+    private static void giveUpAttempt(Minecraft mc, String why) {
+        offSince = -1;
+        ClaudeBridge.server.emit("disconnected", obj("reason", why, "key", "disconnect.timeout", "rejoin", server != null, "inSeconds", null));
+        mc.gui.setScreen(new DisconnectedScreen(new TitleScreen(), Component.translatable("connect.failed"), Component.translatable("disconnect.timeout")));
     }
 
     /** Join the server again, from the disconnected screen. */
@@ -109,7 +135,11 @@ public final class Reconnect {
             Minecraft mc = Minecraft.getInstance();
             if (mc.player != null && mc.level != null) return obj("rejoining", false, "reason", "already on the server");
             if (server == null) return obj("rejoining", false, "reason", "it hasn't been on a server yet");
-            if (!(mc.gui.screen() instanceof DisconnectedScreen)) return obj("rejoining", false, "reason", "already connecting");
+            if (!(mc.gui.screen() instanceof DisconnectedScreen)) {
+                // a hung attempt (off the server a while with no disconnected screen): break into it
+                if (offSince < 0 || Ticker.ticks() - offSince < STUCK_MANUAL_TICKS) return obj("rejoining", false, "reason", "already connecting");
+                offSince = -1;
+            }
             attempts = 0;
             connect(mc);
             return obj("rejoining", true, "server", server);
