@@ -1,7 +1,7 @@
 import test from 'ava';
 import zlib from 'zlib';
 import nbt from 'prismarine-nbt';
-import { checkBuild, keepExisting, layoutSpec, missingCells, placerFacing, splitDirectional, varints, writeSchematic } from '../../src/client/schematic.js';
+import { breakKinds, checkBuild, keepExisting, layoutSpec, missingCells, placerFacing, splitDirectional, varints, writeSchematic } from '../../src/client/schematic.js';
 
 test('layoutSpec: dimensions, palette, Sponge index order, and material counts', (t) => {
   const s = layoutSpec({ palette: { L: 'acacia_log[axis=y]', P: 'acacia_planks' }, layers: [['LP', 'P.L'], ['L']] });
@@ -90,4 +90,13 @@ test('keepExisting turns the picked air cells into leave-as-is cells', (t) => {
   t.deepEqual(kept.blocks, [1, 2, 0]);
   t.is(kept.palette['minecraft:structure_void'], 2);
   t.is(keepExisting(s, () => false), s);
+});
+
+test('breakKinds: only what stands where the build clears or replaces, never what the bot keeps', (t) => {
+  // 3 cells along x: clear (.), want planks, leave alone (' ')
+  const layout = layoutSpec({ palette: { P: 'oak_planks' }, layers: [['.P ']] });
+  t.deepEqual(breakKinds(layout, ['minecraft:dirt', 'minecraft:grass_block[snowy=false]', 'minecraft:oak_log[axis=y]']), ['dirt', 'grass_block']);
+  // what's right already, and air, need nothing broken; a kept block in a clear cell stays
+  t.deepEqual(breakKinds(layout, ['minecraft:air', 'minecraft:oak_planks', null]), []);
+  t.deepEqual(breakKinds(layout, ['minecraft:cobblestone', 'minecraft:air', null], i => i === 0), []);
 });

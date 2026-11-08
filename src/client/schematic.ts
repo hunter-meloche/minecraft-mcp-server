@@ -218,3 +218,23 @@ export function keepExisting(layout: Schematic, keep: (index: number) => boolean
   if (!(LEAVE in palette)) palette[LEAVE] = Object.keys(palette).length;
   return { ...layout, palette, blocks: layout.blocks.map((b, i) => b === 0 && keep(i) ? palette[LEAVE] : b) };
 }
+
+/**
+ * The kinds of block a build has to break: what stands in a cell it clears ('.') or in a cell it wants something else
+ * in, unless `kept` (a block the bot placed, which a clear leaves alone). All the rest the bot built stays protected
+ * while it builds (a narrow lift): with the rule lifted whole, Baritone cut through the bot's own walls to reach a site.
+ */
+export function breakKinds(layout: Schematic, world: (string | null)[], kept: (i: number) => boolean = () => false): string[] {
+  const byState = new Map(Object.entries(layout.palette).map(([state, i]) => [i, state]));
+  const id = (s: string) => s.replace(/^minecraft:/, '').replace(/\[.*$/, '');
+  const out = new Set<string>();
+  layout.blocks.forEach((p, i) => {
+    const now = world[i];
+    if (!now || /^(minecraft:)?(air|cave_air|void_air)$/.test(now)) return;
+    const want = byState.get(p);
+    if (want === LEAVE) return;
+    if (p === 0) { if (!kept(i)) out.add(id(now)); return; }
+    if (want && id(want) !== id(now)) out.add(id(now));
+  });
+  return [...out].sort();
+}

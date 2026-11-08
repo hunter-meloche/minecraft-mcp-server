@@ -15,6 +15,8 @@ export interface LevelPlan {
   /** natural leaves left to decay by themselves once the trunks are gone (cutting them one by one took most of the time) */
   leaves: number;
   kept: { water: number; built: number };
+  /** the kinds of block it cuts ("grass_block", "oak_log"): all Baritone may break doing it, the bot's own walls stay */
+  cutNames: string[];
 }
 
 const name = (s: string | null | undefined) => (s ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
@@ -30,6 +32,7 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
   const at = (x: number, y: number, z: number) => name(blocks[x + z * w + y * w * l]);
   const raw = (x: number, y: number, z: number) => blocks[x + z * w + y * w * l] ?? '';
   const cutKinds: Record<string, number> = {};
+  const cutNames = new Set<string>();
   let leaves = 0;
   const L = level - box.y; // the level as a layer index
   const ground: number[] = new Array(w * l).fill(-1);
@@ -72,6 +75,7 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
         // plants pop off with the block under them, or get tilled away: cutting them one by one only costs time
         if (NOT_GROUND.test(n) && !/_log$|_leaves$/.test(n)) continue; // (leaves reach here only when cutting them)
         cell[i] = '.'; cut++; lo = Math.min(lo, y); hi = Math.max(hi, y);
+        cutNames.add(n);
         const kind = /_log$|_wood$/.test(n) ? 'logs' : /_leaves$/.test(n) ? 'leaves' : NOT_GROUND.test(n) ? 'plants' : 'ground';
         cutKinds[kind] = (cutKinds[kind] ?? 0) + 1;
       } else if (g >= 0 && y > g) {
@@ -84,7 +88,7 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
       }
     }
   }
-  if (lo === Infinity) return { origin: { x: box.x, y: level, z: box.z }, spec: null, cut, dirt, cobblestone, cutKinds, leaves, kept: { water, built } };
+  if (lo === Infinity) return { origin: { x: box.x, y: level, z: box.z }, spec: null, cut, dirt, cobblestone, cutKinds, leaves, kept: { water, built }, cutNames: [...cutNames] };
   const layers: string[][] = [];
   for (let y = lo; y <= hi; y++) {
     const rows: string[] = [];
@@ -94,6 +98,6 @@ export function planLevel(box: Box, blocks: (string | null)[], level: number, is
   return {
     origin: { x: box.x, y: box.y + lo, z: box.z },
     spec: { palette: { C: 'cobblestone', D: 'dirt' }, layers },
-    cut, dirt, cobblestone, cutKinds, leaves, kept: { water, built }
+    cut, dirt, cobblestone, cutKinds, leaves, kept: { water, built }, cutNames: [...cutNames]
   };
 }

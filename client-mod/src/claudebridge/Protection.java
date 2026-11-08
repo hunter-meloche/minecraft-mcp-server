@@ -147,6 +147,15 @@ public final class Protection {
 
     public static void endAllowOnly(Block target) { only.remove(target); }
 
+    /** The blocks of these names ("oak_log", "grass_block"): what a narrow lift for a whole job lets Baritone break. */
+    static List<Block> named(java.util.Collection<String> names) {
+        Set<String> want = new HashSet<>();
+        for (String n : names) want.add(Names.strip(n).replaceAll("\\[.*$", ""));
+        List<Block> out = new ArrayList<>();
+        for (Block b : net.minecraft.core.registries.BuiltInRegistries.BLOCK) if (want.contains(Names.block(b.defaultBlockState()))) out.add(b);
+        return out;
+    }
+
     private static void tick(Minecraft mc) {
         // a process that ended without its end handler (its call was dropped) must not leave the rule lifted for good
         if (suspended > 0) {

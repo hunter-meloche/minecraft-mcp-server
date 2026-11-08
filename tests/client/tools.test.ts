@@ -157,6 +157,10 @@ test('build-structure checks materials, writes the schematic, and builds it', as
   });
   t.false((await half.run('build-structure', { x: 0, y: 64, z: 0, spec, name: 'posts' })).isError);
   t.true(half.request.getCalls().some(c => c.args[0] === 'build'));
+  // a narrow lift: nothing in its cells needs breaking (air where the logs go), so nothing the bot built may break
+  const halfBuild = half.request.getCalls().find(c => c.args[0] === 'build')!.args[1] as Record<string, unknown>;
+  t.like(halfBuild, { keepProtection: true });
+  t.is(halfBuild.allow, undefined);
 
   const rich = setup({
     status: STATUS,
@@ -661,11 +665,13 @@ test('level-area works in tiles: cuts, then fills when it has the blocks', async
   let world = ['stone', 'stone', 'dirt', 'air', 'dirt', 'air'];   // y63: stone stone; y64: dirt air; y65: dirt air
   let dirt = 0;
   const builds: string[] = [];
+  const params: Record<string, unknown>[] = [];
   const { run } = setup({
     'world.region': () => ({ blocks: world }),
     inventory: () => ({ items: dirt ? [{ slot: 1, name: 'dirt', count: dirt }] : [], selectedSlot: 0, held: null }),
     build: (p: Record<string, unknown>) => {
       const file = String(p.file);
+      params.push(p);
       builds.push(file.replace(/^.*[\\/]/, ''));
       if (/cut/.test(file)) { world = ['stone', 'stone', 'dirt', 'air', 'air', 'air']; dirt = 1; } // the bump comes off as dirt
       else world = ['stone', 'stone', 'dirt', 'dirt', 'air', 'air'];                                     // the dip is filled
@@ -674,6 +680,11 @@ test('level-area works in tiles: cuts, then fills when it has the blocks', async
   });
   const r = await run('level-area', { x1: 0, z1: 0, x2: 1, z2: 0, level: 64, above: 1, below: 1 });
   t.deepEqual(builds, ['level_tile_cut.schem', 'level_tile_fill.schem']);
+  // never the whole rule lifted: the cut may break only the kinds it cuts, the fill nothing (out of the storage house
+  // Baritone went through its north wall on the way to a strip north of the fence)
+  t.like(params[0], { keepProtection: true, allow: ['dirt'] });
+  t.like(params[1], { keepProtection: true });
+  t.is(params[1].allow, undefined);
   t.regex(r.text, /^Level \(0, 0\)\.\.\(1, 0\) to ground y 64: cut 1 block\(s\) \(ground 1\), fill 1 dirt \+ 0 cobblestone/);
   t.regex(r.text, /Worked 1\/1 tile\(s\) of 8x8 in \d+s\. Now level\.$/);
 });

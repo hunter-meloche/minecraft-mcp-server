@@ -19,6 +19,8 @@ test('planLevel cuts a hill and a tree, fills a dip with cobblestone and dirt on
   t.is(p.cut, 4); // the hill and the trunk; the natural leaves decay by themselves
   t.is(p.leaves, 1);
   t.deepEqual(p.cutKinds, { ground: 2, logs: 2 });
+  // the only kinds Baritone may break doing it (the bot's own walls stay protected on the way)
+  t.deepEqual([...p.cutNames].sort(), ['dirt', 'grass_block', 'oak_log']);
   t.is(p.dirt, 1);
   t.is(p.cobblestone, 1);
   t.deepEqual(p.origin, { x: 10, y: 62, z: 20 });

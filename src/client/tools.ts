@@ -12,7 +12,7 @@ import { ClientProtection } from './protection.js';
 import { survey, type Cluster } from './survey.js';
 import { planLevel } from './level.js';
 import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
-import { checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
+import { breakKinds, checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import { itemOf } from './brain/blueprints.js';
 import { freeLid } from './brain/chests.js';
 import type { Item } from 'prismarine-item';
@@ -960,7 +960,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   );
 
   // kept as a function so level-area can build its plan the same way (verification, stall recovery, protection)
-  let buildStructure: (args: { x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number }) =>
+  let buildStructure: (args: { x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number; keepProtection?: boolean; allow?: string[] }) =>
     Promise<ReturnType<ToolFactory['createResponse']>>;
   register(
     'build-structure',
@@ -977,14 +977,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       name: z.string().regex(/^[\w-]+$/).optional().describe('Name for the schematic file (default: structure)'),
       timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 600000)')
     },
-    buildStructure = async ({ x, y, z: zz, spec, file, name = 'structure', timeoutMs = 600_000, keepProtection = false }: {
+    buildStructure = async ({ x, y, z: zz, spec, file, name = 'structure', timeoutMs = 600_000, keepProtection = false, allow }: {
       x: number; y: number; z: number; spec?: StructureSpec; file?: string; name?: string; timeoutMs?: number;
       /** the build jobs' packages: Baritone may break nothing the bot built (their clears are done first, by hand) */
-      keepProtection?: boolean
+      keepProtection?: boolean;
+      /** with keepProtection: the only kinds Baritone may break (level-area's cuts: the natural blocks it cuts) */
+      allow?: string[]
     }) => {
       const origin = floorPos({ x, y, z: zz });
       let schematicFile: string;
       let layout: Schematic | undefined;
+      // a narrow lift by default: Baritone may break only the kinds standing in the cells this build clears or
+      // replaces; everything else the bot built stays protected (keepProtection without allow: nothing at all)
+      let narrow: string[] | undefined = keepProtection ? allow : undefined;
       if (spec) {
         layout = layoutSpec(spec);
         const s = await status();
@@ -1012,8 +1017,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         fs.mkdirSync(dir, { recursive: true });
         schematicFile = path.join(dir, `${name}.schem`);
         // '.' clears a cell, but not of what the bot placed there itself: a rebuild of the cabin cleared its door and furniture
-        const kept = keepExisting(layout, i => !!now[i] && !/^(minecraft:)?(air|cave_air|void_air)$/.test(now[i]!) &&
-          protection.has(dim, cellPos(origin, box, i)));
+        const isKept = (i: number) => !!now[i] && !/^(minecraft:)?(air|cave_air|void_air)$/.test(now[i]!) && protection.has(dim, cellPos(origin, box, i));
+        const kept = keepExisting(layout, isKept);
+        if (!keepProtection) narrow = breakKinds(layout, now, isKept);
         fs.writeFileSync(schematicFile, writeSchematic(splitDirectional(kept).baritone));
       } else if (file) {
         schematicFile = path.resolve(file);
@@ -1025,7 +1031,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const around = layout ? { x: origin.x - SCAFFOLD_MARGIN, y: origin.y - 2, z: origin.z - SCAFFOLD_MARGIN,
         width: layout.width + 2 * SCAFFOLD_MARGIN, height: layout.height + 8, length: layout.length + 2 * SCAFFOLD_MARGIN } : undefined;
       const aroundBefore = around ? await readRegion(around).catch(() => undefined) : undefined;
-      const building = call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs, ...(keepProtection ? { keepProtection } : {}) }, timeoutMs + 15_000);
+      const building = call<ProcessResult & { used: Record<string, number> }>('build', { file: schematicFile, ...origin, timeoutMs, ...(keepProtection || narrow ? { keepProtection: true } : {}), ...(narrow?.length ? { allow: narrow } : {}) }, timeoutMs + 15_000);
       // Baritone can stand still for minutes when nothing left is placeable from where it can stand (a log over a
       // doorway, a ridge with no stairs under it yet): when the box hasn't changed for STALL_MS, stop it and finish by hand
       let stalled = false;
@@ -1277,14 +1283,17 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const left = () => Math.max(30_000, timeoutMs - (Date.now() - started));
         if (p.cut) {
           const cutOnly = { ...p.spec, layers: p.spec.layers.map(rows => rows.map(r => r.replace(/[CD]/g, ' '))) };
-          await buildStructure({ ...p.origin, spec: cutOnly, name: 'level_tile_cut', timeoutMs: Math.min(180_000, left()) });
+          // a narrow lift: only the kinds it cuts here may break, so the walk to the tile goes round what the bot built
+          // (lifted whole, it went out of the storage house through the north wall, the door being on the south side)
+          await buildStructure({ ...p.origin, spec: cutOnly, name: 'level_tile_cut', timeoutMs: Math.min(180_000, left()), keepProtection: true, allow: p.cutNames });
           p = planLevel(t, await readBox(t), level, q => protection.has(dim, q), cutLeaves, fillWater);
         }
         if (p.spec && (p.dirt || p.cobblestone)) {
           const have = (await inventoryCounts()).counts;
           if ((have.get('dirt') ?? 0) >= p.dirt && (have.get('cobblestone') ?? 0) >= p.cobblestone) {
             const fillOnly = { ...p.spec, layers: p.spec.layers.map(rows => rows.map(r => r.replace(/\./g, ' '))) };
-            const r = await buildStructure({ ...p.origin, spec: fillOnly, name: 'level_tile_fill', timeoutMs: Math.min(180_000, left()) });
+            // filling only places: nothing need break at all
+            const r = await buildStructure({ ...p.origin, spec: fillOnly, name: 'level_tile_fill', timeoutMs: Math.min(180_000, left()), keepProtection: true });
             if (r.isError && !/blocks in place/.test(textOf(r))) shortTiles++;
           } else {
             shortTiles++;

@@ -376,9 +376,22 @@ public final class Handlers {
             // the builder replaces wrong blocks inside its own box (furniture excepted); keepProtection (the build
             // jobs, which dig first) keeps everything the bot built unbreakable, so it can't cut its way to a cell
             boolean keep = p.has("keepProtection") && p.get("keepProtection").getAsBoolean();
+            // allow (with keepProtection): a narrow lift for the whole build, only these kinds breakable (level-area's
+            // cuts: the tile's natural blocks). Lifted whole, Baritone walked out of the storage house through its
+            // north wall on its way to a strip north of the fence, twice, rather than round to the door on the south
+            List<net.minecraft.world.level.block.Block> allow = new java.util.ArrayList<>();
+            if (keep && p.has("allow")) {
+                List<String> names = new java.util.ArrayList<>();
+                for (var e : p.getAsJsonArray("allow")) names.add(e.getAsString());
+                allow = Protection.named(names);
+                for (var b : allow) Protection.allowOnly(b);
+                Protection.refresh();
+            }
+            final List<net.minecraft.world.level.block.Block> allowed = allow;
             if (!keep) Protection.suspend(null);
             Processes.watch(c, seq, timeoutTicks, reason -> {
                 if (!keep) Protection.resume(null);
+                if (!allowed.isEmpty()) { for (var b : allowed) Protection.endAllowOnly(b); Protection.refresh(); }
                 Map<String, Integer> after = Processes.inventoryCounts(Minecraft.getInstance());
                 Map<String, Integer> used = Processes.gained(after, before); // what went down
                 return obj("used", used, "at", pos(Minecraft.getInstance().player.blockPosition()));
