@@ -15,6 +15,8 @@ const port = Number(process.argv[3] ?? 7777);
 const transport = new StdioClientTransport({
   command: 'node',
   args: [repo + 'dist/main.js', '--host', process.env.MC_HOST ?? 'localhost', '--port', process.env.MC_PORT ?? '25565', '--username', username, ...(process.env.MCP_EXTRA_ARGS ?? '').split(' ').filter(Boolean)],
+  // the whole environment, not the SDK's safe few: on a headless Linux box the game client needs DISPLAY (xvfb-run)
+  env: Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)),
   stderr: 'ignore'
 });
 const client = new Client({ name: 'live-test', version: '0' });
