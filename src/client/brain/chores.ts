@@ -432,7 +432,7 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
 
 /** How far round the bot a tree counts as in sight for a wood trip (Baritone's miner finds what's loaded near it). */
 const WOOD_SIGHT = 64;
-const WOODS_DIRS = ['north', 'east', 'south', 'west'] as const;
+export const WOODS_DIRS = ['north', 'east', 'south', 'west'] as const;
 
 /**
  * Where a wood trip can mine: here if a tree of one of `kinds` is in sight; else the woods it found before; else it
@@ -440,7 +440,11 @@ const WOODS_DIRS = ['north', 'east', 'south', 'west'] as const;
  * the plains had no tree within 96 blocks once its first few were felled: every trip found nothing and the storage
  * house waited for its logs all day. `text` says what it did; ok false when there are no woods within reach.
  */
-export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress'>, kinds: string[], ownOnly = false): Promise<{ ok: boolean; text: string }> {
+export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress'>, kinds: string[], ownOnly = false,
+  opts: { zone?: string; what?: string; dirs?: readonly (typeof WOODS_DIRS)[number][] } = {}): Promise<{ ok: boolean; text: string }> {
+  // the same search for other wild things (sugar cane), remembered under their own zone, a side or two per call
+  const { zone = 'woods', what = 'woods', dirs = WOODS_DIRS } = opts;
+  const thing = zone === 'woods' ? 'tree' : kinds[0].replace(/_/g, ' ');
   // a tree, not a log of its own: none in the yard or on a site the yard's projects keep (the storage house is logs)
   const y = ctx.world.yard;
   const sites = [...Object.values(ctx.world.zones ?? {}).flat().filter(b => b.width && b.length),
@@ -457,28 +461,28 @@ export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world'
   // ownOnly: the logs in sight are the bot's own builds (the storage house's posts), not trees
   if (!ownOnly && await inSight()) return { ok: true, text: '' };
   const zones = (ctx.world.zones ??= {});
-  const known = zones.woods?.[0];
+  const known = zones[zone]?.[0];
   if (known) {
-    ctx.progress?.(`no tree in sight: to the woods at (${known.x}, ${known.z})`);
+    ctx.progress?.(`no ${thing} in sight: to the ${what} at (${known.x}, ${known.z})`);
     await ctx.act('move-to-position', { ...known, range: 6, timeoutMs: 150_000 });
-    if (await inSight()) return { ok: true, text: `off to the woods at (${known.x}, ${known.z})` };
-    delete zones.woods; // felled, or not there after all: look again
+    if (await inSight()) return { ok: true, text: `off to the ${what} at (${known.x}, ${known.z})` };
+    delete zones[zone]; // felled, or not there after all: look again
   }
   const reach = Math.min(Math.max(ctx.world.leash ?? 96, 48), 160);
-  for (const direction of WOODS_DIRS) {
-    ctx.progress?.(`no tree in sight: looking ${direction} for ${kinds[0]}`);
+  for (const direction of dirs) {
+    ctx.progress?.(`no ${thing} in sight: looking ${direction} for ${kinds[0]}`);
     const r = await ctx.act('explore', { target: kinds[0], direction, maxDistance: reach, step: 32, timeoutMs: 90_000 });
     const m = /^Found [a-z_]+ at \((-?\d+), (-?\d+), (-?\d+)\)/.exec(r.text);
     if (m) {
       const at = { x: Number(m[1]), y: Number(m[2]), z: Number(m[3]) };
-      zones.woods = [at];
+      zones[zone] = [at];
       // explore says so as soon as it sees one, maybe 60 blocks off: Baritone's miner found no path from there
       await ctx.act('move-to-position', { ...at, range: 6, timeoutMs: 150_000 });
-      return { ok: true, text: `found woods ${direction} at (${at.x}, ${at.z})` };
+      return { ok: true, text: `found ${what} ${direction} at (${at.x}, ${at.z})` };
     }
     await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
   }
-  return { ok: false, text: `no ${kinds[0]} within ${reach} blocks of home on any side` };
+  return { ok: false, text: `no ${kinds[0]} within ${reach} blocks of home ${dirs.length === WOODS_DIRS.length ? 'on any side' : dirs.join(', ')}` };
 }
 
 /**

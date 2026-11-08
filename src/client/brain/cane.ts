@@ -3,6 +3,7 @@ import type { Milestone, StepResult } from './progress.js';
 import type { Pos } from './memory.js';
 import { addZone } from './milestones.js';
 import { takeFromChests } from './chests.js';
+import { toTheWoods, WOODS_DIRS } from './chores.js';
 
 /**
  * Sugar cane on the lake shore (paper for books, books for the enchanting table and its shelves): a few stalks from
@@ -52,13 +53,23 @@ export function caneMilestone(prereqs: string[]): Milestone {
     steps: [
       {
         name: 'find sugar cane',
-        run: async ctx => {
+        run: async (ctx, st) => {
           if ((await caneCount(ctx)) < 3) await takeFromChests(ctx, 'sugar_cane', 12);
           if ((await caneCount(ctx)) >= 3) return ok('cane in hand');
-          const r = await ctx.act('mine-blocks', { block: 'sugar_cane', count: 6, timeoutMs: 4 * MINUTE });
+          // none in sight from home: off to where it found cane before, else one side of home a run, in turn (the
+          // step only ever looked from home, found "no sugar_cane in sight" hourly from 09:57 on, and the enchanting
+          // room behind it never started; all four sides at once would outrun the project's 9 minutes)
+          const looked = Number(st.data.caneLooked ?? 0);
+          const side = WOODS_DIRS[looked % WOODS_DIRS.length];
+          const wild = await toTheWoods(ctx, ['sugar_cane'], false, { zone: 'wildcane', what: 'sugar cane', dirs: [side] });
+          let r = wild.ok ? await ctx.act('mine-blocks', { block: 'sugar_cane', count: 6, timeoutMs: 4 * MINUTE }) : undefined;
           await ctx.act('go-home', { name: 'home', timeoutMs: 180_000 }).catch(() => undefined);
-          if ((await caneCount(ctx)) >= 1) return ok(r.text.split('\n')[0].slice(0, 100));
-          return blocked(`no sugar cane found: ${r.text.split('\n')[0].slice(0, 100)}`, 60 * MINUTE);
+          if ((await caneCount(ctx)) >= 1) return ok((r?.text ?? wild.text).split('\n')[0].slice(0, 100));
+          if (wild.ok && wild.text) delete ctx.world.zones?.wildcane; // seen, but none came of it: look elsewhere next time
+          st.data.caneLooked = looked + 1;
+          const why = r ? r.text.split('\n')[0].slice(0, 100) : wild.text;
+          // the next side soon; once round all four, an hour (cane may come into reach as the yard and leash grow)
+          return blocked(`no sugar cane found: ${why}`, (looked + 1) % WOODS_DIRS.length ? 5 * MINUTE : 60 * MINUTE);
         }
       },
       {
