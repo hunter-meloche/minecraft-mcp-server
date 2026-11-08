@@ -380,6 +380,8 @@ export const STOCK: { name: string; want: number; mine: string; counts: RegExp }
   { name: 'sand', want: 0, mine: 'sand', counts: /^sand$/ },
   { name: 'clay_ball', want: 0, mine: 'clay', counts: /^clay_ball$/ },
   { name: 'gravel', want: 0, mine: 'gravel', counts: /^gravel$/ },
+  // fill for levelling (the yard growing, a site): grass dug gives dirt
+  { name: 'dirt', want: 0, mine: 'dirt,grass_block', counts: /^dirt$/ },
   { name: 'andesite', want: 0, mine: 'andesite', counts: /^andesite$/ },
   { name: 'diorite', want: 0, mine: 'diorite', counts: /^diorite$/ },
   { name: 'granite', want: 0, mine: 'granite', counts: /^granite$/ }

@@ -1,6 +1,7 @@
 import type { GoalContext } from './goals.js';
 import type { MilestoneState, Step, StepResult } from './progress.js';
 import { prepareBill } from './project.js';
+import { takeFromChests } from './chests.js';
 import { allItems, mostWood, progressOf } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
@@ -124,13 +125,23 @@ export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width:
   const g = growYard(yard, footprint, { isWater: (x, z) => col(x, z).water, heightAt: (x, z) => col(x, z).h, level: yard.y, forbid: theirs });
   if (!g) return blocked(`no room in the yard for the ${kind}, and no dry land beside it to grow into`, 60 * MINUTE);
   ctx.progress(`growing the yard to the ${g.side} for the ${kind}`);
-  const r = await ctx.act('level-area', { x1: g.strip.x1, z1: g.strip.z1, x2: g.strip.x2, z2: g.strip.z2, level: yard.y, timeoutMs: 8 * MINUTE });
+  const strip = { x1: g.strip.x1, z1: g.strip.z1, x2: g.strip.x2, z2: g.strip.z2, level: yard.y };
+  // the fill first: level-area only fills from the pockets, and a shortfall it reports as work still to do never sent
+  // anyone for dirt (plot1 re-ran every 5 min for hours, "fill 53 dirt (have 15)", the bot idle in between)
+  const short = await fillShort(ctx, strip);
+  const p = progressOf(ctx.world);
+  // the trips' need is a total, not what's left: met, it goes, or they would keep fetching dirt
+  if (!Object.keys(short).length && p.need && Object.keys(p.need).every(k => k === 'dirt' || k === 'cobblestone')) p.need = undefined;
+  if (Object.keys(short).length) {
+    p.need = short;
+    return blocked(`growing the yard to the ${g.side} for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')} to fill it (the stock trips fetch it)`, 3 * MINUTE);
+  }
+  const r = await ctx.act('level-area', { ...strip, timeoutMs: 8 * MINUTE });
   if (/Now level|Already level/.test(r.text)) {
     ctx.world.yard = { ...g.newYard, y: yard.y };
     // the fence follows the yard: its old side comes down and the ring goes up round the new yard, before the next build
     if (ctx.world.zones?.fence?.length) {
       ctx.world.fenceMove = { side: g.side, old: { x1: yard.x1, z1: yard.z1, x2: yard.x2, z2: yard.z2, y: yard.y } };
-      const p = progressOf(ctx.world);
       p.done = p.done.filter(id => id !== 'perimeter');
     }
     return going(`grew the yard to the ${g.side} (${g.strip.x1}..${g.strip.x2}, ${g.strip.z1}..${g.strip.z2})`);
@@ -140,6 +151,31 @@ export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width:
   // goes on next time (it spun 4 times in 15 s on "Failed: Part of the area...")
   if (!r.ok || /^Failed/.test(r.text)) return blocked(`leveling ground to the ${g.side} for the ${kind}: ${why}`, 5 * MINUTE);
   return going(`leveling ground to the ${g.side} for the ${kind}: ${why}`);
+}
+
+/** What levelling a box would fill with (level-area's dry run: "fill 53 dirt + 22 cobblestone"). */
+export function fillOf(text: string): { dirt: number; cobblestone: number } | undefined {
+  const m = /fill (\d+) dirt \+ (\d+) cobblestone/.exec(text);
+  return m ? { dirt: Number(m[1]), cobblestone: Number(m[2]) } : undefined;
+}
+
+/**
+ * Get a levelling's fill into the pockets from the home chests; what's still short (raw materials, as progress.need)
+ * the stock trips fetch. Empty when it's all carried.
+ */
+async function fillShort(ctx: GoalContext, box: { x1: number; z1: number; x2: number; z2: number; level: number }): Promise<Record<string, number>> {
+  const dry = await ctx.act('level-area', { ...box, dryRun: true });
+  const fill = fillOf(dry.text);
+  if (!fill) return {};
+  const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
+  const has = (re: RegExp) => inv.items.filter(i => i.slot < 36 && re.test(i.name)).reduce((a, i) => a + i.count, 0);
+  const short: Record<string, number> = {};
+  for (const [item, want, re] of [['dirt', fill.dirt, /^dirt$/], ['cobblestone', fill.cobblestone, /^(cobblestone|cobbled_deepslate)$/]] as const) {
+    let have = has(re);
+    if (have < want) have += await takeFromChests(ctx, item, want - have);
+    if (have < want) short[item] = want - have;
+  }
+  return short;
 }
 
 /**
