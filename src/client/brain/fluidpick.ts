@@ -159,7 +159,10 @@ export async function sourcesInSight(ctx: Pick<GoalContext, 'call' | 's'>, fluid
   const found = await ctx.call<{ positions: P[] }>('world.findBlocks', { block: fluid, maxDistance: 96, count: 256 }).catch(() => ({ positions: [] as P[] }));
   const here = (await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P })).position ?? ctx.s.position;
   const from = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
-  const near = found.positions.sort((a, b) => Math.hypot(a.x - from.x, a.y - from.y, a.z - from.z) - Math.hypot(b.x - from.x, b.y - from.y, b.z - from.z));
+  // lava near the ground level only, before any is judged: an underground lake's hundreds of sources were all nearer
+  // than any surface pool, and the 60 judged were all of them (none safe, every time)
+  const band = (p: P) => fluid !== 'lava' || groundY === undefined || Math.abs(p.y - groundY) <= 4;
+  const near = found.positions.filter(band).sort((a, b) => Math.hypot(a.x - from.x, a.y - from.y, a.z - from.z) - Math.hypot(b.x - from.x, b.y - from.y, b.z - from.z));
   // judged until `most` good ones (the nearest dozen were all cave water under the yard, the lake past them), at
   // most 60 looked at; the refused ones come along too (lava-sources shows why), good ones first
   const good: SourceVerdict[] = [], bad: SourceVerdict[] = [];

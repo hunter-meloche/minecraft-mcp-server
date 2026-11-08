@@ -83,9 +83,9 @@ export async function bucketsFor(ctx: GoalContext, lava: number): Promise<string
 export async function fetchLava(ctx: GoalContext, want: number): Promise<number> {
   let have = await countOf(ctx, 'lava_bucket');
   if (have >= want || !ctx.world.lavaCasting) return have;
-  // the ground where it stands (home: the yard's; out on a trip: under its feet)
+  // the ground level: the yard's (the land round here; under its feet it was in a dip at y 53, or a cave)
   const pos = (await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P })).position ?? ctx.s.position;
-  const ground = Math.floor(pos.y) - 1;
+  const ground = ctx.world.yard?.y ?? Math.floor(pos.y) - 1;
   const sources = (await sourcesInSight(ctx, 'lava', ground)).filter(v => !v.why);
   for (const v of sources) {
     if (have >= want || ctx.signal.aborted) break;

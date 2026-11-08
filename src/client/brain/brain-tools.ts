@@ -5,6 +5,7 @@ import type { ClientRuntime } from '../tools.js';
 import { lightArea, YARD_RADIUS } from './chores.js';
 import { requestYardGrowth, yardGrowStatus } from './yardgrow.js';
 import { fillAt, sourcesInSight } from './fluidpick.js';
+import { castObsidian } from './cast.js';
 import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 
 /** Tools to switch the brain on and off and see what it is doing. They never take control from it. */
@@ -76,7 +77,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
     { fluid: z.enum(['lava', 'water']).optional().describe('Which (default lava)') },
     async ({ fluid = 'lava' }: { fluid?: 'lava' | 'water' }) => {
       const s = await rt.status();
-      const ground = s.block ? s.block.y - 1 : undefined;
+      const ground = brain.worldMemory()?.yard?.y ?? (s.block ? s.block.y - 1 : undefined);
       const io = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } } } as unknown as Parameters<typeof sourcesInSight>[0];
       const all = await sourcesInSight(io, fluid, fluid === 'lava' ? ground : undefined, 4);
       if (!all.length) return factory.createResponse(`No ${fluid} in sight.`);
@@ -93,7 +94,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
     async ({ fluid }: { fluid: 'lava' | 'water' }) => {
       await brain.manual('fill-bucket');
       const s = await rt.status();
-      const ground = s.block ? s.block.y - 1 : undefined;
+      const ground = brain.worldMemory()?.yard?.y ?? (s.block ? s.block.y - 1 : undefined);
       const ctx = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } }, signal: new AbortController().signal, progress: () => undefined } as unknown as Parameters<typeof fillAt>[0];
       const list = (await sourcesInSight(ctx, fluid, fluid === 'lava' ? ground : undefined, 3)).filter(v => !v.why);
       if (!list.length) return factory.createErrorResponse(`No ${fluid} source in sight that's safe to fill a bucket at (lava-sources says why for each)`);
@@ -116,6 +117,26 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
       if (!world) return factory.createErrorResponse('Not in a world yet');
       if (enabled !== undefined) { world.lavaCasting = enabled; brain.saveMemory(); }
       return factory.createResponse(`Obsidian casting from lava is ${world.lavaCasting ? 'on' : 'off'}.`);
+    }
+  );
+
+  factory.registerTool(
+    'cast-obsidian',
+    "Cast obsidian at home now, as the enchanting room's step does: with lava buckets and a water bucket carried, at the cast site in the yard (a sealed 2-deep pit in plain lawn, the bot beside it throughout), each lava bucket turned to obsidian and mined (with a diamond pickaxe; without one the obsidian is left in the pit). Needs lava-casting on.",
+    {},
+    async () => {
+      const world = brain.worldMemory();
+      if (!world) return factory.createErrorResponse('Not in a world yet');
+      await brain.manual('cast-obsidian');
+      const s = await rt.status();
+      const ctx = { call: rt.call, world, s: { position: s.block ?? { x: 0, y: 0, z: 0 }, home: rt.home(s) }, signal: new AbortController().signal, progress: () => undefined,
+        act: async (tool: string, args: Record<string, unknown> = {}) => { const r = await rt.actions[tool](args); return { ok: !r.isError, text: r.content.map(c => (c as { text?: string }).text ?? '').join(' ') }; } } as unknown as Parameters<typeof castObsidian>[0];
+      const inv = await rt.call<{ items: { name: string; count: number }[] }>('inventory');
+      const lava = inv.items.filter(i => i.name === 'lava_bucket').reduce((a, i) => a + i.count, 0);
+      const have = inv.items.filter(i => i.name === 'obsidian').reduce((a, i) => a + i.count, 0);
+      const r = await castObsidian(ctx, have + lava);
+      brain.saveMemory();
+      return factory.createResponse(`${r.text}; carrying ${r.have} obsidian`);
     }
   );
 
