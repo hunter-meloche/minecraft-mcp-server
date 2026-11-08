@@ -2,8 +2,9 @@ import type { GoalContext } from './goals.js';
 import type { Milestone, MilestoneState, Step, StepResult } from './progress.js';
 import { progressOf } from './progress.js';
 import { prepareBill } from './project.js';
-import { addZone, siteStep } from './milestones.js';
+import { addZone, readBox, siteStep } from './milestones.js';
 import { takeFromChests } from './chests.js';
+import { digByHand } from '../structures/job.js';
 
 /**
  * Farm v2: a 9 x 9 crop plot with a water source in the middle (one source keeps 4 blocks each way wet), tilled and
@@ -208,8 +209,14 @@ export function treeFarmMilestone(prereqs: string[]): Milestone {
 }
 
 /**
- * Once a day: fell the grown trees of the tree farm (each trunk dug from the bottom up: Baritone climbs for the top)
- * and plant saplings where the trunks stood (the leaves drop more as they decay; a bare cell is planted next round).
+ * Once a day: fell the grown trees of the tree farm and plant saplings where the trunks stood (the leaves drop more
+ * as they decay; a bare cell is planted next round).
+ *
+ * Every log in the plot goes, at any height (branches, and trunks a stopped round left floating: the old round cut
+ * each trunk from the bottom with Baritone's dig and, stopped midway, never looked at a tree again once its bottom
+ * log was gone). Logs are cut by hand from the ground where they're in reach (no Baritone: its dig pillared up on
+ * cobblestone for the high ones and left the pillars), and only what's out of reach is left to Baritone. Then the
+ * plot is cleared of scaffold: nothing but trees belongs in it, so every throwaway block above the ground goes.
  */
 export const treeFarm: import('./goals.js').Goal = {
   name: 'trees',
@@ -223,21 +230,81 @@ export const treeFarm: import('./goals.js').Goal = {
   run: async ctx => {
     (ctx.world.lastDone ??= {}).trees = ctx.s.now;
     const cells = ctx.world.zones!['trees:sapling'];
-    let felled = 0, logs = 0;
-    for (const c of cells) {
+    const box = treePlot(ctx.world, cells);
+    const here = { at: ctx.s.position };
+    let blocks = await readBox(ctx, box);
+    const logs = plotLogs(blocks, box);
+    let cut = 0, byBaritone = 0;
+    const gone = new Set<string>();
+    const high: Site[] = [];
+    if (logs.length) ctx.progress(`felling ${logs.length} log(s) in the tree farm`);
+    for (const p of logs) {
       if (ctx.signal.aborted) break;
-      const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 10, length: 1 });
-      const trunk = blocks.map((b, i) => ({ b: (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, ''), y: c.y + i })).filter(t => LOG.test(t.b));
-      if (!trunk.length || trunk[0].y !== c.y) continue; // a sapling still, or nothing
-      ctx.progress(`felling the tree at (${c.x}, ${c.z}): ${trunk.length} log(s)`);
-      for (const t of trunk) {
-        if (ctx.signal.aborted) break;
-        const r = await ctx.act('dig-block', { x: c.x, y: t.y, z: c.z });
-        if (/^Dug/.test(r.text)) logs++;
-      }
-      felled++;
+      const why = await digByHand(ctx, blocks, box, p, here, gone);
+      if (!why) { cut++; gone.add(`${p.x},${p.y},${p.z}`); } else high.push(p);
     }
+    // out of reach from the ground (the top of a tall one): Baritone, and its pillar comes down below
+    for (const p of high) {
+      if (ctx.signal.aborted) break;
+      const r = await ctx.act('dig-block', { ...p });
+      if (/^Dug/.test(r.text)) byBaritone++;
+    }
+    if (cut + byBaritone) await ctx.act('collect-items', { x: box.x + Math.floor(box.width / 2), y: box.y + 1, z: box.z + Math.floor(box.length / 2), radius: 10, timeoutMs: 40_000 }).catch(() => undefined);
+    // the scaffold: anything thrown down in the plot above the ground
+    // by hand first; what's out of reach (an old pillar's top, left hanging once its foot was dug) goes to Baritone's
+    // dig, and the pillar Baritone stands on for that is taken down by hand in the next pass
+    let cleared = 0;
+    let left: string[] = [];
+    for (let pass = 0; pass < 3 && !ctx.signal.aborted; pass++) {
+      blocks = await readBox(ctx, box);
+      const scaffold = plotScaffold(blocks, box, cells[0].y);
+      if (!scaffold.length) { left = []; break; }
+      const high: Site[] = [];
+      left = [];
+      for (const p of scaffold) {
+        if (ctx.signal.aborted) break;
+        const why = await digByHand(ctx, blocks, box, p, here, new Set());
+        if (!why) cleared++; else { high.push(p); left.push(`${p.x},${p.y},${p.z}: ${why}`); }
+      }
+      if (!high.length || pass === 2) break;
+      for (const p of high) {
+        if (ctx.signal.aborted) break;
+        const r = await ctx.act('dig-block', { ...p });
+        if (/^Dug/.test(r.text)) cleared++;
+      }
+    }
+    if (left.length) ctx.progress(`scaffold left in the tree farm: ${left.slice(0, 5).join('; ')}`);
     const p = await plantSaplings(ctx, cells);
-    return `felled ${felled} tree(s) (${logs} log(s)); planted ${p.planted} sapling(s)${p.bare ? `, ${p.bare} cell(s) bare` : ''}`;
+    return `cut ${cut + byBaritone} log(s)${byBaritone ? ` (${byBaritone} out of reach, by Baritone)` : ''}${high.length - byBaritone > 0 ? `, ${high.length - byBaritone} left` : ''}; ` +
+      `cleared ${cleared} scaffold block(s)${left.length ? `, ${left.length} left` : ''}; planted ${p.planted} sapling(s)${p.bare ? `, ${p.bare} cell(s) bare` : ''}`;
   }
 };
+
+/** The tree farm's plot: its zone (or the saplings' box, a tree's crown round it), from the ground up past the tallest tree. */
+export function treePlot(world: { zones?: Record<string, { x: number; y: number; z: number; width?: number; length?: number }[]> }, cells: Site[]): Site & { width: number; height: number; length: number } {
+  const z = world.zones?.trees?.[0];
+  const ground = cells[0].y - 1;
+  if (z?.width && z.length) return { x: z.x, y: ground, z: z.z, width: z.width, height: 14, length: z.length };
+  const x1 = Math.min(...cells.map(c => c.x)) - 2, x2 = Math.max(...cells.map(c => c.x)) + 2;
+  const z1 = Math.min(...cells.map(c => c.z)) - 2, z2 = Math.max(...cells.map(c => c.z)) + 2;
+  return { x: x1, y: ground, z: z1, width: x2 - x1 + 1, height: 14, length: z2 - z1 + 1 };
+}
+
+type Box3 = Site & { width: number; height: number; length: number };
+const at = (box: Box3, i: number): Site => ({ x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length });
+const bare = (b: string | null) => (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+
+/** Every log in the plot, top down (the top of each trunk first, so nothing is left hanging if a round stops). */
+export function plotLogs(blocks: (string | null)[], box: Box3): Site[] {
+  const out: Site[] = [];
+  blocks.forEach((b, i) => { if (LOG.test(bare(b))) out.push(at(box, i)); });
+  return out.sort((a, b) => b.y - a.y || a.x - b.x || a.z - b.z);
+}
+
+/** Scaffold in the plot: throwaway blocks and dirt above the ground (the saplings stand on the ground itself), top down. */
+export const SCAFFOLD = /^(cobblestone|cobbled_deepslate|netherrack|andesite|diorite|granite|tuff|dirt|stone)$/;
+export function plotScaffold(blocks: (string | null)[], box: Box3, saplingY: number): Site[] {
+  const out: Site[] = [];
+  blocks.forEach((b, i) => { const p = at(box, i); if (p.y >= saplingY && SCAFFOLD.test(bare(b))) out.push(p); });
+  return out.sort((a, b) => b.y - a.y || a.x - b.x || a.z - b.z);
+}
