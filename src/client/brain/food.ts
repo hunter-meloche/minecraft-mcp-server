@@ -3,7 +3,7 @@ import { foodsFor26 } from '../tools.js';
 import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { daylightLeft } from './schedule.js';
-import { farmAll } from './chores.js';
+import { collectFurnace, farmAll } from './chores.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { placeNearHome } from './firsts.js';
@@ -154,6 +154,7 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
   }
 
   // 3. cook what it carries
+  let cleared = false;
   const cook = async () => {
     // a new bot with meat and no furnace yet: one from 8 cobblestone beside home (raw meat isn't ready food)
     if (!landmarks.furnace && Object.keys(COOKS_TO).some(raw => (have.get(raw) ?? 0) > 0) && ctx.s.home &&
@@ -162,6 +163,13 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
       if (at) { landmarks.furnace = at; say(`put a furnace down at (${at.x}, ${at.y}, ${at.z})`); }
     }
     if (!landmarks.furnace) return;
+    // logs left in the input from a charcoal burn that ran out of fuel block every cook ("input slot is occupied"):
+    // take them back first, and anything finished with them
+    if (!cleared) {
+      cleared = true;
+      const took = await collectFurnace(ctx).catch(() => '');
+      if (took) { ctx.progress(`took ${took} out of the furnace`); await refresh(); }
+    }
     for (const [raw] of Object.entries(COOKS_TO)) {
       const n = have.get(raw) ?? 0;
       if (!n) continue;
@@ -177,8 +185,12 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
       }
       if (!fuel) { say('no fuel to cook with'); return; }
       const r = await ctx.act('smelt-item', { ...landmarks.furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
-      if (r.ok) say(`cooked ${n} ${raw}`);
       await refresh();
+      // cooked means the raw meat went: "input slot is occupied" is no error, and counted as done the food goal
+      // "cooked 2 beef; cooked 2 chicken" every 30 s for two hours, the same 4 raw pieces, the bot at 0 food points
+      const left = have.get(raw) ?? 0;
+      if (left < n) say(`cooked ${n - left} ${raw}`);
+      else ctx.progress(`could not cook ${raw}: ${r.text.slice(0, 120)}`);
     }
   };
   if (!enough()) await cook();
@@ -189,9 +201,13 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
 
   // 4. the farm
   if (!enough() && working && landmarks.farmland.length) {
+    const before = readyFoodPoints(have) + (have.get('wheat') ?? 0);
     const r = await farmAll(ctx);
-    if (r.ok) say(`farmed (${r.text.slice(0, 80)})`);
     await refresh();
+    // farmed is something only when food or wheat came of it: "nothing ripe to harvest" counted as done, and with
+    // the cooking also failing the goal finished every 20 s with nothing, instead of failing and waiting
+    if (readyFoodPoints(have) + (have.get('wheat') ?? 0) > before) say(`farmed (${r.text.slice(0, 80)})`);
+    else ctx.progress(`farmed, nothing to eat from it (${r.text.slice(0, 80)})`);
     const w = have.get('wheat') ?? 0;
     if (w >= 3) {
       const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(w / 3) });

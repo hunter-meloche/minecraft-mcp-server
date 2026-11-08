@@ -217,7 +217,7 @@ const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_i
 const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
 
 /** Take whatever the home furnace has finished; how much (as "16 iron_ingot"), or '' when nothing. */
-async function collectFurnace(ctx: GoalContext): Promise<string> {
+export async function collectFurnace(ctx: GoalContext): Promise<string> {
   const at = ctx.world.landmarks.furnace;
   if (!at) return '';
   type Slot = { name: string; count: number } | null;

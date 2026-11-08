@@ -129,3 +129,64 @@ test('gatherFood: hungry, the only game it found past the hunting range: walks o
   t.regex(text, /hunted \d+ cow/);
   t.notRegex(text, /now carrying 0 food points/);
 });
+
+/** A furnace that holds `input` unlit in its input slot: smelt-item answers (ok) that the slot is occupied until it's taken out. */
+function blockedFurnaceCtx(inv: Map<string, number>, acts: string[], opts: { farmland?: boolean } = {}) {
+  let input: { name: string; count: number } | null = { name: 'oak_log', count: 5 };
+  const world = { landmarks: { chests: [], farmland: opts.farmland ? [{ x: 5, y: 63, z: 5 }] : [], furnace: { x: 2, y: 64, z: 0 } }, leash: 96, zones: {} } as unknown as WorldMemory;
+  const s = { food: 20, health: 20, home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, counts: inv, position: { x: 0, y: 64, z: 0 } } as unknown as Snapshot;
+  const ctx = {
+    s, world, signal: new AbortController().signal, progress: () => undefined,
+    // evening: no hunting, so only the cooking (and the farm) can bring food
+    status: async () => ({ timeOfDay: 11_500 }),
+    call: (async (m: string, a: Record<string, unknown> = {}) => {
+      if (m === 'inventory') return { items: [...inv].map(([name, count], slot) => ({ slot, name, count })) };
+      if (m === 'furnace.open') return { open: true, input, fuel: null, output: null, lit: false };
+      if (m === 'furnace.take' && a.slot === 'input') { const took = input; input = null; if (took) inv.set(took.name, (inv.get(took.name) ?? 0) + took.count); return { took }; }
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      acts.push(`${tool}${a.inputItem ? ` ${a.inputItem}` : ''}`);
+      if (tool === 'smelt-item') {
+        if (input) return { ok: true, text: `Furnace input slot is occupied by ${input.name}` };
+        const raw = String(a.inputItem);
+        const n = inv.get(raw) ?? 0;
+        inv.delete(raw);
+        inv.set(`cooked_${raw}`, n);
+        return { ok: true, text: `Smelted ${n} cooked_${raw}` };
+      }
+      if (tool === 'farm') return { ok: true, text: 'Farmed for 0.45s: nothing ripe to harvest. Baritone: Farm failed' };
+      return { ok: true, text: 'ok' };
+    }
+  } as unknown as GoalContext;
+  return { ctx, world };
+}
+
+test('gatherFood: logs left in the furnace input are taken out first, then the meat cooks', async t => {
+  // a charcoal burn ran out of fuel and left 5 oak logs in the input: every cook after it was "input slot is occupied"
+  const inv = new Map<string, number>([['beef', 2], ['chicken', 2], ['coal', 3]]);
+  const acts: string[] = [];
+  const { ctx } = blockedFurnaceCtx(inv, acts);
+  const text = await gatherFood(ctx, 20, true);
+  t.is(inv.get('oak_log'), 5, 'the logs came back');
+  t.is(inv.get('cooked_beef'), 2);
+  t.regex(text, /cooked 2 beef; cooked 2 chicken/);
+});
+
+test('gatherFood: a cook that leaves the meat raw and a farm with nothing ripe are no food: it fails, not "done"', async t => {
+  // the food goal "cooked 2 beef; cooked 2 chicken; farmed (nothing ripe)" every 30 s for two hours, the same 4 raw
+  // pieces each time, carrying 0 food points; as a failure it waits its retry instead
+  const inv = new Map<string, number>([['beef', 2], ['chicken', 2], ['coal', 3]]);
+  const acts: string[] = [];
+  const { ctx } = blockedFurnaceCtx(inv, acts, { farmland: true });
+  // by day, so the farm runs too; the logs can't be taken back (the bot's inventory is full, say), so the furnace
+  // stays blocked; and no game about
+  const call = ctx.call;
+  const c = ctx as { call: GoalContext['call']; status: GoalContext['status'] };
+  c.status = (async () => ({ timeOfDay: 2000 })) as GoalContext['status'];
+  c.call = (async (m: string, a?: Record<string, unknown>) =>
+    (m === 'furnace.take' ? { took: null } : m === 'world.entities' ? { entities: [] } : call(m, a))) as GoalContext['call'];
+  await t.throwsAsync(gatherFood(ctx, 20, true), { message: /no food to be had/ });
+  t.true(acts.includes('smelt-item beef') && acts.includes('farm'), acts.join(', '));
+  t.is(inv.get('beef'), 2);
+});
