@@ -29,6 +29,7 @@ import { projectGoal } from './project.js';
 import { TREE } from './tree.js';
 import { communityStatus, donateGoal, missionGoal } from './community.js';
 import { yardGrowGoal, yardGrowStatus } from './yardgrow.js';
+import { storageGoal } from './storehouse.js';
 
 /**
  * The bot's own low-level AI for the client backend, built like a mob's goal selector on a villager's schedule: every
@@ -125,7 +126,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

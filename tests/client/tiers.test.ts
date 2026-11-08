@@ -3,6 +3,7 @@ import { breakOut, shelterGoal, wake } from '../../src/client/brain/goals.js';
 import { food, larder, recoverGoal, retreat } from '../../src/client/brain/food.js';
 import { farm, kit, lights, smelt, stash, stock } from '../../src/client/brain/chores.js';
 import { pens } from '../../src/client/brain/pens.js';
+import { storageGoal } from '../../src/client/brain/storehouse.js';
 import { deepTrip } from '../../src/client/brain/deep.js';
 import { treeFarm } from '../../src/client/brain/farming.js';
 import { caneRound } from '../../src/client/brain/cane.js';
@@ -14,7 +15,7 @@ import type { Snapshot } from '../../src/client/brain/goals.js';
 // 1 staying alive, 2 the gear, 3 the food stockpile, 4 the home (upkeep and building)
 const tiers = [
   [wake, breakOut, recoverGoal(() => undefined), retreat, shelterGoal(), food],
-  [kit, smelt, stash],
+  [kit, smelt, stash, storageGoal],
   [larder, farm, pens],
   [lights, deepTrip, treeFarm, caneRound, enchantGoal, projectGoal([])]
 ];

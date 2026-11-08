@@ -100,6 +100,8 @@ export interface WorldMemory {
   chestSigns?: Record<string, string>;
   /** kinds of things with no room left in their chests: the storage needs another chest */
   storageFull?: string[];
+  /** when the storage house was found full up (six double chests) with a kind still without room */
+  storageMaxedAt?: number;
   /** built cells ("x,y,z") the repair round failed to put back, and how often */
   repairFails?: Record<string, number>;
   /** the yard as it grows (x1..x2, z1..z2 at ground y) */
