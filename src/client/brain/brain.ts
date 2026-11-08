@@ -253,7 +253,10 @@ export class Brain {
     if (this.idleStage === 0 && idle >= IDLE_FIRST) {
       this.idleStage = 1;
       const held = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
-      const fruitless = Object.keys(world.lastDone ?? {}).filter(k => k.startsWith('fruitless:'));
+      // spare time's own marks stay: spare time is what fills an idle day, so letting them go only sent it straight
+      // back to a mined-out ore (2026-11-08: "spare time: 0 iron ... Unable to find any path" every 3.5 min for an
+      // hour, each let-go undoing the 40-minute wait); they lapse by themselves
+      const fruitless = Object.keys(world.lastDone ?? {}).filter(k => k.startsWith('fruitless:') && !k.startsWith('fruitless:spare:'));
       this.retryAt.clear();
       this.fails.clear();
       this.morningHold.clear();

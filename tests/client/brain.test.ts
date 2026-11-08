@@ -348,6 +348,22 @@ test('idle watchdog: by day, standing still with nothing to do, it lets go of ev
   t.is((brain.status().match(/idle \d+ min by day: let go/g) ?? []).length, 1);
 });
 
+test('idle watchdog: it lets go of fruitless stock marks but keeps spare time\'s (it would only go straight back)', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000;
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [goal('never', 1, false)] });
+  brain.setEnabled(true);
+  await brain.tick();
+  const world = brain.worldMemory()!;
+  world.lastDone = { 'fruitless:iron_ingot': clock, 'fruitless:spare:iron': clock, 'spare:iron': clock };
+  clock += 3 * 60_000 + 1000;
+  await brain.tick();
+  t.regex(brain.status(), /idle 3 min by day: let go of fruitless:iron_ingot\b/);
+  t.notRegex(brain.status(), /let go of.*fruitless:spare/);
+  t.deepEqual(world.lastDone, { 'fruitless:spare:iron': 1_000_000, 'spare:iron': 1_000_000 });
+});
+
 test('a goal left "until the morning" may go again when the game morning comes, slept through or not', async (t) => {
   const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
   const { rt } = fakeRuntime(state);
