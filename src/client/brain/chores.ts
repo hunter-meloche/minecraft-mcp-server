@@ -23,6 +23,12 @@ const NEAR_HOME = 10;
 const MINUTE = 60_000;
 
 const awakeAtHome = (s: Snapshot) => !s.sleeping && s.dimension === 'overworld' && !!s.home && s.distHome <= NEAR_HOME;
+/**
+ * Junk is thrown 8 blocks out from the fence, which in a grown yard is past IN_YARD from home: by day only. In the
+ * evening the shelter called the bot back from the dump walk each time, and stash and shelter took turns (a LOOP) till
+ * dark; the junk waits for the morning, what goes in the chests doesn't.
+ */
+const dumpsJunk = (s: Snapshot) => s.activity === 'work';
 const since = (world: WorldMemory, chore: string, now: number) => now - (world.lastDone?.[chore] ?? 0);
 const done = (world: WorldMemory, chore: string, now: number) => { world.lastDone ??= {}; world.lastDone[chore] = now; };
 
@@ -88,6 +94,7 @@ export const stash: Goal = {
       !activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
     if (!awakeAtHome(s) && !tripWaits) return null;
     const plan = stashPlan(s.items, { foods: foods(), keep: projectCarry(world) });
+    if (!dumpsJunk(s)) plan.drop = [];
     // only what can really go: a worse duplicate of a kept tool can't be told apart, and a project's materials stay
     // (a full pocket of planks for the storage house had the stash stop the build over and over, storing nothing)
     const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
@@ -110,6 +117,7 @@ export const stash: Goal = {
       ctx.progress(`no chest at home yet: put one down at (${at.x}, ${at.y}, ${at.z})`);
     }
     const plan = stashPlan(ctx.s.items, { foods: foods(), keep: projectCarry(ctx.world) });
+    if (!dumpsJunk(ctx.s)) plan.drop = [];
     const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
     let stored = 0;
     const deposit = plan.deposit.filter(e => e.slot === undefined || names(e.name) <= 1);

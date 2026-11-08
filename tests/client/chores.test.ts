@@ -41,6 +41,18 @@ test('stash: when nearly full, or now and then with things to put away; never aw
     world({ lastDone: { stash: 10 * 60 * 60_000 - 60_000 } })), null); // put away a minute ago
 });
 
+test('stash: in the evening it puts things in the chests but leaves the junk dump outside the fence till morning', (t) => {
+  // the dump is 8 out from the fence, past IN_YARD in a grown yard: shelter called the bot back each time (a LOOP)
+  const dirt = Array.from({ length: 20 }, (_, i) => ({ slot: 13 + i, name: 'dirt', count: 64 }));
+  const items = [...gear(), ...dirt]; // 29 slots, all of the extra junk
+  t.regex(stash.wants(snap(items), world()) ?? '', /slots used/);
+  t.is(stash.wants(snap(items, { activity: 'return' }), world()), null);
+  t.is(stash.wants(snap(items, { activity: 'rest' }), world()), null);
+  // what goes in the chests still goes in the evening
+  const logs = dirt.map(d => ({ ...d, name: 'oak_log' }));
+  t.regex(stash.wants(snap([...gear(), ...logs], { activity: 'return' }), world()) ?? '', /slots used/);
+});
+
 test('stash: makes room when a build job materials trip waits on the pockets (stock sets out under 30 slots)', (t) => {
   const seeds = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'wheat_seeds', count: 64 }));
   const items = [...gear(), ...seeds]; // 31 slots
