@@ -220,6 +220,7 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
     const hungry = ctx.s.food < 14;
     const cookable = () => [...have].reduce((a, [n, k]) => a + (COOKS_TO[n] && foods[COOKS_TO[n]] ? k * foods[COOKS_TO[n]].foodPoints : 0), 0);
     const hunted = new Map<string, number>();
+    let walked = false;
     // hungry with nothing to hunt round here (the herds near home hunted out, a horse left): out looking for game,
     // a side at a time within the leash, and the hunt goes on from where it found some
     if (hungry) {
@@ -242,7 +243,20 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
       // fed, it leaves two of a kind to breed; hungry, a lone one will do (the herds had moved off, one of each stayed)
       const kind = GAME.find(g => wild.filter(e => e.name === g).length >= (hungry ? 1 : 3));
       const prey = kind ? wild.filter(e => e.name === kind).sort((a, b) => a.distance - b.distance)[0] : undefined;
-      if (!kind || !prey) break;
+      if (!kind || !prey) {
+        // hungry, and the game it saw is past the hunting range (explore says "Found" for a cow 80 blocks off without
+        // walking a step: the food goal spun on that, 3 s a run, the bot starving at home): walk over to it, once
+        if (!hungry || walked) break;
+        walked = true;
+        const far = (await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: Math.min(Math.max(ctx.world.leash ?? 96, HUNT_RANGE), 128) })).entities
+          .filter(e => !someones(e, ctx.world.yard) && GAME.includes(e.name) && e.position)
+          .sort((a, b) => a.distance - b.distance)[0];
+        if (!far) break;
+        say(`walking over to a ${far.name} ${Math.round(far.distance)} blocks off`);
+        await ctx.call('goto', { x: Math.floor(far.position.x), y: Math.floor(far.position.y), z: Math.floor(far.position.z), range: 12, timeoutMs: 90_000 }, 100_000).catch(() => undefined);
+        kills--;
+        continue;
+      }
       const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: HUNT_RANGE, timeoutMs: 45_000 });
       if (!r.ok) { say(`could not hunt a ${kind}`); break; }
       hunted.set(kind, (hunted.get(kind) ?? 0) + 1);
