@@ -4,6 +4,10 @@ import { buildStep, siteStep } from './milestones.js';
 import { enchantRoom, type Side } from './blueprints.js';
 import { chestTotals, takeFromChests } from './chests.js';
 import { tier } from './kit.js';
+import { deepTripReady, pickMineStart } from './mine.js';
+import { tripCheck } from './deep.js';
+import { nearestZone, type Zone } from './courtesy.js';
+import { bucketsFor, castObsidian, fetchLava } from './cast.js';
 
 /**
  * Enchanting: obsidian (mined with a diamond pickaxe), then a 7 x 7 room with the table in the middle and 15 shelves
@@ -14,6 +18,36 @@ import { tier } from './kit.js';
 const MINUTE = 60_000;
 const ok = (text: string): StepResult => ({ status: 'done', text });
 const blocked = (text: string, retryMs = 20 * MINUTE): StepResult => ({ status: 'blocked', text, retryMs });
+
+/** How far a trip for obsidian looks: steps of this many blocks out from the mine, scanning after each. */
+const OBSIDIAN_STEP = 40;
+const OBSIDIAN_STEPS = 3;
+
+type P = { x: number; y: number; z: number };
+
+/**
+ * Obsidian in sight to dig: every obsidian block the loaded chunks hold (all depths), nearest first, less a lit
+ * nether portal's frame (anything within 4 of a portal block; the mod refuses those anyway).
+ */
+export function obsidianTargets(obsidian: P[], portals: P[], from: P): P[] {
+  const d2 = (a: P, b: P) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2;
+  return obsidian.filter(p => !portals.some(q => d2(p, q) <= 16)).sort((a, b) => d2(a, from) - d2(b, from));
+}
+
+/** Dig obsidian in sight until the inventory holds `want`; returns how many it holds. */
+async function digObsidian(ctx: GoalContext, want: number): Promise<number> {
+  const find = (block: string) => ctx.call<{ positions: P[] }>('world.findBlocks', { block, maxDistance: 96, count: 128 }).catch(() => ({ positions: [] as P[] }));
+  const here = (await ctx.call<{ position?: P }>('status').catch(() => undefined))?.position ?? ctx.s.position;
+  const targets = obsidianTargets((await find('obsidian')).positions, (await find('nether_portal')).positions, here);
+  let have = await countOf(ctx, 'obsidian');
+  for (const p of targets.slice(0, 8)) {
+    if (have >= want || ctx.signal.aborted) break;
+    const r = await ctx.act('dig-block', { ...p });
+    ctx.progress(`obsidian at (${p.x}, ${p.y}, ${p.z}): ${r.text.split('\n')[0].slice(0, 100)}`);
+    have = await countOf(ctx, 'obsidian');
+  }
+  return have;
+}
 
 const countOf = async (ctx: GoalContext, item: string) =>
   (await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory')).items
@@ -35,16 +69,56 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
     steps: [
       {
         name: 'mine 4 obsidian',
-        run: async ctx => {
+        run: async (ctx, st) => {
           const stored = chestTotals(ctx.world).obsidian ?? 0;
           if (stored && (await countOf(ctx, 'obsidian')) < 4) await takeFromChests(ctx, 'obsidian', 4);
           const have = await countOf(ctx, 'obsidian');
           if (have >= 4) return ok(`${have} obsidian`);
           if (!(await countOf(ctx, 'diamond_pickaxe'))) return blocked('waiting for a diamond pickaxe to mine obsidian with', 30 * MINUTE);
-          const r = await ctx.act('mine-blocks', { block: 'obsidian', count: 4 - have, timeoutMs: 6 * MINUTE });
+          // obsidian in sight (the loaded chunks, every depth) that isn't a lit portal's frame, one block at a time:
+          // Baritone's own miner went for the nearest obsidian it knew, which was the community chest's portal, walked
+          // a hundred blocks toward it twice, and gave up ("Unable to find any path") as the portal guard stopped it
+          let got = await digObsidian(ctx, 4);
+          if (got >= 4) return ok(`${got} obsidian (near home)`);
+          // cast it at home from lava and water (cast.ts): buckets from iron, water from the lake, lava open to the sky
+          // in sight; what's still short, a trip out for natural obsidian or lava
+          const cast = async () => {
+            if (!(await countOf(ctx, 'lava_bucket'))) return;
+            const c = await castObsidian(ctx, 4);
+            ctx.progress(c.text);
+            got = c.have;
+          };
+          const noBuckets = await bucketsFor(ctx, 4 - got);
+          if (!noBuckets) {
+            await fetchLava(ctx, 4 - got, false);
+            await cast();
+            if (got >= 4) return ok(`${got} obsidian, cast at home`);
+          } else ctx.progress(`casting obsidian: ${noBuckets}`);
+          // none near home: out from the mine's departure point, kitted out like a deep trip, looking a step at a time
+          const ready = deepTripReady(tripCheck(ctx.s));
+          if (!ready.ok) return blocked(`no obsidian or lava in sight near home; a trip out for it waits for: ${ready.why}`, 15 * MINUTE);
+          const zones = (await ctx.call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
+          const start = pickMineStart(ctx.s.home!, ctx.world.yard, ctx.world.zones?.mine?.[0], p => nearestZone(p, zones, true).distance);
+          if (!start) return blocked("every side of the yard has someone else's build by it: no trip out from here", 60 * MINUTE);
+          (ctx.world.zones ??= {}).mine = [start];
+          // a different way each trip
+          const dirs = [[0, -1], [1, 0], [0, 1], [-1, 0]] as const;
+          const turn = ((st.data.obsidianTurn as number | undefined) ?? 0) % 4;
+          st.data.obsidianTurn = turn + 1;
+          const [dx, dz] = dirs[turn];
+          const lavaEnough = async () => !noBuckets && got + (await countOf(ctx, 'lava_bucket')) >= 4;
+          for (let step = 0; step <= OBSIDIAN_STEPS && got < 4 && !ctx.signal.aborted; step++) {
+            const at = { x: start.x + dx * OBSIDIAN_STEP * step, y: start.y, z: start.z + dz * OBSIDIAN_STEP * step };
+            ctx.progress(`obsidian: looking round (${at.x}, ${at.z})`);
+            await ctx.call('goto', { ...at, xz: true, range: 6, timeoutMs: 120_000 }, 135_000).catch(() => undefined);
+            got = await digObsidian(ctx, 4);
+            if (got < 4 && !noBuckets) await fetchLava(ctx, 4 - got, true);
+            if (await lavaEnough()) break;
+          }
           await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
-          if ((await countOf(ctx, 'obsidian')) >= 4) return ok(r.text.split('\n')[0].slice(0, 100));
-          return blocked(`short of obsidian: ${r.text.split('\n')[0].slice(0, 100)}`, 60 * MINUTE);
+          if (got < 4) await cast();
+          if (got >= 4) return ok(`${got} obsidian`);
+          return blocked(`short of obsidian (${got}/4): none in sight, and not enough lava, on a trip ${['north', 'east', 'south', 'west'][turn]} from the mine`, 20 * MINUTE);
         }
       },
       siteStep('enchanting room', 7, 7),
