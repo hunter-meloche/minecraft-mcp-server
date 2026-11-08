@@ -31,6 +31,7 @@ import { communityStatus, donateGoal, missionGoal } from './community.js';
 import { yardGrowGoal, yardGrowStatus } from './yardgrow.js';
 import { storageGoal } from './storehouse.js';
 import { bedGoal } from './home.js';
+import { spareGoal } from './spare.js';
 
 /**
  * The bot's own low-level AI for the client backend, built like a mob's goal selector on a villager's schedule: every
@@ -127,7 +128,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -359,16 +360,26 @@ export class Brain {
     if (!this.running) this.day.idle++;
   }
 
-  /** The boxes of the structures placed in this world. */
-  private structureBoxes(world: WorldMemory): { x: number; y: number; z: number; width: number; height: number; length: number }[] {
-    if (!world.id) return [];
-    return this.structures.listStructures(world.id).flatMap(n => {
+  /**
+   * The chests the LLM's structures have as their own cells ("x,y,z"): those are the structure's, not home storage.
+   * Not every chest in a structure's box: the lamp walk's box (a path round the yard) took in the storage house's
+   * southern chests, and every landmark scan dropped them from the home's storage again.
+   */
+  private structureChests(world: WorldMemory): Set<string> {
+    const out = new Set<string>();
+    if (!world.id) return out;
+    for (const n of this.structures.listStructures(world.id)) {
       try {
-        const s = this.structures.loadStructure(world.id!, n);
-        return s && !s.homeStorage ? [compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box] : [];
-      } catch { return []; }
-    });
+        const s = this.structures.loadStructure(world.id, n);
+        if (!s || s.homeStorage) continue;
+        for (const c of compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).cells) {
+          if (/(^|:)(chest|trapped_chest|barrel)(\[|$)/.test(c.want)) out.add(`${c.at.x},${c.at.y},${c.at.z}`);
+        }
+      } catch { /* a structure that won't compile has no chests */ }
+    }
+    return out;
   }
+
 
   /** The memory of the world the bot is in (chests, zones, jobs), once it knows which world that is. */
   worldMemory(): WorldMemory | undefined {
@@ -485,8 +496,8 @@ export class Brain {
     world.landmarks = { ...findLandmarks(box, blocks, s.home), foundAt: this.now() };
     // a chest inside one of the LLM's structures is that structure's (a valuables chest in a hut 40 blocks out), not
     // home storage: the kit walked out to it at dusk, and the shelter pulled it back, three times over
-    const boxes = this.structureBoxes(world);
-    world.landmarks.chests = world.landmarks.chests.filter(c => !boxes.some(b => c.x >= b.x && c.x < b.x + b.width && c.y >= b.y && c.y < b.y + b.height && c.z >= b.z && c.z < b.z + b.length));
+    const theirs = this.structureChests(world);
+    world.landmarks.chests = world.landmarks.chests.filter(c => !theirs.has(`${c.x},${c.y},${c.z}`));
     // nothing in someone else's build is the bot's: a friend's chest by home is not home storage, their bed not its bed,
     // their farmland not its farm (the mod knows the builds round the bot it didn't make)
     await this.dropForeign(world, s.home);
