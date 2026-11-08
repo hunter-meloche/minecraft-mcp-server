@@ -1,7 +1,7 @@
 import test from 'ava';
 import { activityAt, daylightLeft } from '../../src/client/brain/schedule.js';
 import { findLandmarks } from '../../src/client/brain/memory.js';
-import { Brain, decide } from '../../src/client/brain/brain.js';
+import { Brain, decide, wedgedOut } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
 import { closeDoors, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
 
@@ -244,6 +244,75 @@ test('the watchdog stops a Baritone job that has not moved the bot in 3 minutes'
   now += 3.1 * 60_000; await brain.tick(); await settle(); // 3 minutes since it was first seen standing there
   t.true(calls.includes('cancel'));
   t.regex(brain.status(), /stuck looks stuck \(no movement for 3 min at 0,64,0\)/);
+  brain.setEnabled(false);
+});
+
+test('a retry after a stuck stop gets its own 3 minutes, not the last job\'s clock', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const stuck: Goal = { name: 'stuck', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [stuck], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 5000; await brain.tick(); await settle(); // the watchdog's first look at it
+  now += 3.1 * 60_000; await brain.tick(); await settle();
+  t.is(calls.filter(c => c === 'cancel').length, 1);
+  now += 3.1 * 60_000; await brain.tick(); await settle(); // the retry starts
+  now += 5000; await brain.tick(); await settle();
+  now += 5000; await brain.tick(); await settle();          // 10 s in: not stuck yet (it was, every time, at the south fence)
+  t.is(calls.filter(c => c === 'cancel').length, 1);
+  t.is((brain.status().match(/stuck looks stuck/g) ?? []).length, 1);
+  brain.setEnabled(false);
+});
+
+/** A 3x2x3 region round (0, 64, 0) with `feet` in the middle and the given side cells (dx,dz) filled at both heights. */
+const box3 = (feet: string, filled: [number, number][] = []) => {
+  const b = new Array<string>(18).fill('air');
+  b[1 + 1 * 3] = feet;
+  for (const [dx, dz] of filled) for (const dy of [0, 1]) b[(dx + 1) + (dz + 1) * 3 + dy * 9] = 'oak_fence[east=true,west=true]';
+  return b;
+};
+
+test('wedgedOut: standing in a fence cell, step to the open side nearest the bot; not when the cell is clear', (t) => {
+  const fence = 'oak_fence[east=true,north=false,south=false,waterlogged=false,west=true]';
+  // the fence line runs east-west; the bot hugs its south side (z .95 floors into the fence cell)
+  t.deepEqual(wedgedOut({ x: 0.5, y: 64, z: 0.95 }, box3(fence, [[1, 0], [-1, 0]])), { block: 'oak_fence', to: { x: 0.5, y: 64, z: 1.5 } });
+  t.deepEqual(wedgedOut({ x: 0.5, y: 64, z: 0.05 }, box3(fence, [[1, 0], [-1, 0]]))?.to, { x: 0.5, y: 64, z: -0.5 });
+  t.is(wedgedOut({ x: 0.5, y: 64, z: 0.95 }, box3('air')), undefined);
+  t.is(wedgedOut({ x: 0.5, y: 64, z: 0.95 }, box3('birch_fence_gate[facing=north,open=true]')), undefined);
+  t.is(wedgedOut({ x: 0.5, y: 64, z: 0.95 }, box3(fence, [[1, 0], [-1, 0], [0, 1], [0, -1]])), undefined); // nowhere to go
+  t.is(wedgedOut({ x: 0.5, y: 64, z: 0.95 }, box3('redstone_wall_torch[facing=north]')), undefined);
+});
+
+test('the watchdog steps a bot wedged in a fence out by hand after half a minute, and lets the job go again soon', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0.5, y: 64, z: 0.95 }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const call = rt.call;
+  const steered: unknown[] = [];
+  rt.call = (async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'world.region' && params?.width === 3) return { blocks: box3('oak_fence[east=true,west=true]', [[1, 0], [-1, 0]]) };
+    if (method === 'steer') { steered.push(params); return { reached: true }; }
+    return call(method, params);
+  }) as ClientRuntime['call'];
+  const stuck: Goal = { name: 'stuck', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [stuck], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 5000; await brain.tick(); await settle();
+  now += 20_000; await brain.tick(); await settle();
+  t.is(steered.length, 0);
+  now += 15_000; await brain.tick(); await settle();
+  t.true(calls.includes('cancel'));
+  t.deepEqual(steered, [{ x: 0.5, y: 64, z: 1.5, within: 0.25, timeoutMs: 2000 }]);
+  t.regex(brain.status(), /stuck is wedged in the oak_fence at 0,64,0: stepping out/);
+  now += 6000; await brain.tick(); await settle();
+  t.regex(brain.status(), /start stuck: test[\s\S]*start stuck: test/); // again in seconds, not 3 minutes
   brain.setEnabled(false);
 });
 

@@ -52,6 +52,30 @@ export interface BrainOptions {
 
 interface Running { goal: Goal; reason: string; started: number; abort: AbortController; done: Promise<void> }
 
+/** Blocks the bot can stand partly inside of (thin ones): a fence, wall, pane, bars, a shut gate. */
+const THIN = /(fence|_wall(\[|$)|pane|iron_bars|chain(\[|$))/;
+/** What the bot can step into: air and the small plants and lights that don't block a walk. */
+const OPEN = /^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|large_fern|dandelion|poppy|\w+_tulip|cornflower|oxeye_daisy|azure_bluet|allium|blue_orchid|lily_of_the_valley|torch|wall_torch|snow\[layers=1\])(\[|$)/;
+
+/**
+ * Wedged: the bot's feet cell (floored) holds a thin block it stands against, so Baritone plans from inside the
+ * fence and walks into it for ever. Three times one night at the south fence (-547, 63, 2199), right after hunts
+ * outside it: food, shelter and every retry "looks stuck" for half an hour, hungry, out of bed. `blocks` is the
+ * 3x2x3 region from (x-1, y, z-1) round the floored position, x fastest, then z, then y. Returns the thin block and
+ * the centre of the open side cell nearest the bot to step to, or undefined when it isn't wedged (or can't step out).
+ */
+export function wedgedOut(pos: Pos, blocks: (string | null)[]): { block: string; to: Pos } | undefined {
+  const at = (dx: number, dy: number, dz: number) => (blocks[(dx + 1) + (dz + 1) * 3 + dy * 9] ?? '').replace(/^minecraft:/, '');
+  const feet = at(0, 0, 0);
+  if (!THIN.test(feet) || /open=true/.test(feet)) return undefined;
+  const fx = Math.floor(pos.x), fy = Math.floor(pos.y), fz = Math.floor(pos.z);
+  const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+    .filter(([dx, dz]) => OPEN.test(at(dx, 0, dz)) && OPEN.test(at(dx, 1, dz)))
+    .map(([dx, dz]) => ({ x: fx + dx + 0.5, y: fy, z: fz + dz + 0.5 }))
+    .sort((a, b) => Math.hypot(a.x - pos.x, a.z - pos.z) - Math.hypot(b.x - pos.x, b.z - pos.z));
+  return sides.length ? { block: feet.replace(/\[.*$/, ''), to: sides[0] } : undefined;
+}
+
 /** The most urgent goal that wants to run (and isn't waiting out a failure), with its reason. */
 export function decide(s: Snapshot, world: WorldMemory, goals: Goal[], retryAt: Map<string, number>): { goal: Goal; reason: string } | undefined {
   const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
@@ -83,6 +107,8 @@ export class Brain {
   /** where the bot has stood still since when, while a Baritone process runs (the stuck watchdog) */
   private stillAt = '';
   private stillSince = 0;
+  /** the stand-still (its stillSince) the wedge check has looked at already */
+  private wedgeLooked = -1;
   /** goals left "until the morning": let go when the game's morning comes (sleeping brings it at once) */
   private morningHold = new Set<string>();
   /** the idle watchdog: where the bot has stood by day since when, and how far it has escalated */
@@ -159,6 +185,19 @@ export class Brain {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
         const here = `${Math.floor(s.position.x)},${Math.floor(s.position.y)},${Math.floor(s.position.z)}`;
         if (here !== this.stillAt || !s.process) { this.stillAt = here; this.stillSince = this.now(); }
+        // half a minute without a block's movement: wedged against a fence? step out by hand (Baritone never will)
+        if (s.process && this.now() - this.stillSince > 30_000 && this.wedgeLooked !== this.stillSince) {
+          this.wedgeLooked = this.stillSince;
+          const box = { x: Math.floor(s.position.x) - 1, y: Math.floor(s.position.y), z: Math.floor(s.position.z) - 1, width: 3, height: 2, length: 3 };
+          const { blocks } = await this.rt.call<{ blocks: (string | null)[] }>('world.region', box).catch(() => ({ blocks: [] as (string | null)[] }));
+          const out = wedgedOut(s.position, blocks ?? []);
+          if (out) {
+            await this.stopRunning(`${r.goal.name} is wedged in the ${out.block} at ${here}: stepping out`);
+            await this.rt.call('steer', { ...out.to, within: 0.25, timeoutMs: 2000 }, 5000).catch(() => undefined);
+            this.retryAt.set(r.goal.name, this.now() + 5000);
+            return;
+          }
+        }
         if (s.process && this.now() - this.stillSince > 3 * 60_000) {
           this.stillSince = this.now();
           await this.stopRunning(`${r.goal.name} looks stuck (no movement for 3 min at ${here})`);
@@ -472,6 +511,9 @@ export class Brain {
       progress: text => { this.step = text; this.note(`${goal.name}: ${text}`); void this.show(); }
     };
     this.note(`start ${goal.name}: ${reason}`);
+    // the stuck watchdog counts from now: it kept the last job's clock, and every retry after a stuck stop was
+    // "stuck" 5 s in (the shelter's 3-minute retries at the south fence never got to walk or wall in)
+    this.stillAt = '';
     const started = this.now();
     const run = this.loops.begin(goal.name, reason, started);
     const done = brainRun.run({ signal: abort.signal }, () => goal.run(ctx))
