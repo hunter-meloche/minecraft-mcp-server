@@ -103,7 +103,7 @@ export function siteStep(kind: string, width: number, length: number): Step {
   };
 }
 
-async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
+export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
   const m = 24;
   const box = { x: yard.x1 - m, y: yard.y - 4, z: yard.z1 - m, width: yard.x2 - yard.x1 + 1 + 2 * m, height: 14, length: yard.z2 - yard.z1 + 1 + 2 * m };
   const blocks = await readBox(ctx, box);

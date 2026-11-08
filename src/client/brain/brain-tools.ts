@@ -3,6 +3,7 @@ import type { ToolFactory } from '../../tool-factory.js';
 import type { Brain } from './brain.js';
 import type { ClientRuntime } from '../tools.js';
 import { lightArea, YARD_RADIUS } from './chores.js';
+import { requestYardGrowth, yardGrowStatus } from './yardgrow.js';
 import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 
 /** Tools to switch the brain on and off and see what it is doing. They never take control from it. */
@@ -65,6 +66,35 @@ export function registerBrainTools(factory: ToolFactory, brain: Brain, rt: Clien
 Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` : ''}` +
         `${r.undone.length ? `; took back ${r.undone.length} that lit nothing dark (${list(r.undone)})` : ''}. ` +
         `${r.left.length} dark spot(s) left${r.left.length ? `: ${list(r.left)} (no torch spot within reach of them, or walled off)` : ''}.`);
+    }
+  );
+
+  factory.registerTool(
+    'grow-yard',
+    "Ask the bot to grow its yard (its fenced territory) to make room for something that doesn't fit: it grows by a strip along its cheapest dry side, never toward someone else's build (16 from a build on the surface), levels the strip and moves the fence out to the new edge, by itself at its own pace (just after community missions). Check structure-site with where: 'inside' first: only ask when nothing fits. One request at a time; cancel: true drops it. Nothing given: shows the yard and any request.",
+    {
+      width: z.coerce.number().int().min(3).max(48).optional().describe('The footprint it needs room for, east-west (2 blocks clear round it are added)'),
+      length: z.coerce.number().int().min(3).max(48).optional().describe('North-south'),
+      why: z.string().max(80).optional().describe('What for, e.g. "a wheat farm"'),
+      cancel: z.boolean().optional().describe('Drop the request')
+    },
+    async ({ width, length, why, cancel }: { width?: number; length?: number; why?: string; cancel?: boolean }) => {
+      const world = brain.worldMemory();
+      if (!world) return factory.createErrorResponse('Not in a world yet');
+      const y = world.yard;
+      const yardLine = y ? `Yard: x ${y.x1}..${y.x2}, z ${y.z1}..${y.z2} (${y.x2 - y.x1 + 1}x${y.z2 - y.z1 + 1}), ground y ${y.y}.` : 'No yard yet.';
+      if (cancel) {
+        if (!world.yardGrow) return factory.createErrorResponse('No yard growth asked for');
+        delete world.yardGrow;
+        brain.saveMemory();
+        return factory.createResponse(`Dropped the request. ${yardLine}`);
+      }
+      if (!width || !length) return factory.createResponse([yardLine, ...yardGrowStatus(world)].join('\n'));
+      if (world.yardGrow) return factory.createErrorResponse(`A request is already waiting: ${yardGrowStatus(world).join(' ')} (cancel it first)`);
+      requestYardGrowth(world, { width, length, why: why ?? 'a new build' });
+      brain.saveMemory();
+      const off = brain.enabled ? '' : " The bot's autonomy is off: it starts once set-autonomy turns it on.";
+      return factory.createResponse(`Asked: the yard grows for ${width}x${length} (${why ?? 'a new build'}). ${yardLine} The bot picks the side, levels the strip and moves the fence; brain-status shows how it goes.${off}`);
     }
   );
 

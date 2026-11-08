@@ -120,6 +120,8 @@ export interface WorldMemory {
   reserved?: Record<string, Record<string, number>>;
   /** community chests (shared with other players and bots), the missions for them and what was donated */
   community?: import('./community.js').CommunityMemory;
+  /** room asked for by the LLM: the yard grows for it (yardgrow.ts) */
+  yardGrow?: import('./yardgrow.js').YardGrowRequest;
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
 }
 
