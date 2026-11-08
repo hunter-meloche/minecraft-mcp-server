@@ -109,6 +109,8 @@ export interface WorldMemory {
   /** the yard grew past the fence on this side: the fence moves out (its old side comes down, the ring is rebuilt) */
   /** the yard box (x1,z1,x2,z2) the 2-block band outside the fence was last cleared for */
   fenceClearFor?: string;
+  /** the yard (its box) last levelled inside the fence */
+  yardLevelFor?: string;
   /** the LLM's declarative builds, oldest first */
   buildJobs?: BuildJob[];
   /**

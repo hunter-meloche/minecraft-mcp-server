@@ -194,6 +194,49 @@ const fenceClear: Milestone = {
   }]
 };
 
+/** A yard's four quarters, to level a piece at a time. */
+export function quarters(y: Box2): Box2[] {
+  const mx = Math.floor((y.x1 + y.x2) / 2), mz = Math.floor((y.z1 + y.z2) / 2);
+  return [
+    { x1: y.x1, z1: y.z1, x2: mx, z2: mz }, { x1: mx + 1, z1: y.z1, x2: y.x2, z2: mz },
+    { x1: y.x1, z1: mz + 1, x2: mx, z2: y.z2 }, { x1: mx + 1, z1: mz + 1, x2: y.x2, z2: y.z2 }
+  ];
+}
+
+/**
+ * The yard inside the fence level with its ground, a quarter at a time: the plains yard rose a block along its east
+ * side. Buildings, furniture, crops, the fence and water keep their columns (level-area leaves those whole). Again
+ * when the yard grows.
+ */
+const yardLevel: Milestone = {
+  id: 'yard-level',
+  title: 'level the yard',
+  prereqs: ['fence-clear'],
+  done: v => !!v.world.yard && v.world.yardLevelFor === boxKey(v.world.yard),
+  steps: [{
+    name: 'level the yard to its ground',
+    run: async (ctx: GoalContext, st: MilestoneState) => {
+      const yard = await yardOf(ctx);
+      const parts = quarters(yard);
+      const key = boxKey(yard);
+      const doneParts = st.data.for === key ? ((st.data.quarters as number[] | undefined) ?? []) : [];
+      st.data.for = key;
+      for (let i = 0; i < parts.length; i++) {
+        if (doneParts.includes(i)) continue;
+        if (ctx.signal.aborted) return { status: 'progress', text: `${doneParts.length} of 4 quarters level` };
+        const q = parts[i];
+        ctx.progress(`levelling the yard (${q.x1}..${q.x2}, ${q.z1}..${q.z2})`);
+        const r = await ctx.act('level-area', { x1: q.x1, z1: q.z1, x2: q.x2, z2: q.z2, level: yard.y, fillWater: false, timeoutMs: 6 * 60_000 });
+        if (!/Now level|Already level/.test(r.text)) return { status: 'progress', text: `quarter ${i + 1}: ${r.text.split('\n').pop()?.slice(0, 100)}` };
+        doneParts.push(i);
+        st.data.quarters = doneParts;
+      }
+      ctx.world.yardLevelFor = key;
+      return { status: 'done', text: 'the yard is level' };
+    }
+  }]
+};
+
 /** The side of a footprint a point on its edge is on. */
 export function sideOf(site: { x: number; z: number; width: number; length: number }, p: { x: number; z: number }): Side {
   if (p.z === site.z) return 'north';
@@ -230,6 +273,6 @@ const moreChests: Milestone = {
   }]
 };
 
-export const TREE: Milestone[] = [storage, moreChests, perimeter, fenceClear, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
+export const TREE: Milestone[] = [storage, moreChests, perimeter, fenceClear, yardLevel, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
   penMilestone('cow', ['plot1']), penMilestone('sheep', ['pen-cow']),
   caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow'])];
