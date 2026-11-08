@@ -90,7 +90,7 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
           };
           const noBuckets = await bucketsFor(ctx, 4 - got);
           if (!noBuckets) {
-            await fetchLava(ctx, 4 - got, false);
+            await fetchLava(ctx, 4 - got);
             await cast();
             if (got >= 4) return ok(`${got} obsidian, cast at home`);
           } else ctx.progress(`casting obsidian: ${noBuckets}`);
@@ -112,7 +112,7 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
             ctx.progress(`obsidian: looking round (${at.x}, ${at.z})`);
             await ctx.call('goto', { ...at, xz: true, range: 6, timeoutMs: 120_000 }, 135_000).catch(() => undefined);
             got = await digObsidian(ctx, 4);
-            if (got < 4 && !noBuckets) await fetchLava(ctx, 4 - got, true);
+            if (got < 4 && !noBuckets) await fetchLava(ctx, 4 - got);
             if (await lavaEnough()) break;
           }
           await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);

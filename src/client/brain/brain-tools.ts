@@ -4,6 +4,7 @@ import type { Brain } from './brain.js';
 import type { ClientRuntime } from '../tools.js';
 import { lightArea, YARD_RADIUS } from './chores.js';
 import { requestYardGrowth, yardGrowStatus } from './yardgrow.js';
+import { fillAt, sourcesInSight } from './fluidpick.js';
 import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 
 /** Tools to switch the brain on and off and see what it is doing. They never take control from it. */
@@ -66,6 +67,55 @@ export function registerBrainTools(factory: ToolFactory, brain: Brain, rt: Clien
 Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` : ''}` +
         `${r.undone.length ? `; took back ${r.undone.length} that lit nothing dark (${list(r.undone)})` : ''}. ` +
         `${r.left.length} dark spot(s) left${r.left.length ? `: ${list(r.left)} (no torch spot within reach of them, or walled off)` : ''}.`);
+    }
+  );
+
+  factory.registerTool(
+    'lava-sources',
+    "Look over the lava (or water) the bot can see, without moving: for each source, nearest first, whether it would bucket it and from where, or why not (a flow, under ground, not open to the sky, no safe spot to stand at). The bot only ever fills a bucket at a still source open to the sky near the ground, standing on solid ground at least 2 blocks from it with no lava round its feet.",
+    { fluid: z.enum(['lava', 'water']).optional().describe('Which (default lava)') },
+    async ({ fluid = 'lava' }: { fluid?: 'lava' | 'water' }) => {
+      const s = await rt.status();
+      const ground = s.block ? s.block.y - 1 : undefined;
+      const io = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } } } as unknown as Parameters<typeof sourcesInSight>[0];
+      const all = await sourcesInSight(io, fluid, fluid === 'lava' ? ground : undefined, 4);
+      if (!all.length) return factory.createResponse(`No ${fluid} in sight.`);
+      const list = [...all.filter(v => !v.why), ...all.filter(v => v.why).slice(0, 8)];
+      const at = (p: { x: number; y: number; z: number }) => `(${p.x}, ${p.y}, ${p.z})`;
+      return factory.createResponse(list.map(v => `- ${at(v.at)}: ${v.why ? `no: ${v.why}` : `yes, from ${v.spots.slice(0, 3).map(at).join(' or ')}`}`).join('\n'));
+    }
+  );
+
+  factory.registerTool(
+    'fill-bucket',
+    "Fill an empty bucket the safe way (as the obsidian casting does): at the nearest still source open to the sky (lava: near the ground too), walking carefully to a spot on solid ground beside it (lava: 2 or more away, no lava round its feet) and using the bucket from there, never walking closer. Says why not, if it won't.",
+    { fluid: z.enum(['lava', 'water']).describe('Which') },
+    async ({ fluid }: { fluid: 'lava' | 'water' }) => {
+      await brain.manual('fill-bucket');
+      const s = await rt.status();
+      const ground = s.block ? s.block.y - 1 : undefined;
+      const ctx = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } }, signal: new AbortController().signal, progress: () => undefined } as unknown as Parameters<typeof fillAt>[0];
+      const list = (await sourcesInSight(ctx, fluid, fluid === 'lava' ? ground : undefined, 3)).filter(v => !v.why);
+      if (!list.length) return factory.createErrorResponse(`No ${fluid} source in sight that's safe to fill a bucket at (lava-sources says why for each)`);
+      const lines: string[] = [];
+      for (const v of list.slice(0, 3)) {
+        const r = await fillAt(ctx, v, fluid);
+        if (r.ok) return factory.createResponse(r.text);
+        lines.push(r.text);
+      }
+      return factory.createErrorResponse(`Not filled: ${lines.join(' | ')}`);
+    }
+  );
+
+  factory.registerTool(
+    'lava-casting',
+    "Turn the obsidian casting on or off: with it on, the enchanting room's obsidian step may fill lava buckets (still sources open to the sky near the ground only, from a safe spot 2 or more away) and cast obsidian at home in a sealed pit. Off by default: the first, unsafe version walked the bot into a cave and it burned. Nothing given: says which.",
+    { enabled: z.boolean().optional().describe('On or off') },
+    async ({ enabled }: { enabled?: boolean }) => {
+      const world = brain.worldMemory();
+      if (!world) return factory.createErrorResponse('Not in a world yet');
+      if (enabled !== undefined) { world.lavaCasting = enabled; brain.saveMemory(); }
+      return factory.createResponse(`Obsidian casting from lava is ${world.lavaCasting ? 'on' : 'off'}.`);
     }
   );
 

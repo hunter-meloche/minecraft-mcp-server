@@ -124,6 +124,8 @@ export interface WorldMemory {
   community?: import('./community.js').CommunityMemory;
   /** room asked for by the LLM: the yard grows for it (yardgrow.ts) */
   yardGrow?: import('./yardgrow.js').YardGrowRequest;
+  /** the obsidian casting may fetch and pour lava (off until a supervised first run: the first unsafe one killed the bot) */
+  lavaCasting?: boolean;
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
 }
 

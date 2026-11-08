@@ -1,7 +1,7 @@
 import type { GoalContext } from './goals.js';
 import { readBox } from './milestones.js';
 import { prepare } from './project.js';
-import { waterBucketStep } from './farming.js';
+import { fillAt, sourcesInSight } from './fluidpick.js';
 
 /**
  * Obsidian cast at home from lava and water, when there's none to mine away from a lit portal (natural obsidian is
@@ -54,9 +54,6 @@ export function castSite(blocks: (string | null)[], box: P & { width: number; he
 }
 
 /** How long the water takes (ms): to turn the lava, to float the dropped obsidian up, to drain. Tests set them to 0. */
-/** Lava fetching is off: see fetchLava. */
-export const LAVA_OFF = true;
-
 export const CAST_TIMING = { settle: 1500, float: 2500, drain: 1500 };
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -75,39 +72,56 @@ export async function bucketsFor(ctx: GoalContext, lava: number): Promise<string
     const short = await prepare(ctx, 'bucket', empties);
     if (Object.keys(short).length) return `buckets: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`;
   }
-  if (!water) {
-    const r = await waterBucketStep.run(ctx, { step: 0, data: {} });
-    if (r.status !== 'done') return `water: ${r.text}`;
-  }
+  if (!water && !(await fetchWater(ctx))) return 'water: no still water in sight with a safe spot to fill a bucket at';
   return undefined;
 }
 
 /**
- * Lava into buckets from still sources in sight (the loaded chunks), nearest first, up to `want`; returns how many
- * lava buckets it carries. `deep`: sources under ground too (only on a kitted-out trip); else open to the sky only.
+ * Lava into buckets from still sources in sight, up to `want`, the safe way (fluidpick.ts): pools open to the sky,
+ * near the ground, filled from a safe spot beside them, never walked into. Returns how many lava buckets it carries.
  */
-export async function fetchLava(ctx: GoalContext, want: number, deep: boolean): Promise<number> {
+export async function fetchLava(ctx: GoalContext, want: number): Promise<number> {
   let have = await countOf(ctx, 'lava_bucket');
-  if (have >= want) return have;
-  // OFF (2026-11-08): the first live run walked to lava 40 blocks under the yard and the bot died there, losing its
-  // diamond pickaxe; "open above" didn't keep it to surface pools. Nothing fetches lava until that is made safe
-  if (LAVA_OFF) return have;
-  const found = await ctx.call<{ positions: P[] }>('world.findBlocks', { block: 'lava', maxDistance: 96, count: 256, ...(deep ? {} : { openAbove: true }) })
-    .catch(() => ({ positions: [] as P[] }));
-  const here = (await ctx.call<{ position?: P }>('status').catch(() => undefined))?.position ?? ctx.s.position;
-  const near = found.positions.sort((a, b) => Math.hypot(a.x - here.x, a.y - here.y, a.z - here.z) - Math.hypot(b.x - here.x, b.y - here.y, b.z - here.z));
-  let tried = 0;
-  for (const p of near) {
-    if (have >= want || tried >= 10 || ctx.signal.aborted) break;
-    if (!/^lava(\[level=0\])?$/.test(await blockAt(ctx, p))) continue; // a source, not a flow
-    tried++;
+  if (have >= want || !ctx.world.lavaCasting) return have;
+  // the ground where it stands (home: the yard's; out on a trip: under its feet)
+  const pos = (await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P })).position ?? ctx.s.position;
+  const ground = Math.floor(pos.y) - 1;
+  const sources = (await sourcesInSight(ctx, 'lava', ground)).filter(v => !v.why);
+  for (const v of sources) {
+    if (have >= want || ctx.signal.aborted) break;
     if (!(await countOf(ctx, 'bucket'))) break;
-    const r = await ctx.act('use-item-on-block', { ...p, item: 'bucket', face: 'up' });
-    const now = await countOf(ctx, 'lava_bucket');
-    if (now <= have) ctx.progress(`lava at (${p.x}, ${p.y}, ${p.z}): ${r.text.slice(0, 80)}`);
-    have = now;
+    const r = await fillAt(ctx, v, 'lava');
+    ctx.progress(`lava: ${r.text.slice(0, 140)}`);
+    have = await countOf(ctx, 'lava_bucket');
   }
   return have;
+}
+
+/** A water bucket from still water open to the sky outside the yard (the lake), the same safe way. */
+async function fetchWater(ctx: GoalContext): Promise<boolean> {
+  if (await countOf(ctx, 'water_bucket')) return true;
+  const y = ctx.world.yard;
+  const outside = (p: P) => !y || p.x < y.x1 - 2 || p.x > y.x2 + 2 || p.z < y.z1 - 2 || p.z > y.z2 + 2;
+  const sources = (await sourcesInSight(ctx, 'water', undefined, 16)).filter(v => !v.why && outside(v.at));
+  for (const v of sources.slice(0, 4)) {
+    if (ctx.signal.aborted) break;
+    const r = await fillAt(ctx, v, 'water');
+    ctx.progress(`water: ${r.text.slice(0, 140)}`);
+    if (r.ok) return true;
+  }
+  return !!(await countOf(ctx, 'water_bucket'));
+}
+
+/** Lava anywhere round the stand spot or over the pit but the pit itself, as it is now (a bucket emptied off aim). */
+async function strayLava(ctx: GoalContext, pit: P, stand: P): Promise<P | undefined> {
+  const box = { x: Math.min(pit.x, stand.x) - 1, y: pit.y, z: pit.z - 1, width: Math.abs(pit.x - stand.x) + 3, height: stand.y - pit.y + 2, length: 3 };
+  const blocks = (await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...box })).blocks;
+  for (let i = 0; i < blocks.length; i++) {
+    if (!/^(minecraft:)?lava/.test(blocks[i] ?? '')) continue;
+    const p = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
+    if (p.x !== pit.x || p.y !== pit.y || p.z !== pit.z) return p;
+  }
+  return undefined;
 }
 
 /** The cast site, kept: chosen once in the yard and remembered. */
@@ -128,6 +142,7 @@ async function siteOf(ctx: GoalContext): Promise<P | undefined> {
  */
 export async function castObsidian(ctx: GoalContext, want: number): Promise<{ have: number; text: string }> {
   let have = await countOf(ctx, 'obsidian');
+  if (!ctx.world.lavaCasting) return { have, text: 'obsidian casting is off (lava-casting turns it on)' };
   const c = await siteOf(ctx);
   if (!c) return { have, text: 'no lawn in the yard to cast obsidian in (a 5 x 5 patch of plain ground, nothing built or burning by it)' };
   const pit = { x: c.x, y: c.y - 1, z: c.z }, top = { ...c };
@@ -151,7 +166,15 @@ export async function castObsidian(ctx: GoalContext, want: number): Promise<{ ha
     if (!(await countOf(ctx, 'lava_bucket'))) { notes.push('out of lava'); break; }
     if (!(await countOf(ctx, 'water_bucket'))) { notes.push('no water bucket'); break; }
     if (!(await goStand())) { notes.push('lost the casting spot'); break; }
+    if (!/^(air|cave_air)/.test(await blockAt(ctx, pit))) { notes.push(`the pit isn't empty (${await blockAt(ctx, pit)})`); break; }
     await use(wallLow, 'lava_bucket', 'west');
+    // the lava only in the pit: any anywhere round the stand spot or the pit's top is scooped straight back, and no more
+    const stray = await strayLava(ctx, pit, stand);
+    if (stray) {
+      await use(stray, 'bucket', 'up');
+      notes.push(`lava went to (${stray.x}, ${stray.y}, ${stray.z}), not the pit: scooped back, stopped`);
+      break;
+    }
     if (!/^lava/.test(await blockAt(ctx, pit))) { notes.push(`the lava didn't go in (${await blockAt(ctx, pit)})`); break; }
     await use(wallHigh, 'water_bucket', 'west');
     await sleep(CAST_TIMING.settle);

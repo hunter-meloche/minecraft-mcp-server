@@ -45,7 +45,7 @@ test('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated 
   const { world, read } = lawn();
   const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 1], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
   const site = { x: 4, y: 62, z: 4 };
-  const w: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard: { x1: 0, z1: 0, x2: 19, z2: 19, y: 62 }, zones: { 'obsidian:cast': [site] } };
+  const w: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard: { x1: 0, z1: 0, x2: 19, z2: 19, y: 62 }, zones: { 'obsidian:cast': [site] }, lavaCasting: true };
   let feet: P = { x: 10, y: 63, z: 10 };
   let lying = 0; // obsidian at the pit's bottom, not picked up yet
   const set = (p: P, b: string) => world.set(k(p), `minecraft:${b}`);
@@ -94,4 +94,18 @@ test('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated 
   t.is(get({ x: 4, y: 61, z: 4 }), 'dirt');
   t.is(get({ x: 4, y: 62, z: 4 }), 'dirt');
   t.is(inv.get('water_bucket'), 1);
+});
+
+test('casting is off until it is turned on: no lava fetched, nothing cast', async (t) => {
+  const { fetchLava } = await import('../../src/client/brain/cast.js');
+  const calls: string[] = [];
+  const ctx = {
+    s: { position: { x: 0, y: 63, z: 0 } }, world: { landmarks: { chests: [], farmland: [] }, leash: 96 },
+    signal: new AbortController().signal, progress: () => undefined,
+    call: async <T>(method: string): Promise<T> => { calls.push(method); return { items: [{ slot: 1, name: 'bucket', count: 4 }] } as T; },
+    act: async (tool: string) => { calls.push(tool); return { ok: true, text: '' }; }
+  } as unknown as GoalContext;
+  t.is(await fetchLava(ctx, 4), 0);
+  t.regex((await castObsidian(ctx, 4)).text, /casting is off/);
+  t.deepEqual(calls.filter(c => c !== 'inventory'), []);
 });

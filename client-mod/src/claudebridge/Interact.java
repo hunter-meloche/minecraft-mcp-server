@@ -303,12 +303,14 @@ public final class Interact {
             // a shield in the off-hand stops a hoe, axe or shovel from working the block unless the player sneaks
             // (26.x: "blocking item use intent"): with the kit's shield, tilling the plot did nothing
             String inHand = Names.item(pl.getMainHandItem());
+            // buckets too: with the shield on, "use" failed at every lake and lava pool (use: Fail[]), and sneaking
+            // also keeps the bot from stepping off the edge it stands at
             boolean sneak = pl.getOffhandItem().has(net.minecraft.core.component.DataComponents.BLOCKS_ATTACKS)
-                && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel"));
+                && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel") || inHand.endsWith("bucket"));
             if (sneak) mc.options.keyShift.setDown(true);
             Ticker.add(new Ticker.Task() {
                 int wait = 5;
-                String result = "", held = "";
+                String result = "", held = "", aimed = "";
                 @Override public boolean tick(Minecraft m) {
                     wait--;
                     if (wait == 0 && sneak) m.options.keyShift.setDown(false);
@@ -316,6 +318,21 @@ public final class Interact {
                         // after the rotation is sent; buckets (and other aimed items) act through "use", along the look
                         // direction at the same point, when the block click does nothing
                         held = m.player.getMainHandItem().isEmpty() ? "nothing" : Names.item(m.player.getMainHandItem());
+                        // a bucket aims along the look, which something (Baritone's look, the guardian) may have turned
+                        // since: look again now, at the fluid itself. Every fill at the lake was "use: Fail": the aim hit
+                        // the grass
+                        if (held.endsWith("bucket")) {
+                            // just under the surface (a source fills to 8/9 of the cell): aimed at the middle, the line
+                            // from the shore clipped the shore block's corner ("aim: BLOCK ... grass_block"); this is the
+                            // point the brain's sight-line check (fluidpick.ts) looks at too
+                            m.player.lookAt(EntityAnchorArgument.Anchor.EYES, new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5));
+                            // what the bucket's aim hits, the way BucketItem traces it (sources only), for the reply
+                            Vec3 eye = m.player.getEyePosition(), end = eye.add(m.player.getViewVector(1f).scale(m.player.blockInteractionRange()));
+                            var pov = m.level.clip(new net.minecraft.world.level.ClipContext(eye, end, net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                                net.minecraft.world.level.ClipContext.Fluid.SOURCE_ONLY, m.player));
+                            aimed = pov.getType() + " " + pov.getBlockPos().toShortString() + " " + Names.block(m.level.getBlockState(pov.getBlockPos()))
+                                + " offhand=" + Names.item(m.player.getOffhandItem()) + " sneaking=" + m.player.isShiftKeyDown() + " using=" + m.player.isUsingItem();
+                        }
                         var r = m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click);
                         result = r.toString();
                         if (!r.consumesAction()) result += " / use: " + m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
@@ -324,7 +341,7 @@ public final class Interact {
                     var now = m.level.getBlockState(at);
                     JsonObject props = new JsonObject();
                     for (var prop : now.getProperties()) props.addProperty(prop.getName(), Handlers.valueName(now, prop));
-                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "changed", !now.equals(beforeState), "properties", props, "held", held, "result", result,
+                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "changed", !now.equals(beforeState), "properties", props, "held", held, "result", result + (aimed.isEmpty() ? "" : " [aim: " + aimed + "]"),
                         "sneaking", m.player.isShiftKeyDown()));
                     return true;
                 }
