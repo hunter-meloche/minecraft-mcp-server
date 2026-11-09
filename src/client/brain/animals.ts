@@ -48,6 +48,18 @@ export function penState(pen: Pen, entities: Animal[]): PenState {
   return { inside: { adults: adults.length, babies: babies.length }, adults, babies, outsideNear };
 }
 
+/**
+ * A wild adult to fetch from farther out than the pen chore lures from: the pen holds fewer than `minAdults` and one
+ * of its kind stands outside it within `max` (nearest first). The bot's cow pen sat empty for a day and a half on the
+ * friend's server with no cow within LURE_RANGE, the enchanting room short of 38 leather, the bot idle all day.
+ */
+export function strayToFetch(pen: Pen, entities: Animal[], max: number, minAdults = 2): Animal | undefined {
+  const s = penState(pen, entities);
+  if (s.inside.adults >= minAdults) return undefined;
+  return entities.filter(e => bare(e.name) === pen.kind && !e.baby && !inPen(pen, e.position) && e.distance <= max)
+    .sort((a, b) => a.distance - b.distance)[0];
+}
+
 export type AnimalAction =
   | { kind: 'lure'; target: number; food: string }
   | { kind: 'breed'; ids: [number, number]; food: string }

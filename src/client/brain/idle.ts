@@ -1,13 +1,15 @@
 import type { Goal } from './goals.js';
 import { FOOD_TARGET, gatherFood, readyFoodPoints } from './food.js';
 import { stock, stockShort } from './chores.js';
+import { fetchForPens } from './pens.js';
 
 /**
  * The idle watchdog's last resort: something useful when nothing else would run by day. The bot stood at home for
  * a quarter of an hour, hungry (9) with no food, its storage house a log short: a wood trip doesn't set out under
  * hunger 10, and the food goal waited out a "morning" hold counted in real time though sleeping had brought the
  * morning at once. Hungry, it goes for food (the hunt, fishing, what the chests hold); else it fetches what a
- * project or the home is short of, the stock trip without the stock goal's own conditions.
+ * project or the home is short of, the stock trip without the stock goal's own conditions; else an animal for an
+ * empty pen.
  */
 export const IDLE_FIRST = 3 * 60_000;
 const GAME_DIRS = ['north', 'east', 'south', 'west'] as const;
@@ -39,6 +41,9 @@ export const forage: Goal = {
       ctx.progress('idle: fetching what the home is short of');
       return `stock: ${await stock.run(ctx)}`;
     }
+    // an empty pen: one fetched from farther out than the pen chore lures from (its herd is the leather and wool)
+    const fetched = await fetchForPens(ctx);
+    if (fetched) return fetched;
     return 'idle, and nothing short: nothing to forage for';
   }
 };

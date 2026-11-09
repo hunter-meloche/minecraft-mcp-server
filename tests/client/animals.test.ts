@@ -1,5 +1,5 @@
 import test from 'ava';
-import { inPen, nextAnimalAction, penState, type Animal, type Pen } from '../../src/client/brain/animals.js';
+import { inPen, nextAnimalAction, penState, strayToFetch, type Animal, type Pen } from '../../src/client/brain/animals.js';
 
 const pen: Pen = { x1: 0, z1: 0, x2: 4, z2: 4, kind: 'cow' };
 let nextId = 1;
@@ -78,4 +78,16 @@ test('sheep with wool are sheared when shears are carried; unknown wool is left 
   t.deepEqual(nextAnimalAction(sheepPen, flock, { shears: 1 }), { kind: 'shear', id: woolly.id });
   t.not(nextAnimalAction(sheepPen, flock, {}).kind, 'shear');
   t.not(nextAnimalAction(sheepPen, [sheep({}), sheep({})], { shears: 1 }).kind, 'shear');
+});
+
+test('strayToFetch: an empty pen fetches the nearest wild adult from past the lure range, within the reach given', (t) => {
+  const far = cow(70, 0), farther = cow(90, 0), calf = cow(60, 0, { baby: true });
+  t.is(strayToFetch(pen, [farther, far, calf], 96)?.id, far.id);
+  // the pen chore's own range found none: 70 blocks off is past it
+  t.is(nextAnimalAction(pen, [far], { wheat: 10 }).kind, 'wait');
+  t.is(strayToFetch(pen, [farther], 80), undefined);
+  // one adult inside is still short of a pair
+  t.is(strayToFetch(pen, [...inside(1), far], 96)?.id, far.id);
+  // a pair inside breeds: nothing to fetch
+  t.is(strayToFetch(pen, [...inside(2), far], 96), undefined);
 });

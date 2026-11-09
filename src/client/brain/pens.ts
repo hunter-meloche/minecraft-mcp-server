@@ -2,7 +2,7 @@ import type { Goal, GoalContext } from './goals.js';
 import type { Milestone, MilestoneState } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
 import { pen, type Side } from './blueprints.js';
-import { nextAnimalAction, PEN_FOOD, type Animal, type Pen, type PenKind } from './animals.js';
+import { nextAnimalAction, PEN_FOOD, penState, strayToFetch, type Animal, type Pen, type PenKind } from './animals.js';
 import { prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
@@ -44,8 +44,8 @@ export function penMilestone(kind: PenKind, prereqs: string[]): Milestone {
 
 type Ent = Animal & { category: string };
 // someone's animals (named, tamed, on a lead, in their pen or by their builds) are never lured, bred or culled
-const entities = async (ctx: GoalContext) =>
-  (await ctx.call<{ entities: (Ent & Creature)[] }>('world.entities', { maxDistance: 48 })).entities.filter(e => e.category === 'creature' && !someones(e, ctx.world.yard));
+const entities = async (ctx: GoalContext, maxDistance = 48) =>
+  (await ctx.call<{ entities: (Ent & Creature)[] }>('world.entities', { maxDistance })).entities.filter(e => e.category === 'creature' && !someones(e, ctx.world.yard));
 const find = async (ctx: GoalContext, id: number) => (await entities(ctx)).find(e => e.id === id);
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const OUT: Record<Side, { x: number; z: number }> = { north: { x: 0, z: -1 }, south: { x: 0, z: 1 }, west: { x: -1, z: 0 }, east: { x: 1, z: 0 } };
@@ -87,11 +87,21 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
   await ctx.call('gates.auto', { enabled: false }).catch(() => undefined);
   try {
     await ctx.call('item.select', { name: food });
-    let e = await find(ctx, id);
+    let e = (await entities(ctx, 128)).find(a => a.id === id);
     if (!e) return `${kind}: it wandered off`;
-    await ctx.act('move-to-position', { ...e.position, range: 3, timeoutMs: 60_000 });
-    // back to the gate in legs of 4 blocks, waiting for it each time
-    for (let leg = 0; leg < 20; leg++) {
+    await ctx.act('move-to-position', { ...e.position, range: 3, timeoutMs: 120_000 });
+    // where it stood when seen, 77 blocks off, was not where it grazed by the time the bot got there ("it stopped
+    // following" at the first leg): close in on where it is now, wheat in hand, before leading it back
+    for (let i = 0; i < 3; i++) {
+      e = await find(ctx, id);
+      if (!e) return `${kind}: it wandered off`;
+      if (e.distance <= 4) break;
+      await ctx.call('item.select', { name: food });
+      await ctx.act('move-to-position', { ...e.position, range: 2, timeoutMs: 45_000 });
+    }
+    // back to the gate in legs of 4 blocks, waiting for it each time (enough legs for one fetched from 96 out)
+    const far = Math.hypot(way.outside.x - e.position.x, way.outside.z - e.position.z);
+    for (let leg = 0; leg < Math.max(20, Math.ceil(far / 4) + 8); leg++) {
       if (ctx.signal.aborted) return `${kind}: stopped`;
       const me = (await ctx.status()).position!;
       const d = Math.hypot(way.outside.x - me.x, way.outside.z - me.z);
@@ -172,3 +182,53 @@ export const pens: Goal = {
     return out.join('; ') || 'nothing to do at the pens';
   }
 };
+
+/** How far out an idle bot fetches an animal for an empty pen (within its leash), and how long a fruitless look waits. */
+const FETCH_RANGE = 96;
+const FETCH_WAIT = 30 * MINUTE;
+const FETCH_DIRS = ['north', 'east', 'south', 'west'] as const;
+let fetchSide = 0;
+
+/**
+ * Idle by day: a pen with fewer than two adults and none of its kind near enough for the pen chore to lure gets one
+ * fetched from farther out: the nearest wild one in sight within the leash, else a look one side out for one, then
+ * led home on the wheat. The cow pen on the friend's server never held a cow (none within 32 of home since it was
+ * built), so the herd never bred and the enchanting room waited on its 38 leather while the bot sat idle all day.
+ * Undefined when no pen wants one (or a look found none less than half an hour ago).
+ */
+export async function fetchForPens(ctx: GoalContext): Promise<string | undefined> {
+  const last = ctx.world.lastDone?.['pens-fetch'] ?? 0;
+  if (ctx.s.now - last < FETCH_WAIT) return undefined;
+  const range = Math.min(ctx.world.leash ?? FETCH_RANGE, FETCH_RANGE);
+  for (const [key, zs] of Object.entries(ctx.world.zones ?? {})) {
+    const m = /^pen:([a-z]+)$/.exec(key);
+    if (!m || !zs[0]?.width) continue;
+    const kind = m[1] as PenKind;
+    const z = zs[0];
+    const p: Pen = { x1: z.x, z1: z.z, x2: z.x + z.width! - 1, z2: z.z + z.length! - 1, kind };
+    const near = await entities(ctx, range);
+    if (penState(p, near).inside.adults >= 2) continue;
+    let target = strayToFetch(p, near, range);
+    const food = PEN_FOOD[kind].find(f => (ctx.s.counts.get(f) ?? 0) >= 2) ?? (await (async () => {
+      for (const f of PEN_FOOD[kind]) if (await takeFromChests(ctx, f, 16)) return f;
+      return undefined;
+    })());
+    if (!food) continue;
+    if (!target) {
+      const side = FETCH_DIRS[fetchSide++ % FETCH_DIRS.length];
+      ctx.progress(`the ${kind} pen is short of adults and none in sight: a look ${side} for one`);
+      const r = await ctx.act('explore', { target: kind, direction: side, maxDistance: range, step: 32, timeoutMs: 90_000 }).catch(() => undefined);
+      if (r && /^Found /.test(r.text)) target = strayToFetch(p, await entities(ctx, 128), 128);
+    }
+    if (!target) {
+      (ctx.world.lastDone ??= {})['pens-fetch'] = ctx.s.now;
+      await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+      return `no ${kind} to fetch for the pen within ${range}`;
+    }
+    ctx.progress(`fetching a ${kind} for the pen from ${Math.round(target.distance)} blocks off`);
+    const r = await lure(ctx, kind, p, target.id, food);
+    if (!/led one into the pen/.test(r)) (ctx.world.lastDone ??= {})['pens-fetch'] = ctx.s.now;
+    return `fetched for the pen: ${r}`;
+  }
+  return undefined;
+}
