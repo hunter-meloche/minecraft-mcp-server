@@ -53,6 +53,21 @@ test('stash: when nearly full, or now and then with things to put away; never aw
     world({ lastDone: { stash: 10 * 60 * 60_000 - 60_000 } })), null); // put away a minute ago
 });
 
+test('stash: really full in the yard, it goes home to stash from the bed 16 out (it sat there at 34/36 all day)', (t) => {
+  // live 2026-11-09: the bed is 16 from the home point; awake by it at 34 slots, the at-home stash never ran
+  const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'wheat_seeds', count: 64 }));
+  // the home's stock all there (no materials trip waits, as live: "nothing to forage for")
+  const stocked = world({ chestItems: { '1,64,0': { oak_log: 64, cobblestone: 128, coal: 32, iron_ingot: 32 } } });
+  t.deepEqual(stockShort(snap([...gear(), ...junk], { distHome: 16 }), stocked), []);
+  t.regex(stash.wants(snap([...gear(), ...junk], { distHome: 16 }), stocked) ?? '', /slots used/);
+  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 16, sleeping: true }), stocked), null);
+  t.is(stash.wants(snap(gear(), { distHome: 16 }), stocked), null, 'not full: only from home');
+  // not again and again from out there: the project's own load keeps it near 33
+  const justNow = { ...stocked, lastDone: { stash: 10 * 60 * 60_000 - 2 * 60_000 } };
+  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 16 }), justNow), null);
+  t.regex(stash.wants(snap([...gear(), ...junk]), justNow) ?? '', /slots used/, 'at home it still does');
+});
+
 test('stash: in the evening it puts things in the chests but leaves the junk dump outside the fence till morning', (t) => {
   // the dump is 8 out from the fence, past IN_YARD in a grown yard: shelter called the bot back each time (a LOOP)
   const dirt = Array.from({ length: 20 }, (_, i) => ({ slot: 13 + i, name: 'dirt', count: 64 }));

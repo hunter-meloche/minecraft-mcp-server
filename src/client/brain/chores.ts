@@ -105,7 +105,15 @@ export const stash: Goal = {
     // (not while a build job carries its load: those pockets are full on purpose)
     const tripWaits = s.slotsUsed >= STOCK_SLOTS && s.distHome <= TRIP_STASH_RANGE && stockShort(s, world).length > 0 &&
       !activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
-    if (!awakeAtHome(s) && !tripWaits) return null;
+    // really full in the yard is worth the walk too: the bed is 16 from the home point there, the bot woke and sat
+    // by it at 34/36 slots all day (live 2026-11-09), nothing stashed, and the cane round won't go out at 34
+    const fullAt = world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27;
+    const building = activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
+    // once in 10 min: what it carries for the project fills 31 slots, and a farm round's seeds took it back to 33 at
+    // once (the stash ran 6 times in 5 min, stopping the farm, the lights and the trees each time)
+    const fullOut = s.slotsUsed >= fullAt && !s.sleeping && s.distHome <= TRIP_STASH_RANGE && !building &&
+      since(world, 'stash', s.now) > 10 * MINUTE;
+    if (!awakeAtHome(s) && !tripWaits && !fullOut) return null;
     const plan = stashPlan(s.items, stashKeep(world));
     if (!dumpsJunk(s)) plan.drop = [];
     // only what can really go: a worse duplicate of a kept tool can't be told apart, and a project's materials stay
@@ -114,7 +122,7 @@ export const stash: Goal = {
     plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
     if (!plan.deposit.length && !plan.drop.length) return null;
     // a project carrying its materials fills the pockets on purpose: only stop it when really full
-    if (s.slotsUsed >= (world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27)) return `${s.slotsUsed}/36 slots used`;
+    if (s.slotsUsed >= fullAt) return `${s.slotsUsed}/36 slots used`;
     // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used): make the room. Between the
     // two limits the bot sat idle all day at 31 slots, its build job waiting on 77 logs and the pockets full of seeds
     if (tripWaits) return `${s.slotsUsed}/36 slots used, and a materials trip waits for room`;
