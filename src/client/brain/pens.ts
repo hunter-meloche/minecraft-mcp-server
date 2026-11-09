@@ -99,17 +99,20 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
       await ctx.call('item.select', { name: food });
       await ctx.act('move-to-position', { ...e.position, range: 2, timeoutMs: 45_000 });
     }
-    // back to the gate in legs of 4 blocks, waiting for it each time (enough legs for one fetched from 96 out)
+    // back to the gate in legs of LEG blocks, the food in hand all the way, waiting for it each time. A careful walk
+    // (no digging: Baritone's tool pick took the wheat out of hand mid-leg), a longer wait, and a step back toward
+    // it when it lags: with 4-block legs and a 4 s wait, two cows fetched from 61 and 77 out "stopped following"
     const far = Math.hypot(way.outside.x - e.position.x, way.outside.z - e.position.z);
-    for (let leg = 0; leg < Math.max(20, Math.ceil(far / 4) + 8); leg++) {
+    for (let leg = 0; leg < Math.max(30, Math.ceil(far / LEG) + 10); leg++) {
       if (ctx.signal.aborted) return `${kind}: stopped`;
       const me = (await ctx.status()).position!;
       const d = Math.hypot(way.outside.x - me.x, way.outside.z - me.z);
       if (d < 2) break;
-      const t = Math.min(1, 4 / d);
+      const t = Math.min(1, LEG / d);
       await ctx.call('item.select', { name: food });
-      await ctx.act('move-to-position', { x: me.x + (way.outside.x - me.x) * t, y: way.outside.y, z: me.z + (way.outside.z - me.z) * t, range: 1, timeoutMs: 20_000 });
-      for (let w = 0; w < 4; w++) { e = await find(ctx, id); if (!e || e.distance < 5) break; await pause(1000); }
+      await ctx.call('goto', { x: Math.floor(me.x + (way.outside.x - me.x) * t), y: way.outside.y, z: Math.floor(me.z + (way.outside.z - me.z) * t), range: 1, careful: true, timeoutMs: 20_000 }, 30_000)
+        .catch(() => undefined);
+      e = await keepClose(ctx, id, food);
       if (!e || e.distance > 10) return `${kind}: it stopped following`;
     }
     if (!(await gateOpen(ctx, way.gate))) await ctx.act('use-item-on-block', { ...way.gate, face: 'up', toggle: true });
@@ -182,6 +185,31 @@ export const pens: Goal = {
     return out.join('; ') || 'nothing to do at the pens';
   }
 };
+
+/** Blocks a leg of the walk home with an animal on the food. */
+const LEG = 3;
+
+/**
+ * Wait for a led animal to close in (food in hand, up to 8 s), and when it lags (5 to 10 off) step back toward it
+ * to tempt it again, twice at most. The animal as last seen, or undefined when it's gone.
+ */
+async function keepClose(ctx: GoalContext, id: number, food: string): Promise<Ent | undefined> {
+  let e: Ent | undefined;
+  for (let tries = 0; tries < 3; tries++) {
+    for (let w = 0; w < 8; w++) {
+      await ctx.call('item.select', { name: food }).catch(() => undefined);
+      e = await find(ctx, id);
+      if (!e || e.distance < 5) return e;
+      await pause(1000);
+    }
+    if (!e || e.distance > 10 || tries === 2) return e;
+    // lagging: halfway back toward it, food out
+    const me = (await ctx.status()).position!;
+    await ctx.call('goto', { x: Math.floor((me.x + e.position.x) / 2), y: Math.floor(e.position.y), z: Math.floor((me.z + e.position.z) / 2), range: 1, careful: true, timeoutMs: 15_000 }, 25_000)
+      .catch(() => undefined);
+  }
+  return e;
+}
 
 /** How far out an idle bot fetches an animal for an empty pen (within its leash), and how long a fruitless look waits. */
 const FETCH_RANGE = 96;

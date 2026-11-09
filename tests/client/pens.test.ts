@@ -45,6 +45,12 @@ function fetchCtx(world: WorldMemory, cowAt: { x: number; z: number } | undefine
         return { entities: distance <= a.maxDistance ? [{ id: 5, name: 'cow', category: 'creature', distance, position: cow }] : [] };
       }
       if (m === 'world.region') return { blocks: ['oak_fence_gate[open=true]'] };
+      // the careful walk home with it (legs of 3): the cow follows the wheat from within 10
+      if (m === 'goto') {
+        me = { x: a.x, y: 64, z: a.z };
+        if (cow && !penned && Math.hypot(cow.x - me.x, cow.z - me.z) <= 10) { cow = { x: me.x + 0.5, y: 64, z: me.z - 1 }; penned = cow.x >= 0 && cow.x < 7 && cow.z >= 0 && cow.z < 7; }
+        return { arrived: true };
+      }
       return {};
     }) as GoalContext['call'],
     act: async (tool: string, a: Record<string, number> = {}) => {
