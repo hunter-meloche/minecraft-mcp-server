@@ -164,7 +164,7 @@ fences, rails, wool, torches...) that the bot didn't place itself. Near one on t
 
 Under ground (mineshafts, dungeons, someone's cellar) the built blocks stay and the rock round them is mined. Gates and
 doors it opens to walk through are shut behind it. It never attacks a player, even one that hits it (auto-defend is
-for hostile mobs), and it doesn't chat on its own. After a server restart or a dropped connection it rejoins by itself
+for hostile mobs), and it doesn't chat on its own, except to answer `claudebot status` (its name, then "status"), from anyone, in one line: what it's doing, its health and food, and what it's building (at most one answer every 20 s). After a server restart or a dropped connection it rejoins by itself
 (after 30 s, then less often, down to every 5 minutes); kicked, banned or refused by the whitelist, it stays off until
 `rejoin-server`.
 

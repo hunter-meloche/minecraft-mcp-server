@@ -20,6 +20,7 @@ import { registerStructureTools } from './client/structures/tools.js';
 import { jsonFileStore } from './build-protection.js';
 import { defaultMinecraftDir } from './client/install.js';
 import { takeAlerts } from './auto-defend.js';
+import { cooldown, isStatusQuery } from './client/brain/chatstatus.js';
 
 setupStdioFiltering();
 
@@ -57,12 +58,20 @@ async function main() {
       },
       {
         onLog: log,
-        onChatMessage: (username, message) => messageStore.addMessage(username, message),
+        onChatMessage: (username, message) => {
+          messageStore.addMessage(username, message);
+          // "claudebot status" from anyone in the chat: one line on what it's doing (a few seconds apart at most);
+          // the only thing it says in a shared world, and only when asked
+          if (isStatusQuery(message, config.username) && statusAllowed() && brain) {
+            void runtime.call('chat.send', { text: brain.chatStatus() }).catch(() => undefined);
+          }
+        },
         // the brain only in the copy that drives the bot (another session's copy may already be: see fileLock)
         onLock: () => { if (config.autonomy) brain.setEnabled(true); }
       },
       { lock: fileLock(path.join(os.homedir(), '.minecraft-mcp-server')) }
     );
+    const statusAllowed = cooldown();
     const factory = new ToolFactory(server, connection, () => (connection.isConnected() ? connection.alerts.take() : null));
     const dataDir = path.join(os.homedir(), '.minecraft-mcp-server');
     const runtime = registerClientTools(factory, connection.bridge, messageStore, {

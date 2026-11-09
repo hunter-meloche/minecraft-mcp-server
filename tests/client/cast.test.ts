@@ -43,9 +43,9 @@ test('the cast site: plain lawn with sealed walls, nothing built or burning with
 
 let floats = true;
 
-test.serial('a cast: lava in the pit, water on it is obsidian, scooped, mined, floated up; the pit filled after', async (t) => {
+test.serial('a cast: lava in the pit, water on it is obsidian, scooped, mined, lifted out with dirt; the pit filled after', async (t) => {
   const { world, read } = lawn();
-  const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 1], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
+  const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 2], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
   const site = { x: 4, y: 62, z: 4 };
   const w: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard: { x1: 0, z1: 0, x2: 19, z2: 19, y: 62 }, zones: { 'obsidian:cast': [site] }, lavaCasting: true };
   let feet: P = { x: 10, y: 63, z: 10 };
@@ -79,12 +79,15 @@ test.serial('a cast: lava in the pit, water on it is obsidian, scooped, mined, f
       if (item === 'lava_bucket') { set(into, 'lava[level=0]'); inv.set('lava_bucket', inv.get('lava_bucket')! - 1); inv.set('bucket', inv.get('bucket')! + 1); }
       else if (item === 'water_bucket') {
         set(into, 'water[level=0]');
-        inv.set('water_bucket', 0); inv.set('bucket', inv.get('bucket')! + 1);
+        inv.set('water_bucket', inv.get('water_bucket')! - 1); inv.set('bucket', inv.get('bucket')! + 1);
         const below = { ...into, y: into.y - 1 };
         if (/^lava/.test(get(below))) set(below, 'obsidian');
-        if (lying && floats) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; } // floats up within reach
-      } else if (item === 'bucket' && /^water/.test(get(q))) { set(q, 'air'); inv.set('water_bucket', 1); inv.set('bucket', inv.get('bucket')! - 1); }
-      else if (item === 'dirt') { set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1); }
+      } else if (item === 'bucket' && /^water/.test(get(q))) { set(q, 'air'); inv.set('water_bucket', inv.get('water_bucket')! + 1); inv.set('bucket', inv.get('bucket')! - 1); }
+      else if (item === 'dirt') {
+        set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1);
+        // the pit filled over the drop pushes it up out of it, beside the bot (`floats`: off, it stays put)
+        if (lying && floats && into.y === 62) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; }
+      }
       return { ok: true, text: 'Used' };
     }
   } as unknown as GoalContext;
@@ -95,13 +98,13 @@ test.serial('a cast: lava in the pit, water on it is obsidian, scooped, mined, f
   // the lawn back: the pit filled with dirt, the water bucket kept
   t.is(get({ x: 4, y: 61, z: 4 }), 'dirt');
   t.is(get({ x: 4, y: 62, z: 4 }), 'dirt');
-  t.is(inv.get('water_bucket'), 1);
+  t.is(inv.get('water_bucket'), 2, 'both water buckets back');
 });
 
-test.serial('a drop that does not float up: no more lava on it, the rest kept, the pit left open', async (t) => {
+test.serial('a drop that does not come up: no more lava cast, the rest kept', async (t) => {
   floats = false;
   const { world, read } = lawn();
-  const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 1], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
+  const inv = new Map<string, number>([['lava_bucket', 2], ['water_bucket', 2], ['bucket', 0], ['diamond_pickaxe', 1], ['dirt', 10]]);
   const site = { x: 4, y: 62, z: 4 };
   const w: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard: { x1: 0, z1: 0, x2: 19, z2: 19, y: 62 }, zones: { 'obsidian:cast': [site] }, lavaCasting: true };
   let feet: P = { x: 10, y: 63, z: 10 };
@@ -135,21 +138,22 @@ test.serial('a drop that does not float up: no more lava on it, the rest kept, t
       if (item === 'lava_bucket') { set(into, 'lava[level=0]'); inv.set('lava_bucket', inv.get('lava_bucket')! - 1); inv.set('bucket', inv.get('bucket')! + 1); }
       else if (item === 'water_bucket') {
         set(into, 'water[level=0]');
-        inv.set('water_bucket', 0); inv.set('bucket', inv.get('bucket')! + 1);
+        inv.set('water_bucket', inv.get('water_bucket')! - 1); inv.set('bucket', inv.get('bucket')! + 1);
         const below = { ...into, y: into.y - 1 };
         if (/^lava/.test(get(below))) set(below, 'obsidian');
-        if (lying && floats) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; } // floats up within reach
-      } else if (item === 'bucket' && /^water/.test(get(q))) { set(q, 'air'); inv.set('water_bucket', 1); inv.set('bucket', inv.get('bucket')! - 1); }
-      else if (item === 'dirt') { set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1); }
+      } else if (item === 'bucket' && /^water/.test(get(q))) { set(q, 'air'); inv.set('water_bucket', inv.get('water_bucket')! + 1); inv.set('bucket', inv.get('bucket')! - 1); }
+      else if (item === 'dirt') {
+        set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1);
+        if (lying && floats && into.y === 62) { inv.set('obsidian', (inv.get('obsidian') ?? 0) + lying); lying = 0; }
+      }
       return { ok: true, text: 'Used' };
     }
   } as unknown as GoalContext;
   const r = await castObsidian(ctx, 4);
   floats = true;
   t.is(r.have, 0, r.text);
-  t.regex(r.text, /didn't float up/);
+  t.regex(r.text, /didn't come up/);
   t.is(inv.get('lava_bucket'), 1, 'the second lava bucket kept, not poured onto the drop');
-  t.is(get({ x: 4, y: 61, z: 4 }), 'air', 'the pit left open over it');
 });
 
 test('casting is off until it is turned on: no lava fetched, nothing cast', async (t) => {

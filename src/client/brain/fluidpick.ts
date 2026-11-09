@@ -161,12 +161,17 @@ export async function fillAt(ctx: GoalContext, v: SourceVerdict, fluid: 'lava' |
 
 /** Sources of a fluid in sight, judged, nearest first (read-only). */
 export async function sourcesInSight(ctx: Pick<GoalContext, 'call' | 's'>, fluid: 'lava' | 'water', groundY: number | undefined, most = 12): Promise<SourceVerdict[]> {
-  const found = await ctx.call<{ positions: P[] }>('world.findBlocks', { block: fluid, maxDistance: 96, count: 256 }).catch(() => ({ positions: [] as P[] }));
+  const reach = fluid === 'lava' ? 4 : 3;
+  // asked of the mod by height too (the nearest 256 were a cave's, and the surface ones never came back at all)
+  const yBand = groundY === undefined ? {} : { yMin: groundY - reach, yMax: groundY + reach };
+  const found = await ctx.call<{ positions: P[] }>('world.findBlocks', { block: fluid, maxDistance: 96, count: 256, ...yBand }).catch(() => ({ positions: [] as P[] }));
   const here = (await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P })).position ?? ctx.s.position;
   const from = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
   // lava near the ground level only, before any is judged: an underground lake's hundreds of sources were all nearer
   // than any surface pool, and the 60 judged were all of them (none safe, every time)
-  const band = (p: P) => fluid !== 'lava' || groundY === undefined || Math.abs(p.y - groundY) <= 4;
+  // water too, nearer still (the cave water under the yard crowded out the pond by the fence): it's surface water
+  // that's wanted
+  const band = (p: P) => groundY === undefined || Math.abs(p.y - groundY) <= reach;
   const near = found.positions.filter(band).sort((a, b) => Math.hypot(a.x - from.x, a.y - from.y, a.z - from.z) - Math.hypot(b.x - from.x, b.y - from.y, b.z - from.z));
   // judged until `most` good ones (the nearest dozen were all cave water under the yard, the lake past them), at
   // most 60 looked at; the refused ones come along too (lava-sources shows why), good ones first

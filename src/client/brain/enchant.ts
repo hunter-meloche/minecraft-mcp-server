@@ -1,6 +1,7 @@
 import type { Goal, GoalContext } from './goals.js';
 import type { Milestone, MilestoneState, StepResult } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
+import { progressOf } from './progress.js';
 import { enchantRoom, type Side } from './blueprints.js';
 import { chestTotals, takeFromChests } from './chests.js';
 import { tier } from './kit.js';
@@ -70,6 +71,10 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
       {
         name: 'mine 4 obsidian',
         run: async (ctx, st) => {
+          // what it gathers for the room stays carried: the step took the obsidian from the chest, the pockets went to
+          // 28, the stash (more urgent) put it back, and round again every 15 s
+          const p = progressOf(ctx.world);
+          p.carry = [...new Set([...(p.carry ?? []), 'obsidian'])];
           const stored = chestTotals(ctx.world).obsidian ?? 0;
           if (stored && (await countOf(ctx, 'obsidian')) < 4) await takeFromChests(ctx, 'obsidian', 4);
           const have = await countOf(ctx, 'obsidian');

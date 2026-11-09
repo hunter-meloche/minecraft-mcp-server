@@ -58,7 +58,7 @@ function fake(items: Snapshot['items'], wild: P[]) {
       return { ok: true, text: 'ok' };
     }
   } as unknown as GoalContext;
-  return { ctx, calls };
+  return { ctx, calls, world };
 }
 
 const step = enchantingMilestone([]).steps[0];
@@ -87,4 +87,10 @@ test('obsidian: none near home and not kitted out: it waits, and says for what',
   t.is(r.status, 'blocked');
   t.regex(r.text, /waits for: .*food/);
   t.false(calls.includes('goto'));
+});
+
+test('obsidian it has stays carried: the step marks it for the stash to leave (the take-and-store ping-pong)', async (t) => {
+  const { ctx, world } = fake(kitted, wild(-30));
+  await step.run(ctx, { step: 0, data: {} });
+  t.true(world.progress?.carry?.includes('obsidian'));
 });

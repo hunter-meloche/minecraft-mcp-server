@@ -32,6 +32,7 @@ import { yardGrowGoal, yardGrowStatus } from './yardgrow.js';
 import { storageGoal } from './storehouse.js';
 import { bedGoal } from './home.js';
 import { spareGoal } from './spare.js';
+import { statusAnswer } from './chatstatus.js';
 
 /**
  * The bot's own low-level AI for the client backend, built like a mob's goal selector on a villager's schedule: every
@@ -391,6 +392,14 @@ export class Brain {
 
   /** Save the memory now (after a tool changed it). */
   saveMemory(): void { this.memory.save(); }
+
+  /** The answer to "claudebot status" in the server chat: what it's doing, how it is, what it's building. */
+  chatStatus(): string {
+    const world = this.worldId ? this.memory.world(this.worldId) : undefined;
+    const cur = world?.progress?.current;
+    const title = cur ? TREE.find(m => m.id === cur.id)?.title : undefined;
+    return statusAnswer({ line: this.statusLine(), health: this.last?.health, food: this.last?.food, project: title, done: world?.progress?.done.length });
+  }
 
   /** One line for the bot's own window: what the autopilot is doing right now. */
   statusLine(): string {

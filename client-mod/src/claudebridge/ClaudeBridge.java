@@ -59,6 +59,9 @@ public class ClaudeBridge implements ClientModInitializer {
         s.allowParkour.value = false;
         s.allowParkourPlace.value = false;
         s.maxFallHeightNoWater.value = 3;
+        // no water-bucket landings: Baritone poured the bot's water buckets to break falls on the way back from the lake
+        // and left them (two vanished on one walk, another on the next), and the obsidian cast found none to pour
+        s.allowWaterBucketFall.value = false;
         s.avoidance.value = true;
         s.blocksToAvoid.value.add(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH); // it hurts: 5 hits on one walk
         // scaffold with stone-type blocks only: dirt is worth keeping for farmland and fills (Baritone climbed a hill on

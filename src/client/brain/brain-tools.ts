@@ -79,7 +79,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
       const s = await rt.status();
       const ground = brain.worldMemory()?.yard?.y ?? (s.block ? s.block.y - 1 : undefined);
       const io = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } } } as unknown as Parameters<typeof sourcesInSight>[0];
-      const all = await sourcesInSight(io, fluid, fluid === 'lava' ? ground : undefined, 4);
+      const all = await sourcesInSight(io, fluid, ground, 4);
       if (!all.length) return factory.createResponse(`No ${fluid} in sight.`);
       const list = [...all.filter(v => !v.why), ...all.filter(v => v.why).slice(0, 8)];
       const at = (p: { x: number; y: number; z: number }) => `(${p.x}, ${p.y}, ${p.z})`;
@@ -96,7 +96,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
       const s = await rt.status();
       const ground = brain.worldMemory()?.yard?.y ?? (s.block ? s.block.y - 1 : undefined);
       const ctx = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } }, signal: new AbortController().signal, progress: () => undefined } as unknown as Parameters<typeof fillAt>[0];
-      const list = (await sourcesInSight(ctx, fluid, fluid === 'lava' ? ground : undefined, 3)).filter(v => !v.why);
+      const list = (await sourcesInSight(ctx, fluid, ground, 3)).filter(v => !v.why);
       if (!list.length) return factory.createErrorResponse(`No ${fluid} source in sight that's safe to fill a bucket at (lava-sources says why for each)`);
       const lines: string[] = [];
       for (const v of list.slice(0, 3)) {

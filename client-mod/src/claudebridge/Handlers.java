@@ -218,12 +218,17 @@ public final class Handlers {
             // or at least awayMin outside a rectangle (the yard): awayX1, awayZ1, awayX2, awayZ2
             boolean awayRect = p.has("awayX1");
             int ax1 = intParam(p, "awayX1", 0), az1 = intParam(p, "awayZ1", 0), ax2 = intParam(p, "awayX2", 0), az2 = intParam(p, "awayZ2", 0);
+            // yMin/yMax: only blocks in that height band (lava and water at the ground level: a cave's hundreds of
+            // sources under the yard filled the nearest 256 and hid the lake and the pools)
+            boolean band = p.has("yMin") || p.has("yMax");
+            int yMin = intParam(p, "yMin", Integer.MIN_VALUE), yMax = intParam(p, "yMax", Integer.MAX_VALUE);
             List<BlockPos> found = baritone.api.BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
-                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), openAbove || awayMin > 0 ? 65536 : 4096, -1, (maxDistance >> 4) + 1);
+                Processes.baritone().getPlayerContext(), new BlockOptionalMetaLookup(name), openAbove || awayMin > 0 || band ? 65536 : 4096, -1, (maxDistance >> 4) + 1);
             Vec3 eye = pl.position();
             JsonArray out = new JsonArray();
             found.stream()
                 .filter(bp -> Vec3.atCenterOf(bp).distanceTo(eye) <= maxDistance)
+                .filter(bp -> bp.getY() >= yMin && bp.getY() <= yMax)
                 .filter(bp -> awayMin <= 0 || (awayRect
                     ? Math.max(Math.max(ax1 - bp.getX(), bp.getX() - ax2), Math.max(az1 - bp.getZ(), bp.getZ() - az2)) >= awayMin
                     : Math.hypot(bp.getX() - awayX, bp.getZ() - awayZ) >= awayMin))
