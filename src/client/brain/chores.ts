@@ -421,6 +421,9 @@ export const STOCK: { name: string; want: number; mine: string; counts: RegExp }
   { name: 'sand', want: 0, mine: 'sand', counts: /^sand$/ },
   { name: 'clay_ball', want: 0, mine: 'clay', counts: /^clay_ball$/ },
   { name: 'gravel', want: 0, mine: 'gravel', counts: /^gravel$/ },
+  // paper for the enchanting room's books: wild cane, when a project is short of it (the room waited on 116 cane with
+  // the bot idle, no trip ever going for it: the cane plot's few cells grow it too slowly)
+  { name: 'sugar_cane', want: 0, mine: 'sugar_cane', counts: /^sugar_cane$/ },
   // fill for levelling (the yard growing, a site): grass dug gives dirt
   { name: 'dirt', want: 0, mine: 'dirt,grass_block', counts: /^dirt$/ },
   { name: 'andesite', want: 0, mine: 'andesite', counts: /^andesite$/ },

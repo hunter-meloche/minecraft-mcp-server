@@ -64,3 +64,9 @@ test('growing the yard with the fill carried: levels, grows, and the met need is
   t.is(world.progress?.need, undefined);
   t.true(acts.some(a => a.tool === 'level-area' && !a.args.dryRun));
 });
+
+test('a project short of sugar cane sends the stock trips for wild cane', (t) => {
+  const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96 };
+  world.progress = { done: [], journal: [], need: { sugar_cane: 116, leather: 38 } } as unknown as WorldMemory['progress'];
+  t.like(stockShort(snap(), world).find(x => x.name === 'sugar_cane'), { short: 116, mine: 'sugar_cane' });
+});

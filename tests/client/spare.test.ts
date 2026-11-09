@@ -34,7 +34,8 @@ test('spare time: by day near home, fed and with room, with daylight to spare; t
   t.regex(spareGoal.wants(snap(), w) ?? '', /stockpile iron/);
   t.is(spareGoal.wants(snap({ activity: 'rest' }), w), null);
   t.is(spareGoal.wants(snap({ distHome: 40 }), w), null);
-  t.is(spareGoal.wants(snap({ slotsUsed: 30 }), w), null);
+  t.is(spareGoal.wants(snap({ slotsUsed: 32 }), w), null);
+  t.regex(spareGoal.wants(snap({ slotsUsed: 30 }), w) ?? "", /stockpile/);
   t.regex(spareGoal.wants(snap({ slotsUsed: 26 }), w) ?? "", /stockpile/);
   t.is(spareGoal.wants(snap({ food: 8 }), w), null);
   t.is(spareGoal.wants(snap({ timeOfDay: 10_500 }), w), null);

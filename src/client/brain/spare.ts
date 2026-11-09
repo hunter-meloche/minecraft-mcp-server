@@ -49,7 +49,8 @@ export const spareGoal: Goal = {
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > 16) return null;
     // room as the stock trips want it (the stash empties the pockets at home from 27: at 26 neither ran, and it idled)
-    if (s.health < 14 || s.food < 12 || s.slotsUsed >= 30) return null;
+    // 32: at 30 (the stock trips' limit) it sat idle with exactly 30 used, the stash having nothing more to put away
+    if (s.health < 14 || s.food < 12 || s.slotsUsed >= 32) return null;
     if (daylightLeft(s.timeOfDay) < 3000) return null; // under 2.5 minutes of daylight: not worth setting out (as the stock trips)
     if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return null; // the kit looks in them first
     const t = spareTask(s, world);
