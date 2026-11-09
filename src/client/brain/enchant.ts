@@ -5,7 +5,7 @@ import { progressOf } from './progress.js';
 import { enchantRoom, type Side } from './blueprints.js';
 import { chestTotals, takeFromChests } from './chests.js';
 import { tier } from './kit.js';
-import { deepTripReady, pickMineStart } from './mine.js';
+import { DEEP_TRIP, deepTripReady, pickMineStart } from './mine.js';
 import { tripCheck } from './deep.js';
 import { nearestZone, type Zone } from './courtesy.js';
 import { bucketsFor, castObsidian, fetchLava } from './cast.js';
@@ -23,6 +23,8 @@ const blocked = (text: string, retryMs = 20 * MINUTE): StepResult => ({ status: 
 /** How far a trip for obsidian looks: steps of this many blocks out from the mine, scanning after each. */
 const OBSIDIAN_STEP = 40;
 const OBSIDIAN_STEPS = 3;
+/** Free slots an obsidian trip wants (buckets of lava and the obsidian itself, not ore). */
+export const OBSIDIAN_TRIP_SLOTS = 3;
 
 type P = { x: number; y: number; z: number };
 
@@ -100,7 +102,10 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
             if (got >= 4) return ok(`${got} obsidian, cast at home`);
           } else ctx.progress(`casting obsidian: ${noBuckets}`);
           // none near home: out from the mine's departure point, kitted out like a deep trip, looking a step at a time
-          const ready = deepTripReady(tripCheck(ctx.s));
+          // kitted out like a deep trip, but the pockets needn't be as empty: it brings back a few buckets and 4
+          // obsidian, not a load of ore (it sat at home all morning, "4 free slots < 10", with the storage house full)
+          const check = tripCheck(ctx.s);
+          const ready = deepTripReady(check.slotsFree >= OBSIDIAN_TRIP_SLOTS ? { ...check, slotsFree: Math.max(check.slotsFree, DEEP_TRIP.slotsFree) } : check);
           if (!ready.ok) return blocked(`no obsidian or lava in sight near home; a trip out for it waits for: ${ready.why}`, 15 * MINUTE);
           const zones = (await ctx.call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
           const start = pickMineStart(ctx.s.home!, ctx.world.yard, ctx.world.zones?.mine?.[0], p => nearestZone(p, zones, true).distance);

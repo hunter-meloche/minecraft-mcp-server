@@ -94,3 +94,12 @@ test('obsidian it has stays carried: the step marks it for the stash to leave (t
   await step.run(ctx, { step: 0, data: {} });
   t.true(world.progress?.carry?.includes('obsidian'));
 });
+
+test('an obsidian trip needs only a few free slots, not a deep trip\'s ten', async (t) => {
+  const { ctx, calls } = fake(kitted, wild(-160));
+  // 31 of 36 used: 5 free, under the deep trip's 10
+  (ctx.s as { slotsUsed: number }).slotsUsed = 31;
+  const r = await step.run(ctx, { step: 0, data: {} });
+  t.is(r.status, 'done', r.text);
+  t.true(calls.includes('goto'));
+});
