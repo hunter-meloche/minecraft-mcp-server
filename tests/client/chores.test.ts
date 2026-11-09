@@ -91,14 +91,15 @@ test('stash: in the evening it puts things in the chests but leaves the junk dum
   t.regex(stash.wants(snap([...gear(), ...logs], { activity: 'return' }), world()) ?? '', /slots used/);
 });
 
-test('stash: makes room when a build job materials trip waits on the pockets (stock sets out under 30 slots)', (t) => {
-  const seeds = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'wheat_seeds', count: 64 }));
-  const items = [...gear(), ...seeds]; // 31 slots
+test('stash: makes room when a build job materials trip waits on the pockets (stock sets out under 33 slots)', (t) => {
+  const seeds = [6, 7, ...Array.from({ length: 22 }, (_, i) => 13 + i)].map(slot => ({ slot, name: 'wheat_seeds', count: 64 }));
+  const items = [...gear(), ...seeds]; // 33 slots
   const job = { id: 5, world: 'w', structure: 'home', mode: 'repair' as const, status: 'gathering' as const, createdAt: 0, updatedAt: 0, need: { oak_log: 77 }, carry: ['oak_log'] };
   t.is(stock.wants(snap(items), world({ buildJobs: [job] })), null); // too full to set out
-  t.regex(stash.wants(snap(items), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room/);
+  // at home at 33 the pockets-full rule fires first; either way the stash runs
+  t.regex(stash.wants(snap(items), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room|33\/36 slots used/);
   // from the job's site too, 24 blocks out (the plain at-home stash doesn't go that far)
-  t.regex(stash.wants(snap(items, { distHome: 24 }), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room/);
+  t.regex(stash.wants(snap(items, { distHome: 24 }), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room|33\/36 slots used/);
   t.is(stash.wants(snap(gear(), { distHome: 24 }), world({ buildJobs: [job] })), null);
 });
 

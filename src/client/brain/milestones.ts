@@ -2,7 +2,7 @@ import type { GoalContext } from './goals.js';
 import type { MilestoneState, Step, StepResult } from './progress.js';
 import { billCarry, billCarryCap, prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
-import { allItems, mostWood, progressOf } from './progress.js';
+import { allItems, mostWood, progressOf, rawShort } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
 import { billLeft, billOf, type Blueprint } from './blueprints.js';
@@ -193,8 +193,6 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       st.data.wood ??= mostWood(allItems(ctx.s, ctx.world));
       const bp = inWood(plan(st), st.data.wood as string);
       const wood = st.data.wood as string;
-      // what the bill is crafted from stays carried too (the enchanting room's books, diamonds and obsidian)
-      progressOf(ctx.world).carry = [...new Set([...billCarry(bp.bill, wood), `${wood}_log`, `${wood}_planks`, 'stick'])];
       // only what isn't in place yet (a half-built house, a fence moved out), plus the extras the spec doesn't place
       const origin0 = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
       const there = await readBox(ctx, { ...origin0, ...bp.size });
@@ -202,6 +200,20 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       const all = billOf(bp.spec);
       const bill = { ...left };
       for (const [k, n] of Object.entries(bp.bill)) { const extra = n - (all[k] ?? 0); if (extra > 0) bill[k] = (bill[k] ?? 0) + extra; }
+      // short of something that's slow to come (the enchanting room's cane and leather for its books, for days):
+      // the trips are sent for it and nothing is taken out of the chests yet, and nothing is kept carried, so the
+      // stash puts the rest away. Taken out and kept for the whole wait, 128 planks, 64 logs and 47 sticks sat in the
+      // pockets and every trip waited for room
+      const dry = rawShort(bill, allItems(ctx.s, ctx.world));
+      if (Object.keys(dry).length) {
+        const p = progressOf(ctx.world);
+        p.need = dry;
+        p.carry = p.carryCap = undefined;
+        return blocked(`gathering for the ${label}: short of ${Object.entries(dry).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+      }
+      // all there: what the bill is crafted from stays carried while it's made and built (the enchanting room's books,
+      // diamonds and obsidian were taken out and put back every 15 s otherwise)
+      progressOf(ctx.world).carry = [...new Set([...billCarry(bp.bill, wood), `${wood}_log`, `${wood}_planks`, 'stick'])];
       progressOf(ctx.world).carryCap = billCarryCap(bill, ctx.s.counts, wood);
       const short = await prepareBill(ctx, bill);
       if (Object.keys(short).length) {

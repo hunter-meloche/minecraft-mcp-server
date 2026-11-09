@@ -99,7 +99,12 @@ async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<
 
 /** Empty the pockets into the home chests: when nearly full, and once in a while when home anyway. */
 /** Most slots used to set out on a materials trip (the stash makes room when one waits). */
-const STOCK_SLOTS = 30;
+/**
+ * Most slots used to set out on a materials trip: 3 free carry 192 of a block. At 30, with the pockets holding what
+ * the stash keeps carried (gear, food, the casting's buckets and obsidian), the sugar cane trip for the enchanting
+ * room never left: 31 used, the stash put away all it might and stayed at 31, and the bot idled 68% of the day.
+ */
+export const STOCK_SLOTS = 33;
 /** How far out (the yard, a build job's site) the stash still goes home to make room for a waiting trip. */
 const TRIP_STASH_RANGE = 40;
 

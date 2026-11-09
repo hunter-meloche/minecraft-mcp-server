@@ -70,3 +70,29 @@ test('a project short of sugar cane sends the stock trips for wild cane', (t) =>
   world.progress = { done: [], journal: [], need: { sugar_cane: 116, leather: 38 } } as unknown as WorldMemory['progress'];
   t.like(stockShort(snap(), world).find(x => x.name === 'sugar_cane'), { short: 116, mine: 'sugar_cane' });
 });
+
+test('a materials trip sets out with a few slots free, not only under 30 used', async (t) => {
+  const { stock } = await import('../../src/client/brain/chores.js');
+  const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96 };
+  world.progress = { done: [], journal: [], need: { sugar_cane: 98 } } as unknown as WorldMemory['progress'];
+  t.regex(stock.wants(snap({ slotsUsed: 31 }), world) ?? '', /sugar_cane/);
+  t.is(stock.wants(snap({ slotsUsed: 33 }), world), null);
+});
+
+test('a build short of something slow takes nothing out of the chests and keeps nothing carried: the trips get the need', async (t) => {
+  const { buildStep } = await import('../../src/client/brain/milestones.js');
+  const { enchantRoom } = await import('../../src/client/brain/blueprints.js');
+  const world: WorldMemory = {
+    landmarks: { chests: [{ x: 9, y: 64, z: 9 }], farmland: [] }, leash: 96,
+    chestItems: { '9,64,9': { oak_log: 200, obsidian: 4, diamond: 2 } }
+  };
+  world.progress = { done: [], journal: [], carry: ['oak_log', 'oak_planks'] } as unknown as WorldMemory['progress'];
+  const { ctx, acts } = fakeCtx(world, [{ name: 'sugar_cane', count: 37, slot: 3 }, { name: 'leather', count: 7, slot: 4 }], '');
+  const step = buildStep('enchanting', () => enchantRoom(), 'enchanting room');
+  const r = await step.run(ctx, { step: 0, data: { site: { x: 0, y: 63, z: 0 }, wood: 'oak' } });
+  t.is(r.status, 'blocked');
+  t.regex(r.text, /sugar_cane|leather/);
+  t.false(acts.some(a => a.tool === 'take-from-chest' || a.tool === 'craft-item'), acts.map(a => a.tool).join(','));
+  t.is(world.progress!.carry, undefined);
+  t.truthy(world.progress!.need?.leather);
+});
