@@ -1,5 +1,6 @@
 import test from 'ava';
-import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
+import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stashKeep, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
+import { stashPlan } from '../../src/client/brain/kit.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -24,6 +25,15 @@ const gear = (): InventoryItem[] => ['stone_pickaxe', 'stone_pickaxe', 'stone_ax
   .map((name, slot): InventoryItem => ({ slot, name, count: 1, damage: 0, maxDamage: 131 }))
   .concat(['iron_boots', 'iron_leggings', 'iron_chestplate', 'iron_helmet'].map((name, i) => ({ slot: 36 + i, name, count: 1, damage: 0, maxDamage: 200 })))
   .concat([{ slot: 10, name: 'torch', count: 20 }, { slot: 11, name: 'cobblestone', count: 40 }, { slot: 12, name: 'bread', count: 5 }]);
+
+test('stash: the casting keeps its lava and water buckets, and 5 empty ones at most (9 empties in 9 slots filled the pockets)', (t) => {
+  const empties = Array.from({ length: 9 }, (_, i): InventoryItem => ({ slot: 13 + i, name: 'bucket', count: 1 }));
+  const items = [...gear(), ...empties, { slot: 22, name: 'water_bucket', count: 1 }, { slot: 23, name: 'lava_bucket', count: 1 }];
+  const casting = stashPlan(items, stashKeep(world({ lavaCasting: true }))).deposit;
+  t.deepEqual(casting.filter(d => /bucket/.test(d.name)), [{ name: 'bucket', count: 4 }]);
+  // casting off: one empty bucket stays, as before
+  t.deepEqual(stashPlan(items, stashKeep(world())).deposit.filter(d => d.name === 'bucket'), [{ name: 'bucket', count: 8 }]);
+});
 
 test('ready food counts cooked food and bread, not raw meat or poison', (t) => {
   t.is(readyFoodPoints(new Map([['bread', 2], ['cooked_cod', 1], ['beef', 5], ['pufferfish', 3], ['rotten_flesh', 4]])), 2 * 5 + 5);

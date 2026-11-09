@@ -46,6 +46,17 @@ function projectCarry(world: WorldMemory): Set<string> {
   return new Set([...(world.progress?.carry ?? []), ...activeJobs(world).flatMap(j => j.carry ?? []), ...casting]);
 }
 
+/**
+ * Empty buckets the casting keeps carried at most: 4 for the enchanting room's lava, 1 for the water. The rest go in
+ * the chests (the cast takes them back out, stacked). A water or lava bucket emptied turns into an empty bucket in its
+ * own slot and never stacks: with them all kept, 9 empties took 9 slots, the pockets sat at 36/36 for hours, and the
+ * kit couldn't take the coal for a torch (a LOOP every half hour) nor the cow barn start.
+ */
+const CAST_EMPTY_BUCKETS = 5;
+/** What the stash leaves on the bot: the project's and the jobs' materials, capped where they would hog the slots. */
+export const stashKeep = (world: WorldMemory) =>
+  ({ foods: foods(), keep: projectCarry(world), ...(world.lavaCasting ? { cap: { bucket: CAST_EMPTY_BUCKETS } } : {}) });
+
 /** The LLM's build jobs still going. */
 export const activeJobs = (world: WorldMemory) => (world.buildJobs ?? []).filter(j => !['done', 'failed', 'cancelled'].includes(j.status));
 
@@ -95,7 +106,7 @@ export const stash: Goal = {
     const tripWaits = s.slotsUsed >= STOCK_SLOTS && s.distHome <= TRIP_STASH_RANGE && stockShort(s, world).length > 0 &&
       !activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
     if (!awakeAtHome(s) && !tripWaits) return null;
-    const plan = stashPlan(s.items, { foods: foods(), keep: projectCarry(world) });
+    const plan = stashPlan(s.items, stashKeep(world));
     if (!dumpsJunk(s)) plan.drop = [];
     // only what can really go: a worse duplicate of a kept tool can't be told apart, and a project's materials stay
     // (a full pocket of planks for the storage house had the stash stop the build over and over, storing nothing)
@@ -118,7 +129,7 @@ export const stash: Goal = {
       ctx.world.landmarks.chests.push(at);
       ctx.progress(`no chest at home yet: put one down at (${at.x}, ${at.y}, ${at.z})`);
     }
-    const plan = stashPlan(ctx.s.items, { foods: foods(), keep: projectCarry(ctx.world) });
+    const plan = stashPlan(ctx.s.items, stashKeep(ctx.world));
     if (!dumpsJunk(ctx.s)) plan.drop = [];
     const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
     let stored = 0;

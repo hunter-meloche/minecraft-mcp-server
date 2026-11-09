@@ -348,6 +348,8 @@ export interface StashOptions {
   foods?: Set<string>;
   /** More item names to keep carrying. */
   keep?: Set<string>;
+  /** Kept (by `keep` or otherwise) only up to this many: the rest goes in the chests. */
+  cap?: Record<string, number>;
 }
 
 /** Carried up to this many, the rest dropped: junk, or worth a few (dirt fills holes, seeds and saplings replant). */
@@ -399,6 +401,7 @@ export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { de
     else if (name === 'cobblestone') keep = KIT.carryMax.cobblestone;
     else if (name === 'cobbled_deepslate') keep = Math.max(0, KIT.carryMax.cobblestone - (totals.get('cobblestone') ?? 0));
     else if (KEEP_ONE.has(name)) keep = 1;
+    if (opts.cap?.[name] !== undefined) keep = Math.min(keep, opts.cap[name]);
     if (count > keep) deposit.push({ name, count: count - keep });
   }
   return { deposit, drop };
