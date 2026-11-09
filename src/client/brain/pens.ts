@@ -89,7 +89,10 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
     await ctx.call('item.select', { name: food });
     let e = (await entities(ctx, 128)).find(a => a.id === id);
     if (!e) return `${kind}: it wandered off`;
-    await ctx.act('move-to-position', { ...e.position, range: 3, timeoutMs: 120_000 });
+    // a walk that ends a few blocks short throws ("no path found ... 3.61 blocks away", the cow on a ledge): that
+    // failed the whole fetch, though the wheat reaches it from there. The close-in below and the legs' "stopped
+    // following" check judge whether it is near enough
+    await ctx.act('move-to-position', { ...e.position, range: 3, timeoutMs: 120_000 }).catch(() => undefined);
     // where it stood when seen, 77 blocks off, was not where it grazed by the time the bot got there ("it stopped
     // following" at the first leg): close in on where it is now, wheat in hand, before leading it back
     for (let i = 0; i < 3; i++) {
@@ -97,7 +100,7 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
       if (!e) return `${kind}: it wandered off`;
       if (e.distance <= 4) break;
       await ctx.call('item.select', { name: food });
-      await ctx.act('move-to-position', { ...e.position, range: 2, timeoutMs: 45_000 });
+      await ctx.act('move-to-position', { ...e.position, range: 2, timeoutMs: 45_000 }).catch(() => undefined);
     }
     // back to the gate in legs of LEG blocks, the food in hand all the way, waiting for it each time. A careful walk
     // (no digging: Baritone's tool pick took the wheat out of hand mid-leg), a longer wait, and a step back toward

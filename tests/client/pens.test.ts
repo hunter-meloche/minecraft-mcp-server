@@ -94,3 +94,20 @@ test('fetchForPens: a pen with a pair in it fetches nothing', async (t) => {
   t.is(await fetchForPens(ctx), undefined);
   t.deepEqual(acts, []);
 });
+
+test('fetchForPens: the walk to the cow ending a few blocks short still leads it in (live: "no path found ... 3.61 blocks away" failed the fetch)', async (t) => {
+  const acts: string[] = [];
+  const ctx = fetchCtx(fetchWorld(), { x: 3, z: 60 }, acts);
+  const act = ctx.act;
+  let first = true;
+  ctx.act = (async (tool: string, a: Record<string, number>) => {
+    if (tool === 'move-to-position' && first) {
+      first = false;
+      // Baritone stops 3-4 blocks off on a ledge it can't path over, and the tool reports it as a failure
+      await act(tool, { ...a, z: a.z - 4 });
+      throw new Error(`Could not reach (${a.x}, 64, ${a.z}): no path found. Stopped at (${a.x}, 64, ${a.z - 4}), 3.61 blocks away.`);
+    }
+    return act(tool, a);
+  }) as GoalContext['act'];
+  t.regex((await fetchForPens(ctx)) ?? '', /led one into the pen/);
+});
