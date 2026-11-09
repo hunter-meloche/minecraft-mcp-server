@@ -35,6 +35,17 @@ test('stash: the casting keeps its lava and water buckets, and 5 empty ones at m
   t.deepEqual(stashPlan(items, stashKeep(world())).deposit.filter(d => d.name === 'bucket'), [{ name: 'bucket', count: 8 }]);
 });
 
+test('stash: past the enchanting room\'s obsidian step (or with it built) the casting\'s buckets go in the chest, one kept', (t) => {
+  const empties = Array.from({ length: 5 }, (_, i): InventoryItem => ({ slot: 13 + i, name: 'bucket', count: 1 }));
+  const items = [...gear(), ...empties];
+  const buckets = (w: WorldMemory) => stashPlan(items, stashKeep(w)).deposit.filter(d => d.name === 'bucket');
+  // still casting: the obsidian step is the one in hand
+  t.deepEqual(buckets(world({ lavaCasting: true, progress: { current: { id: 'enchanting', step: 0, data: {} } } as never })), []);
+  // live: the table made, the room waiting on leather at step 2, five empties held the pockets at 33/36 all day
+  t.deepEqual(buckets(world({ lavaCasting: true, progress: { current: { id: 'enchanting', step: 2, data: {} } } as never })), [{ name: 'bucket', count: 4 }]);
+  t.deepEqual(buckets(world({ lavaCasting: true, zones: { enchanting: [{ x: 0, y: 64, z: 0 }] } })), [{ name: 'bucket', count: 4 }]);
+});
+
 test('ready food counts cooked food and bread, not raw meat or poison', (t) => {
   t.is(readyFoodPoints(new Map([['bread', 2], ['cooked_cod', 1], ['beef', 5], ['pufferfish', 3], ['rotten_flesh', 4]])), 2 * 5 + 5);
   t.is(food.wants(snap([{ slot: 0, name: 'bread', count: 4 }]), world()), null); // 20 points: enough

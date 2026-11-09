@@ -40,9 +40,21 @@ function foods(): Set<string> {
 }
 
 /** What the project in hand and the build jobs are gathering and building with: stays carried (the stash put a trip's logs away). */
+/**
+ * The casting still has obsidian to make: it's on, and the enchanting room (the only thing cast for) is neither past
+ * its obsidian step nor built. With the table made and the room waiting on leather, its 5 empty buckets stayed carried
+ * a day, five slots that held the pockets at 33/36 with nothing else to put away: every farm round's wheat set the
+ * stash off, and the stash cut the farm, the pens and the fetch of a cow for the pen short each time (live 2026-11-09).
+ */
+export function castingAhead(world: WorldMemory): boolean {
+  if (!world.lavaCasting || world.zones?.enchanting?.length) return false;
+  const cur = world.progress?.current;
+  return !(cur?.id === 'enchanting' && (cur.step ?? 0) > 0);
+}
+
 function projectCarry(world: WorldMemory): Set<string> {
   // the obsidian casting's buckets stay carried (the stash put four lava buckets in the gear chest mid-test)
-  const casting = world.lavaCasting ? ['lava_bucket', 'water_bucket', 'bucket'] : [];
+  const casting = castingAhead(world) ? ['lava_bucket', 'water_bucket', 'bucket'] : [];
   return new Set([...(world.progress?.carry ?? []), ...activeJobs(world).flatMap(j => j.carry ?? []), ...casting]);
 }
 
@@ -55,7 +67,7 @@ function projectCarry(world: WorldMemory): Set<string> {
 const CAST_EMPTY_BUCKETS = 5;
 /** What the stash leaves on the bot: the project's and the jobs' materials, capped where they would hog the slots. */
 export const stashKeep = (world: WorldMemory) =>
-  ({ foods: foods(), keep: projectCarry(world), ...(world.lavaCasting ? { cap: { bucket: CAST_EMPTY_BUCKETS } } : {}) });
+  ({ foods: foods(), keep: projectCarry(world), ...(castingAhead(world) ? { cap: { bucket: CAST_EMPTY_BUCKETS } } : {}) });
 
 /** The LLM's build jobs still going. */
 export const activeJobs = (world: WorldMemory) => (world.buildJobs ?? []).filter(j => !['done', 'failed', 'cancelled'].includes(j.status));
