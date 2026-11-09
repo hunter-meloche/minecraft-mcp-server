@@ -95,6 +95,22 @@ export function caneMilestone(prereqs: string[]): Milestone {
   };
 }
 
+/**
+ * What a filler block in a cane cell can be: the scaffold kinds (Baritone's throwaway blocks, what tidy clears). Live
+ * 2026-11-09: all five cane cells by the lake held cobblestone, the cane gone; the round only replanted into air, so
+ * it cut 0 stalks every 20 min for 15 hours with 15 cane carried, and the enchanting room sat short of 120 cane.
+ */
+const FILLER = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|netherrack)$/;
+
+/** What the round does with one of its cells, from the cell's block and the one above: cut, replant, clear, or leave. */
+export function caneCellPlan(base: string, mid: string, haveCane: boolean): 'cut' | 'plant' | 'clear' | 'leave' {
+  if (base === 'sugar_cane') return mid === 'sugar_cane' ? 'cut' : 'leave';
+  if (!haveCane) return 'leave';
+  if (AIRY.test(base)) return 'plant';
+  // a scaffold block in the bot's own cane cell (anything else someone may have put there on purpose stays)
+  return FILLER.test(base) && AIRY.test(mid) ? 'clear' : 'leave';
+}
+
 /** Once a day: cut the cane down to its base (the stalk above the bottom block), and replant a missing base. */
 export const caneRound: Goal = {
   name: 'cane',
@@ -107,22 +123,28 @@ export const caneRound: Goal = {
   },
   run: async ctx => {
     (ctx.world.lastDone ??= {}).cane = ctx.s.now;
-    let cut = 0, replanted = 0;
+    let cut = 0, replanted = 0, cleared = 0;
     const before = await caneCount(ctx);
     for (const c of ctx.world.zones!.cane) {
       if (ctx.signal.aborted) break;
       const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 3, length: 1 });
       const [base, mid] = blocks.map(name);
-      if (base === 'sugar_cane' && mid === 'sugar_cane') {
+      const plan = caneCellPlan(base, mid, base !== 'sugar_cane' && (await caneCount(ctx)) > 0);
+      if (plan === 'cut') {
         // cutting the second block brings the rest down with it
         const r = await ctx.act('dig-block', { x: c.x, y: c.y + 1, z: c.z, collect: true });
         if (/^Dug/.test(r.text)) cut++;
-      } else if (AIRY.test(base) && (await caneCount(ctx)) > 0) {
+      } else if (plan === 'plant' || plan === 'clear') {
+        if (plan === 'clear') {
+          const d = await ctx.act('dig-block', { ...c, collect: true }).catch(e => ({ ok: false, text: (e as Error).message }));
+          if (!/^Dug|^No block/.test(d.text)) { ctx.progress(`cane cell ${c.x},${c.y},${c.z}: ${base} would not come out: ${d.text.slice(0, 100)}`); continue; }
+          cleared++;
+        }
         const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
         if (/^Placed/.test(r.text)) replanted++;
       }
     }
     const got = (await caneCount(ctx)) - before + replanted;
-    return `cut ${cut} stalk(s) (${Math.max(0, got)} cane)${replanted ? `, replanted ${replanted}` : ''}`;
+    return `cut ${cut} stalk(s) (${Math.max(0, got)} cane)${replanted ? `, replanted ${replanted}` : ''}${cleared ? ` (${cleared} cell(s) cleared of scaffold first)` : ''}`;
   }
 };

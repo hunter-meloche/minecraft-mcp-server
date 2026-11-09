@@ -1,5 +1,5 @@
 import test from 'ava';
-import { caneMilestone, shoreCells } from '../../src/client/brain/cane.js';
+import { caneCellPlan, caneMilestone, caneRound, shoreCells } from '../../src/client/brain/cane.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
 import { enchantingMilestone } from '../../src/client/brain/enchant.js';
 
@@ -73,4 +73,40 @@ test('find sugar cane: round all four sides with none found, it waits an hour', 
   const r = await find.run(ctx, st as never);
   t.is((r as { retryMs?: number }).retryMs, 60 * 60_000);
   t.is(st.data.caneLooked, 4);
+});
+
+test('caneCellPlan: cut grown cane, replant into air, clear scaffold off its own cell, leave anything else', (t) => {
+  t.is(caneCellPlan('sugar_cane', 'sugar_cane', false), 'cut');
+  t.is(caneCellPlan('sugar_cane', 'air', true), 'leave');
+  t.is(caneCellPlan('air', 'air', true), 'plant');
+  t.is(caneCellPlan('cobblestone', 'air', true), 'clear');
+  t.is(caneCellPlan('cobblestone', 'air', false), 'leave', 'nothing to plant: the block stays');
+  t.is(caneCellPlan('oak_planks', 'air', true), 'leave', 'not scaffold: someone may have built there');
+});
+
+test('cane round: cells filled with cobblestone are cleared and replanted from the cane carried', async (t) => {
+  // live 2026-11-09: five cane cells held cobblestone; "cut 0 stalk(s) (0 cane)" every 20 min for 15 h, 15 cane carried
+  const cells = [{ x: 0, y: 63, z: 0 }, { x: 2, y: 63, z: 0 }];
+  const world = { zones: { cane: cells }, lastDone: {} };
+  const grid = new Map<string, string>([['0,63,0', 'cobblestone'], ['2,63,0', 'cobblestone']]);
+  let cane = 15;
+  const acts: string[] = [];
+  const ctx = {
+    world, s: { now: 1 }, progress: () => undefined, signal: new AbortController().signal,
+    call: async (m: string, a: { x: number; y: number; z: number }) => (m === 'inventory'
+      ? { items: [{ slot: 3, name: 'sugar_cane', count: cane }] }
+      : { blocks: [0, 1, 2].map(dy => grid.get(`${a.x},${a.y + dy},${a.z}`) ?? 'air') }),
+    act: async (tool: string, a: { x: number; y: number; z: number }) => {
+      const k = `${a.x},${a.y},${a.z}`;
+      acts.push(`${tool} ${k}`);
+      if (tool === 'dig-block') { const b = grid.get(k); grid.delete(k); return { ok: true, text: `Dug ${b} at (${k})` }; }
+      if (grid.has(k)) return { ok: true, text: `There's already a block (${grid.get(k)}) at (${k})` };
+      grid.set(k, 'sugar_cane'); cane--;
+      return { ok: true, text: `Placed sugar_cane at (${k}) using down face` };
+    }
+  } as unknown as GoalContext;
+  const r = await caneRound.run(ctx);
+  t.deepEqual(acts, ['dig-block 0,63,0', 'place-block 0,63,0', 'dig-block 2,63,0', 'place-block 2,63,0']);
+  t.is(grid.get('0,63,0'), 'sugar_cane');
+  t.regex(String(r), /replanted 2 \(2 cell\(s\) cleared of scaffold first\)/);
 });
