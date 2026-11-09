@@ -1,5 +1,5 @@
 import test from 'ava';
-import { CATEGORIES, assignChests, type ChestContents, categoryOf, depositPlan, misplaced, stackSize } from '../../src/client/brain/storage.js';
+import { CATEGORIES, assignChests, giveChests, type ChestContents, categoryOf, depositPlan, misplaced, stackSize } from '../../src/client/brain/storage.js';
 
 const P = (x: number) => ({ x, y: 64, z: 0 });
 const K = (x: number) => `${x},64,0`;
@@ -110,4 +110,29 @@ test('misplaced moves only what the target has room for', (t) => {
   t.deepEqual(misplaced(assign, contents), [{ from: K(0), to: K(1), name: 'oak_log', count: 10 }]);
   const tight: ChestContents = { [K(0)]: { oak_log: 10 }, [K(1)]: { oak_planks: 64 * 27 } };
   t.deepEqual(misplaced(assign, tight), []);
+});
+
+test('a chest built for a full category is theirs, not the busiest one\'s', (t) => {
+  // the incident: the gear chest full of one-per-slot tools, 881 cobblestone in stone: the new chest went to stone
+  const chests = [{ x: 0, y: 63, z: 0 }, { x: 1, y: 63, z: 0 }, { x: 2, y: 63, z: 0 }, { x: 3, y: 64, z: 0 }];
+  const contents: ChestContents = {
+    '0,63,0': { iron_sword: 1, iron_axe: 1, bow: 2 }, '1,63,0': { cobblestone: 881 }, '2,63,0': { oak_log: 900 }, '3,64,0': {}
+  };
+  const prev = { '0,63,0': 'gear', '1,63,0': 'stone', '2,63,0': 'wood' };
+  const before = assignChests(chests, ['gear', 'stone', 'wood'], contents, prev);
+  t.not(before['3,64,0'], 'gear'); // what used to happen
+  const r = giveChests(before, contents, ['gear'], ['3,64,0']);
+  t.is(r.assign['3,64,0'], 'gear');
+  t.deepEqual(r.short, []);
+  t.is(assignChests(chests, ['gear', 'stone', 'wood'], contents, r.assign)['3,64,0'], 'gear'); // and it stays
+});
+
+test('an empty spare chest is lent to a full category before building another', (t) => {
+  const assign = { a: 'gear', b: 'stone', c: 'stone', d: 'wood', e: 'misc', f: 'misc' };
+  const contents: ChestContents = { a: { bow: 27 }, b: { cobblestone: 64 }, c: {}, d: {}, e: {}, f: {} };
+  const r = giveChests(assign, contents, ['gear', 'ores']);
+  t.is(r.assign.c, 'gear'); // stone has another chest; wood's only chest and misc stay
+  t.is(r.assign.d, 'wood');
+  t.deepEqual(r.short, ['ores']);
+  t.deepEqual(giveChests({ a: 'gear', c: 'stone' }, { a: {}, c: {} }, ['gear']).short, ['gear']); // stone's only chest
 });

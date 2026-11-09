@@ -126,6 +126,33 @@ export function assignChests(chests: Pos[], categories: readonly string[] = CATE
   return out;
 }
 
+/**
+ * Chests for the categories that ran out of room (the stash's `full`). A chest just built for them (`fresh`) is theirs:
+ * left to assignChests it went to whichever category had the most items per chest, and that is the stackable stone
+ * and wood (881 cobblestone) while the gear chest was full of one-per-slot tools, so the storage goal built a chest
+ * "for gear" three times in an hour (13 chests, the gear one still full). Before building, an empty chest (lowest
+ * first) of a category that has another chest is lent to a full one. Returns the new assignment and the categories still short.
+ */
+export function giveChests(assign: ChestAssign, contents: ChestContents, full: readonly string[], fresh: string[] = []): { assign: ChestAssign; short: string[] } {
+  const out = { ...assign };
+  const short = [...new Set(full)];
+  const count = (c: string) => Object.values(out).filter(v => v === c).length;
+  for (const k of fresh) {
+    const c = short.shift();
+    if (!c) break;
+    out[k] = c;
+  }
+  for (const c of [...short]) {
+    // the lowest first: the top layer is the one the walk can't always reach
+    const empty = Object.keys(out).sort((a, b) => Number(a.split(',')[1]) - Number(b.split(',')[1])).find(k => contents[k] && !Object.values(contents[k]).some(n => n > 0) &&
+      !full.includes(out[k]) && out[k] !== 'misc' && count(out[k]) > 1);
+    if (!empty) continue;
+    out[empty] = c;
+    short.splice(short.indexOf(c), 1);
+  }
+  return { assign: out, short };
+}
+
 export interface Deposit { chest: string; name: string; count: number }
 export interface DepositPlan {
   moves: Deposit[];

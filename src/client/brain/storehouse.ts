@@ -4,6 +4,7 @@ import { storageHouse, STORAGE_HOUSE_MAX_CHESTS, type Side } from './blueprints.
 import { key, peekChest } from './chests.js';
 import { prepare } from './project.js';
 import { readCells } from './repair.js';
+import { assignChests, CATEGORIES, giveChests } from './storage.js';
 
 /**
  * The storage house's chests kept up: one that went missing (broken by a player, a creeper) is put back where the
@@ -173,10 +174,20 @@ export const storageGoal: Goal = {
     (ctx.world.lastDone ??= {}).storage = ctx.s.now;
     const cells = storageChestCells(ctx.world);
     if (!cells.length) return 'no storage house';
+    const did: string[] = [];
+    // an empty chest another category can spare comes before a new one
+    if (ctx.world.storageFull?.length) {
+      const before = assignChests(ctx.world.landmarks.chests, CATEGORIES, ctx.world.chestItems ?? {}, ctx.world.chestAssign ?? {});
+      const lent = giveChests(before, ctx.world.chestItems ?? {}, ctx.world.storageFull);
+      ctx.world.chestAssign = lent.assign;
+      const served = ctx.world.storageFull.filter(c => !lent.short.includes(c));
+      if (served.length) did.push(`gave an empty chest to ${served.join(', ')}`);
+      if (lent.short.length) ctx.world.storageFull = lent.short;
+      else { delete ctx.world.storageFull; return did.join('; '); }
+    }
     const blocks = await readCells(ctx, cells.map(c => c.at));
     const built = new Set((ctx.world.zones?.[chestCellsKey] ?? []).map(p => key(p)));
     const plan = storagePlan(cells, blocks, built, ctx.world.storageFull ?? []);
-    const did: string[] = [];
     if (plan.replace.length) {
       const n = await placeChests(ctx, plan.replace);
       did.push(`put back ${n}/${plan.replace.length} chest half(s)`);
@@ -207,6 +218,11 @@ export const storageGoal: Goal = {
     const found = standing.filter(c => !before.has(key(c)));
     for (const c of found) await peekChest(ctx, c).catch(() => undefined);
     if (found.length) did.push(`${found.length} chest(s) now counted that weren't`);
+    // the chests just built belong to the categories they were built for
+    if (plan.add.length && found.length && ctx.world.storageFull?.length) {
+      const now = assignChests(ctx.world.landmarks.chests, CATEGORIES, ctx.world.chestItems ?? {}, ctx.world.chestAssign ?? {});
+      ctx.world.chestAssign = giveChests(now, ctx.world.chestItems ?? {}, ctx.world.storageFull, found.map(c => key(c))).assign;
+    }
     // a chest gone from the list is gone for the stash's sorting too
     for (const k of Object.keys(ctx.world.chestItems ?? {})) if (inHouse.has(k) && !standing.some(c => key(c) === k)) delete ctx.world.chestItems![k];
     if (plan.add.length || plan.replace.length || found.length) delete ctx.world.storageFull; // the stash finds out again
