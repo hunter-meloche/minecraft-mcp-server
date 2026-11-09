@@ -194,3 +194,23 @@ export async function prepareBill(ctx: GoalContext, bill: Record<string, number>
   if (opts.record !== false) progressOf(ctx.world).need = Object.keys(short).length ? short : undefined;
   return short;
 }
+
+/**
+ * Everything a bill is made from, all the way down (its own items, what they're crafted and smelted from, and what
+ * that is made from): what stays carried while a project prepares it. Only the bill's own items stayed: the
+ * enchanting room took its books, diamonds and obsidian out of the chests for the table and shelves, the pockets went
+ * to 33, the stash (more urgent) put the 26 of them back, and round again every 15 s for an hour. `wood` stands for
+ * the recipes' any-wood planks and logs.
+ */
+export function billCarry(bill: Record<string, number>, wood = 'oak'): string[] {
+  const out = new Set<string>();
+  const add = (item: string, depth: number) => {
+    const name = item === 'planks' ? `${wood}_planks` : item === 'log' ? `${wood}_log` : item;
+    if (out.has(name) || depth > 6) return;
+    out.add(name);
+    if (SMELTED[name]) add(SMELTED[name], depth + 1);
+    for (const inp of Object.keys(recipeFor(name)?.from ?? {})) add(inp, depth + 1);
+  };
+  for (const item of Object.keys(bill)) add(item, 0);
+  return [...out];
+}

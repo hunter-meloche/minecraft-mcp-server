@@ -1,6 +1,6 @@
 import type { GoalContext } from './goals.js';
 import type { MilestoneState, Step, StepResult } from './progress.js';
-import { prepareBill } from './project.js';
+import { billCarry, prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { allItems, mostWood, progressOf } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
@@ -193,7 +193,8 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       st.data.wood ??= mostWood(allItems(ctx.s, ctx.world));
       const bp = inWood(plan(st), st.data.wood as string);
       const wood = st.data.wood as string;
-      progressOf(ctx.world).carry = [...Object.keys(bp.bill), `${wood}_log`, `${wood}_planks`, 'stick'];
+      // what the bill is crafted from stays carried too (the enchanting room's books, diamonds and obsidian)
+      progressOf(ctx.world).carry = [...new Set([...billCarry(bp.bill, wood), `${wood}_log`, `${wood}_planks`, 'stick'])];
       // only what isn't in place yet (a half-built house, a fence moved out), plus the extras the spec doesn't place
       const origin0 = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
       const there = await readBox(ctx, { ...origin0, ...bp.size });

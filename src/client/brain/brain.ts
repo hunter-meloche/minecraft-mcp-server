@@ -99,6 +99,12 @@ export class Brain {
   private leaseUntil = 0;
   private leaseTool = '';
   private retryAt = new Map<string, number>();
+  /**
+   * The loop watch's back-offs (goal -> until): the morning and the idle watchdog let every hold go, and that undid
+   * them (2026-11-09: the enchanting room and the stash took turns 51 times in an hour, the "morning: project may try
+   * again" 3.5 min after the LOOP, which wasn't reported again for half an hour); they run their 10 minutes.
+   */
+  private loopHold = new Map<string, number>();
   private log: string[] = [];
   private memory: BrainMemory;
   private goals: Goal[];
@@ -253,12 +259,13 @@ export class Brain {
     const mins = Math.round(idle / 60_000);
     if (this.idleStage === 0 && idle >= IDLE_FIRST) {
       this.idleStage = 1;
-      const held = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
+      const held = [...this.retryAt].filter(([g, t]) => t > this.now() && !this.looping(g)).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
       // spare time's own marks stay: spare time is what fills an idle day, so letting them go only sent it straight
       // back to a mined-out ore (2026-11-08: "spare time: 0 iron ... Unable to find any path" every 3.5 min for an
       // hour, each let-go undoing the 40-minute wait); they lapse by themselves
       const fruitless = Object.keys(world.lastDone ?? {}).filter(k => k.startsWith('fruitless:') && !k.startsWith('fruitless:spare:'));
       this.retryAt.clear();
+      this.keepLoopHolds();
       this.fails.clear();
       this.morningHold.clear();
       for (const k of fruitless) delete world.lastDone![k];
@@ -352,9 +359,10 @@ export class Brain {
       this.day.work = this.day.idle = 0;
       // a new day: what failed in the dark (no hunting at night) or waited a while may try again now; with a bed
       // the morning comes a minute after dusk, and the food goal sat out a 5 minute retry, hungry, in daylight
-      const waiting = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g]) => g);
+      const waiting = [...this.retryAt].filter(([g, t]) => t > this.now() && !this.looping(g)).map(([g]) => g);
       if (waiting.length) this.note(`morning: ${waiting.join(', ')} may try again`);
       this.retryAt.clear();
+      this.keepLoopHolds();
       this.fails.clear();
       this.morningHold.clear();
     }
@@ -584,15 +592,41 @@ export class Brain {
   private loopCheck(run: Run, outcome: Outcome, text: string): void {
     this.stopWhy = undefined;
     const loop = this.loops.end(run, outcome, text, this.now());
+    const again = loop ? undefined : this.loops.repeat;
+    const victimOf = (l: { victim: string; goals: string[] }) => !SURVIVAL.has(l.victim) ? l.victim : l.goals.find(g => !SURVIVAL.has(g));
+    if (again) {
+      // reported once per half hour, but backed off each time it comes back
+      const v = victimOf(again);
+      // only a loop the goal has gone round again since its last hold (not the old turns, still in the window)
+      const since = (this.loopHold.get(v ?? '') ?? 0) - 10 * 60_000;
+      if (v && again.runs.some(r => r.goal === v && r.at >= since)) { this.hold(v); this.note(`LOOP again (${again.kind}: ${again.goals.join(' and ')}); ${v} backed off for 10 min`); }
+      return;
+    }
     if (!loop) return;
-    const victim = !SURVIVAL.has(loop.victim) ? loop.victim : loop.goals.find(g => !SURVIVAL.has(g));
-    if (victim) this.retryAt.set(victim, this.now() + 10 * 60_000);
+    const victim = victimOf(loop);
+    if (victim) this.hold(victim);
     this.note(`LOOP (${loop.kind}): ${loop.summary}${victim ? `; ${victim} backed off for 10 min` : ''}`);
     if (this.opts.logFile) {
       try {
         fs.appendFileSync(path.join(path.dirname(this.opts.logFile), 'loops.log'),
           JSON.stringify({ at: new Date(this.now()).toISOString(), ...loop, backedOff: victim ?? null }) + '\n');
       } catch { /* a convenience */ }
+    }
+  }
+
+  private hold(goal: string): void {
+    const until = this.now() + 10 * 60_000;
+    this.retryAt.set(goal, until);
+    this.loopHold.set(goal, until);
+  }
+
+  private looping = (goal: string) => (this.loopHold.get(goal) ?? 0) > this.now();
+
+  /** After every hold was let go: the loop watch's back-offs still running are put back. */
+  private keepLoopHolds(): void {
+    for (const [g, t] of this.loopHold) {
+      if (t > this.now()) this.retryAt.set(g, t);
+      else this.loopHold.delete(g);
     }
   }
 

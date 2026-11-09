@@ -74,6 +74,8 @@ export class LoopWatch {
   readonly runs: Run[] = [];
   readonly found: { at: number; loop: Loop }[] = [];
   private reported = new Map<string, number>();
+  /** The loop the last run showed again, already reported within the half hour (still worth backing off). */
+  repeat: Loop | undefined;
 
   begin(goal: string, reason: string, at: number): Run {
     const r: Run = { goal, reason, at };
@@ -87,10 +89,11 @@ export class LoopWatch {
     run.outcome = outcome;
     run.ms = now - run.at;
     run.text = text;
+    this.repeat = undefined;
     const loop = findLoop(this.runs, now);
     if (!loop) return undefined;
     const sig = `${loop.kind}:${[...loop.goals].sort().join('+')}`;
-    if (now - (this.reported.get(sig) ?? -Infinity) < 30 * 60_000) return undefined;
+    if (now - (this.reported.get(sig) ?? -Infinity) < 30 * 60_000) { this.repeat = loop; return undefined; }
     this.reported.set(sig, now);
     this.found.push({ at: now, loop });
     if (this.found.length > 20) this.found.shift();

@@ -380,3 +380,35 @@ test('a goal left "until the morning" may go again when the game morning comes, 
   await brain.tick(); await settle();
   t.regex(brain.status(), /morning: flaky may try again/);
 });
+
+test('a LOOP back-off holds through the morning and the idle watchdog, and a loop back again is backed off again', async (t) => {
+  // live 2026-11-09: the enchanting room and the stash took turns 51 times in an hour: "morning: project may try
+  // again" 3.5 min after the LOOP undid its back-off, and the loop wasn't reported (nor backed off) for half an hour
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000;
+  let runs = 0;
+  const spin: Goal = { name: 'spin', priority: 5, wants: () => 'wants', run: async () => { runs++; return 'nothing to show'; }, timeoutMs: 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [spin] });
+  brain.setEnabled(true);
+  const go = async (n: number, step = 2000) => { for (let i = 0; i < n; i++) { await brain.tick(); await settle(); clock += step; } };
+  await go(6);
+  t.is(runs, 4);
+  t.regex(brain.status(), /LOOP \(spinning\).*spin backed off for 10 min/);
+  // the night skipped in a bed: the morning lets holds go, not this one
+  state.time = 12_900; await go(1);
+  state.time = 100; await go(1);
+  t.notRegex(brain.status(), /morning: spin may try again/);
+  // standing idle by day 3 min and more: the watchdog's let-go leaves it too
+  await go(4, 60_000);
+  t.is(runs, 4);
+  t.notRegex(brain.status(), /let go of spin/);
+  // its 10 minutes up, it goes again; going round again within the half hour backs it off again, unreported
+  clock += 6 * 60_000;
+  await go(6);
+  t.is(runs, 8); // the old turns have left the watch's window: four new ones
+  t.regex(brain.status(), /LOOP again \(spinning: spin\); spin backed off for 10 min/);
+  await go(5);
+  t.is(runs, 8);
+  brain.setEnabled(false);
+});

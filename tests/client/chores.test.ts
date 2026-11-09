@@ -4,6 +4,8 @@ import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 import type { InventoryItem } from '../../src/client/tools.js';
+import { billCarry } from '../../src/client/brain/project.js';
+import { enchantRoom } from '../../src/client/brain/blueprints.js';
 
 const CHEST = { x: 1, y: 64, z: 0 };
 const world = (over: Partial<WorldMemory> = {}): WorldMemory => ({
@@ -62,6 +64,22 @@ test('stash: makes room when a build job materials trip waits on the pockets (st
   // from the job's site too, 24 blocks out (the plain at-home stash doesn't go that far)
   t.regex(stash.wants(snap(items, { distHome: 24 }), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room/);
   t.is(stash.wants(snap(gear(), { distHome: 24 }), world({ buildJobs: [job] })), null);
+});
+
+test('stash: a project keeps what its bill is crafted from carried, not only the bill itself', (t) => {
+  // live 2026-11-09: the enchanting room took books, diamonds and obsidian out of the chests for its table and
+  // shelves, the pockets went to 33, the stash put the 26 back, and round again every 15 s for an hour (51 times)
+  const carry = billCarry(enchantRoom().bill, 'oak');
+  for (const n of ['enchanting_table', 'bookshelf', 'book', 'paper', 'leather', 'sugar_cane', 'diamond', 'obsidian', 'oak_planks', 'oak_log']) t.true(carry.includes(n), n);
+  t.false(carry.includes('planks')); // the recipes' any-wood planks are the project's wood
+  for (const n of ['iron_nugget', 'iron_ingot', 'raw_iron', 'torch', 'coal', 'stick']) t.true(billCarry({ lantern: 1 }).includes(n), n); // smelted from too
+  const fill = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'oak_planks', count: 64 }));
+  const items = [...gear(), ...fill, { slot: 6, name: 'book', count: 26 }, { slot: 7, name: 'obsidian', count: 4 }, { slot: 8, name: 'diamond', count: 2 }];
+  t.is(snap(items).slotsUsed, 34);
+  t.is(stash.wants(snap(items), world({ progress: { carry } } as Partial<WorldMemory>)), null);
+  // the old carry (the bill's own items and the wood) let the stash take the ingredients back
+  const old = [...Object.keys(enchantRoom().bill), 'oak_log', 'oak_planks', 'stick'];
+  t.regex(stash.wants(snap(items), world({ progress: { carry: old } } as Partial<WorldMemory>)) ?? '', /34\/36 slots used/);
 });
 
 test('smelt: raw ore and fuel at home', (t) => {
