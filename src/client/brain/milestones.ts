@@ -1,6 +1,6 @@
 import type { GoalContext } from './goals.js';
 import type { MilestoneState, Step, StepResult } from './progress.js';
-import { billCarry, prepareBill } from './project.js';
+import { billCarry, billCarryCap, prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { allItems, mostWood, progressOf } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
@@ -202,6 +202,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       const all = billOf(bp.spec);
       const bill = { ...left };
       for (const [k, n] of Object.entries(bp.bill)) { const extra = n - (all[k] ?? 0); if (extra > 0) bill[k] = (bill[k] ?? 0) + extra; }
+      progressOf(ctx.world).carryCap = billCarryCap(bill, ctx.s.counts, wood);
       const short = await prepareBill(ctx, bill);
       if (Object.keys(short).length) {
         return blocked(`gathering for the ${label}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
@@ -212,7 +213,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
         for (const l of bp.landmarks) addZone(ctx.world, `${kind}:${l.kind}`, { x: origin.x + l.at.x, y: origin.y + l.at.y, z: origin.z + l.at.z });
         addZone(ctx.world, kind, { x: site.x, y: site.y, z: site.z, width: bp.size.width, length: bp.size.length });
         ctx.world.landmarks.foundAt = 0; // look for the new chests, beds and tables
-        progressOf(ctx.world).carry = undefined;
+        progressOf(ctx.world).carry = progressOf(ctx.world).carryCap = undefined;
         return ok(`${label} built at (${origin.x}, ${origin.y}, ${origin.z})`);
       }
       // the whole story in the log (what couldn't be placed and why), a line in the journal

@@ -5,7 +5,7 @@ import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 import type { InventoryItem } from '../../src/client/tools.js';
-import { billCarry } from '../../src/client/brain/project.js';
+import { billCarry, billCarryCap } from '../../src/client/brain/project.js';
 import { enchantRoom } from '../../src/client/brain/blueprints.js';
 
 const CHEST = { x: 1, y: 64, z: 0 };
@@ -118,6 +118,36 @@ test('stash: a project keeps what its bill is crafted from carried, not only the
   t.regex(stash.wants(snap(items), world({ progress: { carry: old } } as Partial<WorldMemory>)) ?? '', /34\/36 slots used/);
 });
 
+test('stash: a project keeps only the stacks of its wood its bill could still use (208 logs held the pockets at 31)', (t) => {
+  // live 2026-11-09: the enchanting room kept every oak log and plank carried, 4 stacks of logs and 3 of planks, the
+  // pockets sat at 31/36, the stock trip for its sugar cane never set out, and the stash cut the farm short each round
+  const bill = enchantRoom().bill;
+  const carried = (o: Record<string, number>) => new Map(Object.entries(o));
+  const bare = billCarryCap(bill, carried({}), 'oak');
+  t.is(bare.oak_log, 128); // 16 logs and ~225 planks (walls, shelves, door) from scratch: 73 logs, in whole stacks
+  t.true(bare.oak_planks >= 225);
+  // planks in hand need no logs: 128 planks carried leave 16 + 25 logs, one stack
+  t.is(billCarryCap(bill, carried({ oak_planks: 128 }), 'oak').oak_log, 64);
+  t.is(billCarryCap({ birch_planks: 10 }, carried({}), 'birch').birch_log, 64); // never under a stack
+  const items: InventoryItem[] = [
+    ...gear(),
+    ...[13, 14, 15].map(slot => ({ slot, name: 'oak_log', count: 64 })), { slot: 16, name: 'oak_log', count: 16 },
+    ...[17, 18].map(slot => ({ slot, name: 'oak_planks', count: 64 })),
+    { slot: 19, name: 'sugar_cane', count: 20 }, { slot: 20, name: 'leather', count: 7 }
+  ];
+  const carry = [...billCarry(bill, 'oak'), 'stick'];
+  const s = snap(items);
+  const progress = { done: [], journal: [], carry, carryCap: billCarryCap(bill, s.counts, 'oak') };
+  const plan = stashPlan(items, stashKeep(world({ progress })));
+  t.deepEqual(plan.deposit.filter(d => /oak/.test(d.name)), [{ name: 'oak_log', count: 208 - 64 }]);
+  t.false(plan.deposit.some(d => ['sugar_cane', 'leather'].includes(d.name))); // what the trips gather for it stays
+  // with no cap (the old memory), everything stayed
+  t.false(stashPlan(items, stashKeep(world({ progress: { done: [], journal: [], carry } }))).deposit.some(d => d.name === 'oak_log'));
+  // a build job carrying the same wood keeps all of its load
+  const job = { id: 5, world: 'w', structure: 'barn', mode: 'apply' as const, status: 'working' as const, phase: 'building' as const, createdAt: 0, updatedAt: 0, carry: ['oak_log'] };
+  t.false(stashPlan(items, stashKeep(world({ progress, buildJobs: [job] }))).deposit.some(d => d.name === 'oak_log'));
+});
+
 test('smelt: raw ore and fuel at home', (t) => {
   t.regex(smelt.wants(snap([{ slot: 0, name: 'raw_iron', count: 5 }, { slot: 1, name: 'coal', count: 1 }]), world()) ?? '', /5 raw_iron/);
   // no fuel: nothing to smelt, but a furnace not looked at in half an hour gets its finished smelting taken out
@@ -217,6 +247,37 @@ test('stock: a trip that found nothing leaves that resource alone for a while', 
   await stock.run(ctx);
   t.deepEqual(stockShort(s, w), []);
   t.deepEqual(stockShort({ ...s, now: s.now + 31 * 60_000 }, w).map(x => x.name), ['coal']);
+});
+
+test('stock: a trip for the project cane goes to the wild cane it found before, not only what is in sight from home', async (t) => {
+  // live 2026-11-09: the enchanting room short of 113 cane, the trip mined from home and failed "No sugar_cane in sight
+  // outside the home area" each time; the cane milestone had found wild cane 163 blocks south
+  const s = snap(gear());
+  const run = async (mined: string) => {
+    const w = world({ chestItems: { '1,64,0': { oak_log: 40, cobblestone: 64, iron_ingot: 20, coal: 30 } }, progress: { done: [], journal: [], need: { sugar_cane: 113 } } });
+    w.zones = { wildcane: [{ x: 14, y: 63, z: 163 }] };
+    t.deepEqual(stockShort(s, w).map(x => x.name), ['sugar_cane']);
+    const acts: string[] = [];
+    const ctx = {
+      s, world: w, signal: new AbortController().signal,
+      act: async (tool: string, a: Record<string, unknown> = {}) => {
+        acts.push(tool === 'move-to-position' ? `${tool} ${a.x},${a.z}` : tool);
+        return { ok: true, text: tool === 'mine-blocks' ? mined : 'Home' };
+      },
+      // no cane in sight from home; there, some
+      call: (async () => ({ positions: acts.length ? [{ x: 15, y: 63, z: 165 }] : [] })) as GoalContext['call'],
+      status: async () => ({ inWorld: true, username: 'b', screen: null }),
+      progress: () => undefined
+    } as GoalContext;
+    await stock.run(ctx);
+    return { acts, w };
+  };
+  const got = await run('Mined for 60s: sugar_cane x24.');
+  t.deepEqual(got.acts, ['move-to-position 14,163', 'mine-blocks', 'go-home']);
+  t.deepEqual(got.w.zones?.wildcane, [{ x: 14, y: 63, z: 163 }]);
+  // cut bare (or gone): forgotten, so the next trip looks for more
+  const bare = await run('Stopped after 72s (time limit): nothing gained.');
+  t.is(bare.w.zones?.wildcane, undefined);
 });
 
 test('lightArea: a torch that lights nothing dark is taken back up', async (t) => {

@@ -131,7 +131,7 @@ export const sowStep: Step = {
     const r = await ctx.act('farm', { range: 11, timeoutMs: 180_000 });
     addZone(ctx.world, 'plot', { x: site.x, y: site.y, z: site.z, width: SIZE, length: SIZE });
     ctx.world.landmarks.foundAt = 0; // pick up the new farmland
-    progressOf(ctx.world).carry = undefined;
+    progressOf(ctx.world).carry = progressOf(ctx.world).carryCap = undefined;
     return ok(r.text.slice(0, 120));
   }
 };

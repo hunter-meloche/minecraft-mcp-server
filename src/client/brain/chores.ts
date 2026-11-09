@@ -66,8 +66,17 @@ function projectCarry(world: WorldMemory): Set<string> {
  */
 const CAST_EMPTY_BUCKETS = 5;
 /** What the stash leaves on the bot: the project's and the jobs' materials, capped where they would hog the slots. */
-export const stashKeep = (world: WorldMemory) =>
-  ({ foods: foods(), keep: projectCarry(world), ...(castingAhead(world) ? { cap: { bucket: CAST_EMPTY_BUCKETS } } : {}) });
+export const stashKeep = (world: WorldMemory) => ({
+  foods: foods(), keep: projectCarry(world),
+  // a build job's carry is its own: only the project's capped (what its bill could still use, billCarryCap)
+  cap: { ...projectCap(world), ...(castingAhead(world) ? { bucket: CAST_EMPTY_BUCKETS } : {}) }
+});
+
+/** The project's carry caps, less anything a build job carries too (its own load, never capped here). */
+function projectCap(world: WorldMemory): Record<string, number> {
+  const jobs = new Set(activeJobs(world).flatMap(j => j.carry ?? []));
+  return Object.fromEntries(Object.entries(world.progress?.carryCap ?? {}).filter(([k]) => !jobs.has(k)));
+}
 
 /** The LLM's build jobs still going. */
 export const activeJobs = (world: WorldMemory) => (world.buildJobs ?? []).filter(j => !['done', 'failed', 'cancelled'].includes(j.status));
@@ -558,6 +567,20 @@ export const stock: Goal = {
       }
       if (woods.text) ctx.progress(woods.text);
     }
+    // wild cane the same way, to where the cane milestone found it (163 blocks south): mining from home, the trip for
+    // the enchanting room's 113 cane failed "no sugar_cane in sight outside the home area" each time (live
+    // 2026-11-09). With none remembered, one side a trip: a fruitless trip waits half an hour, the next looks elsewhere
+    const wildCane = t.mine === 'sugar_cane';
+    if (wildCane) {
+      const side = WOODS_DIRS[Math.floor(ctx.s.now / FRUITLESS_WAIT) % WOODS_DIRS.length];
+      const wild = await toTheWoods(ctx, ['sugar_cane'], false, { zone: 'wildcane', what: 'sugar cane', dirs: [side] });
+      if (!wild.ok) {
+        done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
+        await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+        return wild.text;
+      }
+      if (wild.text) ctx.progress(wild.text);
+    }
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
     // as much as the trip's time allows (a build job's whole bill, not a stack at a time)
     let r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
@@ -573,6 +596,8 @@ export const stock: Goal = {
       }
     }
     if (/nothing gained|in sight outside the home area/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
+    // the remembered cane all cut (or never there): look again next time
+    if (wildCane && /nothing gained|in sight outside the home area/.test(r.text)) delete ctx.world.zones?.wildcane;
     // a project's shortfall is served once per trip: the project works out what's still short when it next runs
     // (left standing, it had the bot fetch 22 more birch logs trip after trip)
     const need = ctx.world.progress?.need;

@@ -214,3 +214,37 @@ export function billCarry(bill: Record<string, number>, wood = 'oak'): string[] 
   for (const item of Object.keys(bill)) add(item, 0);
   return [...out];
 }
+
+/**
+ * The most of each carried kind the rest of a bill could still use, given what's carried already (planks in the
+ * pockets need no logs), in whole stacks: the stash lets go of the stacks beyond it. Kept without a cap, the
+ * enchanting room's oak held 208 logs and 128 planks on the bot when the bill took 16 logs, 127 planks and the
+ * shelves' planks: the pockets sat at 31/36, over the stock trip's limit, so the trip for its sugar cane never went,
+ * and "a materials trip waits for room" stashed the farm's wheat mid-round, every farm round of the day
+ * (live 2026-11-09).
+ */
+export function billCarryCap(bill: Record<string, number>, carried: Map<string, number>, wood = 'oak'): Record<string, number> {
+  const norm = (item: string) => (item === 'planks' ? `${wood}_planks` : item === 'log' ? `${wood}_log` : item);
+  const inputs = (name: string): [string, number, number][] => {
+    if (SMELTED[name]) return [[norm(SMELTED[name]), 1, 1]];
+    const r = recipeFor(name);
+    return r ? Object.entries(r.from).map(([k, v]) => [norm(k), v, r.makes]) : [];
+  };
+  // every item before what it's made from (planks get all their askers' demand before the logs are worked out)
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const visit = (name: string, depth: number) => {
+    if (seen.has(name) || depth > 6) return;
+    seen.add(name);
+    for (const [inp] of inputs(name)) visit(inp, depth + 1);
+    order.push(name);
+  };
+  for (const item of Object.keys(bill)) visit(norm(item), 0);
+  const need: Record<string, number> = {};
+  for (const [k, v] of Object.entries(bill)) need[norm(k)] = (need[norm(k)] ?? 0) + v;
+  for (const name of order.reverse()) {
+    const left = Math.max(0, (need[name] ?? 0) - (carried.get(name) ?? 0));
+    for (const [inp, v, makes] of inputs(name)) need[inp] = (need[inp] ?? 0) + Math.ceil(left / makes) * v;
+  }
+  return Object.fromEntries(Object.entries(need).map(([k, v]) => [k, Math.max(64, Math.ceil(v / 64) * 64)]));
+}

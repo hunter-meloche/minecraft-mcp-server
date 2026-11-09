@@ -44,6 +44,8 @@ export interface ProgressMemory {
   need?: Record<string, number>;
   /** items the current step builds with (and their logs): not put away by the stash */
   carry?: string[];
+  /** the most of a carried kind the current step could still use (whole stacks): the stash takes the rest */
+  carryCap?: Record<string, number>;
   /** a step that failed: not before (ms) */
   blockedUntil?: Record<string, number>;
   journal: { at: number; text: string }[];
