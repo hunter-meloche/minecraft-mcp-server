@@ -57,6 +57,8 @@ export function castSite(blocks: (string | null)[], box: P & { width: number; he
 /** How long the water takes (ms): to turn the lava, to float the dropped obsidian up, to drain. Tests set them to 0. */
 /** Water buckets the cast carries: one, to turn the lava (the dropped obsidian is lifted out with dirt, not water). */
 export const WATER_BUCKETS = 1;
+/** Where a pool gave lava safely: zones[LAVA_POOL]. */
+export const LAVA_POOL = 'lava:pool';
 
 export const CAST_TIMING = { settle: 1500, float: 500, floatTries: 16, drain: 1500 };
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -100,6 +102,9 @@ export async function fetchLava(ctx: GoalContext, want: number): Promise<number>
     const r = await fillAt(ctx, v, 'lava');
     ctx.progress(`lava: ${r.text.slice(0, 140)}`);
     have = await countOf(ctx, 'lava_bucket');
+    // a pool that gave lava safely is remembered: the next trip goes straight there (the one found was 230 blocks
+    // out, past where a trip's steps from the mine reach)
+    if (r.ok) (ctx.world.zones ??= {})[LAVA_POOL] = [{ ...v.at }];
   }
   return have;
 }

@@ -24,11 +24,15 @@ const k = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
 test("the storage house's chest cells: six double chests, the back first, each half as the house has it", (t) => {
   const cells = storageChestCells(house());
-  t.is(cells.length, 12);
+  t.is(cells.length, 36);
+  // two more layers stacked on the ground row, the same cells a block and two up, the top one under open air
+  t.deepEqual(cells[12].at, { x: -551, y: 64, z: 2179 });
+  t.deepEqual(cells[24].at, { x: -551, y: 65, z: 2179 });
+  t.is(cells[24].state, cells[0].state);
   t.deepEqual(cells.slice(0, 4).map(c => [k(c.at), c.state]), [
     ['-551,63,2179', 'chest[facing=east,type=left]'], ['-551,63,2180', 'chest[facing=east,type=right]'],
     ['-547,63,2179', 'chest[facing=west,type=right]'], ['-547,63,2180', 'chest[facing=west,type=left]']]);
-  t.deepEqual(cells.slice(8).map(c => k(c.at)), ['-551,63,2183', '-551,63,2184', '-547,63,2183', '-547,63,2184']);
+  t.deepEqual(cells.slice(8, 12).map(c => k(c.at)), ['-551,63,2183', '-551,63,2184', '-547,63,2183', '-547,63,2184']);
   t.deepEqual(storageChestCells({ landmarks: { chests: [], farmland: [] }, leash: 96 }), []);
 });
 
@@ -55,12 +59,12 @@ test('the storage plan: a broken chest goes back, a full kind gets the next pair
   t.deepEqual(storagePlan(cells, cells.map(() => null), built, ['stone']), { replace: [], add: [], maxed: false, standing: [] });
 });
 
-test('chestSpec: a pair of cells as a build spec, each half with its own state', (t) => {
+test('chestSpec: a pair of cells as a build spec, by facing only (single or joined, either is storage)', (t) => {
   const cells = storageChestCells(house()).slice(8, 10);
   const { origin, spec } = chestSpec(cells);
   t.deepEqual(origin, { x: -551, y: 63, z: 2183 });
-  t.deepEqual(spec.layers, [['A', 'B']]);
-  t.deepEqual(spec.palette, { A: 'chest[facing=east,type=left]', B: 'chest[facing=east,type=right]' });
+  t.deepEqual(spec.layers, [['A', 'A']]);
+  t.deepEqual(spec.palette, { A: 'chest[facing=east]' });
 });
 
 test('the storage goal: a kind without room by day at home (under the stash, over the food stockpile); a look now and then', (t) => {
@@ -76,4 +80,28 @@ test('the storage goal: a kind without room by day at home (under the stash, ove
   w.lastDone = { storage: 0 };
   t.regex(storageGoal.wants(snap(), w) ?? '', /look over the storage chests/);
   t.true(storageGoal.priority < stash.priority && storageGoal.priority > larder.priority);
+});
+
+test('the ground row full and a kind without room: the next double chest goes on top of the first', (t) => {
+  const w = house();
+  const cells = storageChestCells(w);
+  const ground = new Set(cells.slice(0, 12).map(c => k(c.at)));
+  const blocks = cells.map(c => (ground.has(k(c.at)) ? `minecraft:${c.state}` : 'minecraft:air'));
+  const plan = storagePlan(cells, blocks, ground, ['stone']);
+  t.deepEqual(plan.add.map(c => k(c.at)), ['-551,64,2179', '-551,64,2180']);
+  t.false(plan.maxed);
+});
+
+test('no whole pair free (a label sign, a single chest beside it): the next free cell alone', (t) => {
+  const w = house();
+  const cells = storageChestCells(w);
+  const ground = new Set(cells.slice(0, 12).map(c => k(c.at)));
+  // every pair on the second layer has a sign or a chest in one of its cells
+  const blocks = cells.map((c, i) => (ground.has(k(c.at)) ? `minecraft:${c.state}` : i >= 12 && i < 24 && i % 2 === 0 ? 'minecraft:oak_wall_sign[facing=east]' : 'minecraft:air'));
+  const plan = storagePlan(cells, blocks, ground, ['stone']);
+  t.is(plan.add.length, 2, 'a whole pair on the top layer comes first');
+  t.is(plan.add[0].at.y, 65);
+  const topFull = blocks.map((b, i) => (i >= 24 && i % 2 === 0 ? 'minecraft:chest[facing=east,type=single]' : b));
+  const single = storagePlan(cells, topFull, ground, ['stone']);
+  t.is(single.add.length, 1);
 });

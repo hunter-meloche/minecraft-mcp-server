@@ -8,7 +8,7 @@ import { tier } from './kit.js';
 import { DEEP_TRIP, deepTripReady, pickMineStart } from './mine.js';
 import { tripCheck } from './deep.js';
 import { nearestZone, type Zone } from './courtesy.js';
-import { bucketsFor, castObsidian, fetchLava } from './cast.js';
+import { bucketsFor, castObsidian, fetchLava, LAVA_POOL } from './cast.js';
 
 /**
  * Enchanting: obsidian (mined with a diamond pickaxe), then a 7 x 7 room with the table in the middle and 15 shelves
@@ -117,7 +117,15 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
           st.data.obsidianTurn = turn + 1;
           const [dx, dz] = dirs[turn];
           const lavaEnough = async () => !noBuckets && got + (await countOf(ctx, 'lava_bucket')) >= 4;
-          for (let step = 0; step <= OBSIDIAN_STEPS && got < 4 && !ctx.signal.aborted; step++) {
+          // a pool that gave lava before: straight there first
+          const pool = ctx.world.zones?.[LAVA_POOL]?.[0];
+          if (pool && !noBuckets) {
+            ctx.progress(`obsidian: to the lava pool at (${pool.x}, ${pool.z})`);
+            await ctx.call('goto', { x: pool.x, y: pool.y, z: pool.z, xz: true, range: 8, timeoutMs: 180_000 }, 195_000).catch(() => undefined);
+            await fetchLava(ctx, 4 - got);
+            if (!(await countOf(ctx, 'lava_bucket'))) delete ctx.world.zones![LAVA_POOL]; // dry, or no safe spot now: look again
+          }
+          for (let step = 0; step <= OBSIDIAN_STEPS && got < 4 && !(await lavaEnough()) && !ctx.signal.aborted; step++) {
             const at = { x: start.x + dx * OBSIDIAN_STEP * step, y: start.y, z: start.z + dz * OBSIDIAN_STEP * step };
             ctx.progress(`obsidian: looking round (${at.x}, ${at.z})`);
             await ctx.call('goto', { ...at, xz: true, range: 6, timeoutMs: 120_000 }, 135_000).catch(() => undefined);
