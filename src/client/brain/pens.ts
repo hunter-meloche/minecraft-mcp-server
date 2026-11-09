@@ -102,7 +102,7 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
       for (let w = 0; w < 4; w++) { e = await find(ctx, id); if (!e || e.distance < 5) break; await pause(1000); }
       if (!e || e.distance > 10) return `${kind}: it stopped following`;
     }
-    if (!(await gateOpen(ctx, way.gate))) await ctx.act('use-item-on-block', { ...way.gate, face: 'up' });
+    if (!(await gateOpen(ctx, way.gate))) await ctx.act('use-item-on-block', { ...way.gate, face: 'up', toggle: true });
     await ctx.call('item.select', { name: food });
     await ctx.act('move-to-position', { ...way.inside, range: 0, timeoutMs: 20_000 });
     for (let w = 0; w < 6; w++) { e = await find(ctx, id); if (!e || inside(p, e.position)) break; await pause(1000); }
@@ -111,7 +111,7 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
     if (weapon) await ctx.call('item.select', { name: weapon });
     await pause(1500);
     await ctx.act('move-to-position', { ...way.outside, range: 0, timeoutMs: 20_000 });
-    if (await gateOpen(ctx, way.gate)) await ctx.act('use-item-on-block', { ...way.gate, face: 'up' });
+    if (await gateOpen(ctx, way.gate)) await ctx.act('use-item-on-block', { ...way.gate, face: 'up', toggle: true });
     e = await find(ctx, id);
     return e && inside(p, e.position) ? `${kind}: led one into the pen` : `${kind}: it did not come in`;
   } finally {

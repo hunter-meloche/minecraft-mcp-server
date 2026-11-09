@@ -540,6 +540,14 @@ test('use-item-on-block tills with a hoe and reports the change', async (t) => {
   t.like(request.getCalls().find(c => c.args[0] === 'useOn')!.args[1], { x: 1, y: 64, z: 2, face: 'up' });
 });
 
+test('use-item-on-block with toggle tells the client to only open or close, never pour what is held', async (t) => {
+  const { run, request } = setup({
+    useOn: { used: true, before: 'oak_door', after: 'oak_door', properties: { open: 'false' }, held: 'water_bucket', changed: true }
+  });
+  await run('use-item-on-block', { x: 1, y: 64, z: 2, toggle: true });
+  t.like(request.getCalls().find(c => c.args[0] === 'useOn')!.args[1], { x: 1, y: 64, z: 2, face: 'up', toggle: true });
+});
+
 test('use-item-on-block clears grass on top before tilling again', async (t) => {
   let tills = 0;
   const { run, request } = setup({

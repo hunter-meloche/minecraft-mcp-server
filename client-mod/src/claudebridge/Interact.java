@@ -305,7 +305,14 @@ public final class Interact {
             String inHand = Names.item(pl.getMainHandItem());
             // buckets too: with the shield on, "use" failed at every lake and lava pool (use: Fail[]), and sneaking
             // also keeps the bot from stepping off the edge it stands at
-            boolean sneak = pl.getOffhandItem().has(net.minecraft.core.component.DataComponents.BLOCKS_ATTACKS)
+            // a door, trapdoor, gate, lever or button is only ever toggled: no sneak (it skips the block's own use) and
+            // no "use" with what is held. Shutting the storage-house door with a water bucket in hand and the shield on
+            // poured the water outside it at head height, and the flowing sheet kept Baritone from the bed for hours
+            var kind = beforeState.getBlock();
+            boolean toggle = flag(p, "toggle") || kind instanceof net.minecraft.world.level.block.DoorBlock
+                || kind instanceof net.minecraft.world.level.block.TrapDoorBlock || kind instanceof net.minecraft.world.level.block.FenceGateBlock
+                || kind instanceof net.minecraft.world.level.block.LeverBlock || kind instanceof net.minecraft.world.level.block.ButtonBlock;
+            boolean sneak = !toggle && pl.getOffhandItem().has(net.minecraft.core.component.DataComponents.BLOCKS_ATTACKS)
                 && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel") || inHand.endsWith("bucket"));
             if (sneak) mc.options.keyShift.setDown(true);
             Ticker.add(new Ticker.Task() {
@@ -321,7 +328,7 @@ public final class Interact {
                         // a bucket aims along the look, which something (Baritone's look, the guardian) may have turned
                         // since: look again now, at the fluid itself. Every fill at the lake was "use: Fail": the aim hit
                         // the grass
-                        if (held.endsWith("bucket")) {
+                        if (held.endsWith("bucket") && !toggle) {
                             // an empty bucket: at the fluid just under its surface (a source fills to 8/9 of the cell):
                             // aimed at the middle, the line from the shore clipped the shore block's corner ("aim: BLOCK
                             // ... grass_block"); the point the brain's sight-line check (fluidpick.ts) looks at too. A full
@@ -338,7 +345,7 @@ public final class Interact {
                         }
                         var r = m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click);
                         result = r.toString();
-                        if (!r.consumesAction()) result += " / use: " + m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
+                        if (!r.consumesAction() && !toggle) result += " / use: " + m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
                     }
                     if (wait > 0) return false;
                     var now = m.level.getBlockState(at);

@@ -1132,19 +1132,22 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       y: z.coerce.number().describe('Y of the block'),
       z: z.coerce.number().describe('Z of the block'),
       item: z.string().optional().describe("Item to hold, e.g. 'wooden_hoe' (default: whatever is in hand)"),
-      face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional().describe("Which face to click (default: 'up')")
+      face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional().describe("Which face to click (default: 'up')"),
+      toggle: z.boolean().optional().describe('Only open or close it (a door, gate, trapdoor, lever): never pour, fill or use what is held')
     },
-    async ({ x, y, z: zz, item, face = 'up' }: { x: number; y: number; z: number; item?: string; face?: string }) => {
+    async ({ x, y, z: zz, item, face = 'up', toggle }: { x: number; y: number; z: number; item?: string; face?: string; toggle?: boolean }) => {
       const at = floorPos({ x, y, z: zz });
       if (item) {
         try { await call('item.select', { name: item }); } catch { return factory.createErrorResponse(`No ${item} in inventory`); }
       }
       type Used = { used: boolean; reason?: string; before?: string; after?: string; changed?: boolean; properties?: Record<string, string>; held?: string; result?: string };
-      let r = await call<Used>('useOn', { ...at, face });
+      // toggle: a water bucket in hand once poured outside the door it was shutting (the game client checks doors too)
+      const how = toggle ? { face, toggle: true } : { face };
+      let r = await call<Used>('useOn', { ...at, ...how });
       if (!r.used && r.reason === 'too far') {
         await goNear(at, 3);
         if (item) await call('item.select', { name: item });
-        r = await call<Used>('useOn', { ...at, face });
+        r = await call<Used>('useOn', { ...at, ...how });
       }
       if (!r.used) return factory.createErrorResponse(`Could not use ${item ?? 'the held item'} on ${fmt(at)}: ${r.reason}`);
       // a hoe only tills with air above: grass or leaf litter on top makes it do nothing, so clear that and try again

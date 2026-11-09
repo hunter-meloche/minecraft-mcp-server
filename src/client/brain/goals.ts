@@ -199,6 +199,7 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
   const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', box);
   // a door still powered by the plate the bot just stepped off shuts by itself when the plate lets go
   const me = (await ctx.status()).block;
+  // toggle only: shut with a water bucket in hand (and the shield on), the click poured the water outside the door
   let shut = 0;
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i] ?? '';
@@ -207,7 +208,7 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
     if (!(door || /_fence_gate\[/.test(b)) || !/open=true/.test(b) || /powered=true/.test(b)) continue;
     const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
     if (me && me.x === at.x && me.z === at.z && Math.abs(me.y - at.y) <= 1) continue; // standing in it
-    const r = await ctx.act('use-item-on-block', { ...at, face: 'up' });
+    const r = await ctx.act('use-item-on-block', { ...at, face: 'up', toggle: true });
     if (r.ok && /open=false|closed/.test(r.text)) shut++;
   }
   // the gates in the fence and the doors of the other buildings, further out: the fishing trip left a gate open
@@ -217,7 +218,7 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
     if (ctx.signal.aborted) break;
     const { blocks: [b] } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...at, width: 1, height: 1, length: 1 });
     if (!b || !/open=true/.test(b) || /powered=true/.test(b) || /half=upper/.test(b)) continue;
-    const r = await ctx.act('use-item-on-block', { ...at, face: 'up' });
+    const r = await ctx.act('use-item-on-block', { ...at, face: 'up', toggle: true });
     if (r.ok && /open=false|closed/.test(r.text)) shut++;
   }
   return shut;

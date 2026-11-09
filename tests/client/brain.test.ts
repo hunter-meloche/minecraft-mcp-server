@@ -160,7 +160,7 @@ test('stuck away from home at night: wall in and wait for morning', async (t) =>
   brain.setEnabled(false);
 });
 
-test('closeDoors: shuts open doors near home that no plate holds open, not one the bot stands in', async (t) => {
+test('closeDoors: shuts open doors near home that no plate holds open, not one the bot stands in, toggling only (a held water bucket poured)', async (t) => {
   const box = { x: -8, y: 62, z: -8, width: 17, height: 6, length: 17 };
   const blocks = new Array(box.width * box.height * box.length).fill('air');
   const idx = (x: number, y: number, z: number) => (x - box.x) + (z - box.z) * box.width + (y - box.y) * box.width * box.length;
@@ -173,10 +173,10 @@ test('closeDoors: shuts open doors near home that no plate holds open, not one t
   const ctx = {
     call: (async () => ({ blocks })) as GoalContext['call'],
     status: async () => ({ inWorld: true, username: 'b', screen: null, block: { x: 1, y: 64, z: 1 } }),
-    act: async (tool: string, a: Record<string, unknown> = {}) => { used.push(`${tool} ${a.x},${a.y},${a.z}`); return { ok: true, text: 'Used the held item on oak_door at (0, 64, 2): it is now oak_door[open=false]' }; }
+    act: async (tool: string, a: Record<string, unknown> = {}) => { used.push(`${tool} ${a.x},${a.y},${a.z}${a.toggle ? ' toggle' : ''}`); return { ok: true, text: 'Used the held item on oak_door at (0, 64, 2): it is now oak_door[open=false]' }; }
   } as unknown as GoalContext;
   t.is(await closeDoors(ctx, { x: 0, y: 64, z: 0 }), 1);
-  t.deepEqual(used, ['use-item-on-block 0,64,2']);
+  t.deepEqual(used, ['use-item-on-block 0,64,2 toggle']);
 });
 
 test('the status line for the bot\'s window: off, the goal and its step, paused for the LLM, idle, asleep', async (t) => {
