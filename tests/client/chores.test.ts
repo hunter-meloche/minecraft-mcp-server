@@ -495,3 +495,14 @@ test('stockShort: a project short of oak goes before the home keeping its 32 log
   t.true(short.indexOf('oak_log 12') >= 0 && short.indexOf('oak_log 12') < short.indexOf('log 2'), short.join(', '));
   t.true(short.indexOf('cobblestone 24') > short.indexOf('oak_log 12'), 'the home stock after the project');
 });
+
+test('stash: a build job carrying its load is stopped for full pockets once in 10 min, not at every station', (t) => {
+  // live 2026-11-10: the lookout's load filled 35/36 slots; the build now goes on with full pockets, and a block dug
+  // at each station (a bone here) must not bring the stash back each time
+  const load = Array.from({ length: 22 }, (_, i): InventoryItem => ({ slot: 13 + i, name: 'cobblestone', count: 64 }));
+  const items = [...gear(), ...load, { slot: 6, name: 'bone', count: 1 }, { slot: 7, name: 'cobblestone', count: 64 }, { slot: 35, name: 'cobblestone', count: 64 }];
+  const job = { id: 8, world: 'w', structure: 'lookout', mode: 'apply' as const, status: 'working' as const, phase: 'building' as const, createdAt: 0, updatedAt: 0, carry: ['cobblestone'] };
+  const s = snap(items);
+  t.regex(stash.wants(s, world({ buildJobs: [job], lastDone: { stash: s.now - 11 * 60_000 } })) ?? '', /slots used/);
+  t.is(stash.wants(s, world({ buildJobs: [job], lastDone: { stash: s.now - 60_000 } })), null);
+});

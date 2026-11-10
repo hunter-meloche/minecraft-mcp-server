@@ -147,8 +147,10 @@ export const stash: Goal = {
     const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
     plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
     if (!plan.deposit.length && !plan.drop.length) return null;
-    // a project carrying its materials fills the pockets on purpose: only stop it when really full
-    if (s.slotsUsed >= fullAt) return `${s.slotsUsed}/36 slots used`;
+    // a project carrying its materials fills the pockets on purpose: only stop it when really full (a build job
+    // carrying its load: once in 10 min, as fullOut; the build runs with full pockets now, and a dug block each
+    // station would have the stash stop it at every one)
+    if (s.slotsUsed >= fullAt && (!building || since(world, 'stash', s.now) > 10 * MINUTE)) return `${s.slotsUsed}/36 slots used`;
     // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used): make the room. Between the
     // two limits the bot sat idle all day at 31 slots, its build job waiting on 77 logs and the pockets full of seeds
     if (tripWaits) return `${s.slotsUsed}/36 slots used, and a materials trip waits for room`;

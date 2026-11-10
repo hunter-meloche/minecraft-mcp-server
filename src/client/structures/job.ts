@@ -234,8 +234,12 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
     retryMs: MINUTE,
     wants: (s, world) => {
       // by day only (the user's choice): the shelter brings it home at dusk and the job goes on in the morning
-      if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || s.slotsUsed >= 34) return null;
+      if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld') return null;
       const j = activeJob(world, s.now);
+      // full pockets: the stash's turn, unless what fills them is this job's own load (live 2026-11-10: the lookout
+      // took its 292-item load to 35/36 slots, the stash stopped it at station 1 and could put none of it away, and
+      // at 34+ the job never ran again: a day's build stalled with its whole bill in hand)
+      if (s.slotsUsed >= 34 && !(j?.phase === 'building' && j.carry?.length)) return null;
       // gathering: the stock trip clears job.need when it's back; until then (10 minutes at most) don't stop it for
       // the two logs it has so far (the job did, a minute into each trip, and built a package of one block)
       if (j?.status === 'gathering' && j.need && Object.keys(j.need).length && s.now - j.updatedAt < 10 * MINUTE) return null;
