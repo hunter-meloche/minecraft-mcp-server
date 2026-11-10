@@ -46,6 +46,8 @@ export function repairGoal(rt: ClientRuntime): Goal {
     priority: 38,
     timeoutMs: 10 * MINUTE,
     retryMs: 15 * MINUTE,
+    // blocks put back: a round that finds nothing missing (or can put none of it back) brought nothing
+    gains: true,
     wants: (s, world) => {
       if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > NEAR_HOME) return null;
       if (since(world, 'repair', s.now) <= 20 * MINUTE) return null;
@@ -102,6 +104,7 @@ export function repairGoal(rt: ClientRuntime): Goal {
         }
         delete tries[key(r.at)];
         restored++;
+        ctx.gain(1);
         have.set(r.item, have.get(r.item)! - 1);
         ctx.progress(`put back ${r.item} at ${key(r.at)}`);
       }

@@ -36,7 +36,7 @@ test('nextMilestone: the first not done whose prereqs are; done-in-the-world cou
 });
 
 const ctxFor = (w: WorldMemory, s: Snapshot, acts: string[] = [], inv: Map<string, number> = new Map()) => ({
-  s, world: w, signal: new AbortController().signal, progress: () => undefined,
+  s, world: w, signal: new AbortController().signal, progress: () => undefined, gain: () => undefined,
   status: async () => ({ inWorld: true, username: 'b', screen: null }),
   call: (async (m: string) => (m === 'inventory' ? { items: [...inv].map(([name, count], slot) => ({ slot, name, count })) } : {})) as GoalContext['call'],
   act: async (tool: string, a: Record<string, unknown> = {}) => {

@@ -1,6 +1,6 @@
-import type { Goal, GoalContext } from './goals.js';
-import { daylightLeft } from './schedule.js';
-import { journal, nextMilestone, progressOf, recipeFor, type Milestone } from './progress.js';
+import { fromGate, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import type { WorldMemory } from './memory.js';
+import { haveFn, journal, nextMilestone, progressOf, recipeFor, type Milestone } from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 
 /**
@@ -13,6 +13,29 @@ const MINUTE = 60_000;
 export function projectGoal(tree: Milestone[]): Goal {
   // while a step runs it keeps the raised urgency: a stock trip for 1 cobblestone stopped the yard's leveling midway
   let running = false;
+  /** Nowhere it could work from: no home, another dimension. */
+  const off = (s: Snapshot): Decline | null =>
+    (s.dimension !== 'overworld' || !s.home || !Number.isFinite(s.distHome) ? no.away(s, 'project', 64) : null);
+  // its work is in and around the yard (it ran while the bot was out on a deep trip); its own materials can fill
+  // the pockets; two minutes before the evening it is not worth starting
+  const heldBack = (s: Snapshot): Decline | null => (s.distHome > 64 ? no.away(s, 'project', 64) : s.health < 12 ? no.health(s, 'project', 12)
+    : s.slotsUsed >= 35 ? no.pockets(s, 'project', 35) : null) ?? no.late(s, 'project', 2400);
+  /**
+   * Run now? The "no" is said in this order: nowhere it could work from; no milestone that can be worked (that is the
+   * project's own reason, whatever the hour and the pockets); then what keeps it from one that can; the hour last.
+   */
+  const gate = (s: Snapshot, world: WorldMemory): Gate => {
+    const away = off(s);
+    if (away) return away;
+    const held = heldBack(s);
+    // not to run anyway: the tree is only looked at (nextMilestone below writes down what it finds in place)
+    if (held) return waiting(tree, s, world) ?? held;
+    const m = nextMilestone(tree, s, world);
+    if (!m) return waiting(tree, s, world) ?? { cause: 'project', text: 'no milestone to work on' };
+    const cur = progressOf(world).current;
+    const step = m.steps[cur?.id === m.id ? cur.step : 0];
+    return { want: `${m.title}: ${step?.name ?? 'finishing'}` };
+  };
   return {
     name: 'project',
     priority: 28,
@@ -21,17 +44,15 @@ export function projectGoal(tree: Milestone[]): Goal {
     urgency: (s, world) => (running || s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 39 : 28),
     timeoutMs: 9 * MINUTE,
     retryMs: 2 * MINUTE,
-    wants: (s, world) => {
-      if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || !Number.isFinite(s.distHome)) return null;
-      if (s.distHome > 64) return null; // its work is in and around the yard (it ran while the bot was out on a deep trip)
-      if (daylightLeft(s.timeOfDay) < 2400) return null; // two minutes before the evening: not worth starting
-      if (s.health < 12 || s.slotsUsed >= 35) return null; // its own materials can fill the pockets
-      const m = nextMilestone(tree, s, world);
-      if (!m) return null;
-      const cur = progressOf(world).current;
-      const step = m.steps[cur?.id === m.id ? cur.step : 0];
-      return `${m.title}: ${step?.name ?? 'finishing'}`;
-    },
+    gate,
+    wants: fromGate(gate).wants,
+    // the gate's "no" as a look only, not through fromGate: the gate writes down a milestone it finds in place, as
+    // wants() always did when the brain decides. The idle log and brain-status ask this where nothing decides (another
+    // goal running, the project held back after a failure, the LLM driving, the autopilot off), and a milestone marked
+    // done there was one the brain had not got to: it must say the same "no" and leave the world as it was
+    declines: (s, world) => off(s) ?? waiting(tree, s, world) ?? heldBack(s),
+    // a step that ends where it began (short of something, waiting) is busy time to no gain
+    gains: true,
     run: async ctx => {
       running = true;
       try { return await runStep(ctx); } finally { running = false; }
@@ -48,8 +69,16 @@ export function projectGoal(tree: Milestone[]): Goal {
       const step = m.steps[cur.step];
       if (!step) return finish(ctx, m);
       ctx.progress(`${m.title} - ${step.name}`);
-      const r = await step.run(ctx, cur);
+      // the gain of a step that is not done yet is the blocks it worked: counted from what its tools report, as they
+      // report it (so a run stopped midway has what it did), and the steps stay as they are
+      const act: GoalContext['act'] = async (tool, args) => {
+        const done = await ctx.act(tool, args);
+        ctx.gain(blocksWorked(tool, done.text));
+        return done;
+      };
+      const r = await step.run({ ...ctx, act }, cur);
       if (r.status === 'done') {
+        ctx.gain(1);
         journal(ctx.world, ctx.s.now, `${m.title}: ${step.name} done (${r.text})`);
         cur.step++;
         p.need = undefined;
@@ -68,8 +97,72 @@ function finish(ctx: GoalContext, m: Milestone): string {
   if (!p.done.includes(m.id)) p.done.push(m.id);
   p.current = undefined;
   p.need = undefined;
+  ctx.gain(1);
   journal(ctx.world, ctx.s.now, `done: ${m.title}`);
   return `${m.title} complete`;
+}
+
+/**
+ * Why no milestone can be worked now, or null when one can: nextMilestone() as a look only. The gate asks it also
+ * where the project would not run anyway (at night, with full pockets), where nothing looked at the tree before: so
+ * nothing is written here, and a milestone's check that cannot answer there leaves the gate's other reason to stand.
+ */
+function waiting(tree: Milestone[], s: Snapshot, world: WorldMemory): Decline | null {
+  try {
+    const p = world.progress;
+    const done = new Set(p?.done ?? []);
+    const view = { s, world, have: haveFn(s, world) };
+    const blocked: { m: Milestone; until: number }[] = [];
+    for (const m of tree) {
+      if (done.has(m.id)) continue;
+      if (m.done?.(view)) { done.add(m.id); continue; }
+      if (!m.prereqs.every(r => done.has(r))) continue;
+      const until = p?.blockedUntil?.[m.id] ?? 0;
+      if (!(until > s.now)) return null;
+      blocked.push({ m, until });
+    }
+    if (!blocked.length) {
+      const left = tree.filter(m => !done.has(m.id)).length;
+      return left ? { cause: 'project', text: `${left} milestone(s) wait for one that is not in the tree` }
+        : { cause: 'unneeded', text: `all ${tree.length} milestone(s) done` };
+    }
+    const first = blocked.reduce((a, b) => (b.until < a.until ? b : a));
+    // what the step that ran last was short of (the stock trips fetch it); else which milestone waits, and how long
+    const short = Object.entries(p?.need ?? {}).filter(([, n]) => n > 0);
+    return {
+      cause: 'project',
+      text: short.length ? `short of ${short.map(([k, n]) => `${n} ${k}`).join(', ')}`
+        : `${first.m.title} tries again in ${Math.max(1, Math.ceil((first.until - s.now) / MINUTE))} min`,
+      until: first.until
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How many blocks a tool's report says it worked: placed, dug, tilled, or cut and filled while leveling. 0 for
+ * everything else, and for a report that does not say (a walk, a look, a failure).
+ */
+export function blocksWorked(tool: string, text: string): number {
+  if (tool === 'place-block') return /^Placed /.test(text) ? 1 : 0;
+  if (tool === 'dig-block') return /^Dug /.test(text) ? 1 : 0;
+  // the hoe on a plot's cell: the report names the block as it is afterwards
+  if (tool === 'use-item-on-block') return /farmland/.test(text) ? 1 : 0;
+  if (tool === 'build-structure') {
+    // "Used: oak_planks x12, cobblestone x3; wore out: stone_axe.": the blocks, not the tools that broke
+    const used = /Used: ([^;.]*)/.exec(text)?.[1] ?? '';
+    return [...used.matchAll(/ x(\d+)/g)].reduce((a, m) => a + Number(m[1]), 0);
+  }
+  if (tool === 'level-area') {
+    // the plan it set out with, less what it says is still to do; a look alone ("Already level", a dry run) worked none
+    if (!/\nWorked \d+\/\d+ tile/.test(text)) return 0;
+    const sum = (m: RegExpExecArray | null) => (m ? m.slice(1).reduce((a, n) => a + Number(n), 0) : 0);
+    const before = sum(/cut (\d+) block\(s\).*?, fill (\d+) dirt \+ (\d+) cobblestone;/.exec(text));
+    const rest = sum(/Still to do: cut (\d+), fill (\d+) dirt \(have \d+\) \+ (\d+) cobblestone/.exec(text));
+    return Math.max(0, before - rest);
+  }
+  return 0;
 }
 
 // ------------------------------------------------------------------------------------------------ materials

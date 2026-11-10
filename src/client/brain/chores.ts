@@ -1,6 +1,6 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
-import type { Goal, GoalContext, Snapshot } from './goals.js';
+import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { COOKS_TO } from './food.js';
 import { ownItems } from './community.js';
 import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
@@ -453,8 +453,8 @@ const FRUITLESS_WAIT = 30 * MINUTE;
 /** The kit is waiting on a stock trip (iron for iron gear, coal for torches, ...), and raw ore at home won't do. */
 const gearShort = (s: Snapshot, world: WorldMemory) => stockShort(s, world).some(t => t.gear);
 
-/** How short the home is of each stock item (kit gathering needs on top), most urgent first. */
-export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp; gear: boolean }[] {
+/** What the home is short of whether or not a trip found none lately, as stockShort() lists it, and how it ranks. */
+function stockRows(s: Snapshot, world: WorldMemory): { rows: { name: string; short: number; mine: string; counts: RegExp; gear: boolean }[]; rank: (t: { name: string }) => number } {
   // what a build job holds in the chests is its own, not the home's stock
   const chest = freeChestTotals(world);
   const have = (re: RegExp) => [...s.counts].filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0) +
@@ -473,13 +473,25 @@ export function stockShort(s: Snapshot, world: WorldMemory): { name: string; sho
   const project = allNeeds(world);
   // a project short of a particular wood's logs mines that wood
   const woods = Object.keys(project).filter(k => /_log$/.test(k)).map(k => ({ name: k, want: 0, mine: k, counts: new RegExp(`^${k}$`) }));
-  const out = [...STOCK, ...woods].map(t => ({ ...t, gear: (extra[t.name] ?? 0) > 0, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
-    .filter(t => t.short > 0 && since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT);
+  const rows = [...STOCK, ...woods].map(t => ({ ...t, gear: (extra[t.name] ?? 0) > 0, short: Math.max(extra[t.name] ?? 0, t.want - have(t.counts), project[t.name] ?? 0) }))
+    .filter(t => t.short > 0);
   // what the kit is waiting for first, then what a project or a build job is short of, then the home's own stock: the
   // home's "32 logs of any kind" came first, and with 30 carried every trip to the woods (160 blocks out) brought back
   // the 2 that topped it up, while the storage house waited for its oak
   const rank = (t: { name: string }) => (extra[t.name] ? 2 : (project[t.name] ?? 0) > 0 ? 1 : 0);
-  return out.sort((a, b) => rank(b) - rank(a));
+  return { rows, rank };
+}
+
+/** How short the home is of each stock item (kit gathering needs on top), most urgent first. */
+export function stockShort(s: Snapshot, world: WorldMemory): { name: string; short: number; mine: string; counts: RegExp; gear: boolean }[] {
+  const { rows, rank } = stockRows(s, world);
+  return rows.filter(t => since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT).sort((a, b) => rank(b) - rank(a));
+}
+
+/** What it is short of and leaves alone for now, a trip having found none lately; `until`: when it is tried again. */
+function stockDry(s: Snapshot, world: WorldMemory): { name: string; short: number; until: number }[] {
+  return stockRows(s, world).rows.filter(t => !(since(world, `fruitless:${t.name}`, s.now) > FRUITLESS_WAIT))
+    .map(t => ({ name: t.name, short: t.short, until: (world.lastDone?.[`fruitless:${t.name}`] ?? 0) + FRUITLESS_WAIT }));
 }
 
 /** How far round the bot a tree counts as in sight for a wood trip (Baritone's miner finds what's loaded near it). */
@@ -538,6 +550,29 @@ export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world'
 }
 
 /**
+ * Run now? The "no" is said in this order: no home to bring it to; the chests not looked in (what is short cannot be
+ * told); nothing short, or only what the trips found none of lately; then what keeps a trip from what is short (out
+ * of the leash, hurt or hungry, no room); the hour last.
+ */
+const stockGate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (s.dimension !== 'overworld' || !s.home) return no.away(s, 'stock', world.leash);
+  // the kit goal looks in them first
+  const unseen = world.landmarks.chests.filter(c => !world.chestItems?.[key(c)]).length;
+  if (unseen) return { cause: 'kit', text: `${unseen} home chest(s) not looked in yet` };
+  const short = stockShort(s, world);
+  if (!short.length) {
+    const dry = stockDry(s, world);
+    return dry.length ? { cause: 'dry', text: `no ${dry.map(t => `${t.name} (${t.short} short)`).join(', ')} found lately`, until: Math.min(...dry.map(t => t.until)) }
+      : { cause: 'stocked', text: 'nothing short' };
+  }
+  if (s.distHome > world.leash) return no.away(s, 'stock', world.leash);
+  if (s.health < 14 || s.food < 10) return no.health(s, 'stock', 14, 10);
+  if (s.slotsUsed >= STOCK_SLOTS) return no.pockets(s, 'stock', STOCK_SLOTS);
+  // under 2.5 minutes of daylight: not worth setting out
+  return no.late(s, 'stock', 3000) ?? { want: `short of ${short.map(t => `${t.short} ${t.name}`).join(', ')}` };
+};
+
+/**
  * A materials trip by day: mine what the home is shortest of near home, timeboxed to be back before the evening, and
  * home again afterwards. Never with the pockets nearly full, low food or hurt.
  */
@@ -549,14 +584,8 @@ export const stock: Goal = {
   urgency: (s, world) => (gearShort(s, world) ? 64 : activeJobs(world).some(j => j.need) ? 43 : 33),
   timeoutMs: 12 * MINUTE,
   retryMs: 8 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > world.leash) return null;
-    if (s.slotsUsed >= STOCK_SLOTS || s.health < 14 || s.food < 10) return null;
-    if (daylightLeft(s.timeOfDay) < 3000) return null; // under 2.5 minutes of daylight: not worth setting out
-    if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return null; // the kit goal looks in them first
-    const short = stockShort(s, world);
-    return short.length ? `short of ${short.map(t => `${t.short} ${t.name}`).join(', ')}` : null;
-  },
+  gate: stockGate,
+  ...fromGate(stockGate),
   run: async ctx => {
     const [t] = stockShort(ctx.s, ctx.world);
     if (!t) return 'nothing short';
@@ -719,6 +748,8 @@ export const lights: Goal = {
     if (s.activity !== 'work' || !awakeAtHome(s) || (s.counts.get('torch') ?? 0) === 0) return null;
     return since(world, 'lights', s.now) > 20 * MINUTE ? 'daily round: dark spots in the yard' : null;
   },
+  // a round that finds the yard lit placed nothing: busy time to no gain
+  gains: true,
   run: async ctx => {
     done(ctx.world, 'lights', ctx.s.now);
     const ignore = new Set(ctx.world.darkIgnore ?? []);
@@ -730,6 +761,7 @@ export const lights: Goal = {
 
     const r = await lightArea(ctx, centre, radius, { place: true, max: torches, ignore, only: yard ? p => outsideBy(yard, p) === 0 : undefined });
     torches -= r.placed.length;
+    ctx.gain(r.placed.length);
     // what no torch reached is out of reach for this plan (enclosed, or out of the bot's reach): leave it be
     ctx.world.darkIgnore = [...new Set([...(ctx.world.darkIgnore ?? []), ...r.left.map(key)])].slice(-500);
     out.push(!r.dark.length ? 'the yard is lit' : `yard: placed ${r.placed.length} torch(es)${r.undone.length ? `, took back ${r.undone.length} that lit nothing` : ''}; ` +
@@ -744,6 +776,7 @@ export const lights: Goal = {
         only: p => { const d = outsideBy(yard, p); return d >= BAND.from && d <= BAND.to; }
       });
       torches -= b.placed.length;
+      ctx.gain(b.placed.length);
       out.push(`outside the fence: ${b.placed.length} torch(es), ${b.left.length} dark spot(s) to go`);
     }
 
@@ -756,7 +789,7 @@ export const lights: Goal = {
         tried++;
         const y = Math.floor(ctx.s.position.y);
         const p = await lightArea(ctx, { x: spot.x, y: Math.min(y, yard.y + 1), z: spot.z }, 3, { place: true, max: 1, ignore });
-        if (p.placed.length) { lit++; torches--; ctx.progress(`a torch on the route at (${spot.x}, ${spot.z})`); }
+        if (p.placed.length) { lit++; torches--; ctx.gain(1); ctx.progress(`a torch on the route at (${spot.x}, ${spot.z})`); }
       }
       if (tried) out.push(`routes: ${lit} torch(es) (${tried} of ${spots.length} spot(s) looked at)`);
     }

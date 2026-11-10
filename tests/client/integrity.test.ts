@@ -149,7 +149,7 @@ test('repair: once a day at home by day, puts back what it carries or finds in t
       throw new Error(`unexpected ${m}`);
     }) as GoalContext['call'],
     status: async () => ({ inWorld: true, username: 'b', screen: null }),
-    progress: (x: string) => { progress.push(x); }
+    progress: (x: string) => { progress.push(x); }, gain: () => undefined
   } as GoalContext;
   const goal = repairGoal(rt);
   t.is(goal.priority, 38);
@@ -184,7 +184,7 @@ test('repair: nothing built near home, nothing to want; blocks built before stat
   const ctx = {
     s, world: mem, signal: new AbortController().signal, act: async () => ({ ok: true, text: '' }),
     call: (async () => ({ blocks: ['oak_log[axis=y]'] })) as GoalContext['call'],
-    status: async () => ({ inWorld: true, username: 'b', screen: null }), progress: () => undefined
+    status: async () => ({ inWorld: true, username: 'b', screen: null }), progress: () => undefined, gain: () => undefined
   } as GoalContext;
   t.is(await goal.run(ctx), 'all 1 built blocks checked, none missing');
   t.deepEqual(built, [{ at: at(0, 64, 0), state: 'oak_log[axis=y]' }]);

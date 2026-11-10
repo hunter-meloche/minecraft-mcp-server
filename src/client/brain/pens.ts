@@ -1,4 +1,5 @@
-import type { Goal, GoalContext } from './goals.js';
+import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import type { WorldMemory } from './memory.js';
 import type { Milestone, MilestoneState } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
 import { pen, type Side } from './blueprints.js';
@@ -136,17 +137,29 @@ async function lure(ctx: GoalContext, kind: PenKind, p: Pen, id: number, food: s
   }
 }
 
+/**
+ * Run now? The "no" is said in this order: no pen to see to (none built, or the round is not due); then what keeps a
+ * round that is due from going (not in the yard, no room for what the animals drop); the hour last.
+ */
+const gate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (!Object.keys(world.zones ?? {}).some(k => /^pen:[a-z]+$/.test(k))) return { cause: 'unneeded', text: 'no pen' };
+  const last = world.lastDone?.pens ?? 0;
+  if (!(s.now - last > 6 * MINUTE)) return no.notDue('pens', s.now, last, 6 * MINUTE);
+  if (s.distHome > 24) return no.away(s, 'pens', 24);
+  if (s.slotsUsed >= 34) return no.pockets(s, 'pens', 34);
+  return no.late(s, 'pens') ?? { want: 'the pens: lure, breed, cull, shear' };
+};
+
 /** Every few minutes by day: up to three things at each pen (lure, cull, shear, breed). */
 export const pens: Goal = {
   name: 'pens',
   priority: 46,
   timeoutMs: 8 * MINUTE,
   retryMs: 10 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || s.distHome > 24 || s.slotsUsed >= 34) return null;
-    if (!Object.keys(world.zones ?? {}).some(k => /^pen:[a-z]+$/.test(k))) return null;
-    return s.now - (world.lastDone?.pens ?? 0) > 6 * MINUTE ? 'the pens: lure, breed, cull, shear' : null;
-  },
+  gate,
+  ...fromGate(gate),
+  // a round that only looks (nothing to lure, breed or cull) is busy time to no gain
+  gains: true,
   run: async ctx => {
     (ctx.world.lastDone ??= {}).pens = ctx.s.now;
     const out: string[] = [];
@@ -168,13 +181,16 @@ export const pens: Goal = {
           minAdults: 2, maxAdults: MAX_ADULTS, breedCooldownOk: id => Date.now() - (fedAt.get(id) ?? 0) > 5.5 * MINUTE
         });
         if (a.kind === 'wait') { out.push(`${kind}: ${a.why}`); break; }
-        if (a.kind === 'lure') out.push(await lure(ctx, kind, p, a.target, a.food));
-        else if (a.kind === 'breed') {
+        if (a.kind === 'lure') {
+          out.push(await lure(ctx, kind, p, a.target, a.food));
+          if (/led one into the pen/.test(out.at(-1)!)) ctx.gain(1);
+        } else if (a.kind === 'breed') {
           let fed = 0;
-          for (const id of a.ids) if (await useOn(ctx, id, a.food)) { fed++; fedAt.set(id, Date.now()); }
+          for (const id of a.ids) if (await useOn(ctx, id, a.food)) { fed++; fedAt.set(id, Date.now()); ctx.gain(1); }
           out.push(`${kind}: fed ${fed} to breed`);
         } else if (a.kind === 'cull') {
           const r = await ctx.act('attack-entity', { target: `#${a.id}`, maxDistance: 24, timeoutMs: 30_000 });
+          if (r.ok) ctx.gain(1);
           out.push(`${kind}: culled one (${r.text.split('\n')[0].slice(0, 60)})`);
         } else {
           out.push(`${kind}: ${(await useOn(ctx, a.id, 'shears')) ? 'sheared one' : 'could not shear'}`);

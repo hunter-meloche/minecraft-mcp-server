@@ -1,6 +1,6 @@
-import type { Goal, GoalContext } from './goals.js';
+import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Milestone, StepResult } from './progress.js';
-import type { Pos } from './memory.js';
+import type { Pos, WorldMemory } from './memory.js';
 import { addZone } from './milestones.js';
 import { takeFromChests } from './chests.js';
 import { toTheWoods, WOODS_DIRS } from './chores.js';
@@ -111,16 +111,29 @@ export function caneCellPlan(base: string, mid: string, haveCane: boolean): 'cut
   return FILLER.test(base) && AIRY.test(mid) ? 'clear' : 'leave';
 }
 
+/**
+ * Run now? The "no" is said in this order: no cane to see to (no patch, or the round is not due); then what keeps a
+ * round that is due from going (not in the yard, no room for the stalks); the hour last.
+ */
+const gate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (!world.zones?.cane?.length) return { cause: 'unneeded', text: 'no cane patch' };
+  const last = world.lastDone?.cane ?? 0;
+  if (!(s.now - last > 20 * MINUTE)) return no.notDue('cane', s.now, last, 20 * MINUTE);
+  if (s.distHome > 24) return no.away(s, 'cane', 24);
+  if (s.slotsUsed >= 34) return no.pockets(s, 'cane', 34);
+  return no.late(s, 'cane') ?? { want: 'daily round: the sugar cane' };
+};
+
 /** Once a day: cut the cane down to its base (the stalk above the bottom block), and replant a missing base. */
 export const caneRound: Goal = {
   name: 'cane',
   priority: 29,
   timeoutMs: 6 * MINUTE,
   retryMs: 30 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || !world.zones?.cane?.length || s.distHome > 24 || s.slotsUsed >= 34) return null;
-    return s.now - (world.lastDone?.cane ?? 0) > 20 * MINUTE ? 'daily round: the sugar cane' : null;
-  },
+  gate,
+  ...fromGate(gate),
+  // a round that cuts nothing and plants nothing (the cells bare and no cane to plant) is busy time to no gain
+  gains: true,
   run: async ctx => {
     (ctx.world.lastDone ??= {}).cane = ctx.s.now;
     let cut = 0, replanted = 0, cleared = 0;
@@ -142,7 +155,7 @@ export const caneRound: Goal = {
       if (plan === 'cut') {
         // cutting the second block brings the rest down with it
         const r = await ctx.act('dig-block', { x: c.x, y: c.y + 1, z: c.z, collect: true });
-        if (/^Dug/.test(r.text)) cut++;
+        if (/^Dug/.test(r.text)) { cut++; ctx.gain(1); }
       } else if (plan === 'plant' || plan === 'clear') {
         if (plan === 'clear') {
           const d = await ctx.act('dig-block', { ...c, collect: true }).catch(e => ({ ok: false, text: (e as Error).message }));
@@ -150,7 +163,7 @@ export const caneRound: Goal = {
           cleared++;
         }
         const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
-        if (/^Placed/.test(r.text)) replanted++;
+        if (/^Placed/.test(r.text)) { replanted++; ctx.gain(1); }
       }
     }
     const got = (await caneCount(ctx)) - before + replanted;

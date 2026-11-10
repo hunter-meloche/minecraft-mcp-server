@@ -8,7 +8,11 @@
  */
 
 export type Outcome = 'done' | 'failed' | 'stopped';
-export interface Run { goal: string; reason: string; at: number; ms?: number; outcome?: Outcome; text?: string }
+export interface Run {
+  goal: string; reason: string; at: number; ms?: number; outcome?: Outcome; text?: string;
+  /** what the run brought in, as the goal reported it (kept when it was stopped midway); not set: it reported none */
+  gain?: number;
+}
 export interface Loop {
   kind: 'ping-pong' | 'spinning';
   goals: string[];

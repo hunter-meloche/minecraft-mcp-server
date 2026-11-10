@@ -95,7 +95,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
       await brain.manual('fill-bucket');
       const s = await rt.status();
       const ground = brain.worldMemory()?.yard?.y ?? (s.block ? s.block.y - 1 : undefined);
-      const ctx = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } }, signal: new AbortController().signal, progress: () => undefined } as unknown as Parameters<typeof fillAt>[0];
+      const ctx = { call: rt.call, s: { position: s.block ?? { x: 0, y: 0, z: 0 } }, signal: new AbortController().signal, progress: () => undefined, gain: () => undefined } as unknown as Parameters<typeof fillAt>[0];
       const list = (await sourcesInSight(ctx, fluid, ground, 3)).filter(v => !v.why);
       if (!list.length) return factory.createErrorResponse(`No ${fluid} source in sight that's safe to fill a bucket at (lava-sources says why for each)`);
       const lines: string[] = [];
@@ -129,7 +129,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
       if (!world) return factory.createErrorResponse('Not in a world yet');
       await brain.manual('cast-obsidian');
       const s = await rt.status();
-      const ctx = { call: rt.call, world, s: { position: s.block ?? { x: 0, y: 0, z: 0 }, home: rt.home(s) }, signal: new AbortController().signal, progress: () => undefined,
+      const ctx = { call: rt.call, world, s: { position: s.block ?? { x: 0, y: 0, z: 0 }, home: rt.home(s) }, signal: new AbortController().signal, progress: () => undefined, gain: () => undefined,
         act: async (tool: string, args: Record<string, unknown> = {}) => { const r = await rt.actions[tool](args); return { ok: !r.isError, text: r.content.map(c => (c as { text?: string }).text ?? '').join(' ') }; } } as unknown as Parameters<typeof castObsidian>[0];
       const inv = await rt.call<{ items: { name: string; count: number }[] }>('inventory');
       const lava = inv.items.filter(i => i.name === 'lava_bucket').reduce((a, i) => a + i.count, 0);

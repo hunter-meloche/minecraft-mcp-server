@@ -1,4 +1,4 @@
-import type { Goal, GoalContext } from '../brain/goals.js';
+import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from '../brain/goals.js';
 import type { BuildJob, Pos, WorldMemory } from '../brain/memory.js';
 import { compile, type Compiled } from './format.js';
 import { pending, type Change } from './diff.js';
@@ -227,24 +227,42 @@ async function terraslice(
  */
 export function structureGoal(store: StructureStore, protect?: (blocks: { at: Pos; state: string }[]) => void,
   built?: (center: Pos, radius: number) => { at: Pos }[]): Goal {
+  /**
+   * Run now? The "no" is said in this order: no job to work (or it waits for something); then the pockets; the hour
+   * last, as the reason only for a job that would otherwise go on.
+   */
+  const gate = (s: Snapshot, world: WorldMemory): Gate => {
+    if (s.dimension !== 'overworld') return { cause: 'away', text: `in ${s.dimension}` };
+    // by day only (the user's choice): the shelter brings it home at dusk and the job goes on in the morning
+    const late = no.late(s, 'build');
+    // the job activeJob() gives, as a look only (that one starts the job list where there is none): the idle log and
+    // brain-status ask this too, and they leave the world as it was
+    const open = (world.buildJobs ?? []).filter(x => !DONE.has(x.status));
+    const j = open.find(x => (x.retryAt ?? 0) <= s.now);
+    if (!j) {
+      if (!open.length) return { cause: 'unneeded', text: 'no build job' };
+      const next = open.reduce((a, b) => ((b.retryAt ?? 0) < (a.retryAt ?? 0) ? b : a));
+      const missing = Object.entries(next.missing ?? {}).map(([k, v]) => `${k} x${v}`).join(', ');
+      return { cause: 'project', text: `build of ${next.structure} waits${missing ? ` for ${missing} in a home chest` : ' to try again'}`, until: next.retryAt };
+    }
+    // full pockets: the stash's turn, unless what fills them is this job's own load (live 2026-11-10: the lookout
+    // took its 292-item load to 35/36 slots, the stash stopped it at station 1 and could put none of it away, and
+    // at 34+ the job never ran again: a day's build stalled with its whole bill in hand)
+    if (s.slotsUsed >= 34 && !(j.phase === 'building' && j.carry?.length)) return no.pockets(s, 'build', 34);
+    // gathering: the stock trip clears job.need when it's back; until then (10 minutes at most) don't stop it for
+    // the two logs it has so far (the job did, a minute into each trip, and built a package of one block)
+    if (j.status === 'gathering' && j.need && Object.keys(j.need).length && s.now - j.updatedAt < 10 * MINUTE) {
+      return { cause: 'project', text: `build of ${j.structure} gathers ${Object.entries(j.need).map(([k, v]) => `${k} x${v}`).join(', ')}`, until: j.updatedAt + 10 * MINUTE };
+    }
+    return late ?? { want: `${j.mode} ${j.structure}${j.note ? `: ${j.note}` : ''}` };
+  };
   return {
     name: 'build',
     priority: BUILD_PRIORITY,
     timeoutMs: 10 * MINUTE,
     retryMs: MINUTE,
-    wants: (s, world) => {
-      // by day only (the user's choice): the shelter brings it home at dusk and the job goes on in the morning
-      if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld') return null;
-      const j = activeJob(world, s.now);
-      // full pockets: the stash's turn, unless what fills them is this job's own load (live 2026-11-10: the lookout
-      // took its 292-item load to 35/36 slots, the stash stopped it at station 1 and could put none of it away, and
-      // at 34+ the job never ran again: a day's build stalled with its whole bill in hand)
-      if (s.slotsUsed >= 34 && !(j?.phase === 'building' && j.carry?.length)) return null;
-      // gathering: the stock trip clears job.need when it's back; until then (10 minutes at most) don't stop it for
-      // the two logs it has so far (the job did, a minute into each trip, and built a package of one block)
-      if (j?.status === 'gathering' && j.need && Object.keys(j.need).length && s.now - j.updatedAt < 10 * MINUTE) return null;
-      return j ? `${j.mode} ${j.structure}${j.note ? `: ${j.note}` : ''}` : null;
-    },
+    gate,
+    ...fromGate(gate),
     run: async ctx => {
       const job = activeJob(ctx.world, ctx.s.now);
       if (!job) return 'no build job';

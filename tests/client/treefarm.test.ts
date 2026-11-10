@@ -50,7 +50,7 @@ test('the harvest round: cuts by hand what it reaches, leaves the rest to Barito
   // reach from where it stands: within 4.5 of the eye
   const reach = (p: { x: number; y: number; z: number }) => Math.hypot(p.x + 0.5 - (feet.x + 0.5), p.y + 0.5 - (feet.y + 1.62), p.z + 0.5 - (feet.z + 0.5)) <= 4.5;
   const ctx = {
-    s: snap(), world: w, signal: new AbortController().signal, progress: () => undefined, status: async () => ({}) as never,
+    s: snap(), world: w, signal: new AbortController().signal, progress: () => undefined, gain: () => undefined, status: async () => ({}) as never,
     call: async <T>(method: string, p: Record<string, number> = {}): Promise<T> => {
       if (method === 'world.region') return { blocks: read(p as unknown as Parameters<typeof read>[0]) } as T;
       if (method === 'dig.here') {

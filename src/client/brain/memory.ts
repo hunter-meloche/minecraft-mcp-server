@@ -127,6 +127,8 @@ export interface WorldMemory {
   /** the obsidian casting may fetch and pour lava (off until a supervised first run: the first unsafe one killed the bot) */
   lavaCasting?: boolean;
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
+  /** the daytime it was busy, idle and busy to no gain, with the idle time by cause: today and the last week (idlelog.ts) */
+  idle?: import('./idlelog.js').IdleMemory;
 }
 
 export const DEFAULT_LEASH = 96;
@@ -160,7 +162,13 @@ export class BrainMemory {
   save(): void {
     if (!this.file) return;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file, JSON.stringify(this.data, null, 1));
+    // written beside it and renamed over it: the file is saved every minute now (the idle tally), and a restart or a
+    // kill halfway through a write must leave the old brain.json whole, not half a new one (it is all the bot knows).
+    // Flushed to the disk before the rename: the filesystem (XFS here) can journal the rename up to half a minute
+    // before it writes the new file's data, and a power cut in between left an empty brain.json, read as a first run
+    const tmp = `${this.file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 1), { flush: true });
+    fs.renameSync(tmp, this.file);
   }
 }
 

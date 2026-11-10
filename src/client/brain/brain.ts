@@ -17,10 +17,11 @@ import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { compile } from '../structures/format.js';
 import { LoopWatch, type Outcome, type Run } from './loops.js';
+import { explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, type IdleCause } from './idlelog.js';
 
 /** Staying alive: never backed off by the loop watch. */
 const SURVIVAL = new Set(['wake', 'break out', 'recover', 'retreat', 'shelter', 'food']);
-import { breakOut, returnIdle, shelterGoal, wake, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { breakOut, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
 import { farm, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
@@ -54,7 +55,11 @@ export interface BrainOptions {
   now?: () => number;
 }
 
-interface Running { goal: Goal; reason: string; started: number; abort: AbortController; done: Promise<void> }
+interface Running {
+  goal: Goal; reason: string; started: number; abort: AbortController; done: Promise<void>;
+  /** the counted daytime it has used and what it has brought in so far: booked on the idle tally when it ends */
+  used: { ms: number; gain: number };
+}
 
 /** Blocks the bot can stand partly inside of (thin ones): a fence, wall, pane, bars, a shut gate. */
 const THIN = /(fence|_wall(\[|$)|pane|iron_bars|chain(\[|$))/;
@@ -105,6 +110,13 @@ export class Brain {
    * again" 3.5 min after the LOOP, which wasn't reported again for half an hour); they run their 10 minutes.
    */
   private loopHold = new Map<string, number>();
+  /**
+   * Why each held goal is held (`wedged`, `stuck`, `timed out`, `failed: ...`, `3 failures: until morning`,
+   * `loop: ...`), set and let go together with retryAt: the idle log and brain-status name what is in the way, not
+   * only that something is. `loopWhy`: the loop watch's own, put back with its holds.
+   */
+  private holdWhy = new Map<string, string>();
+  private loopWhy = new Map<string, string>();
   private log: string[] = [];
   private memory: BrainMemory;
   private goals: Goal[];
@@ -127,6 +139,14 @@ export class Brain {
   private idleStage = 0;
   /** today's daytime ticks, and how many of them had nothing to do */
   private day = { tod: 0, work: 0, idle: 0, lastIdle: 0 };
+  /** the idle tally's clock: when daytime was last booked (markTime) */
+  private lastMark?: number;
+  /** the idle streak under way (counted daytime with nothing running): how long, under which lead causes, and its last log line */
+  private streak?: { ms: number; by: Partial<Record<IdleCause, number>>; lineAt?: number; lead?: IdleCause };
+  /** when an idle tick last saved the tally */
+  private idleSaved?: number;
+  /** what has gone wrong in the measuring and been noted (each kind once) */
+  private mishaps = new Set<string>();
   private worldId?: string;
   private readonly now: () => number;
   private readonly tickMs: number;
@@ -144,7 +164,10 @@ export class Brain {
   setEnabled(on: boolean): void {
     this.enabled = on;
     if (on) this.leaseUntil = 0; // handed back on purpose: no waiting out the LLM's quiet time
+    // the idle tally counts the autopilot's daytime only: its clock starts afresh, and no idle streak spans the time off
+    if (on) this.lastMark = undefined;
     this.note(on ? 'autonomy on' : 'autonomy off');
+    if (!on) this.measure('time', () => this.endStreak()); // after its cause in the log, as when a goal starts
     void this.show();
     if (on && !this.timer) {
       this.timer = setInterval(() => { void this.tick(); }, this.tickMs);
@@ -175,10 +198,13 @@ export class Brain {
   async tick(): Promise<void> {
     if (!this.enabled || this.ticking) return;
     this.ticking = true;
+    // what this tick saw, for the idle tally: stays unset when the tick was skipped (the LLM's, no world to look at)
+    let seen: Snapshot | undefined;
     try {
       if (this.now() < this.leaseUntil) return;
       const s = await this.sense();
       if (!s || !this.worldId) return;
+      seen = s;
       const world = this.memory.world(this.worldId);
       world.id = this.worldId;
       await this.discover(s, world);
@@ -204,19 +230,19 @@ export class Brain {
           if (out) {
             await this.stopRunning(`${r.goal.name} is wedged in the ${out.block} at ${here}: stepping out`);
             await this.rt.call('steer', { ...out.to, within: 0.25, timeoutMs: 2000 }, 5000).catch(() => undefined);
-            this.retryAt.set(r.goal.name, this.now() + 5000);
+            this.holdFor(r.goal.name, this.now() + 5000, 'wedged');
             return;
           }
         }
         if (s.process && this.now() - this.stillSince > 3 * 60_000) {
           this.stillSince = this.now();
           await this.stopRunning(`${r.goal.name} looks stuck (no movement for 3 min at ${here})`);
-          this.retryAt.set(r.goal.name, this.now() + 3 * 60_000);
+          this.holdFor(r.goal.name, this.now() + 3 * 60_000, 'stuck');
           return;
         }
         if (this.now() - r.started > r.goal.timeoutMs) {
           await this.stopRunning(`${r.goal.name} ran out of time`);
-          this.retryAt.set(r.goal.name, this.now() + r.goal.retryMs);
+          this.holdFor(r.goal.name, this.now() + r.goal.retryMs, 'timed out');
           return;
         }
         if (r.goal.interruptible === false) return;
@@ -231,6 +257,8 @@ export class Brain {
     } catch (e) {
       this.note(`tick failed: ${(e as Error).message}`);
     } finally {
+      // after the decision: a tick that started something books no idle time
+      this.measure('time', () => this.markTime(seen));
       this.ticking = false;
       await this.show();
     }
@@ -291,6 +319,15 @@ export class Brain {
     const lease = this.leaseUntil - this.now();
     if (lease > 0) lines.push(`Paused for the LLM for ${(lease / 60_000).toFixed(1)} more min (last tool: ${this.leaseTool}).`);
     const s = this.last;
+    // what is in the way right now, as the idle log books it: the held goals, and why nothing runs. By day, awake,
+    // with the autopilot in charge, "nothing to do" has a reason: the one the idle time is booked under
+    let why: Decline[] = [];
+    let idle: string | undefined;
+    this.measure('status', () => {
+      if (!s || !world) return;
+      why = explainIdle({ ...s, now: this.now() }, world, this.goals, this.retryAt, this.holdWhy);
+      if (this.enabled && lease <= 0 && s.activity === 'work' && !s.sleeping && s.home) idle = idleNow(why);
+    });
     if (s) {
       lines.push(`Activity: ${s.activity} (time of day ${s.timeOfDay}${s.sleeping ? ', asleep' : ''}). Health ${s.health}, food ${s.food}, ${s.slotsUsed}/36 slots used.`);
       lines.push(s.home ? `Home (${s.home.x}, ${s.home.y}, ${s.home.z}), ${Number.isFinite(s.distHome) ? Math.round(s.distHome) + ' blocks away' : 'in another dimension'}.` : 'No home set (set-home).');
@@ -302,7 +339,7 @@ export class Brain {
       }
     }
     if (this.running) lines.push(`Now: ${this.running.goal.name} (${this.running.reason}) for ${Math.round((this.now() - this.running.started) / 1000)}s.`);
-    else lines.push('Now: nothing to do.');
+    else lines.push(idle ?? 'Now: nothing to do.');
     if (world) {
       const l = world.landmarks;
       const p = (q?: { x: number; y: number; z: number }) => (q ? `(${q.x}, ${q.y}, ${q.z})` : 'none');
@@ -320,6 +357,7 @@ export class Brain {
     lines.push(...communityStatus(world), ...yardGrowStatus(world));
     if (world?.yard) lines.push(`Yard: x ${world.yard.x1}..${world.yard.x2}, z ${world.yard.z1}..${world.yard.z2}, ground y ${world.yard.y}.`);
     if (this.day.work) lines.push(`Today: idle ${Math.round(100 * this.day.idle / this.day.work)}% of daytime${this.day.lastIdle ? ` (yesterday ${this.day.lastIdle}%)` : ''}.`);
+    if (world) this.measure('status', () => { lines.push(...idleReport(world, why)); });
     const loops = this.loops.found.filter(f => this.now() - f.at < 60 * 60_000);
     if (loops.length) lines.push('Loops in the last hour (fix these in the code):', ...loops.map(f => `- ${new Date(f.at).toISOString().slice(11, 19)} ${f.loop.kind}: ${f.loop.summary}`));
     if (this.log.length) lines.push('Recent:', ...this.log.slice(-20).map(l => `- ${l}`));
@@ -353,6 +391,11 @@ export class Brain {
 
   private countDay(s: Snapshot): void {
     if (s.timeOfDay < this.day.tod - 12_000) {
+      // the day that ended as the idle tally counted it: one `day:` line, and its sums kept for the week
+      this.measure('day', () => {
+        const line = this.worldId ? tallyRoll(this.memory.world(this.worldId)) : '';
+        if (line) this.note(line);
+      });
       // a new day: old routes fade, so a path no longer walked stops being lit
       if (this.heat) { this.heat.map.decay(0.9); if (this.worldId) this.memory.world(this.worldId).heat = this.heat.map.toJSON(); }
       if (this.day.work) this.day.lastIdle = Math.round(100 * this.day.idle / this.day.work);
@@ -530,6 +573,8 @@ export class Brain {
 
   private start(goal: Goal, reason: string, s: Snapshot, world: WorldMemory): void {
     const abort = new AbortController();
+    // added to as the run goes, not handed over at its end: a run stopped midway keeps the time it used and what it got
+    const used = { ms: 0, gain: 0 };
     const ctx: GoalContext = {
       s, world, signal: abort.signal,
       act: async (tool, args = {}) => {
@@ -541,7 +586,12 @@ export class Brain {
       },
       call: (m, p, t) => this.rt.call(m, p, t),
       status: () => this.rt.status(),
-      progress: text => { this.step = text; this.note(`${goal.name}: ${text}`); void this.show(); }
+      progress: text => { this.step = text; this.note(`${goal.name}: ${text}`); void this.show(); },
+      gain: n => {
+        if (!Number.isFinite(n) || n <= 0) return;
+        used.gain += n;
+        run.gain = used.gain; // the loop watch's record of this run
+      }
     };
     this.note(`start ${goal.name}: ${reason}`);
     // the stuck watchdog counts from now: it kept the last job's clock, and every retry after a stuck stop was
@@ -552,6 +602,7 @@ export class Brain {
     const done = brainRun.run({ signal: abort.signal }, () => goal.run(ctx))
       .then(text => {
         this.retryAt.delete(goal.name);
+        this.holdWhy.delete(goal.name);
         this.fails.delete(goal.name);
         this.note(`done ${goal.name} in ${Math.round((this.now() - started) / 1000)}s: ${text}`);
         this.loopCheck(run, 'done', text);
@@ -559,14 +610,14 @@ export class Brain {
       .catch((e: Error) => {
         // stopped for something more urgent (or the LLM) is no failure: it may go again as soon as it's wanted
         if (!abort.signal.aborted) {
-          this.retryAt.set(goal.name, this.now() + goal.retryMs);
+          this.holdFor(goal.name, this.now() + goal.retryMs, `failed: ${String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 60)}`);
           // three failures in a row: something is in the way today; leave it until the next morning
           const n = (this.fails.get(goal.name) ?? 0) + 1;
           this.fails.set(goal.name, n);
           if (n >= 3 && s) {
             const tod = this.last?.timeOfDay ?? s.timeOfDay;
             const toMorning = (((24_000 - tod) % 24_000) || 24_000) * 50;
-            this.retryAt.set(goal.name, this.now() + toMorning);
+            this.holdFor(goal.name, this.now() + toMorning, '3 failures: until morning');
             this.morningHold.add(goal.name);
             this.fails.delete(goal.name);
             this.note(`${goal.name} failed 3 times in a row: left until the morning`);
@@ -576,11 +627,13 @@ export class Brain {
         this.loopCheck(run, abort.signal.aborted ? 'stopped' : 'failed', this.stopWhy ?? e.message);
       })
       .finally(() => {
+        // booked before the run is let go of: the stretch since the last tick is still its own
+        this.measure('run', () => this.bookRun(goal, used, this.running?.abort === abort));
         if (this.running?.abort === abort) this.running = undefined;
         void this.show();
         this.memory.save(); // chest contents and chore times it learned
       });
-    this.running = { goal, reason, started, abort, done };
+    this.running = { goal, reason, started, abort, done, used };
     this.step = undefined;
     void this.show();
   }
@@ -599,12 +652,12 @@ export class Brain {
       const v = victimOf(again);
       // only a loop the goal has gone round again since its last hold (not the old turns, still in the window)
       const since = (this.loopHold.get(v ?? '') ?? 0) - 10 * 60_000;
-      if (v && again.runs.some(r => r.goal === v && r.at >= since)) { this.hold(v); this.note(`LOOP again (${again.kind}: ${again.goals.join(' and ')}); ${v} backed off for 10 min`); }
+      if (v && again.runs.some(r => r.goal === v && r.at >= since)) { this.hold(v, again.kind); this.note(`LOOP again (${again.kind}: ${again.goals.join(' and ')}); ${v} backed off for 10 min`); }
       return;
     }
     if (!loop) return;
     const victim = victimOf(loop);
-    if (victim) this.hold(victim);
+    if (victim) this.hold(victim, loop.kind);
     this.note(`LOOP (${loop.kind}): ${loop.summary}${victim ? `; ${victim} backed off for 10 min` : ''}`);
     if (this.opts.logFile) {
       try {
@@ -614,20 +667,96 @@ export class Brain {
     }
   }
 
-  private hold(goal: string): void {
+  private hold(goal: string, kind: string): void {
     const until = this.now() + 10 * 60_000;
-    this.retryAt.set(goal, until);
+    this.holdFor(goal, until, `loop: ${kind}`);
     this.loopHold.set(goal, until);
+    this.loopWhy.set(goal, `loop: ${kind}`);
+  }
+
+  /** Hold a goal back until then, and keep why (in a few words: it is read in the idle log and in brain-status). */
+  private holdFor(goal: string, until: number, why: string): void {
+    this.retryAt.set(goal, until);
+    this.holdWhy.set(goal, why);
   }
 
   private looping = (goal: string) => (this.loopHold.get(goal) ?? 0) > this.now();
 
   /** After every hold was let go: the loop watch's back-offs still running are put back. */
   private keepLoopHolds(): void {
+    // the whys went with the holds; a loop hold put back says again what it is
+    this.holdWhy.clear();
     for (const [g, t] of this.loopHold) {
-      if (t > this.now()) this.retryAt.set(g, t);
-      else this.loopHold.delete(g);
+      if (t > this.now()) this.holdFor(g, t, this.loopWhy.get(g) ?? 'loop');
+      else { this.loopHold.delete(g); this.loopWhy.delete(g); }
     }
+  }
+
+  /**
+   * The measuring (the idle tally, its log lines, the status section) must never stop a tick from deciding: whatever
+   * goes wrong in it is noted once per kind and otherwise let be.
+   */
+  private measure(kind: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (e) {
+      if (this.mishaps.has(kind)) return;
+      this.mishaps.add(kind);
+      try { this.note(`idle log: ${kind} failed (noted once): ${String((e as Error)?.message ?? e)}`); } catch { /* not even that */ }
+    }
+  }
+
+  /**
+   * Book the real time since the last call on the idle tally (at most 15 s: a tick that hung, or a clock that jumped,
+   * is not a quarter of an hour of idleness). Only counted daytime: awake by day with a home, in a tick that looked
+   * (`s` unset: the LLM has the bot, or there was no world to see; thunder is `rest`). With a run under way the time
+   * is that run's, booked when it ends; with none it is idle time under the cause that leads, and the streak of it is
+   * logged: once it has lasted 15 s, then each minute, and when the lead cause changes, but never more than once in
+   * 15 s however the lead flips (17,000 ticks a real day).
+   */
+  private markTime(s: Snapshot | undefined): void {
+    const now = this.now();
+    const dt = this.lastMark === undefined ? 0 : Math.max(0, Math.min(now - this.lastMark, 15_000));
+    this.lastMark = now;
+    const world = this.worldId ? this.memory.world(this.worldId) : undefined;
+    if (!s || !world || s.activity !== 'work' || s.sleeping || !s.home) { this.endStreak(); return; }
+    if (this.running) { this.running.used.ms += dt; this.endStreak(); return; }
+    const why = explainIdle(s, world, this.goals, this.retryAt, this.holdWhy);
+    const lead = why[0].cause;
+    tally(world, 'idle', dt, lead);
+    const st = this.streak ??= { ms: 0, by: {} };
+    st.ms += dt;
+    st.by[lead] = (st.by[lead] ?? 0) + dt;
+    if (st.ms >= 15_000 && (st.lineAt === undefined || now - st.lineAt >= 60_000 || (lead !== st.lead && now - st.lineAt >= 15_000))) {
+      st.lineAt = now;
+      st.lead = lead;
+      this.note(idleLine(st.ms, why));
+    }
+    // a run's end saves the tally with the rest; standing idle nothing would, and a restart lost the day so far
+    if (this.idleSaved === undefined) this.idleSaved = now;
+    else if (now - this.idleSaved >= 60_000) { this.idleSaved = now; this.memory.save(); }
+  }
+
+  /** The idle streak is over (something runs, or the counted daytime stopped): say so when it was worth a line. */
+  private endStreak(): void {
+    const st = this.streak;
+    this.streak = undefined;
+    if (st && st.ms >= 15_000) this.note(idleOverLine(st.ms, st.by));
+  }
+
+  /**
+   * A run ended: book the counted daytime it used. The walk back to the yard (goal `idle`) is idle time, the bot was
+   * away with nothing to do; a run that was to bring something in (`gains`) and brought nothing is `empty`, busy to
+   * no gain; everything else is busy. `mine`: it is still the run in hand (then the stretch since the last tick is
+   * its own too).
+   */
+  private bookRun(goal: Goal, used: { ms: number; gain: number }, mine: boolean): void {
+    if (mine) this.markTime(this.last);
+    const world = this.worldId ? this.memory.world(this.worldId) : undefined;
+    if (!world) return;
+    if (goal.name === returnIdle.name) tally(world, 'idle', used.ms, 'away');
+    else if (goal.gains && !used.gain) tally(world, 'empty', used.ms);
+    else tally(world, 'busy', used.ms);
   }
 
   private async stopRunning(why: string): Promise<void> {

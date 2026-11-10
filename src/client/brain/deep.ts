@@ -1,6 +1,6 @@
-import type { Goal, GoalContext, Snapshot } from './goals.js';
+import { fromGate, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
-import { MINE_FROM_BUILDS, deepTripReady, pickMineStart, tripBudgetMs } from './mine.js';
+import { DEEP_TRIP, MINE_FROM_BUILDS, deepTripReady, pickMineStart, tripBudgetMs } from './mine.js';
 import { readyFoodPoints } from './food.js';
 import { tier } from './kit.js';
 import { chestTotals, freeChestTotals } from './chests.js';
@@ -45,7 +45,47 @@ export function tripCheck(s: Snapshot) {
   };
 }
 
+/**
+ * Why a trip underground cannot set out now, or null when it can: deepTripReady, said as the idle log's causes. Hurt or
+ * hungry first, then no room, then what the kit lacks; the hour last, as the reason only for a trip otherwise ready.
+ */
+export function tripDecline(s: Snapshot, who: string): Decline | null {
+  const c = tripCheck(s);
+  const ready = deepTripReady(c);
+  if (ready.ok) return null;
+  if (c.health < DEEP_TRIP.health || c.food < DEEP_TRIP.food) return no.health(s, who, DEEP_TRIP.health, DEEP_TRIP.food);
+  if (c.slotsFree < DEEP_TRIP.slotsFree) return no.pockets(s, who, 37 - DEEP_TRIP.slotsFree);
+  const kit = [
+    c.readyFoodPoints < DEEP_TRIP.readyFoodPoints && `${c.readyFoodPoints}/${DEEP_TRIP.readyFoodPoints} ready food points`,
+    c.armorTier < DEEP_TRIP.armorTier && 'armour below iron',
+    c.torches < DEEP_TRIP.torches && `${c.torches}/${DEEP_TRIP.torches} torches`,
+    c.blocks < DEEP_TRIP.blocks && `${c.blocks}/${DEEP_TRIP.blocks} blocks`
+  ].filter(Boolean);
+  if (kit.length) return { cause: 'kit', text: `${kit.join(', ')} (${who} needs the deep kit)` };
+  const t = ((c.timeOfDay % 24000) + 24000) % 24000;
+  if (t > DEEP_TRIP.latestStart) return { cause: 'late', text: `time of day ${t} (${who} sets out by ${DEEP_TRIP.latestStart})` };
+  // a check deepTripReady has and this does not name yet: its own words
+  return { cause: 'kit', text: `${who}: ${ready.why ?? 'not ready'}` };
+}
+
 let tripRunning = false;
+
+/**
+ * Run now? The "no" is said in this order: no home to set out from; nothing to go for (it went today, or no diamonds
+ * are wanted); then what keeps a wanted trip at home (not in the yard, hurt, full, not kitted out); the hour last.
+ */
+const gate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (s.dimension !== 'overworld' || !s.home) return no.away(s, 'deep trip', 16);
+  // once a day
+  if (s.now - (world.lastDone?.deep ?? 0) < 20 * MINUTE) return no.notDue('deep trip', s.now, world.lastDone?.deep ?? 0, 20 * MINUTE);
+  const want = diamondsWanted(s, world);
+  if (!want) return { cause: 'stocked', text: 'no diamonds wanted' };
+  if (s.distHome > 16) return no.away(s, 'deep trip', 16);
+  // not ready (food, torches, armour, ...): the food goal, the kit and the stash see to that first
+  const trip = tripDecline(s, 'deep trip');
+  if (trip && trip.cause !== 'late') return trip;
+  return no.late(s, 'deep trip') ?? trip ?? { want: `${want} diamond(s) wanted: a deep trip` };
+};
 
 export const deepTrip: Goal = {
   name: 'deep trip',
@@ -55,14 +95,8 @@ export const deepTrip: Goal = {
   urgency: () => (tripRunning ? 58 : 37),
   timeoutMs: 14 * MINUTE,
   retryMs: 30 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > 16) return null;
-    if (s.now - (world.lastDone?.deep ?? 0) < 20 * MINUTE) return null; // once a day
-    const want = diamondsWanted(s, world);
-    if (!want) return null;
-    // not ready (food, torches, armour, ...): the food goal, the kit and the stash see to that first
-    return deepTripReady(tripCheck(s)).ok ? `${want} diamond(s) wanted: a deep trip` : null;
-  },
+  gate,
+  ...fromGate(gate),
   run: async ctx => {
     tripRunning = true;
     try { return await trip(ctx); } finally { tripRunning = false; }

@@ -1,8 +1,7 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
-import { AT_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { AT_HOME, fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
-import { daylightLeft } from './schedule.js';
 import { collectFurnace, farmAll } from './chores.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
@@ -82,6 +81,19 @@ export const LARDER = 60;
 const storedFood = (world: WorldMemory) => readyFoodPoints(new Map(Object.entries(chestTotals(world))));
 
 /**
+ * Run now? The "no" is said in this order: no home to stock; the larder is full; then what keeps a round that is
+ * wanted from going (not in the yard, hungry or hurt: the food goal's turn); the hour last.
+ */
+const larderGate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (!s.home || s.dimension !== 'overworld') return no.away(s, 'larder', 24);
+  const total = readyFoodPoints(s.counts) + storedFood(world);
+  if (!(total < LARDER)) return { cause: 'stocked', text: `${total} food points at home (keep ${LARDER})` };
+  if (s.distHome > 24) return no.away(s, 'larder', 24);
+  if (s.health < 14 || s.food < 14) return no.health(s, 'larder', 14, 14);
+  return no.late(s, 'larder', 3000) ?? { want: `${total} food points at home (keep ${LARDER})` };
+};
+
+/**
  * The stockpile (third after staying alive and the gear): by day, fed and healthy, farm, fish and hunt until the
  * home holds LARDER food points, so a bad day (rain, no fish, a fight) never leaves the bot short.
  */
@@ -90,12 +102,8 @@ export const larder: Goal = {
   priority: 48,
   timeoutMs: 12 * 60_000,
   retryMs: 10 * 60_000,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 24 || s.dimension !== 'overworld') return null;
-    if (s.health < 14 || s.food < 14 || daylightLeft(s.timeOfDay) < 3000) return null;
-    const total = readyFoodPoints(s.counts) + storedFood(world);
-    return total < LARDER ? `${total} food points at home (keep ${LARDER})` : null;
-  },
+  gate: larderGate,
+  ...fromGate(larderGate),
   run: async ctx => {
     const before = readyFoodPoints(ctx.s.counts) + storedFood(ctx.world);
     const text = await gatherFood(ctx, Math.max(FOOD_TARGET, LARDER - storedFood(ctx.world)), false);

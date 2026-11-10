@@ -201,7 +201,7 @@ test('lights: torches checked against the real light; one that lit nothing comes
     },
     call: (async (m: string) => (m === 'world.region' ? { blocks } : { block: light() })) as GoalContext['call'],
     status: async () => ({ inWorld: true, username: 'b', screen: null }),
-    progress: () => undefined
+    progress: () => undefined, gain: () => undefined
   } as GoalContext;
   t.regex(lights.wants(ctx.s, ctx.world) ?? '', /daily round/);
   const r = await lights.run(ctx);
@@ -226,7 +226,7 @@ test('farm: a daily round from the middle of the farmland, wheat baked into brea
     act: async (tool: string, a: Record<string, unknown> = {}) => { acts.push(`${tool} ${JSON.stringify(a)}`); return { ok: true, text: tool === 'farm' ? 'Harvested wheat x7' : 'ok' }; },
     call: (async () => ({ items: [{ slot: 3, name: 'wheat', count: 7 }] })) as GoalContext['call'],
     status: async () => ({ inWorld: true, username: 'b', screen: null }),
-    progress: () => undefined
+    progress: () => undefined, gain: () => undefined
   } as GoalContext;
   t.is(await farm.run(ctx), 'Harvested wheat x7; baked 2 bread');
   t.deepEqual(acts.map(a => a.split(' ')[0]), ['move-to-position', 'farm', 'craft-item']);
@@ -243,7 +243,7 @@ test('stock: a trip that found nothing leaves that resource alone for a while', 
     act: async (tool: string) => ({ ok: true, text: tool === 'mine-blocks' ? 'Stopped after 360s (time limit): nothing gained.' : 'Home' }),
     call: (async () => ({})) as GoalContext['call'],
     status: async () => ({ inWorld: true, username: 'b', screen: null }),
-    progress: () => undefined
+    progress: () => undefined, gain: () => undefined
   } as GoalContext;
   await stock.run(ctx);
   t.deepEqual(stockShort(s, w), []);
@@ -268,7 +268,7 @@ test('stock: a trip for the project cane goes to the wild cane it found before, 
       // no cane in sight from home; there, some
       call: (async () => ({ positions: acts.length ? [{ x: 15, y: 63, z: 165 }] : [] })) as GoalContext['call'],
       status: async () => ({ inWorld: true, username: 'b', screen: null }),
-      progress: () => undefined
+      progress: () => undefined, gain: () => undefined
     } as GoalContext;
     await stock.run(ctx);
     return { acts, w };

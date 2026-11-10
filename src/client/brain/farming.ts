@@ -1,4 +1,5 @@
-import type { GoalContext } from './goals.js';
+import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import type { WorldMemory } from './memory.js';
 import type { Milestone, MilestoneState, Step, StepResult } from './progress.js';
 import { progressOf } from './progress.js';
 import { prepareBill } from './project.js';
@@ -209,6 +210,19 @@ export function treeFarmMilestone(prereqs: string[]): Milestone {
 }
 
 /**
+ * Run now? The "no" is said in this order: no round to do (no tree farm, or the round is not due); then what keeps a
+ * round that is due from going (not in the yard, no room for the logs); the hour last.
+ */
+const treeGate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (!world.zones?.['trees:sapling']?.length) return { cause: 'unneeded', text: 'no tree farm' };
+  const last = world.lastDone?.trees ?? 0;
+  if (!(s.now - last > 20 * MINUTE)) return no.notDue('trees', s.now, last, 20 * MINUTE);
+  if (s.distHome > 24) return no.away(s, 'trees', 24);
+  if (s.slotsUsed >= 33) return no.pockets(s, 'trees', 33);
+  return no.late(s, 'trees') ?? { want: 'daily round: the tree farm' };
+};
+
+/**
  * Once a day: fell the grown trees of the tree farm and plant saplings where the trunks stood (the leaves drop more
  * as they decay; a bare cell is planted next round).
  *
@@ -218,15 +232,15 @@ export function treeFarmMilestone(prereqs: string[]): Milestone {
  * cobblestone for the high ones and left the pillars), and only what's out of reach is left to Baritone. Then the
  * plot is cleared of scaffold: nothing but trees belongs in it, so every throwaway block above the ground goes.
  */
-export const treeFarm: import('./goals.js').Goal = {
+export const treeFarm: Goal = {
   name: 'trees',
   priority: 30,
   timeoutMs: 10 * MINUTE,
   retryMs: 30 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || !world.zones?.['trees:sapling']?.length || s.distHome > 24 || s.slotsUsed >= 33) return null;
-    return s.now - (world.lastDone?.trees ?? 0) > 20 * MINUTE ? 'daily round: the tree farm' : null;
-  },
+  gate: treeGate,
+  ...fromGate(treeGate),
+  // logs cut and saplings planted: a round over a plot where nothing has grown (or that only clears scaffold) brought none
+  gains: true,
   run: async ctx => {
     (ctx.world.lastDone ??= {}).trees = ctx.s.now;
     const cells = ctx.world.zones!['trees:sapling'];
@@ -241,13 +255,13 @@ export const treeFarm: import('./goals.js').Goal = {
     for (const p of logs) {
       if (ctx.signal.aborted) break;
       const why = await digByHand(ctx, blocks, box, p, here, gone);
-      if (!why) { cut++; gone.add(`${p.x},${p.y},${p.z}`); } else high.push(p);
+      if (!why) { cut++; ctx.gain(1); gone.add(`${p.x},${p.y},${p.z}`); } else high.push(p);
     }
     // out of reach from the ground (the top of a tall one): Baritone, and its pillar comes down below
     for (const p of high) {
       if (ctx.signal.aborted) break;
       const r = await ctx.act('dig-block', { ...p });
-      if (/^Dug/.test(r.text)) byBaritone++;
+      if (/^Dug/.test(r.text)) { byBaritone++; ctx.gain(1); }
     }
     if (cut + byBaritone) await ctx.act('collect-items', { x: box.x + Math.floor(box.width / 2), y: box.y + 1, z: box.z + Math.floor(box.length / 2), radius: 10, timeoutMs: 40_000 }).catch(() => undefined);
     // the scaffold: anything thrown down in the plot above the ground
@@ -275,6 +289,7 @@ export const treeFarm: import('./goals.js').Goal = {
     }
     if (left.length) ctx.progress(`scaffold left in the tree farm: ${left.slice(0, 5).join('; ')}`);
     const p = await plantSaplings(ctx, cells);
+    ctx.gain(p.planted);
     return `cut ${cut + byBaritone} log(s)${byBaritone ? ` (${byBaritone} out of reach, by Baritone)` : ''}${high.length - byBaritone > 0 ? `, ${high.length - byBaritone} left` : ''}; ` +
       `cleared ${cleared} scaffold block(s)${left.length ? `, ${left.length} left` : ''}; planted ${p.planted} sapling(s)${p.bare ? `, ${p.bare} cell(s) bare` : ''}`;
   }

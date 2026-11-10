@@ -1,6 +1,7 @@
 import type { InventoryItem, Status } from '../tools.js';
-import type { Activity } from './schedule.js';
+import { daylightLeft, type Activity } from './schedule.js';
 import type { Pos, WorldMemory } from './memory.js';
+import type { IdleCause } from './idlelog.js';
 
 /** What the brain knows at one moment: read fresh each tick. */
 export interface Snapshot {
@@ -43,7 +44,21 @@ export interface GoalContext {
   status: () => Promise<Status>;
   /** log a step as it happens (a job stopped midway still shows what it got done) */
   progress: (text: string) => void;
+  /**
+   * what the run has brought in so far (items, blocks placed, animals: whatever the goal counts); the brain adds it
+   * up as it goes, so a run stopped midway keeps what it got. A `gains` goal that ends with none was busy to no gain
+   */
+  gain: (n: number) => void;
 }
+
+/**
+ * Why a goal does not ask to run now: the cause the idle time is booked under, a short text for the log and
+ * brain-status, and when it lifts (real ms) where that is known.
+ */
+export interface Decline { cause: IdleCause; text: string; until?: number }
+
+/** A goal's one answer to "run now?": the reason to, or why not. */
+export type Gate = { want: string } | Decline;
 
 /**
  * One behaviour, like a mob AI goal: it says when it wants to run (and why), and how. The brain runs the most
@@ -67,7 +82,65 @@ export interface Goal {
   interruptible?: boolean;
   /** may run while the bot is in bed (everything else waits for morning) */
   whileAsleep?: boolean;
+  /** the one place it is decided: wants() and declines() both come from it (fromGate), so they cannot disagree */
+  gate?: (s: Snapshot, world: WorldMemory) => Gate;
+  /**
+   * why it does not want to run now, for the idle log and brain-status; null when it does. No calls, and nothing
+   * written, ever: it is asked where the brain decides nothing (another goal running, this one kept back, the LLM
+   * driving, the autopilot off). A gate that writes down what it finds (the project's: a milestone already in place)
+   * gives the same "no" here as a look only, not through fromGate
+   */
+  declines?: (s: Snapshot, world: WorldMemory) => Decline | null;
+  /** it reports what it brings in through ctx.gain: a run that ends with none is booked as busy to no gain */
+  gains?: true;
 }
+
+/**
+ * wants() and declines() from one gate: a goal that said "no" in one and nothing in the other is how idle time went
+ * unexplained. Use as `{ name, ..., gate, ...fromGate(gate) }`.
+ */
+export const fromGate = (g: (s: Snapshot, w: WorldMemory) => Gate): Pick<Goal, 'wants' | 'declines'> => ({
+  wants: (s, w) => { const r = g(s, w); return 'want' in r ? r.want : null; },
+  declines: (s, w) => { const r = g(s, w); return 'want' in r ? null : r; }
+});
+
+/** game ticks as minutes of real time, to one place (a tick is 50 ms) */
+const tickMin = (ticks: number) => (ticks * 50 / 60_000).toFixed(1);
+
+/**
+ * The declines the gates share: the same words wherever they are said, each with its numbers and with who says it
+ * (`35/36 slots (cane runs under 34)`), so a line in the idle log can be acted on without reading the goal.
+ */
+export const no = {
+  /** no home, another dimension, or further out than the goal works from */
+  away: (s: Snapshot, who: string, within: number): Decline => ({
+    cause: 'away',
+    text: !s.home ? 'no home set' : s.dimension !== 'overworld' ? `in ${s.dimension}` : !Number.isFinite(s.distHome) ? 'no distance to home'
+      : `${Math.round(s.distHome)} blocks from home (${who} works within ${within})`
+  }),
+  /** under the health (and, where the goal asks for it, the food) it sets out with */
+  health: (s: Snapshot, who: string, health: number, food?: number): Decline => ({
+    cause: 'health',
+    text: food === undefined ? `health ${Math.round(s.health)} (${who} needs ${health})`
+      : `health ${Math.round(s.health)}, food ${Math.round(s.food)} (${who} needs ${health} and ${food})`
+  }),
+  /** too full to carry what it would bring in: it runs with fewer than `from` slots used */
+  pockets: (s: Snapshot, who: string, from: number): Decline => ({ cause: 'pockets', text: `${s.slotsUsed}/36 slots (${who} runs under ${from})` }),
+  /**
+   * Not work time, or under `ticks` of daylight left; null by day with time enough. A gate says this last: the hour is
+   * the reason only when nothing else stands in the goal's way (a goal with nothing to do is not idle for being late).
+   */
+  late: (s: Snapshot, who: string, ticks = 0): Decline | null => {
+    if (s.sleeping) return { cause: 'late', text: 'asleep' };
+    if (s.activity !== 'work') return { cause: 'late', text: `not work time (${s.activity})` };
+    const left = daylightLeft(s.timeOfDay);
+    return left < ticks ? { cause: 'late', text: `${tickMin(left)} min of daylight left (${who} needs ${tickMin(ticks)})` } : null;
+  },
+  /** a round that ran less than `every` ms ago (or put itself off beyond that): nothing to do there before `until` */
+  notDue: (who: string, now: number, last: number, every: number): Decline => ({
+    cause: 'unneeded', text: `${who} is not due for ${Math.max(1, Math.ceil((last + every - now) / 60_000))} min (every ${Math.round(every / 60_000)})`, until: last + every
+  })
+};
 
 /** Close enough to home to count as there. */
 export const AT_HOME = 3;

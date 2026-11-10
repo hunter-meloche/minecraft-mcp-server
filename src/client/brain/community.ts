@@ -1,11 +1,11 @@
-import type { Goal, GoalContext, Snapshot } from './goals.js';
+import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { freeChestTotals, takeFromChests } from './chests.js';
-import { deepTripReady, pickMineStart, tripBudgetMs, MINE_FROM_BUILDS } from './mine.js';
+import { pickMineStart, tripBudgetMs, MINE_FROM_BUILDS } from './mine.js';
 import { nearestZone, type Zone } from './courtesy.js';
 import { daylightLeft } from './schedule.js';
 import { fuelFor } from './project.js';
-import { tripCheck, diamondsWanted } from './deep.js';
+import { tripDecline, diamondsWanted } from './deep.js';
 
 /**
  * The community chests: chests on a shared server where players and bots leave surplus for each other (a friend put
@@ -273,6 +273,27 @@ async function gather(ctx: GoalContext, m: Mission, src: Source): Promise<string
 const deliverNow = (m: Mission, src: Source) => owed(m) > 0 && (left(m) === 0 || owed(m) >= (src.underground ? 1 : 32));
 
 /**
+ * Run now? The "no" is said in this order: no home; no mission that can be worked (none asked for, or the oldest is
+ * for something the bot cannot get or for a chest it does not know); then what keeps that one from going (not at
+ * home, the deep trip's kit for one under ground); the hour last.
+ */
+const missionGate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (s.dimension !== 'overworld' || !s.home) return no.away(s, 'community', 16);
+  const m = activeMissions(world)[0];
+  if (!m) return { cause: 'unneeded', text: 'no mission' };
+  const src = sourceOf(m.item);
+  if ('error' in src) return { cause: 'unneeded', text: `#${m.id}: ${src.error}` };
+  if (!world.community?.chests[m.chest]) return { cause: 'unneeded', text: `#${m.id}: no community chest called ${m.chest}` };
+  if (s.distHome > 16) return no.away(s, 'community', 16);
+  const late = no.late(s, 'community');
+  if (deliverNow(m, src)) return late ?? { want: `#${m.id}: ${owed(m)} ${m.item} to take to ${m.chest}` };
+  // the kit, the food goal and the stash first
+  const trip = src.underground ? tripDecline(s, 'community') : null;
+  if (trip && trip.cause !== 'late') return trip;
+  return late ?? trip ?? { want: `#${m.id}: ${left(m)} ${m.item} still to gather for ${m.chest}` };
+};
+
+/**
  * The missions, oldest first: asked for by the user, so they rank with the build jobs (just under them), after
  * staying alive, the gear and the food stockpile. Trips under ground need the deep trip's kit (armour, food, torches).
  */
@@ -281,17 +302,8 @@ export const missionGoal: Goal = {
   priority: 42,
   timeoutMs: 14 * MINUTE,
   retryMs: 10 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > 16) return null;
-    const m = activeMissions(world)[0];
-    if (!m) return null;
-    const src = sourceOf(m.item);
-    if ('error' in src) return null;
-    if (!world.community?.chests[m.chest]) return null;
-    if (deliverNow(m, src)) return `#${m.id}: ${owed(m)} ${m.item} to take to ${m.chest}`;
-    if (src.underground && !deepTripReady(tripCheck(s)).ok) return null; // the kit, the food goal and the stash first
-    return `#${m.id}: ${left(m)} ${m.item} still to gather for ${m.chest}`;
-  },
+  gate: missionGate,
+  ...fromGate(missionGate),
   run: async ctx => {
     const m = activeMissions(ctx.world)[0];
     if (!m) return 'no mission';
@@ -305,21 +317,29 @@ export const missionGoal: Goal = {
   }
 };
 
+/**
+ * Run now? The "no" is said in this order: no home; nothing to give (no community chest known, the last round under
+ * three hours ago, nothing beyond what the bot keeps); then not at home; the hour last.
+ */
+const donateGate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (s.dimension !== 'overworld' || !s.home) return no.away(s, 'donate', 16);
+  const c = world.community;
+  if (!c || !Object.keys(c.chests).length) return { cause: 'unneeded', text: 'no community chest known' };
+  if (s.now - (c.lastDonation ?? 0) < DONATE_EVERY) return no.notDue('donate', s.now, c.lastDonation ?? 0, DONATE_EVERY);
+  const plan = donationPlan(ownTotals(s, world), diamondsWanted(s, world));
+  if (!Object.keys(plan).length) return { cause: 'unneeded', text: 'nothing spare to give' };
+  if (s.distHome > 16) return no.away(s, 'donate', 16);
+  return no.late(s, 'donate', 3000) ?? { want: `spare for the community: ${Object.entries(plan).map(([k, v]) => `${v} ${k}`).join(', ')}` };
+};
+
 /** Now and then, the precious surplus to the first community chest. */
 export const donateGoal: Goal = {
   name: 'donate',
   priority: 30,
   timeoutMs: 8 * MINUTE,
   retryMs: 30 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > 16) return null;
-    const c = world.community;
-    if (!c || !Object.keys(c.chests).length) return null;
-    if (s.now - (c.lastDonation ?? 0) < DONATE_EVERY) return null;
-    if (daylightLeft(s.timeOfDay) < 3000) return null;
-    const plan = donationPlan(ownTotals(s, world), diamondsWanted(s, world));
-    return Object.keys(plan).length ? `spare for the community: ${Object.entries(plan).map(([k, v]) => `${v} ${k}`).join(', ')}` : null;
-  },
+  gate: donateGate,
+  ...fromGate(donateGate),
   run: async ctx => {
     const c = community(ctx.world);
     c.lastDonation = ctx.s.now;
