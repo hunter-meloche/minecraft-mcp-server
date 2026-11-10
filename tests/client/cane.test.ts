@@ -110,3 +110,30 @@ test('cane round: cells filled with cobblestone are cleared and replanted from t
   t.is(grid.get('0,63,0'), 'sugar_cane');
   t.regex(String(r), /replanted 2 \(2 cell\(s\) cleared of scaffold first\)/);
 });
+
+test('cane round: no cane carried and the cells bare, it takes cane from the chests to replant', async (t) => {
+  // live 2026-11-10: the stash had put all the cane away (37 in the food chest); all five cells empty, "cut 0
+  // stalk(s) (0 cane)" every 20 min for 9 hours
+  const cells = [{ x: 0, y: 63, z: 0 }, { x: 2, y: 63, z: 0 }, { x: 4, y: 63, z: 0 }];
+  const chest = { x: 9, y: 63, z: 9 };
+  const world = { zones: { cane: cells }, lastDone: {}, landmarks: { chests: [chest] }, chestItems: { '9,63,9': { sugar_cane: 37 } } };
+  const grid = new Map<string, string>([['4,63,0', 'sugar_cane']]);
+  let cane = 0;
+  const acts: string[] = [];
+  const ctx = {
+    world, s: { now: 1 }, progress: () => undefined, signal: new AbortController().signal,
+    call: async (m: string, a: { x: number; y: number; z: number }) => (m === 'inventory'
+      ? { items: cane ? [{ slot: 3, name: 'sugar_cane', count: cane }] : [] }
+      : { blocks: [0, 1, 2].map(dy => grid.get(`${a.x},${a.y + dy},${a.z}`) ?? 'air') }),
+    act: async (tool: string, a: { x: number; y: number; z: number; count?: number }) => {
+      const k = `${a.x},${a.y},${a.z}`;
+      acts.push(tool === 'take-from-chest' ? `${tool} ${a.count}` : `${tool} ${k}`);
+      if (tool === 'take-from-chest') { cane += a.count!; return { ok: true, text: `Took ${a.count} sugar_cane` }; }
+      grid.set(k, 'sugar_cane'); cane--;
+      return { ok: true, text: `Placed sugar_cane at (${k}) using down face` };
+    }
+  } as unknown as GoalContext;
+  const r = await caneRound.run(ctx);
+  t.deepEqual(acts, ['take-from-chest 2', 'place-block 0,63,0', 'place-block 2,63,0'], 'two bare cells, two stalks; the growing one is left');
+  t.regex(String(r), /replanted 2/);
+});

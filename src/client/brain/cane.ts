@@ -124,11 +124,20 @@ export const caneRound: Goal = {
   run: async ctx => {
     (ctx.world.lastDone ??= {}).cane = ctx.s.now;
     let cut = 0, replanted = 0, cleared = 0;
+    const cells = ctx.world.zones!.cane;
+    const read = async (c: Pos) => (await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 3, length: 1 })).blocks.map(name);
+    const seen = new Map<Pos, string[]>();
+    for (const c of cells) seen.set(c, await read(c));
+    // bases to put back, and too few carried: a few from the chests first. Live 2026-11-10: the stash had put every
+    // stalk away (37 in the food chest), all five cells stood empty, and the round "cut 0 stalk(s) (0 cane)" every
+    // 20 min for 9 hours with nothing to replant, while the enchanting room waited on 98 cane.
+    const bare = [...seen.values()].filter(([base, mid]) => caneCellPlan(base, mid, true) !== 'leave' && base !== 'sugar_cane').length;
+    // (a chest out of reach is no reason to skip the cutting: live, stranded on a scaffold, "chest too far to open")
+    if (bare && (await caneCount(ctx)) < bare) await takeFromChests(ctx, 'sugar_cane', bare - (await caneCount(ctx))).catch(() => 0);
     const before = await caneCount(ctx);
-    for (const c of ctx.world.zones!.cane) {
+    for (const c of cells) {
       if (ctx.signal.aborted) break;
-      const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 3, length: 1 });
-      const [base, mid] = blocks.map(name);
+      const [base, mid] = seen.get(c)!;
       const plan = caneCellPlan(base, mid, base !== 'sugar_cane' && (await caneCount(ctx)) > 0);
       if (plan === 'cut') {
         // cutting the second block brings the rest down with it
