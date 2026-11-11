@@ -3,7 +3,7 @@ import { activityAt, daylightLeft } from '../../src/client/brain/schedule.js';
 import { findLandmarks } from '../../src/client/brain/memory.js';
 import { Brain, decide, wedgedOut } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
-import { closeDoors, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
+import { closeDoors, returnIdle, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
 
 const reply = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError } : {}) });
 
@@ -348,7 +348,30 @@ test('idle watchdog: by day, standing still with nothing to do, it lets go of ev
   t.is((brain.status().match(/idle \d+ min by day: let go/g) ?? []).length, 1);
 });
 
-test('idle watchdog: it lets go of fruitless stock marks but keeps spare time\'s (it would only go straight back)', async (t) => {
+test('idle watchdog: at 3 min it lets go of the holds and keeps every fruitless mark, the stock trips\' like spare time\'s (it would only go straight back)', async (t) => {
+  // live 2026-11-10: "idle 3 min by day: let go of fruitless:sugar_cane" every 10 to 20 min all day, and each time
+  // the stock goal walked straight back out to the cane that was not there
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000;
+  const flaky: Goal = { name: 'flaky', priority: 5, wants: () => 'wants', run: async () => { throw new Error('in the way'); }, timeoutMs: 60_000, retryMs: 10 * 60_000 };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [flaky] });
+  brain.setEnabled(true);
+  await brain.tick(); await settle(); // it fails: held for 10 minutes
+  const world = brain.worldMemory()!;
+  const marks = { 'fruitless:iron_ingot': clock, 'fruitless:sugar_cane': clock, 'fruitless:spare:iron': clock, 'spare:iron': clock };
+  world.lastDone = { ...marks };
+  clock += 3 * 60_000 + 1000;
+  await brain.tick(); await settle();
+  // the note names what was let go, and only that
+  t.regex(brain.status(), /idle 3 min by day: let go of flaky 419s\n/);
+  t.notRegex(brain.status(), /let go of.*fruitless/);
+  t.deepEqual(world.lastDone, marks);
+  t.regex(brain.status(), /start flaky: wants[\s\S]*start flaky: wants/); // the hold did go: it tries again
+  brain.setEnabled(false);
+});
+
+test('idle watchdog: with nothing held, the 3-minute note says so and no mark goes', async (t) => {
   const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
   const { rt } = fakeRuntime(state);
   let clock = 1_000_000;
@@ -359,9 +382,9 @@ test('idle watchdog: it lets go of fruitless stock marks but keeps spare time\'s
   world.lastDone = { 'fruitless:iron_ingot': clock, 'fruitless:spare:iron': clock, 'spare:iron': clock };
   clock += 3 * 60_000 + 1000;
   await brain.tick();
-  t.regex(brain.status(), /idle 3 min by day: let go of fruitless:iron_ingot\b/);
-  t.notRegex(brain.status(), /let go of.*fruitless:spare/);
-  t.deepEqual(world.lastDone, { 'fruitless:spare:iron': 1_000_000, 'spare:iron': 1_000_000 });
+  t.regex(brain.status(), /idle 3 min by day: let go of nothing \(nothing was held\)\n/);
+  t.deepEqual(world.lastDone, { 'fruitless:iron_ingot': 1_000_000, 'fruitless:spare:iron': 1_000_000, 'spare:iron': 1_000_000 });
+  brain.setEnabled(false);
 });
 
 test('a goal left "until the morning" may go again when the game morning comes, slept through or not', async (t) => {
@@ -410,5 +433,370 @@ test('a LOOP back-off holds through the morning and the idle watchdog, and a loo
   t.regex(brain.status(), /LOOP again \(spinning: spin\); spin backed off for 10 min/);
   await go(5);
   t.is(runs, 8);
+  brain.setEnabled(false);
+});
+
+// ---- the hand-over: the next look follows a run's end at once ----
+
+/** What the hand-over's tests look at inside the brain: the tick waiting to follow, one asked for mid-tick, the run in hand. */
+const inside = (brain: Brain) => brain as unknown as { chained?: unknown; again: boolean; running?: { done: Promise<void> } };
+
+/**
+ * A brain by day with two goals, each wanted once: `first` runs until the test ends it (`end`, with an error to fail
+ * it; the brain stopping it ends it too), `second` is over at once. `looks` counts the brain's looks at the world
+ * (one per tick that got that far), `began` the runs in the order they started.
+ */
+function relay() {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  const at = { clock: 1_000_000, looks: 0, inWorld: true };
+  const status = rt.status;
+  rt.status = async () => { at.looks++; return { ...(await status()), inWorld: at.inWorld }; };
+  const began: string[] = [];
+  let end: (e?: Error) => void = () => undefined;
+  const first: Goal = {
+    name: 'first', priority: 10, wants: () => (began.includes('first') ? null : 'to do'), timeoutMs: 600_000, retryMs: 1000,
+    run: ctx => new Promise<string>((res, rej) => {
+      began.push('first');
+      end = e => (e ? rej(e) : res('through'));
+      ctx.signal.addEventListener('abort', () => rej(new Error('aborted')));
+    })
+  };
+  const second: Goal = { name: 'second', priority: 5, wants: () => (began.includes('second') ? null : 'next'), run: async () => { began.push('second'); return 'ok'; }, timeoutMs: 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, leaseMs: 60_000, now: () => at.clock, goals: [first, second] });
+  brain.setEnabled(true);
+  return { brain, at, began, end: (e?: Error) => end(e) };
+}
+
+test('the tick after a run ends follows at once: after 2 s of work the next goal starts with no further tick; a run over sooner waits for the tick', async (t) => {
+  // 2.1 s of work (and 2 s on the dot): the next goal has started, and one look did it
+  for (const ms of [2100, 2000]) {
+    const r = relay();
+    await r.brain.tick(); await settle();
+    t.deepEqual(r.began, ['first']);
+    r.at.clock += ms;
+    r.end(); await settle(); // no tick() from here
+    t.deepEqual(r.began, ['first', 'second'], `${ms} ms`);
+    t.regex(r.brain.status(), /- 00:16:42 done first in 2s: through\n- 00:16:42 start second: next\n/, `${ms} ms`);
+    t.is(r.at.looks, 2, `${ms} ms`); // the first tick's and the one that followed the run; the second run was over at once: nothing follows it
+    r.brain.setEnabled(false);
+  }
+
+  // a run that failed after 2.1 s of trying is followed the same way: it is held, the next goal is not kept waiting
+  const failed = relay();
+  await failed.brain.tick(); await settle();
+  failed.at.clock += 2100;
+  failed.end(new Error('no way through')); await settle();
+  t.deepEqual(failed.began, ['first', 'second']);
+  t.regex(failed.brain.status(), /- 00:16:42 failed first: no way through\n- 00:16:42 start second: next\n/);
+  failed.brain.setEnabled(false);
+
+  // over sooner (failed after 100 ms; done just short of 2 s; done at once): it did nothing or failed at once, and the
+  // next look is the tick's, so nothing goes round faster than the tick does
+  for (const [ms, err] of [[100, 'no way through'], [1999, ''], [0, '']] as const) {
+    const r = relay();
+    await r.brain.tick(); await settle();
+    r.at.clock += ms;
+    r.end(err ? new Error(err) : undefined); await settle();
+    t.deepEqual(r.began, ['first'], `${ms} ms`);
+    t.is(r.at.looks, 1, `${ms} ms`);
+    t.is(inside(r.brain).chained, undefined, `${ms} ms`);
+    r.at.clock += 5000;
+    await r.brain.tick(); await settle(); // the 5 s tick
+    t.deepEqual(r.began, ['first', 'second'], `${ms} ms`);
+    r.brain.setEnabled(false);
+  }
+});
+
+test('a chained tick and the interval tick never start two goals: asked for while a tick is under way, one tick follows it, and one run is in hand', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000, looks = 0, alarm = false;
+  // the look at the world waits for the test: a tick is under way for as long
+  let gate: Promise<void> | undefined, open = () => { /* nothing waits */ };
+  const shut = () => { gate = new Promise<void>(r => { open = r; }); };
+  const status = rt.status;
+  rt.status = async () => { looks++; await gate; return status(); };
+  // runs that last until the test (or the brain) ends them; `most`: how many were ever under way at once
+  let live = 0, most = 0;
+  const began: string[] = [];
+  const ends = new Map<string, () => void>();
+  const work = (name: string, priority: number, wants: () => string | null): Goal => ({
+    name, priority, wants, timeoutMs: 600_000, retryMs: 1000,
+    run: ctx => new Promise<string>((res, rej) => {
+      began.push(name);
+      most = Math.max(most, ++live);
+      let over = false;
+      const close = (how: () => void) => { if (over) return; over = true; live--; how(); };
+      ends.set(name, () => close(() => res('through')));
+      ctx.signal.addEventListener('abort', () => close(() => rej(new Error('aborted'))));
+    })
+  });
+  const goals = [work('a', 10, () => (began.includes('a') ? null : 'once')), work('b', 5, () => 'always'), work('urgent', 50, () => (alarm ? 'alarm' : null))];
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals });
+  brain.setEnabled(true);
+
+  // three ask at once (the interval's tick, and two more while it looks): however many asked, one tick follows
+  shut();
+  const under = brain.tick();
+  await brain.tick(); await brain.tick(); // both come back at once: a tick is under way
+  t.is(looks, 1);
+  t.true(inside(brain).again);
+  open(); await under; await settle();
+  t.is(looks, 2);            // the one that follows: one, not two
+  t.deepEqual(began, ['a']); // and it found the run in hand: nothing started beside it
+  t.false(inside(brain).again);
+
+  // a run ends (3 s in) while the interval's tick is looking: the tick its end asks for lands on that one, which goes
+  // on to start the next goal; the tick that follows finds it running
+  clock += 3000;
+  shut();
+  const looking = brain.tick();
+  ends.get('a')!(); await settle();
+  t.is(looks, 3);
+  t.true(inside(brain).again); // asked for, not lost, and not a second tick beside the one under way
+  t.deepEqual(began, ['a']);
+  open(); await looking; await settle();
+  t.is(looks, 4);
+  t.deepEqual(began, ['a', 'b']);
+
+  // a run stopped for something more urgent: the tick that follows starts that, and only that (the stopped goal
+  // wants to go on, and is not started beside it)
+  clock += 3000;
+  alarm = true;
+  await brain.tick(); await settle();
+  t.is(looks, 6);
+  t.deepEqual(began, ['a', 'b', 'urgent']);
+  t.regex(brain.status(), /stopping b: urgent is more urgent \(alarm\)\n- 00:16:46 stopped b: aborted\n- 00:16:46 start urgent: alarm$/);
+  t.is(live, 1);
+  await settle();
+  t.is(looks, 6); // nothing goes on looking
+  t.is(most, 1);  // never two runs at once
+
+  brain.setEnabled(false); await settle();
+  t.is(live, 0);
+  t.is(looks, 6);
+  t.is(inside(brain).chained, undefined);
+});
+
+test('no tick follows a run\'s end with the brain switched off or the LLM at the bot; one that waits is dropped at switch-off; with the game gone it looks once', async (t) => {
+  // switched off mid-run, 3 s in: the run is stopped, and nothing looks again
+  const off = relay();
+  await off.brain.tick(); await settle();
+  off.at.clock += 3000;
+  off.brain.setEnabled(false); await settle();
+  t.regex(off.brain.status(), /stopped first: aborted/);
+  t.is(off.at.looks, 1);
+  t.deepEqual(off.began, ['first']);
+  t.is(inside(off.brain).chained, undefined);
+
+  // the LLM takes the bot 3 s in: the same (the next goal would start under its hands)
+  const llm = relay();
+  await llm.brain.tick(); await settle();
+  llm.at.clock += 3000;
+  await llm.brain.manual('dig-block');
+  t.is(inside(llm.brain).chained, undefined); // none is even set to follow (it would find the LLM's time and go, but it is not the autopilot's to ask for)
+  await settle();
+  t.regex(llm.brain.status(), /stopped first: aborted/);
+  t.is(llm.at.looks, 1);
+  t.deepEqual(llm.began, ['first']);
+  t.is(inside(llm.brain).chained, undefined);
+  llm.brain.setEnabled(false);
+
+  // switched off between a run's end and the tick it asked for: that tick is dropped, not left to fire later
+  const late = relay();
+  await late.brain.tick(); await settle();
+  late.at.clock += 3000;
+  const done = inside(late.brain).running!.done;
+  late.end(); await done; // the run is over; the tick that follows has not begun
+  t.truthy(inside(late.brain).chained);
+  late.brain.setEnabled(false);
+  t.is(inside(late.brain).chained, undefined);
+  await settle();
+  t.is(late.at.looks, 1);
+  t.deepEqual(late.began, ['first']);
+
+  // the game client gone when the run ends: the look that follows sees no world and starts nothing, and that is all
+  const gone = relay();
+  await gone.brain.tick(); await settle();
+  gone.at.clock += 3000;
+  gone.at.inWorld = false;
+  gone.end(); await settle(); await settle();
+  t.is(gone.at.looks, 2);
+  t.deepEqual(gone.began, ['first']);
+  gone.brain.setEnabled(false);
+});
+
+test('a tick still looking at the world when the brain is switched off, or when the LLM takes the bot, starts nothing', async (t) => {
+  // the tick that follows a run's end can be under way at any moment, not only on the 5 s beat: what it decides
+  // after the bot was taken from it would run with nobody to stop it
+  for (const how of ['switched off', 'the LLM'] as const) {
+    const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 6000 });
+    let started = 0, open = () => { /* nothing waits */ };
+    const gate = new Promise<void>(r => { open = r; });
+    const status = rt.status;
+    rt.status = async () => { await gate; return status(); };
+    const work: Goal = { name: 'work', priority: 5, wants: () => 'wants', run: async () => { started++; return 'ok'; }, timeoutMs: 60_000, retryMs: 1000 };
+    const brain = new Brain(rt, { tickMs: 1e9, leaseMs: 60_000, now: () => 1_000_000, goals: [work] });
+    brain.setEnabled(true);
+    const under = brain.tick(); // it waits for its look at the world
+    if (how === 'switched off') brain.setEnabled(false);
+    else await brain.manual('dig-block');
+    open(); await under; await settle();
+    t.is(started, 0, how);
+    t.notRegex(brain.status(), /start work/, how);
+    t.is(inside(brain).chained, undefined, how);
+    brain.setEnabled(false);
+  }
+});
+
+test('a goal that goes round with nothing to show hands over to itself, and the loop watch holds it at the fourth run as before', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000, looks = 0, runs = 0;
+  const status = rt.status;
+  rt.status = async () => { looks++; return status(); };
+  let end = () => { /* nothing runs yet */ };
+  const spin: Goal = {
+    name: 'spin', priority: 5, wants: () => 'wants', timeoutMs: 60_000, retryMs: 1000,
+    run: () => new Promise<string>((res) => { runs++; end = () => res('nothing to show'); })
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [spin] });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  // each run 2 s of nothing, the next one following at once: four of them, then its 10 minutes off
+  for (let i = 0; i < 6; i++) { clock += 2000; end(); await settle(); }
+  t.is(runs, 4);
+  t.regex(brain.status(), /LOOP \(spinning\).*spin backed off for 10 min/);
+  t.is(looks, 5); // the test's one tick, and one after each run: the last found it held, and nothing looked after that
+  brain.setEnabled(false);
+});
+
+test('a survival goal that goes round with nothing to show keeps the tick\'s beat: nothing follows its end at once, and nothing holds it', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let clock = 1_000_000, looks = 0, runs = 0;
+  const status = rt.status;
+  rt.status = async () => { looks++; return status(); };
+  let end = () => { /* nothing runs yet */ };
+  // one of the six the loop watch never backs off, by its name; and the run the live log had 51 times in a row
+  // (2026-11-08: "done food in 3s: found cow to the north; now carrying 0 food points")
+  const food: Goal = {
+    name: 'food', priority: 80, wants: () => 'nothing to eat', timeoutMs: 60_000, retryMs: 1000,
+    run: () => new Promise<string>((res) => { runs++; end = () => res('found cow to the north; now carrying 0 food points'); })
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [food] });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  for (let i = 1; i <= 6; i++) {
+    // 2.7 s of work, which any other goal hands on at once (the test above): no look follows this one, and no run
+    clock += 2700; end(); await settle();
+    t.is(runs, i, `round ${i}`);
+    t.is(looks, i, `round ${i}`);
+    t.is(inside(brain).chained, undefined, `round ${i}`);
+    // the 5 s tick starts the next: one run per tick, as before the hand-over, with nothing to hold it back
+    clock += 2300;
+    await brain.tick(); await settle();
+    t.is(runs, i + 1, `round ${i}`);
+  }
+  // the loop watch saw it go round, and held nothing: the tick is all there is between its turns
+  t.regex(brain.status(), /LOOP \(spinning\)/);
+  t.notRegex(brain.status(), /backed off/);
+  t.regex(brain.status(), /- 00:16:42 done food in 3s: found cow to the north; now carrying 0 food points\n- 00:16:45 start food: nothing to eat\n/);
+  brain.setEnabled(false);
+});
+
+test('returnIdle: "out here" is more than 32 blocks from home, inside the yard too, or more than 8 outside the yard\'s rectangle', (t) => {
+  const out = 'nothing to do out here: back to the yard';
+  const base = { landmarks: { chests: [], farmland: [] }, leash: 96 };
+  const at = (x: number, z: number, over: Partial<Snapshot> = {}) => snap({ position: { x, y: 64, z }, distHome: Math.hypot(x, z), ...over });
+  // no yard yet: 32 blocks from home
+  t.is(returnIdle.wants(at(32, 0), base), null);
+  t.is(returnIdle.wants(at(32.5, 0), base), out);
+  // the yard as it is by now: 32 by 96, home 64 blocks from its north end. The 32 from home hold inside the fence
+  // too: the home's chores start within 10 to 24 blocks of home, and the tree round ends in the tree farm, 46 from
+  // home. With the fence alone as the measure the bot stood there, every chore "away", until the evening
+  const world = { ...base, yard: { x1: -16, z1: -64, x2: 16, z2: 32, y: 63 } };
+  t.is(returnIdle.wants(at(10, -45), world), out);  // the tree farm
+  t.is(returnIdle.wants(at(10, -60), world), out);  // by the north fence, 61 blocks from home
+  t.is(returnIdle.wants(at(10, -30), world), null); // inside the fence, 31.6 from home
+  t.is(returnIdle.wants(at(0, -32), world), null);
+  t.is(returnIdle.wants(at(0, -32.5), world), out);
+  // out past the fence it is sooner: more than 8 blocks outside, however near home
+  t.is(returnIdle.wants(at(24, 0), world), null);   // 8 outside the fence, 24 from home
+  t.is(returnIdle.wants(at(24.5, 0), world), out);
+  t.is(returnIdle.wants(at(24, 20), world), null);  // 8 outside, 31.2 from home
+  t.is(returnIdle.wants(at(24.5, 20), world), out); // 8.5 outside, 31.6 from home
+  // and where the fence is far from home, the 32 come first: within 8 of the fence is still "out here"
+  t.is(returnIdle.wants(at(0, -72), world), out);   // 8 outside the north fence, 72 from home
+  t.is(returnIdle.wants(at(0, -72.5), world), out);
+  t.is(returnIdle.wants(at(0, 39), world), out);    // 7 outside the south fence, 39 from home
+  t.is(returnIdle.wants(at(22, 40), world), out);   // off the corner (6 and 8 outside), 45.7 from home
+  t.is(returnIdle.wants(at(22, 41), world), out);
+  // off a corner it is the larger of the two directions, not the straight line (a small yard, so that home is near)
+  const small = { ...base, yard: { x1: -14, z1: -14, x2: 14, z2: 14, y: 63 } };
+  t.is(returnIdle.wants(at(21, 21), small), null);  // 7 and 7 outside (9.9 in a straight line), 29.7 from home
+  t.is(returnIdle.wants(at(22.5, 21), small), out); // 8.5 and 7
+  // not in the evening or at night (the shelter's business), with no home, or from another dimension
+  for (const w of [base, world]) {
+    t.is(returnIdle.wants(at(60, 0, { activity: 'return' }), w), null);
+    t.is(returnIdle.wants(at(60, 0, { activity: 'rest' }), w), null);
+    t.is(returnIdle.wants(at(60, 0, { home: undefined }), w), null);
+    t.is(returnIdle.wants(at(60, 0, { dimension: 'the_nether', distHome: Infinity }), w), null);
+    t.is(returnIdle.wants(at(60, 0), w), out);
+  }
+  // home no longer in the yard on record (it was moved): the walk ends at home, so home is what counts, or the bot
+  // would be "out here" again on arriving
+  const moved = { ...base, yard: { x1: 100, z1: 100, x2: 120, z2: 120, y: 63 } };
+  t.is(returnIdle.wants(at(0, 0), moved), null);
+  t.is(returnIdle.wants(at(32, 0), moved), null);
+  t.is(returnIdle.wants(at(40, 0), moved), out);
+  t.is(returnIdle.wants(at(110, 110), moved), out); // in the old yard, 156 blocks from home
+});
+
+test('left at the far end of the yard with nothing to do, the bot walks home, and the chore that waited for it there starts as the walk ends', async (t) => {
+  // the live yard on 2026-11-10: 96 blocks long, home 64 from its north end; the tree round ends in the tree farm, 46
+  // blocks from home and inside the fence, and no chore of the home starts from further than 24
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let arrive = () => { /* not walking yet */ };
+  rt.actions['go-home'] = async () => { await new Promise<void>(r => { arrive = r; }); state.pos = { x: 0, y: 64, z: 0 }; return reply('Home'); };
+  let clock = 1_000_000, due = false, swept = 0;
+  const chore: Goal = { name: 'chore', priority: 20, wants: s => (due && s.distHome <= 24 ? 'due' : null), run: async () => { due = false; swept++; return 'swept'; }, timeoutMs: 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [chore, returnIdle] });
+  brain.setEnabled(true);
+  await brain.tick(); // the first look: the world is known from here
+  brain.worldMemory()!.yard = { x1: -16, z1: -64, x2: 16, z2: 32, y: 63 };
+  state.pos = { x: 10, y: 64, z: -45 };
+  due = true;
+  clock += 5000; await brain.tick(); await settle();
+  t.regex(brain.status(), /- 00:16:45 start idle: nothing to do out here: back to the yard$/);
+  t.is(swept, 0);
+  // home after 9 s: the chore is in reach, and starts in that second with no tick of the test's
+  clock += 9000; arrive(); await settle();
+  t.regex(brain.status(), /- 00:16:54 done idle in 9s: back home\n- 00:16:54 start chore: due\n/);
+  t.is(swept, 1);
+  brain.setEnabled(false);
+});
+
+test('idle watchdog: the time a goal was at work is not idle time, however still the bot stood: a stuck stop\'s hold is not let go at the next look', async (t) => {
+  // live 2026-11-10 09:00: "stopping stash: stash looks stuck (no movement for 3 min ...)", and 5 s on "idle 3 min by
+  // day: let go of stash 175s": the 3 minutes it stood stuck had been counted as standing idle
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const stuck: Goal = { name: 'stuck', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [stuck], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 60_000; await brain.tick();
+  now += 3.1 * 60_000; await brain.tick(); await settle();
+  t.regex(brain.status(), /stuck looks stuck \(no movement for 3 min at 0,64,0\)/);
+  for (let i = 0; i < 6; i++) { now += 5000; await brain.tick(); await settle(); } // half a minute on
+  t.notRegex(brain.status(), /idle \d+ min by day/);
+  t.regex(brain.status(), /Retrying later: stuck 150s\./);
+  t.is(calls.filter(c => c === 'slow').length, 1);
   brain.setEnabled(false);
 });

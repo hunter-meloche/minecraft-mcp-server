@@ -1,6 +1,8 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
-import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+// lives with the goal that walks the bot back to the yard now (goals.ts cannot import from here); still found here
+export { outsideBy } from './goals.js';
 import { COOKS_TO } from './food.js';
 import { ownItems } from './community.js';
 import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
@@ -727,11 +729,6 @@ export function dumpSpots(yard: { x1: number; z1: number; x2: number; z2: number
     return h;
   };
   return spots.map(p => ({ p, h: warmth(p) })).sort((a, b) => a.h - b.h).map(({ p }) => ({ ...p, y: yard.y + 1 }));
-}
-
-/** How far a point is outside a yard box (0 inside), in the larger of the two directions. */
-export function outsideBy(yard: { x1: number; z1: number; x2: number; z2: number }, p: { x: number; z: number }): number {
-  return Math.max(yard.x1 - p.x, 0, p.x - yard.x2, yard.z1 - p.z, p.z - yard.z2);
 }
 
 /**

@@ -42,7 +42,8 @@ export const waterBucketStep: Step = {
     if (have.get('water_bucket')) return ok('a water bucket from the chest');
     if (!have.get('bucket')) {
       const short = await prepareBill(ctx, { bucket: 1 });
-      if (Object.keys(short).length) return blocked(`gathering for a bucket: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+      // (short of materials: with `need` the project waits longer each time, until all of it is there)
+      if (Object.keys(short).length) return { ...blocked(`gathering for a bucket: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE), need: short };
     }
     // the nearest still water open to the sky (the lake: the yard's pond is filled in)
     const found = await ctx.call<{ positions: Site[] }>('world.findBlocks', { block: 'water', maxDistance: 64, count: 256, openAbove: true });

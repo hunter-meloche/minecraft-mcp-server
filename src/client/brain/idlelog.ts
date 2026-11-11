@@ -48,7 +48,7 @@ const rank = (c: IdleCause) => { const i = CAUSES.indexOf(c); return i < 0 ? CAU
 const secs = (t: number) => Math.round(t / 1000);
 const pct = (part: number, whole: number) => (whole > 0 ? Math.round(100 * part / whole) : 0);
 /** HH:MM, UTC like the log's own times; a time that is no time reads `?` (a Date out of range throws) */
-const clock = (t: number) => (Number.isFinite(t) && Math.abs(t) < 8.64e15 ? new Date(t).toISOString().slice(11, 16) : '?');
+export const clock = (t: number) => (Number.isFinite(t) && Math.abs(t) < 8.64e15 ? new Date(t).toISOString().slice(11, 16) : '?');
 
 /** A day as it must be, whatever the file held: the same object where there was one, so a caller's hold on it stays good. */
 function mend(v: unknown): IdleDay {
@@ -80,14 +80,32 @@ export function idleOf(world: WorldMemory): IdleMemory {
   }
 }
 
+/** What a goal says to "why not", when it can say and what it says is sound; one whose declines() throws says nothing. */
+function declineOf(g: Goal, s: Snapshot, world: WorldMemory): Decline | undefined {
+  if (!g.declines) return undefined;
+  try {
+    const d = g.declines(s, world);
+    return d && isCause(d.cause) && typeof d.text === 'string' ? d : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Why nothing runs right now, the lead cause first ([0]): what holds for every goal (away, health), then each goal
  * held back (why, and until when), then what each goal that can say why it doesn't want to run says, in the goals'
- * order. When nobody says anything it is `nothing`: no goal wants to run and none explains itself, which is the gap
- * to close. A goal whose declines() throws is left out; the others still explain the time.
+ * order. A held goal that would decline anyway is listed by that decline, not as held: its hold keeps nothing from
+ * running, and `hold` must not lead the idle time for it (a goal that cannot say why is listed as held). When nobody
+ * says anything it is `nothing`: no goal wants to run and none explains itself, which is the gap to close. A goal
+ * whose declines() throws is left out; the others still explain the time.
  */
 export function explainIdle(s: Snapshot, world: WorldMemory, goals: Goal[], retryAt: Map<string, number>, holdWhy: Map<string, string>): Decline[] {
   const out: Decline[] = [];
+  const said = new Map<Goal, Decline>();
+  for (const g of goals) {
+    const d = declineOf(g, s, world);
+    if (d) said.set(g, d);
+  }
   try {
     if (!s.home) out.push({ cause: 'away', text: 'no home set' });
     else if (!Number.isFinite(s.distHome)) out.push({ cause: 'away', text: 'in another dimension' });
@@ -96,17 +114,14 @@ export function explainIdle(s: Snapshot, world: WorldMemory, goals: Goal[], retr
     // only the goals the brain chooses from: a hold on anything else keeps nothing from running
     for (const g of goals) {
       const until = retryAt.get(g.name) ?? 0;
-      if (!(until > s.now)) continue;
+      if (!(until > s.now) || said.has(g)) continue;
       const why = holdWhy.get(g.name);
       out.push({ cause: 'hold', text: `${g.name} held until ${clock(until)}${why ? ` (${why})` : ''}`, until });
     }
   } catch { /* what could be told so far is told */ }
   for (const g of goals) {
-    if (!g.declines) continue;
-    try {
-      const d = g.declines(s, world);
-      if (d && isCause(d.cause) && typeof d.text === 'string') out.push(d);
-    } catch { /* this one cannot say why */ }
+    const d = said.get(g);
+    if (d) out.push(d);
   }
   if (!out.length) return [{ cause: 'nothing', text: 'no goal wants to run, and none says why' }];
   return out.sort((a, b) => rank(a.cause) - rank(b.cause));
@@ -178,8 +193,30 @@ export function idleNow(now: Decline[]): string | undefined {
 }
 
 /**
+ * brain-status: `Today: idle 8% of daytime, 4% busy to no gain (yesterday 31%, 12%).`, from the tally: how much of
+ * the counted daytime nothing ran, and how much went into runs that brought nothing in. Yesterday's pair only when a
+ * day before today is kept; no line before any daytime was counted today. It only reads: a world with no tally yet
+ * (a brain.json from before it) gets none made here, and whatever else it finds under `idle` it reads as nothing.
+ */
+export function todayLine(world: WorldMemory): string | undefined {
+  try {
+    const m: unknown = world.idle;
+    if (!isObj(m) || !isObj(m.today)) return undefined;
+    const whole = ms(m.today.workMs);
+    if (!whole) return undefined;
+    const pair = (d: Record<string, unknown>) => `${pct(ms(d.idleMs), ms(d.workMs))}%, ${pct(ms(d.emptyMs), ms(d.workMs))}%`;
+    const last: unknown = Array.isArray(m.days) ? m.days[0] : undefined;
+    const yesterday = isObj(last) && ms(last.workMs) ? ` (yesterday ${pair(last)})` : '';
+    return `Today: idle ${pct(ms(m.today.idleMs), whole)}% of daytime, ${pct(ms(m.today.emptyMs), whole)}% busy to no gain${yesterday}.`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * brain-status: today's idle time by cause (in % of the counted daytime; under half a percent left out), and what is
- * blocked: the project's shortfall, and every goal held back with why and until when (the `hold` reasons in `now`).
+ * blocked: the project's shortfall (as the project says it in `now`, with the try and the next one's time), and every
+ * goal held back with why and until when (the `hold` reasons in `now`).
  */
 export function idleReport(world: WorldMemory, now: Decline[]): string[] {
   const lines: string[] = [];
@@ -189,8 +226,12 @@ export function idleReport(world: WorldMemory, now: Decline[]): string[] {
     const by = CAUSES.filter(c => share(c) > 0).sort((a, b) => (t.by[b] ?? 0) - (t.by[a] ?? 0)).map(c => `${c} ${share(c)}%`);
     if (by.length) lines.push(`Idle by cause today: ${by.join(', ')}.`);
     const blocked: string[] = [];
+    // the project's own words where it says what it is short of (they carry the try and the time of the next one: a
+    // step short of materials waits longer each time); else the shortfall the stock trips were given
+    const said = now.find(d => d.cause === 'project' && /^short of /.test(d.text));
     const short = Object.entries(world.progress?.need ?? {}).filter(([, n]) => n > 0);
-    if (short.length) blocked.push(`project - short of ${short.map(([k, n]) => `${n} ${k}`).join(', ')}`);
+    if (said) blocked.push(`project - ${said.text}`);
+    else if (short.length) blocked.push(`project - short of ${short.map(([k, n]) => `${n} ${k}`).join(', ')}`);
     for (const d of now) if (d.cause === 'hold') blocked.push(d.text);
     if (blocked.length) lines.push(`Blocked: ${blocked.join(' | ')}`);
   } catch { /* the status goes without these lines */ }

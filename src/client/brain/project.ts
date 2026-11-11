@@ -1,7 +1,11 @@
 import { fromGate, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
-import { haveFn, journal, nextMilestone, progressOf, recipeFor, type Milestone } from './progress.js';
+import {
+  allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, stepId, stillShort,
+  type Milestone
+} from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
+import { clock } from './idlelog.js';
 
 /**
  * The project goal: works the next milestone of the long game, one step per slot of free daytime, so the bot keeps
@@ -40,8 +44,10 @@ export function projectGoal(tree: Milestone[]): Goal {
     name: 'project',
     priority: 28,
     // chores (stock trips, sorting, the farm round) can fill a short day: after 4 minutes of waiting the project goes
-    // ahead of them, below food, kit and the stash (a whole day went by with the storage house never touched)
-    urgency: (s, world) => (running || s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 39 : 28),
+    // ahead of them, below food, kit and the stash (a whole day went by with the storage house never touched). Not
+    // with a step that has come back short of materials twice running and is short still: that put a project that
+    // could only come back short again ahead of the chores, the trips that fetch what it waits for among them (stuck)
+    urgency: (s, world) => (running ? 39 : stuck(tree, s, world) ? 28 : s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 39 : 28),
     timeoutMs: 9 * MINUTE,
     retryMs: 2 * MINUTE,
     gate,
@@ -68,6 +74,9 @@ export function projectGoal(tree: Milestone[]): Goal {
       const cur = p.current;
       const step = m.steps[cur.step];
       if (!step) return finish(ctx, m);
+      const id = stepId(m.id, cur.step);
+      // what there was when the step set out (it moves things between the chests and the pockets as it goes)
+      const before = allItems(ctx.s, ctx.world);
       ctx.progress(`${m.title} - ${step.name}`);
       // the gain of a step that is not done yet is the blocks it worked: counted from what its tools report, as they
       // report it (so a run stopped midway has what it did), and the steps stay as they are
@@ -77,16 +86,37 @@ export function projectGoal(tree: Milestone[]): Goal {
         return done;
       };
       const r = await step.run({ ...ctx, act }, cur);
+      if (r.status === 'blocked') {
+        p.blockedUntil ??= {};
+        const short = Object.entries(r.need ?? {}).filter(([, n]) => n > 0);
+        if (short.length) {
+          // short of materials: the same step coming back short again waits longer each time (3, 6, 12, 24 min), and
+          // what it waits for is remembered as totals to reach, so the wait ends the moment all of it is there
+          // (heldUntil) and not for a part of it. It came back every 3 min, whatever had or had not come in
+          const have = await totalsNow(ctx, before);
+          const n = (p.blocked?.id === id && p.blocked.n >= 1 ? Math.floor(p.blocked.n) : 0) + 1;
+          p.blocked = { id, n, at: ctx.s.now, need: Object.fromEntries(short.map(([k, v]) => [k, countOf(have, k) + v])) };
+          p.blockedUntil[m.id] = ctx.s.now + backoffMs(n);
+        } else {
+          // waiting for something else (a site, room in the yard, ground that would not level): its own fixed time,
+          // which the materials being there must not cut short. The record of an earlier shortage stays (the step
+          // has not got anywhere); the wait is told apart from that record's own by its end (backoffOf)
+          const until = ctx.s.now + (r.retryMs ?? 10 * MINUTE);
+          const own = p.blocked && typeof p.blocked.id === 'string' && milestoneOf(p.blocked.id) === m.id ? p.blocked.at + backoffMs(p.blocked.n) : NaN;
+          p.blockedUntil[m.id] = until === own ? until + 1 : until;
+        }
+        journal(ctx.world, ctx.s.now, `${m.title}: ${step.name} blocked (${r.text})`);
+        return `${m.title} - ${step.name}: ${r.text}`;
+      }
+      // it got somewhere: what it waited for, it waits for no longer (a wait cut short by the materials coming in
+      // would otherwise stand, with nothing left to end it early)
+      settle(ctx.world, m.id);
       if (r.status === 'done') {
         ctx.gain(1);
         journal(ctx.world, ctx.s.now, `${m.title}: ${step.name} done (${r.text})`);
         cur.step++;
         p.need = undefined;
         if (cur.step >= m.steps.length) return finish(ctx, m);
-      } else if (r.status === 'blocked') {
-        p.blockedUntil ??= {};
-        p.blockedUntil[m.id] = ctx.s.now + (r.retryMs ?? 10 * MINUTE);
-        journal(ctx.world, ctx.s.now, `${m.title}: ${step.name} blocked (${r.text})`);
       }
       return `${m.title} - ${step.name}: ${r.text}`;
   }
@@ -97,9 +127,75 @@ function finish(ctx: GoalContext, m: Milestone): string {
   if (!p.done.includes(m.id)) p.done.push(m.id);
   p.current = undefined;
   p.need = undefined;
+  settle(ctx.world, m.id);
   ctx.gain(1);
   journal(ctx.world, ctx.s.now, `done: ${m.title}`);
   return `${m.title} complete`;
+}
+
+/** A milestone that got on: its wait and its step's record of being short of materials are over. */
+function settle(world: WorldMemory, milestone: string): void {
+  const p = progressOf(world);
+  if (typeof p.blocked?.id === 'string' && milestoneOf(p.blocked.id) === milestone) p.blocked = undefined;
+  if (p.blockedUntil) delete p.blockedUntil[milestone];
+}
+
+/**
+ * Everything carried and in the chests as it is now, counted the way the tick counts it (allItems: every slot, the
+ * chests as remembered). Asked after a step came back short: it took things out of the chests and crafted on the way,
+ * so the pockets are read again. If they cannot be read, what there was when the step set out: never less of a raw
+ * material than there is now, so the wait errs on the long side.
+ */
+async function totalsNow(ctx: GoalContext, before: Record<string, number>): Promise<Record<string, number>> {
+  try {
+    const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
+    const out: Record<string, number> = { ...chestTotals(ctx.world) };
+    for (const i of inv.items) out[i.name] = (out[i.name] ?? 0) + i.count;
+    return out;
+  } catch {
+    return before;
+  }
+}
+
+/** The tree as nextMilestone() sees it, as a look only: the milestone it would work on, and the ones that wait. */
+function look(tree: Milestone[], s: Snapshot, world: WorldMemory): { next?: Milestone; held: { m: Milestone; until: number }[]; done: Set<string> } {
+  const done = new Set(world.progress?.done ?? []);
+  const view = { s, world, have: haveFn(s, world) };
+  const held: { m: Milestone; until: number }[] = [];
+  for (const m of tree) {
+    if (done.has(m.id)) continue;
+    if (m.done?.(view)) { done.add(m.id); continue; }
+    if (!m.prereqs.every(r => done.has(r))) continue;
+    const until = heldUntil(s, world, m.id);
+    if (!(until > s.now)) return { next: m, held, done };
+    held.push({ m, until });
+  }
+  return { held, done };
+}
+
+/**
+ * Whether the step the project would work on now has come back short of materials twice or more in a row and is
+ * short still: then it does not go ahead of the chores. Two things end that, so that the lower urgency cannot keep the
+ * project behind chores for good. With everything it waited for there it can get on, and waits no longer than any
+ * other step. And once it has stood behind the chores for as long again as its wait was (they wanted to run all that
+ * time: a mission, a long build), it goes ahead of them as it used to: its run is what tells the stock trips what is
+ * still short, and nothing else looks whether the step can get on by now.
+ */
+function stuck(tree: Milestone[], s: Snapshot, world: WorldMemory): boolean {
+  try {
+    const p = world.progress;
+    const b = p?.blocked;
+    // asked many times a tick (the brain sorts the goals by urgency): the tree is looked at only with such a record
+    if (!b || !(b.n >= 2) || typeof b.id !== 'string') return false;
+    if (!(s.now < b.at + 2 * backoffMs(b.n))) return false;
+    // the milestone it would work on: the one that can be worked now, else the record's own while it waits
+    const { next, held } = look(tree, s, world);
+    const m = next ?? held.find(h => h.m.id === milestoneOf(b.id))?.m;
+    if (!m || stepId(m.id, p?.current?.id === m.id ? p.current.step : 0) !== b.id) return false;
+    return Object.keys(stillShort(b.need, allItems(s, world))).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -110,28 +206,27 @@ function finish(ctx: GoalContext, m: Milestone): string {
 function waiting(tree: Milestone[], s: Snapshot, world: WorldMemory): Decline | null {
   try {
     const p = world.progress;
-    const done = new Set(p?.done ?? []);
-    const view = { s, world, have: haveFn(s, world) };
-    const blocked: { m: Milestone; until: number }[] = [];
-    for (const m of tree) {
-      if (done.has(m.id)) continue;
-      if (m.done?.(view)) { done.add(m.id); continue; }
-      if (!m.prereqs.every(r => done.has(r))) continue;
-      const until = p?.blockedUntil?.[m.id] ?? 0;
-      if (!(until > s.now)) return null;
-      blocked.push({ m, until });
-    }
-    if (!blocked.length) {
+    const { next, held, done } = look(tree, s, world);
+    if (next) return null;
+    if (!held.length) {
       const left = tree.filter(m => !done.has(m.id)).length;
       return left ? { cause: 'project', text: `${left} milestone(s) wait for one that is not in the tree` }
         : { cause: 'unneeded', text: `all ${tree.length} milestone(s) done` };
     }
-    const first = blocked.reduce((a, b) => (b.until < a.until ? b : a));
+    const first = held.reduce((a, b) => (b.until < a.until ? b : a));
+    const list = (short: [string, number][]) => short.map(([k, n]) => `${n} ${k}`).join(', ');
+    // a step waiting for materials: what is short of them now (it goes down as they come in), which try that was and
+    // when the next one is, so the status shows a wait that grows and not a bot that forgot its project
+    for (const { m, until } of held) {
+      const b = backoffOf(p, m.id);
+      const short = b ? Object.entries(stillShort(b.need, allItems(s, world))) : [];
+      if (b && short.length) return { cause: 'project', text: `short of ${list(short)} (try ${b.n}, next ${clock(until)})`, until: first.until };
+    }
     // what the step that ran last was short of (the stock trips fetch it); else which milestone waits, and how long
     const short = Object.entries(p?.need ?? {}).filter(([, n]) => n > 0);
     return {
       cause: 'project',
-      text: short.length ? `short of ${short.map(([k, n]) => `${n} ${k}`).join(', ')}`
+      text: short.length ? `short of ${list(short)}`
         : `${first.m.title} tries again in ${Math.max(1, Math.ceil((first.until - s.now) / MINUTE))} min`,
       until: first.until
     };

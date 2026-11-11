@@ -22,6 +22,8 @@ export type BuildPlan = Pick<Blueprint, 'name' | 'spec' | 'size' | 'bill' | 'lan
 const ok = (text: string): StepResult => ({ status: 'done', text });
 const going = (text: string): StepResult => ({ status: 'progress', text });
 const blocked = (text: string, retryMs = 5 * MINUTE): StepResult => ({ status: 'blocked', text, retryMs });
+/** Short of materials: the project waits longer each time the step comes back so, until all of `need` is there. */
+const shortOf = (text: string, need: Record<string, number>): StepResult => ({ status: 'blocked', text, retryMs: 3 * MINUTE, need });
 
 /** A blueprint in another wood: oak planks, logs, doors, fences and gates become the given wood's. */
 export function inWood(bp: BuildPlan, wood: string): BuildPlan {
@@ -134,7 +136,7 @@ export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width:
   if (!Object.keys(short).length && p.need && Object.keys(p.need).every(k => k === 'dirt' || k === 'cobblestone')) p.need = undefined;
   if (Object.keys(short).length) {
     p.need = short;
-    return blocked(`growing the yard to the ${g.side} for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')} to fill it (the stock trips fetch it)`, 3 * MINUTE);
+    return shortOf(`growing the yard to the ${g.side} for the ${kind}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')} to fill it (the stock trips fetch it)`, short);
   }
   const r = await ctx.act('level-area', { ...strip, timeoutMs: 8 * MINUTE });
   if (/Now level|Already level/.test(r.text)) {
@@ -209,7 +211,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
         const p = progressOf(ctx.world);
         p.need = dry;
         p.carry = p.carryCap = undefined;
-        return blocked(`gathering for the ${label}: short of ${Object.entries(dry).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+        return shortOf(`gathering for the ${label}: short of ${Object.entries(dry).map(([k, v]) => `${v} ${k}`).join(', ')}`, dry);
       }
       // all there: what the bill is crafted from stays carried while it's made and built (the enchanting room's books,
       // diamonds and obsidian were taken out and put back every 15 s otherwise)
@@ -217,7 +219,7 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       progressOf(ctx.world).carryCap = billCarryCap(bill, ctx.s.counts, wood);
       const short = await prepareBill(ctx, bill);
       if (Object.keys(short).length) {
-        return blocked(`gathering for the ${label}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+        return shortOf(`gathering for the ${label}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, short);
       }
       const origin = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
       const r = await ctx.act('build-structure', { ...origin, spec: bp.spec, name: bp.name, timeoutMs: 8 * MINUTE });

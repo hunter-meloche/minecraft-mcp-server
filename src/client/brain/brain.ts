@@ -17,7 +17,7 @@ import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { compile } from '../structures/format.js';
 import { LoopWatch, type Outcome, type Run } from './loops.js';
-import { explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, type IdleCause } from './idlelog.js';
+import { explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
 /** Staying alive: never backed off by the loop watch. */
 const SURVIVAL = new Set(['wake', 'break out', 'recover', 'retreat', 'shelter', 'food']);
@@ -85,10 +85,28 @@ export function wedgedOut(pos: Pos, blocks: (string | null)[]): { block: string;
   return sides.length ? { block: feet.replace(/\[.*$/, ''), to: sides[0] } : undefined;
 }
 
+/**
+ * The hand-over: a run that lasted this long is followed by the next decision at once, not at the next 5 s tick (a
+ * twelfth of the daytime went into those waits). A run over sooner did nothing or failed at once: it waits for the
+ * ordinary tick, so nothing can go round faster than the tick does. And so does whatever follows a survival goal: the
+ * loop watch never holds one of those, so the tick is the only thing between its turns when it goes round with
+ * nothing to show (2026-11-08: "done food in 3s: ... now carrying 0 food points", 51 times in a row).
+ */
+const HAND_OVER_MS = 2000;
+/** An idle streak led by a hold lasts this long before one of the holds is let go early. */
+const HOLD_IDLE_MS = 60_000;
+/** The holds that may be let go early: a run that got wedged or stuck, ran out of time, or failed (not a loop's, not "until morning"). */
+const ORDINARY_HOLD = /^(wedged$|stuck$|timed out$|failed: )/;
+
+/** The goals in the order they are tried: the most urgent first. */
+function inOrder(s: Snapshot, world: WorldMemory, goals: Goal[]): Goal[] {
+  const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
+  return [...goals].sort((a, b) => p(b) - p(a));
+}
+
 /** The most urgent goal that wants to run (and isn't waiting out a failure), with its reason. */
 export function decide(s: Snapshot, world: WorldMemory, goals: Goal[], retryAt: Map<string, number>): { goal: Goal; reason: string } | undefined {
-  const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
-  for (const goal of [...goals].sort((a, b) => p(b) - p(a))) {
+  for (const goal of inOrder(s, world, goals)) {
     if ((retryAt.get(goal.name) ?? 0) > s.now || (s.sleeping && !goal.whileAsleep)) continue;
     const reason = goal.wants(s, world);
     if (reason) return { goal, reason };
@@ -100,6 +118,10 @@ export class Brain {
   enabled = false;
   private timer?: ReturnType<typeof setInterval>;
   private ticking = false;
+  /** a tick was asked for while one was under way: it follows that one, once */
+  private again = false;
+  /** the tick that follows at once (after a run's end, or one asked for mid-tick): at most one waits at a time */
+  private chained?: ReturnType<typeof setTimeout>;
   private running?: Running;
   private leaseUntil = 0;
   private leaseTool = '';
@@ -137,14 +159,20 @@ export class Brain {
   private idleAt?: { x: number; z: number };
   private idleSince = 0;
   private idleStage = 0;
-  /** today's daytime ticks, and how many of them had nothing to do */
-  private day = { tod: 0, work: 0, idle: 0, lastIdle: 0 };
+  /** when the walk home with nothing to do last ended by itself: the next look still belongs to it (idleTrack) */
+  private walkedHomeAt?: number;
+  /** the game clock at the last look: a new day has come when it wraps */
+  private tod = 0;
   /** the idle tally's clock: when daytime was last booked (markTime) */
   private lastMark?: number;
   /** the idle streak under way (counted daytime with nothing running): how long, under which lead causes, and its last log line */
   private streak?: { ms: number; by: Partial<Record<IdleCause, number>>; lineAt?: number; lead?: IdleCause };
   /** when an idle tick last saved the tally */
   private idleSaved?: number;
+  /** how long the idle streak has been led by a hold, since it began or since a hold was last let go early */
+  private holdIdle = 0;
+  /** the goals let go early: not a second time until a hold on them has run its full time (or the morning, or the idle watchdog) */
+  private freedEarly = new Set<string>();
   /** what has gone wrong in the measuring and been noted (each kind once) */
   private mishaps = new Set<string>();
   private worldId?: string;
@@ -176,8 +204,26 @@ export class Brain {
     if (!on) {
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
+      // and no tick waiting to follow: a brain that is off looks at nothing
+      if (this.chained) clearTimeout(this.chained);
+      this.chained = undefined;
+      this.again = false;
       void this.stopRunning('autonomy turned off');
     }
+  }
+
+  /**
+   * A tick right now, not on the 5 s beat: after a run's end (the hand-over) or when one was asked for while another
+   * was under way. Only one waits at a time, none for a brain that is off, and like the interval it does not keep the
+   * process alive.
+   */
+  private soon(): void {
+    if (!this.enabled || this.chained) return;
+    this.chained = setTimeout(() => {
+      this.chained = undefined;
+      void this.tick();
+    }, 0);
+    this.chained.unref?.();
   }
 
   setLeash(blocks: number): void {
@@ -196,8 +242,12 @@ export class Brain {
 
   /** One look and decision; the timer calls it, tests call it directly. */
   async tick(): Promise<void> {
-    if (!this.enabled || this.ticking) return;
+    if (!this.enabled) return;
+    // asked for while one is under way (the interval's, or the one a run's end asks for): it follows this one, so it
+    // is never lost; and however many ask, one follows, so it is never doubled
+    if (this.ticking) { this.again = true; return; }
     this.ticking = true;
+    this.again = false; // this one looks for all that asked before it began
     // what this tick saw, for the idle tally: stays unset when the tick was skipped (the LLM's, no world to look at)
     let seen: Snapshot | undefined;
     try {
@@ -261,25 +311,37 @@ export class Brain {
       this.measure('time', () => this.markTime(seen));
       this.ticking = false;
       await this.show();
-    }
-  }
-
-  /** Where the bot stands, for the idle watchdog: moving 3 blocks (or night, or no home) starts the count again. */
-  private idleTrack(s: Snapshot): void {
-    const here = { x: s.position.x, z: s.position.z };
-    const moved = !this.idleAt || Math.hypot(here.x - this.idleAt.x, here.z - this.idleAt.z) > 3;
-    if (moved || s.activity !== 'work' || s.sleeping || !s.home) {
-      this.idleAt = here;
-      this.idleSince = this.now();
-      this.idleStage = 0;
+      if (this.again) { this.again = false; this.soon(); }
     }
   }
 
   /**
+   * Where the bot has stood with nothing to do, for the idle watchdog: moving 3 blocks (or night, or no home) starts
+   * the count again, and so does a goal at work, however still the bot stands for it (2026-11-10: "stash looks stuck
+   * (no movement for 3 min)", and at the next look "idle 3 min by day: let go of stash 175s": the 3 minutes it had
+   * stood stuck were counted as idle, so the hold was undone as soon as it was set). Not the walk home with nothing to
+   * do: that is idle time like the standing about before and after it, and each walk started the watchdog's 3 minutes
+   * afresh. While it runs, and at the first look after it ended by itself (the bot has walked on since the last one),
+   * the bot's place is taken as it is and the count goes on. The watchdog's own forage counts as before.
+   */
+  private idleTrack(s: Snapshot): void {
+    const here = { x: s.position.x, z: s.position.z };
+    const run = this.running?.goal;
+    const walkHome = run?.name === returnIdle.name || (this.walkedHomeAt !== undefined && this.now() - this.walkedHomeAt <= 15_000);
+    this.walkedHomeAt = undefined;
+    const atWork = !!run && run.name !== returnIdle.name && run !== forage;
+    const moved = !this.idleAt || Math.hypot(here.x - this.idleAt.x, here.z - this.idleAt.z) > 3;
+    if (atWork || (moved && !(walkHome && this.idleAt)) || s.activity !== 'work' || s.sleeping || !s.home) {
+      this.idleAt = here;
+      this.idleSince = this.now();
+      this.idleStage = 0;
+    } else if (walkHome) this.idleAt = here;
+  }
+
+  /**
    * By day with nothing running, standing still: after IDLE_FIRST every hold is let go (backoffs, a goal left until
-   * the morning, wood or ore marked fruitless) so whatever was waiting tries again; after IDLE_FORAGE it forages
-   * (food when hungry, else what's short). Then it waits ten minutes before going round again. True when it started
-   * something.
+   * the morning) so whatever was waiting tries again; after IDLE_FORAGE it forages (food when hungry, else what's
+   * short). Then it waits ten minutes before going round again. True when it started something.
    */
   private idleWatch(s: Snapshot, world: WorldMemory): boolean {
     if (s.activity !== 'work' || s.sleeping || !s.home) return false;
@@ -288,16 +350,16 @@ export class Brain {
     if (this.idleStage === 0 && idle >= IDLE_FIRST) {
       this.idleStage = 1;
       const held = [...this.retryAt].filter(([g, t]) => t > this.now() && !this.looping(g)).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
-      // spare time's own marks stay: spare time is what fills an idle day, so letting them go only sent it straight
-      // back to a mined-out ore (2026-11-08: "spare time: 0 iron ... Unable to find any path" every 3.5 min for an
-      // hour, each let-go undoing the 40-minute wait); they lapse by themselves
-      const fruitless = Object.keys(world.lastDone ?? {}).filter(k => k.startsWith('fruitless:') && !k.startsWith('fruitless:spare:'));
+      // the marks of what was looked for and not found (`fruitless:*`) stay, the stock trips' like spare time's:
+      // letting them go only sent the bot straight back to where there was nothing (2026-11-08: "spare time: 0 iron
+      // ... Unable to find any path" every 3.5 min for an hour; 2026-11-10: "let go of fruitless:sugar_cane" every 10
+      // to 20 min all day, each one more fruitless cane walk); they lapse by themselves
       this.retryAt.clear();
       this.keepLoopHolds();
       this.fails.clear();
       this.morningHold.clear();
-      for (const k of fruitless) delete world.lastDone![k];
-      this.note(`idle ${mins} min by day: let go of ${[...held, ...fruitless].join(', ') || 'nothing (nothing was held)'}`);
+      this.freedEarly.clear();
+      this.note(`idle ${mins} min by day: let go of ${held.join(', ') || 'nothing (nothing was held)'}`);
       return false;
     }
     if (this.idleStage === 1 && idle >= IDLE_FORAGE) {
@@ -356,15 +418,19 @@ export class Brain {
     }
     lines.push(...communityStatus(world), ...yardGrowStatus(world));
     if (world?.yard) lines.push(`Yard: x ${world.yard.x1}..${world.yard.x2}, z ${world.yard.z1}..${world.yard.z2}, ground y ${world.yard.y}.`);
-    if (this.day.work) lines.push(`Today: idle ${Math.round(100 * this.day.idle / this.day.work)}% of daytime${this.day.lastIdle ? ` (yesterday ${this.day.lastIdle}%)` : ''}.`);
-    if (world) this.measure('status', () => { lines.push(...idleReport(world, why)); });
+    if (world) this.measure('status', () => {
+      // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
+      const today = todayLine(world);
+      if (today) lines.push(today);
+      lines.push(...idleReport(world, why));
+    });
     const loops = this.loops.found.filter(f => this.now() - f.at < 60 * 60_000);
     if (loops.length) lines.push('Loops in the last hour (fix these in the code):', ...loops.map(f => `- ${new Date(f.at).toISOString().slice(11, 19)} ${f.loop.kind}: ${f.loop.summary}`));
     if (this.log.length) lines.push('Recent:', ...this.log.slice(-20).map(l => `- ${l}`));
     return lines.join('\n');
   }
 
-  /** Count today's daytime ticks and the idle ones (a new day starts when the clock wraps). */
+  /** where the bot has walked, per world: its routes, which the lights round lights (walked) */
   private heat?: { world: string; map: HeatMap; last?: Pos; saved: number };
   private readonly structures = new StructureStore();
   private readonly loops = new LoopWatch();
@@ -389,8 +455,9 @@ export class Brain {
     if (this.now() - h.saved > 60_000) { world.heat = h.map.toJSON(); h.saved = this.now(); }
   }
 
+  /** A new game day (the clock wrapped): the tally's day is closed, old routes fade, and what was held may try again. */
   private countDay(s: Snapshot): void {
-    if (s.timeOfDay < this.day.tod - 12_000) {
+    if (s.timeOfDay < this.tod - 12_000) {
       // the day that ended as the idle tally counted it: one `day:` line, and its sums kept for the week
       this.measure('day', () => {
         const line = this.worldId ? tallyRoll(this.memory.world(this.worldId)) : '';
@@ -398,8 +465,6 @@ export class Brain {
       });
       // a new day: old routes fade, so a path no longer walked stops being lit
       if (this.heat) { this.heat.map.decay(0.9); if (this.worldId) this.memory.world(this.worldId).heat = this.heat.map.toJSON(); }
-      if (this.day.work) this.day.lastIdle = Math.round(100 * this.day.idle / this.day.work);
-      this.day.work = this.day.idle = 0;
       // a new day: what failed in the dark (no hunting at night) or waited a while may try again now; with a bed
       // the morning comes a minute after dusk, and the food goal sat out a 5 minute retry, hungry, in daylight
       const waiting = [...this.retryAt].filter(([g, t]) => t > this.now() && !this.looping(g)).map(([g]) => g);
@@ -408,11 +473,9 @@ export class Brain {
       this.keepLoopHolds();
       this.fails.clear();
       this.morningHold.clear();
+      this.freedEarly.clear();
     }
-    this.day.tod = s.timeOfDay;
-    if (s.activity !== 'work' || s.sleeping) return;
-    this.day.work++;
-    if (!this.running) this.day.idle++;
+    this.tod = s.timeOfDay;
   }
 
   /**
@@ -572,6 +635,11 @@ export class Brain {
   }
 
   private start(goal: Goal, reason: string, s: Snapshot, world: WorldMemory): void {
+    // one run at a time, whoever asks: the interval's tick and the one a run's end asks for both come through here.
+    // And none for a brain switched off, or with the LLM at the bot, while this tick was looking: nothing would stop it
+    if (this.running || !this.enabled || this.now() < this.leaseUntil) return;
+    // it starts with a hold behind it that ran its full time: it may be let go early again another time
+    if (this.retryAt.has(goal.name)) this.freedEarly.delete(goal.name);
     const abort = new AbortController();
     // added to as the run goes, not handed over at its end: a run stopped midway keeps the time it used and what it got
     const used = { ms: 0, gain: 0 };
@@ -627,11 +695,21 @@ export class Brain {
         this.loopCheck(run, abort.signal.aborted ? 'stopped' : 'failed', this.stopWhy ?? e.message);
       })
       .finally(() => {
+        const mine = this.running?.abort === abort;
         // booked before the run is let go of: the stretch since the last tick is still its own
-        this.measure('run', () => this.bookRun(goal, used, this.running?.abort === abort));
-        if (this.running?.abort === abort) this.running = undefined;
+        this.measure('run', () => this.bookRun(goal, used, mine));
+        if (mine) this.running = undefined;
         void this.show();
-        this.memory.save(); // chest contents and chore times it learned
+        // chest contents and chore times it learned; a save that fails (a full disk) is noted, and neither goes
+        // unhandled nor keeps the next goal waiting
+        this.measure('save', () => this.memory.save());
+        // while the autopilot has the bot (not switched off, not the LLM's): the tick that would start something
+        const ours = this.enabled && this.now() >= this.leaseUntil;
+        // the walk home that ended by itself: the look that follows still belongs to it (the idle watchdog's count goes on)
+        if (mine && ours && goal.name === returnIdle.name) this.walkedHomeAt = this.now();
+        // the hand-over: the next goal starts now, not up to 5 s on. Not after a run that was over at once, nor after
+        // a survival goal, which nothing holds when it goes round: those keep the tick's beat (see HAND_OVER_MS)
+        if (mine && ours && !SURVIVAL.has(goal.name) && this.now() - started >= HAND_OVER_MS) this.soon();
       });
     this.running = { goal, reason, started, abort, done, used };
     this.step = undefined;
@@ -732,15 +810,51 @@ export class Brain {
       st.lead = lead;
       this.note(idleLine(st.ms, why));
     }
+    // on its own: whatever goes wrong in it, the time above is booked. And before the save below: one that cannot be
+    // made (a full disk) throws out of here, and the hold's minute must not lose that tick
+    this.measure('release', () => this.releaseHold(s, world, lead, dt));
     // a run's end saves the tally with the rest; standing idle nothing would, and a restart lost the day so far
     if (this.idleSaved === undefined) this.idleSaved = now;
     else if (now - this.idleSaved >= 60_000) { this.idleSaved = now; this.memory.save(); }
+  }
+
+  /**
+   * A hold let go early. When the idle time has been led by a hold for a minute, the bot stands about because a goal
+   * with something to do waits out a back-off (five minutes after a walk that failed, three after one that stuck)
+   * and nothing else wants to run meanwhile. One hold goes: the first, in the order the goals are tried, that is an
+   * ordinary one (wedged, stuck, timed out, failed) on a goal that wants to run now. Never the loop watch's (that
+   * goal went round in circles: its 10 minutes are the point) and never "until morning" (three failures in a row:
+   * something is in the way today). The count of failures stays, so a third in a row still means the morning. A goal
+   * let go early and held again is not let go early a second time until a hold on it has run its full time (start),
+   * or the morning or the idle watchdog let everything go: without that a goal that fails at once would be tried
+   * again every minute, all day. The minute starts again after each release.
+   */
+  private releaseHold(s: Snapshot, world: WorldMemory, lead: IdleCause, dt: number): void {
+    if (lead !== 'hold') { this.holdIdle = 0; return; }
+    this.holdIdle += dt;
+    if (this.holdIdle < HOLD_IDLE_MS) return;
+    for (const g of inOrder(s, world, this.goals)) {
+      const why = this.holdWhy.get(g.name) ?? '';
+      if (!((this.retryAt.get(g.name) ?? 0) > s.now) || !ORDINARY_HOLD.test(why)) continue;
+      if (this.looping(g.name) || this.morningHold.has(g.name) || this.freedEarly.has(g.name)) continue;
+      let wants: string | null = null;
+      try { wants = g.wants(s, world); } catch { /* it cannot say what it would do: it stays held */ }
+      if (!wants) continue;
+      this.retryAt.delete(g.name);
+      this.holdWhy.delete(g.name);
+      this.freedEarly.add(g.name);
+      this.holdIdle = 0;
+      this.note(`idle ${HOLD_IDLE_MS / 1000}s on a hold: let go of ${g.name} (${why})`);
+      this.again = true; // the tick that follows this one at once starts it
+      return;
+    }
   }
 
   /** The idle streak is over (something runs, or the counted daytime stopped): say so when it was worth a line. */
   private endStreak(): void {
     const st = this.streak;
     this.streak = undefined;
+    this.holdIdle = 0;
     if (st && st.ms >= 15_000) this.note(idleOverLine(st.ms, st.by));
   }
 

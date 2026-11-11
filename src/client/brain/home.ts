@@ -70,7 +70,8 @@ export const bedStep: Step = {
     }
     if (b?.craft) {
       const short = await prepare(ctx, b.bed, 1);
-      if (Object.keys(short).length) return blocked(`crafting a ${b.bed}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE);
+      // (short of materials: with `need` the project waits longer each time, until all of it is there)
+      if (Object.keys(short).length) return { ...blocked(`crafting a ${b.bed}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE), need: short };
     }
     if (b) { st.data.bed = b.bed; return ok(`${b.bed} in hand`); }
     st.data.bedTries = ((st.data.bedTries as number | undefined) ?? 0) + 1;

@@ -6,8 +6,8 @@ import sinon from 'sinon';
 import { Brain } from '../../src/client/brain/brain.js';
 import { BrainMemory, type WorldMemory } from '../../src/client/brain/memory.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
-import { fromGate, returnIdle, type Decline, type Goal, type Snapshot } from '../../src/client/brain/goals.js';
-import { explainIdle, idleOf, tally, tallyRoll, type IdleCause } from '../../src/client/brain/idlelog.js';
+import { fromGate, returnIdle, type Decline, type Gate, type Goal, type Snapshot } from '../../src/client/brain/goals.js';
+import { explainIdle, idleOf, tally, tallyRoll, todayLine, type IdleCause } from '../../src/client/brain/idlelog.js';
 import type { Run } from '../../src/client/brain/loops.js';
 
 const reply = (text: string) => ({ content: [{ type: 'text' as const, text }] });
@@ -84,13 +84,13 @@ test('explainIdle: away and health lead, then each held goal with why and until 
     idler('e', () => null),
     idler('f', () => ({ cause: 'weather' as IdleCause, text: 'not a cause' }))
   ];
-  const held = new Map([['c', T0 + 90_000], ['a', T0 - 1], ['gone', T0 + 5000], ['d', T0 + 1000]]);
-  t.deepEqual(explainIdle(snap({ health: 8, distHome: 120.4 }), world, goals, held, new Map([['c', 'stuck'], ['a', 'timed out']])), [
+  const held = new Map([['c', T0 + 90_000], ['a', T0 - 1], ['gone', T0 + 5000], ['d', T0 + 1000], ['e', T0 + 90_000]]);
+  t.deepEqual(explainIdle(snap({ health: 8, distHome: 120.4 }), world, goals, held, new Map([['c', 'stuck'], ['a', 'timed out'], ['e', 'stuck']])), [
     { cause: 'away', text: '120 blocks from home, leash 96' },
     { cause: 'health', text: 'health 8, food 20' },
-    { cause: 'hold', text: 'c held until 14:01 (stuck)', until: T0 + 90_000 },
     { cause: 'hold', text: 'd held until 14:00', until: T0 + 1000 }, // a hold nobody gave a reason for still shows
-    { cause: 'kit', text: 'no pickaxe' },
+    { cause: 'hold', text: 'e held until 14:01 (stuck)', until: T0 + 90_000 },
+    { cause: 'kit', text: 'no pickaxe' }, // c is held as well, but would not run without its hold either: by what it says
     { cause: 'stocked', text: 'enough iron' }
   ]); // a hold that ran out (a), and one on a goal the brain does not choose from (gone), keep nothing from running
   t.deepEqual(explainIdle(snap({ home: undefined, distHome: Infinity }), world, [], new Map(), new Map()), [{ cause: 'away', text: 'no home set' }]);
@@ -205,6 +205,37 @@ test('brain.json: the new file is flushed to the disk before it is renamed over 
   t.deepEqual(rename.args, [[`${file}.tmp`, file]]);
   t.true(write.calledBefore(rename));
   t.is((JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, WorldMemory>).w.leash, 50);
+});
+
+test('todayLine: how much of today\'s daytime was idle and how much busy to no gain, with yesterday\'s pair once a day is kept; no line before any is counted, and it only reads', (t) => {
+  const world = emptyWorld();
+  t.is(todayLine(world), undefined);
+  t.is(world.idle, undefined); // a brain.json from before the tally gets none made by being asked
+  // a day of 500 s: 155 of them idle, 60 busy to no gain
+  tally(world, 'idle', 155_000, 'project');
+  tally(world, 'empty', 60_000);
+  tally(world, 'busy', 285_000);
+  t.is(todayLine(world), 'Today: idle 31% of daytime, 12% busy to no gain.'); // no day before it yet
+  tallyRoll(world);
+  t.is(todayLine(world), undefined); // the morning: nothing counted today, and not "idle 0%"
+  tally(world, 'idle', 46_000, 'late');
+  tally(world, 'empty', 23_000);
+  tally(world, 'busy', 506_000);
+  t.is(todayLine(world), 'Today: idle 8% of daytime, 4% busy to no gain (yesterday 31%, 12%).');
+
+  // whatever a brain.json holds under idle: read as far as it is sound, never thrown on, and left as it is
+  const read = (idle: unknown) => {
+    const w = { ...emptyWorld(), idle } as unknown as WorldMemory;
+    const before = JSON.stringify(w);
+    const line = todayLine(w);
+    t.is(JSON.stringify(w), before);
+    return line;
+  };
+  for (const junk of ['yesterday', 7, null, [1, 2], {}, { today: 5 }, { today: { workMs: 'x' } }, { today: { workMs: -5, idleMs: 3 } }]) t.is(read(junk), undefined, JSON.stringify(junk));
+  t.is(read({ today: { workMs: 1000, idleMs: 500, emptyMs: 'x' }, days: 'none' }), 'Today: idle 50% of daytime, 0% busy to no gain.');
+  t.is(read({ today: { workMs: 1000, idleMs: 250, emptyMs: 100 }, days: [null, { workMs: 10 }] }), 'Today: idle 25% of daytime, 10% busy to no gain.');
+  t.is(read({ today: { workMs: 1000 }, days: [{ workMs: 0, idleMs: 5 }] }), 'Today: idle 0% of daytime, 0% busy to no gain.'); // a day with no daytime is no yesterday
+  t.is(read({ today: { workMs: 1000 }, days: [{ workMs: 200, idleMs: 100, emptyMs: 50 }] }), 'Today: idle 0% of daytime, 0% busy to no gain (yesterday 50%, 25%).');
 });
 
 // ---- the brain's half ----
@@ -348,10 +379,13 @@ test('the walk home from nowhere counts as idle time (away)', async (t) => {
 
 test('a gains goal with no gain is booked empty; with one, also when stopped midway, it is busy time', async (t) => {
   const { rt, finish } = fakeRuntime({ pos: HOME, time: 6000 });
-  let clock = T0, bring = 0, lost = false;
+  let clock = T0;
+  // what the next run is to do, settled as it sets out: it sets out the moment the one before it is over (the hand-over)
+  let plan = { bring: 0, lost: false };
   const haul: Goal = {
     name: 'haul', priority: 5, gains: true, wants: () => 'test', timeoutMs: 600_000, retryMs: 1000,
     run: async (ctx) => {
+      const { bring, lost } = plan;
       // as it comes in, not at the end: a run stopped midway keeps what it got
       if (bring) { ctx.gain(bring); ctx.gain(1); ctx.gain(0); ctx.gain(NaN); }
       await ctx.act('slow');
@@ -366,23 +400,25 @@ test('a gains goal with no gain is booked empty; with one, also when stopped mid
 
   // 5 s out, nothing brought back: busy to no gain
   await tick();
+  plan = { bring: 3, lost: false };
   finish(); await settle();
   t.deepEqual(today(brain), { day: 0, workMs: 5000, idleMs: 0, emptyMs: 5000, by: {} });
 
-  // the same with something to show: the wait for it, and the 10 s out
-  bring = 3;
+  // the same with something to show, 10 s out (it set out as the first came in: no wait between them)
   await tick(); await tick();
+  plan = { bring: 0, lost: true };
   finish(); await settle();
   t.deepEqual(today(brain), { day: 0, workMs: 15_000, idleMs: 0, emptyMs: 5000, by: {} });
 
   // a run that fails with nothing brought in is empty too
-  bring = 0; lost = true;
   await tick();
+  plan = { bring: 1, lost: false };
   finish(); await settle();
   t.deepEqual(today(brain), { day: 0, workMs: 20_000, idleMs: 0, emptyMs: 10_000, by: {} });
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (hold): haul held until 14:00 (failed: lost the way).'); // a failure is waited out: nothing set out after it
 
-  // stopped midway (the LLM took over) with 2 in the pockets: what it got counts, and so do the 3 s since the last tick
-  bring = 1; lost = false;
+  // stopped midway (the LLM took over) with 2 in the pockets: what it got counts, and so do the 5 s it waited to set
+  // out and the 3 s since the last tick
   await tick();
   clock += 3000;
   await brain.manual('dig-block'); await settle();
@@ -408,6 +444,7 @@ test('the idle log: a line at 15 s, on a new lead cause (never twice in 15 s) an
   brain.setEnabled(true);
   const tick = async (n = 1) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } };
   await brain.tick();
+  t.is(statusLine(brain, 'Today:'), undefined); // no daytime counted yet: no line, not "idle 0%"
   brain.worldMemory()!.progress = { done: [], journal: [], need: { sugar_cane: 98, leather: 38, string: 0 } };
   await tick(2);
   t.deepEqual(recent(brain), ['14:00:00 autonomy on']); // 10 s of it: not worth a line yet
@@ -438,7 +475,7 @@ test('the idle log: a line at 15 s, on a new lead cause (never twice in 15 s) an
   go = true;
   await tick(); await settle();
   go = false;
-  t.regex(statusLine(brain, 'Today:') ?? '', /^Today: idle \d+% of daytime\.$/); // the old line, from the old count, as it was
+  t.is(statusLine(brain, 'Today:'), 'Today: idle 95% of daytime, 5% busy to no gain.'); // from the tally: 90 s of 95 idle, the trip's 5 s empty; no yesterday yet
   // the night, and the morning after it
   state.time = 13_000;
   await tick();
@@ -458,6 +495,7 @@ test('the idle log: a line at 15 s, on a new lead cause (never twice in 15 s) an
   t.deepEqual(m.days, [{ day: 0, workMs: 95_000, idleMs: 90_000, emptyMs: 5000, by: { pockets: 20_000, late: 70_000 } }]);
   t.deepEqual(m.today, { day: 1, workMs: 5000, idleMs: 5000, emptyMs: 0, by: { late: 5000 } }); // the new day's first 5 s
   t.is(statusLine(brain, 'Idle by cause'), 'Idle by cause today: late 100%.');
+  t.is(statusLine(brain, 'Today:'), 'Today: idle 100% of daytime, 0% busy to no gain (yesterday 95%, 5%).');
   brain.setEnabled(false);
 });
 
@@ -625,4 +663,366 @@ test('a failure in the measuring is noted once and never stops a tick from decid
   await tick(); await settle();
   t.is(recent(brain).at(-1), '14:02:05 done work in 0s: ok'); // and so did the deciding
   brain.setEnabled(false);
+});
+
+// ---- step 2: the hand-over, the watchdog's count, a hold let go early ----
+
+/** The lines that say a hold was let go early. */
+const freed = (brain: Brain) => recent(brain).filter(l => /on a hold/.test(l));
+
+test('brain-status on a brain.json with no tally, or with something else under idle: no Today line until daytime is counted, then one, and nothing goes wrong', async (t) => {
+  for (const idle of [undefined, 'yesterday', { today: 'none', days: 7 }]) {
+    const file = tempFile();
+    fs.writeFileSync(file, JSON.stringify({ 'seed:1': { landmarks: { chests: [], farmland: [] }, leash: 96, ...(idle === undefined ? {} : { idle }) } }));
+    const { rt } = fakeRuntime({ pos: HOME, time: 6000 });
+    let clock = T0;
+    const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [idler('quiet')], memoryFile: file });
+    brain.setEnabled(true);
+    await brain.tick();
+    t.is(statusLine(brain, 'Today:'), undefined, JSON.stringify(idle));
+    clock += 5000; await brain.tick();
+    t.is(statusLine(brain, 'Today:'), 'Today: idle 100% of daytime, 0% busy to no gain.', JSON.stringify(idle));
+    t.notRegex(brain.status(), /idle log: |tick failed/);
+    brain.setEnabled(false);
+  }
+});
+
+test('the hand-over books each moment once: the next run sets out in the second the last one ended, and neither\'s time is idle', async (t) => {
+  const { rt, finish } = fakeRuntime({ pos: HOME, time: 6000 });
+  let clock = T0;
+  const began: string[] = [];
+  const job = (name: string, priority: number): Goal => ({
+    name, priority, wants: () => (began.includes(name) ? null : 'once'), timeoutMs: 600_000, retryMs: 1000,
+    run: async (ctx) => { began.push(name); return (await ctx.act('slow')).text; }
+  });
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [job('first', 9), job('second', 5)] });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  clock += 5000; await brain.tick();
+  clock += 2000; finish(); await settle(); // 7 s in, between two ticks; no tick() from here to the next run
+  t.deepEqual(recent(brain).slice(-2), ['14:00:07 done first in 7s: slow done', '14:00:07 start second: once']);
+  clock += 5000; await brain.tick();
+  clock += 1000; finish(); await settle(); // 6 s on; the look that follows finds nothing to do
+  t.is(recent(brain).at(-1), '14:00:13 done second in 6s: slow done');
+  t.deepEqual(today(brain), { day: 0, workMs: 13_000, idleMs: 0, emptyMs: 0, by: {} });
+  clock += 5000; await brain.tick();
+  t.deepEqual(today(brain), { day: 0, workMs: 18_000, idleMs: 5000, emptyMs: 0, by: { nothing: 5000 } });
+  brain.setEnabled(false);
+});
+
+test('the walk home counts as idle (away) and does not reset the watchdog: its 3 minutes run from the first look, through the walk', async (t) => {
+  const state: State = { pos: { x: 60, y: 64, z: 0 }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let arrive = () => { /* not walking yet */ };
+  rt.actions['go-home'] = async () => { await new Promise<void>(r => { arrive = r; }); state.pos = { ...HOME }; return reply('Home'); };
+  let clock = T0;
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [returnIdle] });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  // a minute's walk, 5 blocks between two looks (3 blocks moved start the watchdog's count again, when it is not this walk)
+  for (let i = 0; i < 11; i++) { clock += 5000; state.pos = { ...state.pos, x: state.pos.x - 5 }; await brain.tick(); }
+  clock += 5000; arrive(); await settle(); // the last 5 blocks, and home
+  t.is(recent(brain).at(-1), '14:01:00 done idle in 60s: back home');
+  for (let i = 0; i < 23; i++) { clock += 5000; await brain.tick(); }
+  t.deepEqual(recent(brain).filter(l => /min by day/.test(l)), []); // 14:02:55
+  clock += 5000; await brain.tick(); await settle();
+  // 3 minutes after the first look, not 3 after arriving: each walk home used to start them afresh, and a bot that
+  // went out and back every few minutes was never idle long enough to be helped
+  t.deepEqual(recent(brain).filter(l => /min by day/.test(l)), ['14:03:00 idle 3 min by day: let go of nothing (nothing was held)']);
+  t.deepEqual(today(brain), { day: 0, workMs: 180_000, idleMs: 180_000, emptyMs: 0, by: { away: 60_000, nothing: 120_000 } });
+  brain.setEnabled(false);
+});
+
+test('a minute of idle time on a hold lets one ordinary hold go early: once, its failures still counted, and never a goal left until the morning', async (t) => {
+  const state: State = { pos: HOME, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let clock = T0, runs = 0;
+  // it fails at once, and waits a minute and a half after each failure
+  const flaky: Goal = { name: 'flaky', priority: 5, wants: () => 'wants', timeoutMs: 60_000, retryMs: 90_000, run: async () => { runs++; throw new Error('in the way'); } };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [flaky] });
+  brain.setEnabled(true);
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } await settle(); };
+  await brain.tick(); await settle();
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: flaky held until 14:01 (failed: in the way)');
+  await ticks(11); // 55 s of standing about for it
+  t.is(runs, 1);
+  t.deepEqual(freed(brain), []);
+  await ticks(1); // the minute is up: it goes again now, not at 14:01:30, and in the same second (no tick() of the test's)
+  t.is(runs, 2);
+  t.deepEqual(recent(brain).slice(-4), [
+    '14:01:00 idle 60s on a hold: let go of flaky (failed: in the way)',
+    '14:01:00 start flaky: wants',
+    '14:01:00 idle over after 60s: hold 60s',
+    '14:01:00 failed flaky: in the way'
+  ]);
+
+  // it failed again and is held again: not let go early a second time, or it would be tried every minute all day
+  await ticks(12);
+  t.is(clock, T0 + 120_000);
+  t.is(runs, 2);
+  t.is(freed(brain).length, 1);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: flaky held until 14:02 (failed: in the way)');
+
+  // this hold runs its full time, to 14:02:30. The third failure in a row: the early release kept the count
+  await ticks(5);
+  t.is(runs, 2);
+  await ticks(1);
+  t.is(runs, 3);
+  t.deepEqual(recent(brain).slice(-2), ['14:02:30 flaky failed 3 times in a row: left until the morning', '14:02:30 failed flaky: in the way']);
+
+  // and "until the morning" is not let go early, however long the bot stands about for it (a few steps away, so
+  // that the idle watchdog's 3 minutes of standing still, which do let it go, start afresh)
+  state.pos = { x: 8, y: 64, z: 0 };
+  await ticks(17);
+  t.is(runs, 3);
+  t.is(freed(brain).length, 1);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: flaky held until 14:17 (3 failures: until morning)');
+  t.notRegex(brain.status(), /min by day/);
+  // 60 s, 85 s and 85 s on the holds; the 5 s before the third run set out are that run's
+  t.deepEqual(today(brain), { day: 0, workMs: 235_000, idleMs: 230_000, emptyMs: 0, by: { hold: 230_000 } });
+  brain.setEnabled(false);
+});
+
+test('a goal let go early may be let go early again once a hold on it has run its full time', async (t) => {
+  const state: State = { pos: HOME, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  let clock = T0, runs = 0, ok = false;
+  const flaky: Goal = {
+    name: 'flaky', priority: 5, wants: () => 'wants', timeoutMs: 60_000, retryMs: 90_000,
+    run: async () => { runs++; if (ok) { ok = false; return 'fine'; } throw new Error('in the way'); }
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [flaky] });
+  brain.setEnabled(true);
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } await settle(); };
+  await brain.tick(); await settle();
+  await ticks(12); // 14:01:00: let go early, and it fails again
+  t.is(runs, 2);
+  await ticks(17); // to 14:02:25: held, and not let go a second time
+  t.is(runs, 2);
+  ok = true;
+  state.pos = { x: 8, y: 64, z: 0 }; // (a few steps away: the idle watchdog's 3 minutes start afresh)
+  await ticks(1); // 14:02:30: the hold has run out by itself, and this time it works
+  t.is(recent(brain).at(-1), '14:02:30 done flaky in 0s: fine');
+  await ticks(1); // 14:02:35: and the time after that it does not
+  t.is(runs, 4);
+  await ticks(11); // 55 s on that hold
+  t.is(runs, 4);
+  await ticks(1);
+  t.is(runs, 5);
+  t.deepEqual(freed(brain), [
+    '14:01:00 idle 60s on a hold: let go of flaky (failed: in the way)',
+    '14:03:35 idle 60s on a hold: let go of flaky (failed: in the way)'
+  ]);
+  brain.setEnabled(false);
+});
+
+test('a minute of idle time lets go of a stuck stop\'s hold as it does of a failure\'s: once, and stuck again it waits its 3 minutes out', async (t) => {
+  const { rt } = fakeRuntime({ pos: HOME, time: 6000, process: 'Custom Goal' });
+  let clock = T0;
+  const walk: Goal = { name: 'walk', priority: 5, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [walk] });
+  brain.setEnabled(true);
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } await settle(); };
+  /** The run in hand stands for 3 minutes with Baritone at work, and the watchdog stops it. */
+  const stick = async () => { clock += 60_000; await brain.tick(); clock += 3.1 * 60_000; await brain.tick(); await settle(); };
+  await brain.tick(); await settle();
+  await stick();
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: walk held until 14:07 (stuck)'); // 3 minutes from 14:04:06
+  await ticks(11); // 55 s of standing about for it
+  t.deepEqual(freed(brain), []);
+  await ticks(1); // the minute is up: it sets out again now, two minutes before its hold ends
+  t.deepEqual(recent(brain).slice(-3), [
+    '14:05:06 idle 60s on a hold: let go of walk (stuck)',
+    '14:05:06 start walk: test',
+    '14:05:06 idle over after 60s: hold 60s'
+  ]);
+
+  // stuck again, and held again: this hold is not let go early
+  await stick();
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: walk held until 14:12 (stuck)'); // 3 minutes from 14:09:12
+  await ticks(13);
+  t.is(freed(brain).length, 1);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: walk held until 14:12 (stuck)');
+  t.is(recent(brain).filter(l => /start walk/.test(l)).length, 2);
+  brain.setEnabled(false);
+});
+
+test('a minute of idle time lets go of the hold of a run that ran out of time: once, and out of time again it waits the hold out', async (t) => {
+  const { rt } = fakeRuntime({ pos: HOME, time: 6000 });
+  let clock = T0;
+  const slowpoke: Goal = { name: 'slowpoke', priority: 5, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 10_000, retryMs: 120_000 };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [slowpoke] });
+  brain.setEnabled(true);
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } await settle(); };
+  await brain.tick(); await settle();
+  await ticks(3); // 15 s into a run that has 10
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: slowpoke held until 14:02 (timed out)'); // 2 minutes from 14:00:15
+  await ticks(11);
+  t.deepEqual(freed(brain), []);
+  await ticks(1); // the minute is up: it goes again now, a minute before its hold ends
+  t.deepEqual(recent(brain).slice(-3), [
+    '14:01:15 idle 60s on a hold: let go of slowpoke (timed out)',
+    '14:01:15 start slowpoke: test',
+    '14:01:15 idle over after 60s: hold 60s'
+  ]);
+
+  // out of time again, and held again: this hold is not let go early
+  await ticks(3);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: slowpoke held until 14:03 (timed out)'); // 2 minutes from 14:01:30
+  await ticks(13);
+  t.is(freed(brain).length, 1);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: slowpoke held until 14:03 (timed out)');
+  t.is(recent(brain).filter(l => /start slowpoke/.test(l)).length, 2);
+  brain.setEnabled(false);
+});
+
+test('the early release leaves a loop hold alone, and a held goal that has nothing to do until it has', async (t) => {
+  // backed off by the loop watch: it went round in circles, and its 10 minutes are the point
+  const spinning = fakeRuntime({ pos: HOME, time: 6000 });
+  let clock = T0, runs = 0;
+  const spin: Goal = { name: 'spin', priority: 5, wants: () => 'wants', run: async () => { runs++; return 'nothing to show'; }, timeoutMs: 60_000, retryMs: 1000 };
+  const round = new Brain(spinning.rt, { tickMs: 1e9, now: () => clock, goals: [spin] });
+  round.setEnabled(true);
+  await round.tick(); await settle();
+  for (let i = 0; i < 3; i++) { clock += 5000; await round.tick(); await settle(); }
+  t.is(statusLine(round, 'Blocked:'), 'Blocked: spin held until 14:10 (loop: spinning)');
+  for (let i = 0; i < 20; i++) { clock += 5000; await round.tick(); } // 100 s of standing about for it
+  await settle();
+  t.is(statusLine(round, 'Now:'), 'Now: idle (hold): spin held until 14:10 (loop: spinning).');
+  t.is(runs, 4);
+  t.deepEqual(freed(round), []);
+  t.is(today(round).by.hold, 100_000);
+  round.setEnabled(false);
+
+  // held after a failure, and what it was after is gone: letting it go would start nothing, so the hold stays; when
+  // there is something for it again, the minute has long been stood, and it goes at the next look
+  const quiet = fakeRuntime({ pos: HOME, time: 6000 });
+  let more = true;
+  clock = T0; runs = 0;
+  const haul: Goal = { name: 'haul', priority: 5, wants: () => (more ? 'a load waits' : null), run: async () => { runs++; throw new Error('lost the way'); }, timeoutMs: 60_000, retryMs: 300_000 };
+  const brain = new Brain(quiet.rt, { tickMs: 1e9, now: () => clock, goals: [haul] });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  more = false;
+  for (let i = 0; i < 14; i++) { clock += 5000; await brain.tick(); } // 70 s
+  await settle();
+  t.is(runs, 1);
+  t.deepEqual(freed(brain), []);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: haul held until 14:05 (failed: lost the way)');
+  more = true;
+  clock += 5000; await brain.tick(); await settle();
+  t.is(runs, 2);
+  t.deepEqual(freed(brain), ['14:01:15 idle 60s on a hold: let go of haul (failed: lost the way)']);
+  brain.setEnabled(false);
+});
+
+test('with two goals held, the first in the order they are tried is let go, and the other a minute later', async (t) => {
+  const { rt } = fakeRuntime({ pos: HOME, time: 6000 });
+  let clock = T0;
+  const ran: string[] = [];
+  const failing = (name: string, priority: number): Goal => ({
+    name, priority, wants: () => 'wants', timeoutMs: 60_000, retryMs: 300_000,
+    run: async () => { ran.push(name); throw new Error(`${name} is in the way`); }
+  });
+  // listed the other way round: the order is the urgency's, as where the next goal is chosen
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [failing('low', 3), failing('high', 7)] });
+  brain.setEnabled(true);
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } await settle(); };
+  await brain.tick(); await settle(); // 14:00:00: high fails
+  await ticks(1);                     // 14:00:05: low fails; both held for 5 minutes
+  t.deepEqual(ran, ['high', 'low']);
+  await ticks(11);
+  t.deepEqual(ran, ['high', 'low']);
+  await ticks(1); // 14:01:05: a minute of it
+  t.deepEqual(ran, ['high', 'low', 'high']);
+  await ticks(11);
+  t.is(ran.length, 3);
+  await ticks(1); // 14:02:05: a minute more; high has had its turn
+  t.deepEqual(ran, ['high', 'low', 'high', 'low']);
+  t.deepEqual(freed(brain), [
+    '14:01:05 idle 60s on a hold: let go of high (failed: high is in the way)',
+    '14:02:05 idle 60s on a hold: let go of low (failed: low is in the way)'
+  ]);
+  await ticks(10); // 50 s more: both have been let go once, neither goes again
+  t.is(ran.length, 4);
+  brain.setEnabled(false);
+});
+
+test('a held goal that would not run anyway is idle for what it says, not for its hold, and the hold\'s minute counts only while it is the hold that keeps it', async (t) => {
+  const { rt } = fakeRuntime({ pos: HOME, time: 6000 });
+  let clock = T0, runs = 0, late = false;
+  const gate = (): Gate => (late ? { cause: 'late', text: 'trip needs 3 min, 2.1 left' } : { want: 'time for a trip' });
+  const trip: Goal = { name: 'trip', priority: 5, gate, ...fromGate(gate), timeoutMs: 60_000, retryMs: 600_000, run: async () => { runs++; throw new Error('lost the way'); } };
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [trip] });
+  brain.setEnabled(true);
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); } await settle(); };
+  await brain.tick(); await settle();
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (hold): trip held until 14:10 (failed: lost the way).');
+  await ticks(6); // half a minute of standing about for the hold
+  t.deepEqual(today(brain).by, { hold: 30_000 });
+  // too late in the day for it now: its hold keeps nothing from running, and must not lead
+  late = true;
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (late): trip needs 3 min, 2.1 left.');
+  await ticks(14); // 70 s
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (late): trip needs 3 min, 2.1 left.');
+  t.is(statusLine(brain, 'Retrying later:'), 'Retrying later: trip 500s.'); // the hold itself stands, and is still to be read
+  t.deepEqual(today(brain).by, { hold: 30_000, late: 70_000 });
+  t.is(runs, 1);
+  t.deepEqual(freed(brain), []); // 100 s idle with a goal held, but never a minute for the hold: nothing to let go
+  // time for it again: now it is the hold that keeps it, and its minute starts here (the half one from before does not count)
+  late = false;
+  await ticks(11);
+  t.is(runs, 1);
+  await ticks(1);
+  t.is(runs, 2);
+  t.deepEqual(freed(brain), ['14:02:40 idle 60s on a hold: let go of trip (failed: lost the way)']);
+  t.deepEqual(today(brain).by, { hold: 90_000, late: 70_000 });
+  brain.setEnabled(false);
+});
+
+test('a save that cannot be made at a run\'s end is noted once and the next goal still follows at once; the idle tally\'s failing costs the hold\'s minute nothing', async (t) => {
+  // the run's end
+  const file = tempFile();
+  const { rt, finish } = fakeRuntime({ pos: HOME, time: 6000 });
+  let clock = T0;
+  const began: string[] = [];
+  const job = (name: string, priority: number): Goal => ({
+    name, priority, wants: () => (began.includes(name) ? null : 'once'), timeoutMs: 600_000, retryMs: 1000,
+    run: async (ctx) => { began.push(name); return (await ctx.act('slow')).text; }
+  });
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [job('first', 9), job('second', 5)], memoryFile: file });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  fs.mkdirSync(`${file}.tmp`); // a folder sits where the save's temp file goes: a full disk, as far as the save can tell
+  clock += 3000; finish(); await settle();
+  clock += 3000; finish(); await settle();
+  const lines = recent(brain);
+  const at = lines.indexOf('14:00:03 done first in 3s: slow done');
+  t.regex(lines[at + 1] ?? '', /^14:00:03 idle log: save failed \(noted once\): /);
+  t.deepEqual(lines.slice(at + 2), ['14:00:03 start second: once', '14:00:06 done second in 3s: slow done']); // the second failure is not a second line
+  t.notRegex(brain.status(), /tick failed/);
+  brain.setEnabled(false);
+
+  // standing idle on a hold, with the once-a-minute save of the tally failing on the tick before the hold's minute is up
+  const file2 = tempFile();
+  const idle = fakeRuntime({ pos: HOME, time: 6000 });
+  let go = false, runs = 0;
+  clock = T0;
+  const haul: Goal = { name: 'haul', priority: 5, wants: () => (go ? 'a load waits' : null), run: async () => { runs++; throw new Error('lost the way'); }, timeoutMs: 60_000, retryMs: 300_000 };
+  const other = new Brain(idle.rt, { tickMs: 1e9, now: () => clock, goals: [haul], memoryFile: file2 });
+  other.setEnabled(true);
+  await other.tick(); // 14:00:00, nothing to do: the tally's minute to its next save runs from here
+  go = true;
+  clock += 5000; await other.tick(); await settle(); // 14:00:05: haul fails, held for 5 minutes
+  fs.mkdirSync(`${file2}.tmp`);
+  for (let i = 0; i < 11; i++) { clock += 5000; await other.tick(); } // to 14:01:00, where that save fails
+  await settle();
+  t.regex(recent(other).at(-1) ?? '', /^14:01:00 idle log: time failed \(noted once\): /);
+  t.is(runs, 1);
+  clock += 5000; await other.tick(); await settle(); // 14:01:05: 60 s on the hold, the failed tick's 5 among them
+  t.is(runs, 2);
+  t.deepEqual(freed(other), ['14:01:05 idle 60s on a hold: let go of haul (failed: lost the way)']);
+  t.is(today(other).by.hold, 60_000);
+  t.notRegex(other.status(), /tick failed/);
+  other.setEnabled(false);
 });

@@ -70,6 +70,21 @@ export function tripDecline(s: Snapshot, who: string): Decline | null {
 
 let tripRunning = false;
 
+/** The walk home from the mine, and the least time at the ore that is worth the walk out. */
+const WALK_BACK = 2 * MINUTE;
+const WORTH = 3 * MINUTE;
+
+/**
+ * Too little of the day left for a trip: the time at the ore before the walk home has to start is under WORTH. The run
+ * used to find this out itself, after writing the day down as done: the trip was then "not due" for the rest of a day
+ * it never went out in. Now the gate says it, as the hour, and the run asks the same question again.
+ */
+function tooLate(timeOfDay: number): Decline | null {
+  const left = tripBudgetMs(timeOfDay, WALK_BACK);
+  // (rounded down: a tick too late is "2.9 left", not "3.0")
+  return left < WORTH ? { cause: 'late', text: `deep trip needs ${WORTH / MINUTE} min, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
+}
+
 /**
  * Run now? The "no" is said in this order: no home to set out from; nothing to go for (it went today, or no diamonds
  * are wanted); then what keeps a wanted trip at home (not in the yard, hurt, full, not kitted out); the hour last.
@@ -84,7 +99,7 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
   // not ready (food, torches, armour, ...): the food goal, the kit and the stash see to that first
   const trip = tripDecline(s, 'deep trip');
   if (trip && trip.cause !== 'late') return trip;
-  return no.late(s, 'deep trip') ?? trip ?? { want: `${want} diamond(s) wanted: a deep trip` };
+  return no.late(s, 'deep trip') ?? trip ?? tooLate(s.timeOfDay) ?? { want: `${want} diamond(s) wanted: a deep trip` };
 };
 
 export const deepTrip: Goal = {
@@ -105,17 +120,26 @@ export const deepTrip: Goal = {
 
 async function trip(ctx: GoalContext): Promise<string> {
   {
-    (ctx.world.lastDone ??= {}).deep = ctx.s.now;
-    const budget = Math.min(10 * MINUTE, tripBudgetMs(ctx.s.timeOfDay, 2 * MINUTE));
-    if (budget < 3 * MINUTE) throw new Error('too late in the day for a deep trip');
+    // the day can run out between the gate's yes and here: no trip then, and nothing written down or failed either
+    // (the day is not "done" and the goal is not kept back for half an hour): the gate says the hour from now on
+    const late = tooLate(ctx.s.timeOfDay);
+    if (late) return `no trip today: ${late.text}`;
+    const budget = Math.min(10 * MINUTE, tripBudgetMs(ctx.s.timeOfDay, WALK_BACK));
     const home = ctx.s.home!;
     // the departure point: remembered; at first well outside the home zone on the side away from the lake (south),
     // and never by someone else's build (a friend's base): another side of the yard then
     const zones = async () => (await ctx.call<{ zones: Zone[] }>('foreign.zones').catch(() => ({ zones: [] as Zone[] }))).zones;
     const seen = await zones();
     const start = pickMineStart(home, ctx.world.yard, ctx.world.zones?.mine?.[0], p => nearestZone(p, seen, true).distance);
-    if (!start) throw new Error("every side of the yard has someone else's build by it: no deep trip from here");
+    if (!start) {
+      // nowhere to set out from: that was today's try as well, or the gate would go on wanting a trip that cannot be
+      // made, and each hold let go (after a minute of standing about, or by the idle watchdog) would try it again
+      (ctx.world.lastDone ??= {}).deep = ctx.s.now;
+      throw new Error("every side of the yard has someone else's build by it: no deep trip from here");
+    }
     (ctx.world.zones ??= {}).mine = [start];
+    // today's trip from here on, where it sets out: whatever comes of the walk, it is not tried again today
+    (ctx.world.lastDone ??= {}).deep = ctx.s.now;
     ctx.progress(`out to the mine at (${start.x}, ${start.z})`);
     await ctx.call('goto', { ...start, xz: true, range: 4, timeoutMs: 180_000 }, 195_000);
     // there, the bot sees round it (the mod looks every 5 s): a build it couldn't see from home means another side next time

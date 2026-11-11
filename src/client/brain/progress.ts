@@ -10,7 +10,12 @@ import { COLOURS } from './blueprints.js';
  * a step reports progress, done, or blocked (and why), so a long job spreads over days and survives restarts.
  */
 
-export type StepResult = { status: 'done' | 'progress'; text: string } | { status: 'blocked'; text: string; retryMs?: number };
+/**
+ * What a step comes back with. A blocked one waits `retryMs`; one that is short of materials says so in `need` (what it
+ * is short of, as it counted it) and the project then waits longer each time it comes back the same (see backoffMs).
+ */
+export type StepResult = { status: 'done' | 'progress'; text: string }
+  | { status: 'blocked'; text: string; retryMs?: number; need?: Record<string, number> };
 
 export interface Step {
   name: string;
@@ -48,6 +53,13 @@ export interface ProgressMemory {
   carryCap?: Record<string, number>;
   /** a step that failed: not before (ms) */
   blockedUntil?: Record<string, number>;
+  /**
+   * The step that last came back short of materials: `id` is `milestone/step`, `n` how many times in a row it has,
+   * `at` when it last did (blockedUntil of its milestone is then `at` + backoffMs(n)). `need` is what it waits for:
+   * for each material it was short of, the TOTAL (carried and in the chests) that covers it, which is what there was
+   * when it came back plus the shortfall. What is still short at any moment is stillShort(need, allItems(s, world)).
+   */
+  blocked?: { id: string; n: number; at: number; need: Record<string, number> };
   journal: { at: number; text: string }[];
 }
 
@@ -76,12 +88,77 @@ export function nextMilestone(tree: Milestone[], s: Snapshot, world: WorldMemory
   const view = { s, world, have: haveFn(s, world) };
   for (const m of tree) {
     if (p.done.includes(m.id)) continue;
-    if (m.done?.(view)) { p.done.push(m.id); journal(world, s.now, `${m.title}: already in place`); continue; }
+    if (m.done?.(view)) {
+      p.done.push(m.id);
+      journal(world, s.now, `${m.title}: already in place`);
+      // (and nothing of it waits for materials any more)
+      if (typeof p.blocked?.id === 'string' && milestoneOf(p.blocked.id) === m.id) p.blocked = undefined;
+      continue;
+    }
     if (!m.prereqs.every(r => p.done.includes(r))) continue;
-    if ((p.blockedUntil?.[m.id] ?? 0) > s.now) continue;
+    if (heldUntil(s, world, m.id) > s.now) continue;
     return m;
   }
   return undefined;
+}
+
+// ------------------------------------------------------------------------------------------------ waiting for materials
+
+const MINUTE = 60_000;
+
+/**
+ * How long a step short of materials waits after coming back short for the n-th time in a row: 3, 6, 12, then 24 min.
+ * It came back every 3 min for as long as it took (the enchanting room's cane and leather: 236 runs of 0 s in a day,
+ * each one ahead of the chores), and nothing had changed in between.
+ */
+export const backoffMs = (n: number): number => Math.min(3 * 2 ** (Math.max(1, Math.floor(n) || 1) - 1), 24) * MINUTE;
+
+/** The step a milestone is at, as the back-off names it, and the milestone of such a name. */
+export const stepId = (milestone: string, step: number): string => `${milestone}/${step}`;
+export const milestoneOf = (step: string): string => step.slice(0, step.lastIndexOf('/'));
+
+/**
+ * The back-off of a milestone: the record of its step short of materials, while the wait that step set is the one
+ * standing in blockedUntil. Undefined for another milestone's record, for a brain.json from before there was one, and
+ * once the milestone waits for something else (the leveling that failed after the dirt came: that wait runs its time).
+ */
+export function backoffOf(p: ProgressMemory | undefined, milestone: string): NonNullable<ProgressMemory['blocked']> | undefined {
+  const b = p?.blocked;
+  if (!b || typeof b.id !== 'string' || milestoneOf(b.id) !== milestone) return undefined;
+  if (!Number.isFinite(b.n) || !Number.isFinite(b.at) || !b.need || typeof b.need !== 'object') return undefined;
+  return p.blockedUntil?.[milestone] === b.at + backoffMs(b.n) ? b : undefined;
+}
+
+/** How many of an item there are in `items` (by name); a recipe's group (any log, any planks) counts every kind of it. */
+export function countOf(items: Record<string, number>, item: string): number {
+  const group = GROUPS[item];
+  if (!group) return items[item] ?? 0;
+  return Object.entries(items).reduce((a, [n, k]) => (group.test(n) ? a + k : a), 0);
+}
+
+/** What of a back-off's `need` (totals to reach) is not there yet, given everything carried and in the chests. */
+export function stillShort(need: Record<string, number>, items: Record<string, number>): Record<string, number> {
+  const short: Record<string, number> = {};
+  for (const [item, total] of Object.entries(need)) {
+    const left = total - countOf(items, item);
+    if (left > 0) short[item] = left;
+  }
+  return short;
+}
+
+/**
+ * Until when a milestone waits (ms); a time not after `s.now` means it does not. A step that waits for materials is let
+ * go early once the chests and the pockets hold everything it was short of. All of it: some of the cane is no reason to
+ * try again. Asked by the project's gate every tick, so this is where the met bill is noticed; it only looks.
+ */
+export function heldUntil(s: Snapshot, world: WorldMemory, milestone: string): number {
+  const until = world.progress?.blockedUntil?.[milestone] ?? 0;
+  if (!(until > s.now)) return 0;
+  try {
+    const b = backoffOf(world.progress, milestone);
+    if (b && Object.keys(b.need).length && !Object.keys(stillShort(b.need, allItems(s, world))).length) return 0;
+  } catch { /* a record that cannot be read: the wait runs its time */ }
+  return until;
 }
 
 // ------------------------------------------------------------------------------------------------ materials

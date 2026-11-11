@@ -297,13 +297,37 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
   return shut;
 }
 
-/** Wandered off with nothing to do (after an LLM job, say): come back to the yard. */
+/** How far a point is outside a yard box (0 inside), in the larger of the two directions. */
+export function outsideBy(yard: { x1: number; z1: number; x2: number; z2: number }, p: { x: number; z: number }): number {
+  return Math.max(yard.x1 - p.x, 0, p.x - yard.x2, yard.z1 - p.z, p.z - yard.z2);
+}
+
+/** How far outside the yard's rectangle the bot may stand with nothing to do before it walks home. */
+export const YARD_EDGE = 8;
+
+/**
+ * Wandered off with nothing to do (after an LLM job, say): come back home. "Off" is more than 32 blocks from home, as
+ * it always was, or more than YARD_EDGE outside the yard's rectangle, which can be nearer. The 32 hold inside the
+ * fence too: the yard is 96 blocks long by now, the chores of the home start within 10 to 24 blocks of home, and a
+ * round that ends at the far end (the tree farm is 46 blocks from home) would leave the bot standing there, every one
+ * of them "away", until the evening. This walk is what brings it back into their reach, and the chore that comes into
+ * range on the way stops it (in two days' log, 103 of 139 walks ended so). Nowhere to walk to from another dimension
+ * (its distance home is not a number there).
+ */
 export const returnIdle: Goal = {
   name: 'idle',
   priority: 1,
   timeoutMs: 10 * 60_000,
   retryMs: 5 * 60_000,
-  wants: s => (s.activity === 'work' && s.home && s.distHome > 32 && Number.isFinite(s.distHome) ? 'nothing to do out here: back to the yard' : null),
+  wants: (s, world) => {
+    if (s.activity !== 'work' || !s.home || !Number.isFinite(s.distHome)) return null;
+    const yard = world.yard;
+    // far from home, in the yard or out of it; or out past the fence, however near home. The fence counts only
+    // while home stands inside it: the walk ends at home, and with home moved out of an old yard the bot would be
+    // "out here" again the moment it arrived, and walk for ever
+    const off = s.distHome > 32 || (!!yard && outsideBy(yard, s.home) === 0 && outsideBy(yard, s.position) > YARD_EDGE);
+    return off ? 'nothing to do out here: back to the yard' : null;
+  },
   run: async ctx => {
     const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
     if (!r.ok) throw new Error(r.text);

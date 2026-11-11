@@ -122,6 +122,8 @@ test('wants is null exactly when declines is not: the ten gated goals over pocke
       const one = g.gate(s, make(blocked));
       if (JSON.stringify('want' in one ? one.want : one) !== JSON.stringify(want ?? no)) say(`the gate says ${JSON.stringify(one)}`);
       const rec = seen.get(`${home}: ${g.name}`)!;
+      // the deep trip sets out only with 3 min at the ore after the walk there: that is 5000 at the latest
+      if (g.name === 'deep trip' && want !== null && time > 5000) say('sets out with under 3 min left at the ore');
       if (want !== null) { rec.wants++; continue; }
       if (!no) continue;
       rec.causes.add(no.cause);
@@ -140,6 +142,25 @@ test('wants is null exactly when declines is not: the ten gated goals over pocke
   for (const g of goals) {
     const rec = seen.get(`busy: ${g.name}`)!;
     t.true(rec.wants > 0 && rec.wants < cells, `${g.name} wants to run in ${rec.wants} of ${cells} cells`);
+  }
+  // the deep trip's last hour: it wanted to run to 6000, set out, found under 3 min left at the ore, turned back with
+  // nothing and had the day marked done. The bound is its gate's now: it says "late", with the numbers, and only
+  // where nothing else holds it (the loop above asks every "late" whether the morning would run)
+  const deep = goals[2];
+  // at home with 10 or 26 slots, project blocked or not, at 0, 3000 and 5000 (it was 16 cells: those at 6000 too)
+  t.is(seen.get('busy: deep trip')!.wants, 12);
+  for (const blocked of [false, true]) {
+    t.is(deep.wants(gridSnap(10, 5000, 0), busyWorld(blocked)), '31 diamond(s) wanted: a deep trip');
+    t.deepEqual(deep.declines!(gridSnap(10, 5001, 0), busyWorld(blocked)), { cause: 'late', text: 'deep trip needs 3 min, 2.9 left' });
+    t.deepEqual(deep.declines!(gridSnap(10, 6000, 0), busyWorld(blocked)), { cause: 'late', text: 'deep trip needs 3 min, 2.1 left' });
+    t.deepEqual(deep.declines!(gridSnap(10, 6800, 0), busyWorld(blocked)), { cause: 'late', text: 'time of day 6800 (deep trip sets out by 6000)' });
+    // not the hour's while something else holds it: full pockets say so at 6000 as they do at 5000
+    t.is(deep.declines!(gridSnap(36, 6000, 0), busyWorld(blocked))?.cause, deep.declines!(gridSnap(36, 5000, 0), busyWorld(blocked))?.cause);
+    t.not(deep.declines!(gridSnap(36, 6000, 0), busyWorld(blocked))?.cause, 'late');
+    // nothing it asks writes the trip down as made
+    const home = busyWorld(blocked), was = JSON.stringify(home);
+    for (const time of [5000, 5001, 6000, 6800]) { deep.wants(gridSnap(10, time, 0), home); deep.declines!(gridSnap(10, time, 0), home); }
+    t.is(JSON.stringify(home), was);
   }
   t.log([...seen].map(([name, rec]) => `${name}: wants ${rec.wants}, declines ${[...rec.causes].sort().join(' ')}`).join('\n'));
 });
@@ -309,17 +330,20 @@ const statusLine = (brain: Brain, start: string) => brain.status().split('\n').f
 /**
  * One run of a goal as the brain books it: the goal's own run() on the test's fakes (`inner`), reporting its gain to
  * the brain's run. The run is kept under way over a tick 5 s on (a run over within the tick that began it used no
- * time), so the 5 s are booked: empty when it reported no gain, busy when it did.
+ * time), so the 5 s are booked: empty when it reported no gain, busy when it did. It wants that one run only: the
+ * brain looks again the moment a run is over (the hand-over), and a second run would be under way, its books open,
+ * when these are read.
  */
 async function booked(goal: Goal, inner: Partial<GoalContext>) {
   const { rt, finish } = fakeRuntime({ pos: HOME, time: 6000 });
-  let clock = T0, text: string | undefined, threw: unknown;
+  let clock = T0, text: string | undefined, threw: unknown, began = false;
   let ran!: () => void;
   const over = new Promise<void>(r => { ran = r; });
   const wrapped: Goal = {
-    name: goal.name, priority: goal.priority, wants: () => 'test', timeoutMs: 600_000, retryMs: 1000,
+    name: goal.name, priority: goal.priority, wants: () => (began ? null : 'test'), timeoutMs: 600_000, retryMs: 1000,
     ...(goal.gains ? { gains: true as const } : {}),
     run: async (ctx) => {
+      began = true;
       try { text = await goal.run({ ...ctx, ...inner, gain: ctx.gain }); } catch (e) { threw = e; } finally { ran(); }
       await ctx.act('slow');
       return text ?? '';
@@ -628,4 +652,78 @@ test('brain-status and the idle log only look: a milestone found in place is wri
     t.deepEqual(written(brain), { done: ['a'], journal: ['started: A', 'A: already in place', 'started: B', 'B: work blocked (short of something)'], jobs: null });
     brain.setEnabled(false);
   }
+});
+
+test('a step short of materials: brain-status says what is short now, which try it was and when the next one is; a part of it coming in starts nothing, all of it starts the step', async (t) => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gates-')), 'brain.json');
+  // a room that takes 113 cane and 40 leather, the bot carrying 17 and 2: short three times so far, the third at 14:28
+  const bill: Record<string, number> = { sugar_cane: 113, leather: 40 };
+  const items: InventoryItem[] = [{ slot: 0, name: 'sugar_cane', count: 17 }, { slot: 1, name: 'leather', count: 2 }];
+  const ran: string[] = [];
+  const build: Step = {
+    name: 'build',
+    run: async (ctx) => {
+      const short = Object.fromEntries(Object.entries(bill).map(([k, n]): [string, number] => [k, n - (ctx.s.counts.get(k) ?? 0)]).filter(([, n]) => n > 0));
+      const text = Object.entries(short).map(([k, n]) => `${n} ${k}`).join(', ');
+      ran.push(text || 'built');
+      return text ? { status: 'blocked', text: `gathering for the room: short of ${text}`, retryMs: 3 * MIN, need: short } : { status: 'done', text: 'built' };
+    }
+  };
+  const journal = ['started: the room', ...[0, 3, 9].map(() => 'the room: build blocked (gathering for the room: short of 96 sugar_cane, 38 leather)')];
+  const world: WorldMemory = {
+    landmarks: { chests: [], farmland: [], foundAt: T0 }, leash: 96, lastDone: { project: T0 + 28 * MIN },
+    progress: {
+      done: [], journal: journal.map((text, i) => ({ at: T0 + i * MIN, text })), current: { id: 'room', step: 0, data: {} }, need: { sugar_cane: 96, leather: 38 },
+      blocked: { id: 'room/0', n: 3, at: T0 + 28 * MIN, need: { sugar_cane: 113, leather: 40 } }, blockedUntil: { room: T0 + 40 * MIN }
+    }
+  };
+  fs.writeFileSync(file, JSON.stringify({ 'seed:1': world }));
+  const { rt, acts } = fakeRuntime({ pos: HOME, time: 3000 }, items);
+  let clock = T0 + 30 * MIN;
+  const brain = new Brain(rt, { tickMs: 1e9, leaseMs: 60_000, now: () => clock, memoryFile: file, goals: [projectGoal([{ id: 'room', title: 'the room', prereqs: [], steps: [build] }])] });
+  const ticks = async (n: number) => { for (let i = 0; i < n; i++) { clock += 5000; await brain.tick(); await settle(); } };
+  const notes = () => brain.worldMemory()!.progress!.journal.map(j => j.text);
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  await ticks(3);
+
+  // read back from brain.json (a restart): it waits, and says for what, which try that was and when it looks again
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (project): short of 96 sugar_cane, 38 leather (try 3, next 14:40).');
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: project - short of 96 sugar_cane, 38 leather (try 3, next 14:40)');
+  t.deepEqual(today(brain).by, { project: 15_000 });
+
+  // 20 cane come in: the count goes down, the wait stands
+  items[0].count = 37;
+  await ticks(3);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: project - short of 76 sugar_cane, 38 leather (try 3, next 14:40)');
+  t.deepEqual([ran, notes()], [[], journal], 'nothing ran and nothing was written');
+
+  // 14:40: the step looks once, is short still, and waits twice as long; the ticks after its run start nothing
+  clock = T0 + 40 * MIN - 5000;
+  await ticks(1);
+  t.deepEqual(ran, ['76 sugar_cane, 38 leather']);
+  await ticks(12);
+  t.deepEqual(ran, ['76 sugar_cane, 38 leather'], 'one run');
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: project - short of 76 sugar_cane, 38 leather (try 4, next 15:04)');
+  t.deepEqual(notes(), [...journal, 'the room: build blocked (gathering for the room: short of 76 sugar_cane, 38 leather)'], 'one line for the run');
+  t.deepEqual(brain.worldMemory()!.progress!.blocked, { id: 'room/0', n: 4, at: T0 + 40 * MIN, need: { sugar_cane: 113, leather: 40 } });
+
+  // all the leather, and the cane but for one: still not the whole of it
+  items[1].count = 40;
+  items[0].count = 112;
+  await ticks(3);
+  t.is(statusLine(brain, 'Blocked:'), 'Blocked: project - short of 1 sugar_cane (try 4, next 15:04)');
+  t.is(ran.length, 1);
+  // the last cane: the next tick starts the step, 23 min before its time, and the room is built
+  items[0].count = 113;
+  await ticks(1);
+  t.deepEqual(ran, ['76 sugar_cane, 38 leather', 'built']);
+  await ticks(2);
+  t.deepEqual(notes().slice(-2), ['the room: build done (built)', 'done: the room']);
+  t.is(statusLine(brain, 'Blocked:'), undefined);
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (unneeded): all 1 milestone(s) done.');
+  const p = brain.worldMemory()!.progress!;
+  t.deepEqual([p.done, p.blocked, p.blockedUntil, p.need], [['room'], undefined, {}, undefined]);
+  t.deepEqual(acts, []);
+  brain.setEnabled(false);
 });
