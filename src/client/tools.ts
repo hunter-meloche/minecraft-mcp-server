@@ -690,10 +690,20 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     return undefined;
   };
 
-  /** Open a chest: walks up to it if it's out of reach, and frees a lid weighed down by scaffold. */
+  /**
+   * Open a chest: walks up to it if it's out of reach, and frees a lid weighed down by scaffold. The walk only walks
+   * at first (nothing dug, nothing placed), to within 3 blocks: a chest two layers up in the storage house opens from
+   * the floor, and the floor is within 3 of it but not within 2, so the walk to within 2 could only be met by
+   * pillaring up in the house (scaffold left there once stood on the home cell and kept the bot from its bed). That
+   * walk comes second, for a chest that needs a dug or bridged way, and not at all for a chest in reach whose lid is
+   * held down: no walk opens that one, the lid is freed.
+   */
   const openChest = async <T>(at: Pos): Promise<T> => {
     try { return await call<T>('chest.open', { ...at }); } catch { /* out of reach, or the lid */ }
-    await goNear(at, 2);
+    await call('goto', { ...floorPos(at), range: 3, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    let lid = false;
+    try { return await call<T>('chest.open', { ...at }); } catch (e) { lid = /did not open/.test((e as Error).message); }
+    if (!lid) await goNear(at, 2);
     try { return await call<T>('chest.open', { ...at }); } catch (e) {
       const freed = /did not open/.test((e as Error).message) ? await freeLid(call, at) : [];
       if (!freed.length) throw e;

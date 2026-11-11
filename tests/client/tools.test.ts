@@ -482,6 +482,66 @@ test('store-in-chest walks to the chest, stores the items and reports what it ho
   t.true((await none.run('store-in-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot' })).isError);
 });
 
+test('a chest out of reach is walked up to on foot only at first; the walk that may dig or pillar comes second', async (t) => {
+  // a chest two layers up in the storage house: the floor is within 3 of it, not within 2 (that walk pillared up)
+  const chest = { x: 1, y: 65, z: 0 };
+  const given = (failures: number) => {
+    let opens = 0;
+    return {
+      inventory: { items: [{ slot: 3, name: 'iron_ingot', count: 32 }], selectedSlot: 0, held: null },
+      'world.block': { loaded: true, name: 'chest' },
+      'chest.open': () => { if (opens++ < failures) throw new Error('chest too far to open'); return { slots: 27, free: 27, items: {} }; },
+      goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 1, y: 63, z: 2 }, distance: 2.8 },
+      'chest.deposit': { slots: 27, free: 26, items: { iron_ingot: 32 }, moved: 32 },
+      'container.close': { ok: true }
+    };
+  };
+  const walks = (request: ReturnType<typeof setup>['request']) => request.getCalls().filter(c => c.args[0] === 'goto').map(c => c.args[1]);
+  // in reach after the careful walk: no other walk
+  const near = setup(given(1));
+  t.false((await near.run('store-in-chest', { ...chest, item: 'iron_ingot' })).isError);
+  t.is(walks(near.request).length, 1);
+  t.like(walks(near.request)[0], { ...chest, range: 3, careful: true });
+  // still out of reach after it (a chest that needs a dug or bridged way): the walk as before
+  const far = setup(given(2));
+  t.false((await far.run('store-in-chest', { ...chest, item: 'iron_ingot' })).isError);
+  t.is(walks(far.request).length, 2);
+  t.like(walks(far.request)[0], { ...chest, range: 3, careful: true });
+  t.like(walks(far.request)[1], { ...chest, range: 2 });
+  t.falsy(walks(far.request)[1]?.careful);
+  // the careful walk itself failing (no answer in time) is no reason to give the chest up: the walk as before follows
+  const arrived = given(2).goto;
+  const lost = setup({ ...given(2), goto: (p: Record<string, unknown>) => { if (p.careful) throw new Error('bridge call goto timed out'); return arrived; } });
+  const stored = await lost.run('store-in-chest', { ...chest, item: 'iron_ingot' });
+  t.false(stored.isError, stored.text);
+  t.is(walks(lost.request).length, 2);
+  t.like(walks(lost.request)[1], { ...chest, range: 2 });
+  t.falsy(walks(lost.request)[1]?.careful);
+  t.is(lost.request.getCalls().filter(c => c.args[0] === 'chest.open').length, 3);
+});
+
+test('a chest in reach with its lid held down is not walked up to again: the lid is freed', async (t) => {
+  // "did not open" is a chest in reach: the walk to within 2 could not help, and for a chest two layers up it pillars
+  const chest = { x: 1, y: 65, z: 0 };
+  const lid = { x: 1, y: 66, z: 0 };
+  const world: Record<string, string> = { '1,65,0': 'chest', '1,66,0': 'cobblestone' };
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 3, name: 'iron_ingot', count: 32 }], selectedSlot: 0, held: null },
+    'world.block': (p: Record<string, unknown>) => ({ loaded: true, name: world[`${p.x},${p.y},${p.z}`] ?? 'air', properties: { type: 'single' } }),
+    'chest.open': () => { if (world['1,66,0'] !== 'air') throw new Error('the chest did not open (blocked lid, or not a chest)'); return { slots: 27, free: 27, items: {} }; },
+    goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 1, y: 63, z: 2 }, distance: 2.8 },
+    dig: (p: Record<string, unknown>) => { world[`${p.x},${p.y},${p.z}`] = 'air'; return { dug: true }; },
+    'chest.deposit': { slots: 27, free: 26, items: { iron_ingot: 32 }, moved: 32 },
+    'container.close': { ok: true }
+  });
+  const stored = await run('store-in-chest', { ...chest, item: 'iron_ingot' });
+  t.false(stored.isError, stored.text);
+  const walks = request.getCalls().filter(c => c.args[0] === 'goto').map(c => c.args[1]);
+  t.is(walks.length, 1);
+  t.like(walks[0], { ...chest, range: 3, careful: true });
+  t.deepEqual(request.getCalls().filter(c => c.args[0] === 'dig').map(c => c.args[1] as Record<string, unknown>).map(p => ({ x: p.x, y: p.y, z: p.z })), [lid]);
+});
+
 test('take-from-chest takes what was asked and says when the chest has none', async (t) => {
   const { run, request } = setup({
     'world.block': { loaded: true, name: 'chest' },

@@ -34,21 +34,33 @@ export async function freeLid(call: Call, at: Pos): Promise<Pos[]> {
   return dug;
 }
 
-/** What's in a chest (walks up to it first, frees a lid weighed down by scaffold); remembered for planning. */
+/**
+ * What's in a chest (walks up to it first, frees a lid weighed down by scaffold); remembered for planning. The walk
+ * only walks at first, to within 3 blocks (as the tools' openChest does): the storage house's floor is within 3 of a
+ * chest two layers up but never within 2, so the walk to within 2 pillared up in the house. That walk comes second,
+ * and not at all for a chest in reach whose lid is held down: no walk opens that one.
+ */
 export async function peekChest(ctx: GoalContext, at: Pos): Promise<Record<string, number>> {
   const open = () => ctx.call<{ items: Record<string, number> }>('chest.open', { ...at });
+  const tryOpen = () => open().then(r => r.items, e => (e instanceof Error ? e : new Error(String(e))));
   try {
-    let items: Record<string, number>;
-    try { items = (await open()).items; } catch {
-      const r = await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 });
-      if (!r.ok) throw new Error(`could not reach the chest at ${fmt(at)}: ${r.text}`);
-      try { items = (await open()).items; } catch (e) {
+    let got = await tryOpen();
+    if (got instanceof Error) {
+      await ctx.call('goto', { ...at, range: 3, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+      got = await tryOpen();
+    }
+    if (got instanceof Error) {
+      if (!/did not open/.test(got.message)) {
+        const r = await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 });
+        if (!r.ok) throw new Error(`could not reach the chest at ${fmt(at)}: ${r.text}`);
+      }
+      try { got = (await open()).items; } catch (e) {
         if (!/did not open/.test((e as Error).message) || !(await freeLid(ctx.call, at)).length) throw e;
-        items = (await open()).items;
+        got = (await open()).items;
       }
     }
-    remember(ctx.world, at, items);
-    return items;
+    remember(ctx.world, at, got);
+    return got;
   } finally {
     await ctx.call('container.close').catch(() => undefined);
   }

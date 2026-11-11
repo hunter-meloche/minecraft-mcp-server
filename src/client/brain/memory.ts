@@ -98,6 +98,8 @@ export interface WorldMemory {
   chestAssign?: Record<string, string>;
   /** the label on the sign over each chest ("x,y,z" -> "food1"), as put up or as found */
   chestSigns?: Record<string, string>;
+  /** chests the signs round couldn't sign ("x,y,z" -> the label it was to wear, and the tries): left be after two */
+  signTries?: Record<string, { label: string; tries: number }>;
   /** kinds of things with no room left in their chests: the storage needs another chest */
   storageFull?: string[];
   /** when the storage house was found full up (six double chests) with a kind still without room */

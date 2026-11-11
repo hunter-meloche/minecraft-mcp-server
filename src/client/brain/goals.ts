@@ -236,8 +236,13 @@ export function shelterGoal(): Goal {
       }
       // onto the home cell itself: go-home stops within 2 blocks, which can be the doorway, with the door left open
       // (Baritone opens doors by hand and walks on; crossing the inside pressure plate is what shuts them again)
+      // A nicety, never what the night hangs on: with scaffold left on the home cell this walk threw "Could not reach
+      // ... no path found" from 1.41 blocks away, three times an evening, before the doors and before the bed, and
+      // for 4.5 hours of evenings and nights the bot never got to bed
       const home = ctx.s.home!;
-      await ctx.act('move-to-position', { x: home.x, y: home.y, z: home.z, range: 0, timeoutMs: 30_000 });
+      const onto = await ctx.act('move-to-position', { x: home.x, y: home.y, z: home.z, range: 0, timeoutMs: 30_000 })
+        .catch(e => ({ ok: false, text: (e as Error).message }));
+      if (!onto.ok) did.push('home cell not reached');
       const shut = await closeDoors(ctx, home);
       if (shut) did.push(`shut ${shut} door(s)`);
       const bed = ctx.world.landmarks.bed;

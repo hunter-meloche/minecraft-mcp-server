@@ -262,23 +262,48 @@ export function categoryOfLabel(text: string): Category | undefined {
 }
 
 /**
- * The label for each chest ("x,y,z" -> "food1"): numbered within its category in chest order, the two halves of a
- * double chest (side by side, same category) sharing one number.
+ * The label for each chest ("x,y,z" -> "food1"): numbered within its category, the two halves of a double chest (side
+ * by side, same category) sharing one number. The numbers stay put: a chest whose sign (`worn`: the labels the chests
+ * wear now) names its present category keeps that number, the first in the order below when two wear the same one;
+ * every other chest takes the lowest number of its category that nobody holds. The chests are gone through by y, then
+ * x, then z, whatever the order of the list: numbered in list order, the two orders that list is written in (nearest
+ * home first after a look round, the storage house's own after it was built on) swapped "tools1" with "tools2" and
+ * "stone2" with "stone5" every 20 minutes, and 64 signs were dug out and rewritten in a day.
  */
-export function chestLabels(chests: Pos[], assign: ChestAssign): Record<string, string> {
-  const out: Record<string, string> = {};
-  const count = new Map<string, number>();
-  for (const c of chests) {
+export function chestLabels(chests: Pos[], assign: ChestAssign, worn: Record<string, string> = {}): Record<string, string> {
+  const order = [...chests].sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
+  // what gets one label: a chest, with its other half when the list holds both
+  const groups: { cat: Category; keys: string[]; n?: number }[] = [];
+  const grouped = new Set<string>();
+  for (const c of order) {
     const k = keyOf(c);
     const cat = assign[k] as Category | undefined;
-    if (!cat || out[k]) continue;
-    const n = (count.get(cat) ?? 0) + 1;
-    count.set(cat, n);
-    const label = `${LABEL[cat] ?? cat}${n}`;
-    out[k] = label;
-    for (const o of chests) {
-      if (o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1 && assign[keyOf(o)] === cat && !out[keyOf(o)]) out[keyOf(o)] = label;
+    if (!cat || grouped.has(k)) continue;
+    const keys = [k];
+    grouped.add(k);
+    for (const o of order) {
+      const ko = keyOf(o);
+      if (o.y === c.y && Math.abs(o.x - c.x) + Math.abs(o.z - c.z) === 1 && assign[ko] === cat && !grouped.has(ko)) { keys.push(ko); grouped.add(ko); }
+    }
+    groups.push({ cat, keys });
+  }
+  const held = new Set<string>();
+  const hold = (g: { cat: Category; n?: number }, n: number) => { g.n = n; held.add(`${g.cat} ${n}`); };
+  // first the numbers already on the signs ...
+  for (const g of groups) {
+    for (const k of g.keys) {
+      const n = worn[k] && categoryOfLabel(worn[k]) === g.cat ? Number(/(\d+)\D*$/.exec(worn[k])?.[1]) : 0;
+      if (n >= 1 && !held.has(`${g.cat} ${n}`)) { hold(g, n); break; }
     }
   }
+  // ... then the lowest free one for each chest without
+  for (const g of groups) {
+    if (g.n) continue;
+    let n = 1;
+    while (held.has(`${g.cat} ${n}`)) n++;
+    hold(g, n);
+  }
+  const out: Record<string, string> = {};
+  for (const g of groups) for (const k of g.keys) out[k] = `${LABEL[g.cat] ?? g.cat}${g.n}`;
   return out;
 }
