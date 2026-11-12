@@ -140,38 +140,49 @@ export const caneRound: Goal = {
     // room for the stalks first (home to the chests where the pockets are too full; the walk to the cane is the
     // round's own, as ever). Before the round is written down: one that could make no room has not been
     await makeRoom(ctx, 'yard');
+    const marked = ctx.world.lastDone?.cane;
     (ctx.world.lastDone ??= {}).cane = ctx.s.now;
     let cut = 0, replanted = 0, cleared = 0;
-    const cells = ctx.world.zones!.cane;
-    const read = async (c: Pos) => (await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 3, length: 1 })).blocks.map(name);
-    const seen = new Map<Pos, string[]>();
-    for (const c of cells) seen.set(c, await read(c));
-    // bases to put back, and too few carried: a few from the chests first. Live 2026-11-10: the stash had put every
-    // stalk away (37 in the food chest), all five cells stood empty, and the round "cut 0 stalk(s) (0 cane)" every
-    // 20 min for 9 hours with nothing to replant, while the enchanting room waited on 98 cane.
-    const bare = [...seen.values()].filter(([base, mid]) => caneCellPlan(base, mid, true) !== 'leave' && base !== 'sugar_cane').length;
-    // (a chest out of reach is no reason to skip the cutting: live, stranded on a scaffold, "chest too far to open")
-    if (bare && (await caneCount(ctx)) < bare) await takeFromChests(ctx, 'sugar_cane', bare - (await caneCount(ctx))).catch(() => 0);
-    const before = await caneCount(ctx);
-    for (const c of cells) {
-      if (ctx.signal.aborted) break;
-      const [base, mid] = seen.get(c)!;
-      const plan = caneCellPlan(base, mid, base !== 'sugar_cane' && (await caneCount(ctx)) > 0);
-      if (plan === 'cut') {
-        // cutting the second block brings the rest down with it
-        const r = await ctx.act('dig-block', { x: c.x, y: c.y + 1, z: c.z, collect: true });
-        if (/^Dug/.test(r.text)) { cut++; ctx.gain(1); }
-      } else if (plan === 'plant' || plan === 'clear') {
-        if (plan === 'clear') {
-          const d = await ctx.act('dig-block', { ...c, collect: true }).catch(e => ({ ok: false, text: (e as Error).message }));
-          if (!/^Dug|^No block/.test(d.text)) { ctx.progress(`cane cell ${c.x},${c.y},${c.z}: ${base} would not come out: ${d.text.slice(0, 100)}`); continue; }
-          cleared++;
+    // a round stopped before it saw to a cell has not been done: the brain lets a goal stopped for something more
+    // urgent go again as soon as it is wanted, and the mark above kept it off for the day. Live 2026-11-12: repair
+    // cut in 5 s after each morning's start (the walk brings the bot near home), and the round ran on 1 day of 9
+    try {
+      const cells = ctx.world.zones!.cane;
+      const read = async (c: Pos) => (await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...c, width: 1, height: 3, length: 1 })).blocks.map(name);
+      const seen = new Map<Pos, string[]>();
+      for (const c of cells) seen.set(c, await read(c));
+      // bases to put back, and too few carried: a few from the chests first. Live 2026-11-10: the stash had put every
+      // stalk away (37 in the food chest), all five cells stood empty, and the round "cut 0 stalk(s) (0 cane)" every
+      // 20 min for 9 hours with nothing to replant, while the enchanting room waited on 98 cane.
+      const bare = [...seen.values()].filter(([base, mid]) => caneCellPlan(base, mid, true) !== 'leave' && base !== 'sugar_cane').length;
+      // (a chest out of reach is no reason to skip the cutting: live, stranded on a scaffold, "chest too far to open")
+      if (bare && (await caneCount(ctx)) < bare) await takeFromChests(ctx, 'sugar_cane', bare - (await caneCount(ctx))).catch(() => 0);
+      const before = await caneCount(ctx);
+      for (const c of cells) {
+        if (ctx.signal.aborted) break;
+        const [base, mid] = seen.get(c)!;
+        const plan = caneCellPlan(base, mid, base !== 'sugar_cane' && (await caneCount(ctx)) > 0);
+        if (plan === 'cut') {
+          // cutting the second block brings the rest down with it
+          const r = await ctx.act('dig-block', { x: c.x, y: c.y + 1, z: c.z, collect: true });
+          if (/^Dug/.test(r.text)) { cut++; ctx.gain(1); }
+        } else if (plan === 'plant' || plan === 'clear') {
+          if (plan === 'clear') {
+            const d = await ctx.act('dig-block', { ...c, collect: true }).catch(e => ({ ok: false, text: (e as Error).message }));
+            if (!/^Dug|^No block/.test(d.text)) { ctx.progress(`cane cell ${c.x},${c.y},${c.z}: ${base} would not come out: ${d.text.slice(0, 100)}`); continue; }
+            cleared++;
+          }
+          const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
+          if (/^Placed/.test(r.text)) { replanted++; ctx.gain(1); }
         }
-        const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
-        if (/^Placed/.test(r.text)) { replanted++; ctx.gain(1); }
+      }
+      const got = (await caneCount(ctx)) - before + replanted;
+      return `cut ${cut} stalk(s) (${Math.max(0, got)} cane)${replanted ? `, replanted ${replanted}` : ''}${cleared ? ` (${cleared} cell(s) cleared of scaffold first)` : ''}`;
+    } finally {
+      if (ctx.signal.aborted && !cut && !replanted && !cleared) {
+        if (marked === undefined) delete ctx.world.lastDone!.cane;
+        else ctx.world.lastDone!.cane = marked;
       }
     }
-    const got = (await caneCount(ctx)) - before + replanted;
-    return `cut ${cut} stalk(s) (${Math.max(0, got)} cane)${replanted ? `, replanted ${replanted}` : ''}${cleared ? ` (${cleared} cell(s) cleared of scaffold first)` : ''}`;
   }
 };

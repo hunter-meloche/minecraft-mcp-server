@@ -138,3 +138,29 @@ test('cane round: no cane carried and the cells bare, it takes cane from the che
   t.deepEqual(acts, ['take-from-chest 2', 'place-block 0,63,0', 'place-block 2,63,0'], 'two bare cells, two stalks; the growing one is left');
   t.regex(String(r), /replanted 2/);
 });
+
+test('cane round: stopped for something more urgent before it saw to a cell, the day is not written off', async (t) => {
+  // live 2026-11-12: repair cut in 5 s after every morning's start; the mark written first kept the round off till the
+  // next day, and it ran on 1 day of 9
+  const cells = [{ x: 0, y: 63, z: 0 }];
+  const world = { zones: { cane: cells }, lastDone: { cane: 5 } };
+  const abort = new AbortController();
+  const ctx = {
+    world, s: { now: 100, slotsUsed: 1 }, progress: () => undefined, gain: () => undefined, signal: abort.signal,
+    call: async (m: string) => {
+      if (m === 'inventory') return { items: [{ slot: 3, name: 'sugar_cane', count: 3 }] };
+      abort.abort(); // stopped while it looks at the cells
+      return { blocks: ['sugar_cane', 'sugar_cane', 'air'] };
+    },
+    act: async () => { throw new Error('aborted'); }
+  } as unknown as GoalContext;
+  await caneRound.run(ctx).catch(() => undefined);
+  t.is(world.lastDone.cane, 5, 'the last finished round stands');
+
+  // a round that gets through (here: cutting) is written down
+  const ok = { ...ctx, signal: new AbortController().signal,
+    call: async (m: string) => (m === 'inventory' ? { items: [] } : { blocks: ['sugar_cane', 'sugar_cane', 'air'] }),
+    act: async () => ({ ok: true, text: 'Dug sugar_cane' }) } as unknown as GoalContext;
+  await caneRound.run(ok);
+  t.is(world.lastDone.cane, 100);
+});
