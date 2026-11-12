@@ -6,6 +6,7 @@ import {
 } from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 import { clock } from './idlelog.js';
+import { makeRoom, noRoom, room } from './pockets.js';
 
 /**
  * The project goal: works the next milestone of the long game, one step per slot of free daytime, so the bot keeps
@@ -21,9 +22,10 @@ export function projectGoal(tree: Milestone[]): Goal {
   const off = (s: Snapshot): Decline | null =>
     (s.dimension !== 'overworld' || !s.home || !Number.isFinite(s.distHome) ? no.away(s, 'project', 64) : null);
   // its work is in and around the yard (it ran while the bot was out on a deep trip); its own materials can fill
-  // the pockets; two minutes before the evening it is not worth starting
-  const heldBack = (s: Snapshot): Decline | null => (s.distHome > 64 ? no.away(s, 'project', 64) : s.health < 12 ? no.health(s, 'project', 12)
-    : s.slotsUsed >= 35 ? no.pockets(s, 'project', 35) : null) ?? no.late(s, 'project', 2400);
+  // the pockets (one slot free will do, and the step makes it first where the stash can); two minutes before the
+  // evening it is not worth starting
+  const heldBack = (s: Snapshot, world: WorldMemory): Decline | null => (s.distHome > 64 ? no.away(s, 'project', 64) : s.health < 12 ? no.health(s, 'project', 12)
+    : room('project', s, world) === 'no' ? noRoom('project', 'project', s, world) : null) ?? no.late(s, 'project', 2400);
   /**
    * Run now? The "no" is said in this order: nowhere it could work from; no milestone that can be worked (that is the
    * project's own reason, whatever the hour and the pockets); then what keeps it from one that can; the hour last.
@@ -31,7 +33,7 @@ export function projectGoal(tree: Milestone[]): Goal {
   const gate = (s: Snapshot, world: WorldMemory): Gate => {
     const away = off(s);
     if (away) return away;
-    const held = heldBack(s);
+    const held = heldBack(s, world);
     // not to run anyway: the tree is only looked at (nextMilestone below writes down what it finds in place)
     if (held) return waiting(tree, s, world) ?? held;
     const m = nextMilestone(tree, s, world);
@@ -56,12 +58,14 @@ export function projectGoal(tree: Milestone[]): Goal {
     // wants() always did when the brain decides. The idle log and brain-status ask this where nothing decides (another
     // goal running, the project held back after a failure, the LLM driving, the autopilot off), and a milestone marked
     // done there was one the brain had not got to: it must say the same "no" and leave the world as it was
-    declines: (s, world) => off(s) ?? waiting(tree, s, world) ?? heldBack(s),
+    declines: (s, world) => off(s) ?? waiting(tree, s, world) ?? heldBack(s, world),
     // a step that ends where it began (short of something, waiting) is busy time to no gain
     gains: true,
     run: async ctx => {
       running = true;
-      try { return await runStep(ctx); } finally { running = false; }
+      // a slot free first (home to the chests where there is none): the step is then chosen and counted from the bot
+      // as it is after that, before anything is written down
+      try { return await runStep({ ...ctx, s: await makeRoom(ctx, 'project') }); } finally { running = false; }
     }
   };
 

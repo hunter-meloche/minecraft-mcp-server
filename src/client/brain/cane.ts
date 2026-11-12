@@ -4,6 +4,7 @@ import type { Pos, WorldMemory } from './memory.js';
 import { addZone } from './milestones.js';
 import { takeFromChests } from './chests.js';
 import { toTheWoods, WOODS_DIRS } from './chores.js';
+import { makeRoom, noRoom, room } from './pockets.js';
 
 /**
  * Sugar cane on the lake shore (paper for books, books for the enchanting table and its shelves): a few stalks from
@@ -120,7 +121,8 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
   const last = world.lastDone?.cane ?? 0;
   if (!(s.now - last > 20 * MINUTE)) return no.notDue('cane', s.now, last, 20 * MINUTE);
   if (s.distHome > 24) return no.away(s, 'cane', 24);
-  if (s.slotsUsed >= 34) return no.pockets(s, 'cane', 34);
+  // two slots free for the stalks, or the stash able to make them (the round does that first)
+  if (room('yard', s, world) === 'no') return noRoom('yard', 'cane', s, world);
   return no.late(s, 'cane') ?? { want: 'daily round: the sugar cane' };
 };
 
@@ -135,6 +137,9 @@ export const caneRound: Goal = {
   // a round that cuts nothing and plants nothing (the cells bare and no cane to plant) is busy time to no gain
   gains: true,
   run: async ctx => {
+    // room for the stalks first (home to the chests where the pockets are too full; the walk to the cane is the
+    // round's own, as ever). Before the round is written down: one that could make no room has not been
+    await makeRoom(ctx, 'yard');
     (ctx.world.lastDone ??= {}).cane = ctx.s.now;
     let cut = 0, replanted = 0, cleared = 0;
     const cells = ctx.world.zones!.cane;

@@ -1,5 +1,5 @@
 import test from 'ava';
-import { CAST_TIMING, castObsidian, castSite } from '../../src/client/brain/cast.js';
+import { CAST_TIMING, bucketsFor, castObsidian, castSite } from '../../src/client/brain/cast.js';
 
 Object.assign(CAST_TIMING, { settle: 0, float: 0, floatTries: 3, drain: 0 });
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
@@ -168,4 +168,32 @@ test('casting is off until it is turned on: no lava fetched, nothing cast', asyn
   t.is(await fetchLava(ctx, 4), 0);
   t.regex((await castObsidian(ctx, 4)).text, /casting is off/);
   t.deepEqual(calls.filter(c => c !== 'inventory'), []);
+});
+
+test('buckets for a cast: full lava buckets in the chests count as carried ones do, and no empties are made for them', async (t) => {
+  // a trip's room-making puts the lava buckets away (it keeps none of the casting's), and the cast takes them back
+  // out. Counting only the carried ones, it asked for four more empties, had no iron for them, and skipped the cast
+  const run = async (chest: Record<string, number>, carried: string[]) => {
+    const asked: string[] = [];
+    const ctx = {
+      s: { position: { x: 0, y: 63, z: 0 } },
+      world: { landmarks: { chests: [{ x: 1, y: 63, z: 0 }], farmland: [] }, leash: 96, lavaCasting: true, chestItems: { '1,63,0': chest } },
+      signal: new AbortController().signal, progress: () => undefined,
+      call: async <T>(method: string): Promise<T> => {
+        if (method !== 'inventory') asked.push(method);
+        return { items: carried.map((name, slot) => ({ name, count: 1, slot })) } as T;
+      },
+      act: async (tool: string) => { asked.push(tool); return { ok: true, text: '' }; }
+    } as unknown as GoalContext;
+    return { said: await bucketsFor(ctx, 4), asked };
+  };
+  // all four in the chest, the water carried: nothing to make, nothing asked of the chests or the table
+  t.deepEqual(await run({ lava_bucket: 4 }, ['water_bucket']), { said: undefined, asked: [] });
+  // two in the chest and two carried: the same
+  t.deepEqual(await run({ lava_bucket: 2 }, ['water_bucket', 'lava_bucket', 'lava_bucket']), { said: undefined, asked: [] });
+  // three in the chest and one empty carried for the fourth
+  t.deepEqual(await run({ lava_bucket: 3 }, ['water_bucket', 'bucket']), { said: undefined, asked: [] });
+  // only what is really missing is asked for: two in the chest, two empties short (3 ingots each); none, four
+  t.is((await run({ lava_bucket: 2 }, ['water_bucket'])).said, 'buckets: short of 6 iron_ingot');
+  t.is((await run({}, ['water_bucket'])).said, 'buckets: short of 12 iron_ingot');
 });

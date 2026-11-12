@@ -5,6 +5,7 @@ import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 import type { InventoryItem } from '../../src/client/tools.js';
+import { deepTrip } from '../../src/client/brain/deep.js';
 import { billCarry, billCarryCap } from '../../src/client/brain/project.js';
 import { enchantRoom } from '../../src/client/brain/blueprints.js';
 
@@ -67,16 +68,50 @@ test('stash: when nearly full, or now and then with things to put away; never aw
 test('stash: really full in the yard, it goes home to stash from the bed 16 out (it sat there at 34/36 all day)', (t) => {
   // live 2026-11-09: the bed is 16 from the home point; awake by it at 34 slots, the at-home stash never ran
   const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'wheat_seeds', count: 64 }));
-  // the home's stock all there (no materials trip waits, as live: "nothing to forage for")
-  const stocked = world({ chestItems: { '1,64,0': { oak_log: 64, cobblestone: 128, coal: 32, iron_ingot: 32 } } });
+  // the home's stock all there (no materials trip waits, as live: "nothing to forage for"), and the day's trip down
+  // the mine made (that one waits for room too now: below)
+  const today = { deep: 10 * 60 * 60_000 - 5 * 60_000 };
+  const stocked = world({ chestItems: { '1,64,0': { oak_log: 64, cobblestone: 128, coal: 32, iron_ingot: 32 } }, lastDone: today });
   t.deepEqual(stockShort(snap([...gear(), ...junk], { distHome: 16 }), stocked), []);
+  t.is(deepTrip.wants(snap([...gear(), ...junk], { distHome: 16 }), stocked), null);
   t.regex(stash.wants(snap([...gear(), ...junk], { distHome: 16 }), stocked) ?? '', /slots used/);
   t.is(stash.wants(snap([...gear(), ...junk], { distHome: 16, sleeping: true }), stocked), null);
   t.is(stash.wants(snap(gear(), { distHome: 16 }), stocked), null, 'not full: only from home');
   // not again and again from out there: the project's own load keeps it near 33
-  const justNow = { ...stocked, lastDone: { stash: 10 * 60 * 60_000 - 2 * 60_000 } };
+  const justNow = { ...stocked, lastDone: { ...today, stash: 10 * 60 * 60_000 - 2 * 60_000 } };
   t.is(stash.wants(snap([...gear(), ...junk], { distHome: 16 }), justNow), null);
   t.regex(stash.wants(snap([...gear(), ...junk]), justNow) ?? '', /slots used/, 'at home it still does');
+});
+
+test('stash: a trip down the mine waiting for its ten slots sends it home, as a materials trip does; once in 10 min where only the trip asks', (t) => {
+  // the kit ready, diamonds wanted, the day young, and 31/36 slots with 22 of them seeds: the deep trip said nothing
+  // at all (deepTripReady's ten free slots, a silent null) and nothing sent the stash home from the bed 16 out
+  const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'wheat_seeds', count: 64 }));
+  const s = snap([...gear(), ...junk], { distHome: 16 });
+  const home = { '1,64,0': { oak_log: 64, cobblestone: 128, coal: 32, iron_ingot: 32 } };
+  const justNow = world({ chestItems: home, lastDone: { stash: 10 * 60 * 60_000 - 2 * 60_000 } });
+  t.regex(deepTrip.wants(s, justNow) ?? '', /diamond\(s\) wanted: a deep trip/, 'five slots free, and the stash can make the ten');
+  t.is(stash.wants(s, justNow), '31/36 slots used', 'two minutes after the last one, from the yard');
+  // what the project carries on purpose stays under the stash's own limit of 33: the trip is named as the reason
+  const carry = (lastDone: Record<string, number> = {}) => world({ chestItems: home, lastDone, progress: { done: [], journal: [], carry: ['oak_planks'] } });
+  const planks = snap([...gear(), ...junk.slice(0, 18).map(j => ({ ...j, name: 'oak_planks' })), ...junk.slice(18)], { distHome: 16 });
+  const ago = (min: number) => 10 * 60 * 60_000 - min * 60_000;
+  t.is(stash.wants(planks, carry()), '31/36 slots used, and the deep trip waits for room', 'never stashed');
+  t.is(stash.wants(planks, carry({ stash: ago(11) })), '31/36 slots used, and the deep trip waits for room');
+  // once in 10 min: this stash leaves the planks carried (only the trip's own run puts them away), so the trip still
+  // waits after it, and every new kind picked up sent the bot home again, for as long as the trip did not get its turn
+  t.is(stash.wants(planks, carry({ stash: ago(2) })), null, 'two minutes after the last one');
+  t.is(stash.wants(planks, carry({ stash: ago(9) })), null);
+  t.regex(deepTrip.wants(planks, carry({ stash: ago(2) })) ?? '', /a deep trip/, 'the trip waits on nobody: its own run makes the room');
+  // the trip made today: the yard's own rule again
+  t.is(stash.wants(planks, carry({ stash: ago(11), deep: ago(5) })), null);
+  // with nothing of its own to put away the stash keeps out of it: the trip's own run makes the room (the carry goes)
+  const allCarry = [...gear(), ...junk.map(j => ({ ...j, name: 'oak_planks' }))];
+  t.regex(deepTrip.wants(snap(allCarry, { distHome: 16 }), carry()) ?? '', /a deep trip/);
+  t.is(stash.wants(snap(allCarry, { distHome: 16 }), carry()), null);
+  // asleep, or 50 out with no yard round it: nobody goes anywhere
+  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 16, sleeping: true }), justNow), null);
+  t.is(stash.wants(snap([...gear(), ...junk], { distHome: 50, position: { x: 50, y: 64, z: 0 } }), justNow), null);
 });
 
 test('stash: in the evening it puts things in the chests but leaves the junk dump outside the fence till morning', (t) => {
@@ -91,16 +126,69 @@ test('stash: in the evening it puts things in the chests but leaves the junk dum
   t.regex(stash.wants(snap([...gear(), ...logs], { activity: 'return' }), world()) ?? '', /slots used/);
 });
 
-test('stash: makes room when a build job materials trip waits on the pockets (stock sets out under 33 slots)', (t) => {
-  const seeds = [6, 7, ...Array.from({ length: 22 }, (_, i) => 13 + i)].map(slot => ({ slot, name: 'wheat_seeds', count: 64 }));
-  const items = [...gear(), ...seeds]; // 33 slots
+test('stash: makes room when a build job materials trip waits on the pockets (stock sets out with 3 slots free)', (t) => {
+  const seeds = [6, 7, 8, ...Array.from({ length: 22 }, (_, i) => 13 + i)].map(slot => ({ slot, name: 'wheat_seeds', count: 64 }));
+  const items = [...gear(), ...seeds]; // 34 slots
   const job = { id: 5, world: 'w', structure: 'home', mode: 'repair' as const, status: 'gathering' as const, createdAt: 0, updatedAt: 0, need: { oak_log: 77 }, carry: ['oak_log'] };
-  t.is(stock.wants(snap(items), world({ buildJobs: [job] })), null); // too full to set out
-  // at home at 33 the pockets-full rule fires first; either way the stash runs
-  t.regex(stash.wants(snap(items), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room|33\/36 slots used/);
-  // from the job's site too, 24 blocks out (the plain at-home stash doesn't go that far)
-  t.regex(stash.wants(snap(items, { distHome: 24 }), world({ buildJobs: [job] })) ?? '', /a materials trip waits for room|33\/36 slots used/);
-  t.is(stash.wants(snap(gear(), { distHome: 24 }), world({ buildJobs: [job] })), null);
+  // the day's trip down the mine made: the materials trip is the only one that waits
+  const lastDone = { deep: 10 * 60 * 60_000 - 5 * 60_000 };
+  const w = (over: Partial<WorldMemory> = {}) => world({ buildJobs: [job], lastDone, ...over });
+  // two slots free and seeds to put away: the trip asks all the same (its run makes the room first). It said nothing
+  // from 33 used, and waited for a stash that had its own idea of full
+  t.regex(stock.wants(snap(items), w()) ?? '', /77 oak_log/);
+  // the stash is the more urgent of the two and goes first. At home at 34 the pockets-full rule fires first; either way it runs
+  t.regex(stash.wants(snap(items), w()) ?? '', /a materials trip waits for room|34\/36 slots used/);
+  // from the job's site too, 24 blocks out (the plain at-home stash doesn't go that far), and two minutes after the
+  // last one (really full out there waits ten)
+  const justNow = { ...lastDone, stash: 10 * 60 * 60_000 - 2 * 60_000 };
+  t.regex(stash.wants(snap(items, { distHome: 24 }), w()) ?? '', /a materials trip waits for room|34\/36 slots used/);
+  t.regex(stash.wants(snap(items, { distHome: 24 }), w({ lastDone: justNow })) ?? '', /a materials trip waits for room|34\/36 slots used/);
+  // the job gone and the home's own stock all there: no trip waits, and out there the stash goes once in 10 min
+  const stocked = { '1,64,0': { oak_log: 64, cobblestone: 128, coal: 32, iron_ingot: 32 } };
+  t.is(stash.wants(snap(items, { distHome: 24 }), w({ lastDone: justNow, buildJobs: [], chestItems: stocked })), null);
+  t.regex(stash.wants(snap(items, { distHome: 24 }), w({ buildJobs: [], chestItems: stocked })) ?? '', /34\/36 slots used/);
+  t.is(stash.wants(snap(gear(), { distHome: 24 }), w()), null);
+});
+
+test('stock at 34/36 with 4 loose slots wants (its run stashes first); at 35/36 with nothing loose it declines pockets', (t) => {
+  const job = { id: 5, world: 'w', structure: 'home', mode: 'repair' as const, status: 'gathering' as const, createdAt: 0, updatedAt: 0, need: { oak_log: 77 }, carry: ['oak_log'] };
+  const w = world({ buildJobs: [job] });
+  // one of each, under the carry cap: food the stash leaves in the pockets
+  const meals = ['apple', 'cooked_porkchop', 'cooked_cod', 'cooked_salmon', 'cookie', 'melon_slice', 'dried_kelp', 'cooked_beef', 'cooked_chicken', 'carrot',
+    'baked_potato', 'pumpkin_pie', 'cooked_rabbit', 'cooked_mutton', 'beetroot', 'sweet_berries', 'glow_berries', 'porkchop', 'cod', 'salmon', 'beef', 'chicken',
+    'potato', 'rabbit', 'mutton', 'tropical_fish', 'honey_bottle'];
+  /** `used` slots: the kit, `loose` stacks of bones (all the stash would put away), the rest food it keeps */
+  const at = (used: number, loose: number): Snapshot => {
+    const items = gear();
+    const empty = Array.from({ length: 36 }, (_, slot) => slot).filter(slot => !items.some(i => i.slot === slot));
+    for (let i = 0; i < loose; i++) items.push({ slot: empty.shift()!, name: 'bone', count: 64 });
+    for (let i = 0; items.filter(x => x.slot < 36).length < used; i++) items.push({ slot: empty.shift()!, name: meals[i], count: 1 });
+    return snap(items);
+  };
+  // the table: 3 free sets out as it stands; with fewer, what the stash could put away decides
+  const cases: [number, number, 'wants' | 'pockets'][] = [
+    [33, 0, 'wants'], [34, 4, 'wants'], [34, 1, 'wants'], [35, 2, 'wants'], [36, 3, 'wants'],
+    [34, 0, 'pockets'], [35, 0, 'pockets'], [35, 1, 'pockets'], [36, 2, 'pockets'], [36, 0, 'pockets']
+  ];
+  for (const [used, loose, answer] of cases) {
+    const s = at(used, loose);
+    t.is(s.slotsUsed, used, `the fixture: ${used} slots`);
+    const said = stock.wants(s, w);
+    const why = stock.declines!(s, w);
+    if (answer === 'wants') {
+      t.regex(said ?? '', /77 oak_log/, `${used}/36, ${loose} loose`);
+      t.is(why, null);
+    } else {
+      t.is(said, null, `${used}/36, ${loose} loose`);
+      // slots the stash would empty, but too few, are said as that: "nothing to put away" only with none
+      t.deepEqual(why, { cause: 'pockets', text: `${used}/36 slots, ${loose ? `only ${loose} more to put away` : 'nothing to put away'} (stock needs 3 free)` });
+    }
+  }
+  // the same full pockets with the stash's own chest out of reach (50 out, no yard round the bot): said as that
+  const far = { ...at(34, 4), distHome: 50, position: { x: 50, y: 64, z: 0 } };
+  t.deepEqual(stock.declines!(far, w), { cause: 'pockets', text: '34/36 slots, the chests out of reach (stock needs 3 free)' });
+  // asleep nothing is put away either
+  t.is(stock.wants({ ...at(34, 4), sleeping: true }, w), null);
 });
 
 test('stash: a project keeps what its bill is crafted from carried, not only the bill itself', (t) => {
@@ -496,13 +584,19 @@ test('stockShort: a project short of oak goes before the home keeping its 32 log
   t.true(short.indexOf('cobblestone 24') > short.indexOf('oak_log 12'), 'the home stock after the project');
 });
 
-test('stash: a build job carrying its load is stopped for full pockets once in 10 min, not at every station', (t) => {
-  // live 2026-11-10: the lookout's load filled 35/36 slots; the build now goes on with full pockets, and a block dug
+test('stash: a build job carrying its load is left alone until not a slot is free, then stopped once in 10 min, not at every station', (t) => {
+  // live 2026-11-10: the lookout's load filled 35/36 slots; the build goes on with full pockets, and a block dug
   // at each station (a bone here) must not bring the stash back each time
   const load = Array.from({ length: 22 }, (_, i): InventoryItem => ({ slot: 13 + i, name: 'cobblestone', count: 64 }));
   const items = [...gear(), ...load, { slot: 6, name: 'bone', count: 1 }, { slot: 7, name: 'cobblestone', count: 64 }, { slot: 35, name: 'cobblestone', count: 64 }];
   const job = { id: 8, world: 'w', structure: 'lookout', mode: 'apply' as const, status: 'working' as const, phase: 'building' as const, createdAt: 0, updatedAt: 0, carry: ['cobblestone'] };
   const s = snap(items);
-  t.regex(stash.wants(s, world({ buildJobs: [job], lastDone: { stash: s.now - 11 * 60_000 } })) ?? '', /slots used/);
-  t.is(stash.wants(s, world({ buildJobs: [job], lastDone: { stash: s.now - 60_000 } })), null);
+  const w = (ago: number) => world({ buildJobs: [job], lastDone: { stash: s.now - ago } });
+  // 34/36: two slots still take what the build digs up, so it runs on however long ago the last stash was
+  t.is(s.slotsUsed, 34);
+  t.is(stash.wants(s, w(11 * 60_000)), null);
+  // not a slot left: what it digs up now stays on the ground
+  const full = snap([...items, { slot: 8, name: 'string', count: 3 }, { slot: 9, name: 'gunpowder', count: 2 }]);
+  t.regex(stash.wants(full, w(11 * 60_000)) ?? '', /36\/36 slots used/);
+  t.is(stash.wants(full, w(60_000)), null);
 });

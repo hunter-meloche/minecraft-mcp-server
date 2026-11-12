@@ -106,6 +106,9 @@ export function siteStep(kind: string, width: number, length: number): Step {
   };
 }
 
+/** What a levelling fills with (fillShort counts cobbled deepslate as cobblestone). */
+const FILL_KINDS = ['dirt', 'cobblestone', 'cobbled_deepslate'] as const;
+
 export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
   const m = 24;
   const box = { x: yard.x1 - m, y: yard.y - 4, z: yard.z1 - m, width: yard.x2 - yard.x1 + 1 + 2 * m, height: 14, length: yard.z2 - yard.z1 + 1 + 2 * m };
@@ -130,8 +133,14 @@ export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width:
   const strip = { x1: g.strip.x1, z1: g.strip.z1, x2: g.strip.x2, z2: g.strip.z2, level: yard.y };
   // the fill first: level-area only fills from the pockets, and a shortfall it reports as work still to do never sent
   // anyone for dirt (plot1 re-ran every 5 min for hours, "fill 53 dirt (have 15)", the bot idle in between)
-  const short = await fillShort(ctx, strip);
   const p = progressOf(ctx.world);
+  // what the fill takes out of the chests is the project's until the strip is level: with 640 cobblestone stored the
+  // stash threw the fill's 86 away as glut, and the next try took it out of the chests again. Marked before the fill
+  // is fetched (a run stopped between two chests left 200 dirt carried and unmarked), with the time of this try: a
+  // growth that is given up never comes back here to clear it, so the mark lapses by itself
+  p.fill = [...FILL_KINDS];
+  p.fillAt = ctx.s.now;
+  const short = await fillShort(ctx, strip);
   // the trips' need is a total, not what's left: met, it goes, or they would keep fetching dirt
   if (!Object.keys(short).length && p.need && Object.keys(p.need).every(k => k === 'dirt' || k === 'cobblestone')) p.need = undefined;
   if (Object.keys(short).length) {
@@ -140,6 +149,8 @@ export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width:
   }
   const r = await ctx.act('level-area', { ...strip, timeoutMs: 8 * MINUTE });
   if (/Now level|Already level/.test(r.text)) {
+    p.fill = undefined;
+    p.fillAt = undefined;
     ctx.world.yard = { ...g.newYard, y: yard.y };
     // the fence follows the yard: its old side comes down and the ring goes up round the new yard, before the next build
     if (ctx.world.zones?.fence?.length) {

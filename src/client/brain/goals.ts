@@ -93,6 +93,12 @@ export interface Goal {
   declines?: (s: Snapshot, world: WorldMemory) => Decline | null;
   /** it reports what it brings in through ctx.gain: a run that ends with none is booked as busy to no gain */
   gains?: true;
+  /**
+   * Is its want worth stopping a running goal for (absent: it is, as every goal's was)? A goal that answers no still
+   * wants: it waits for the running goal to end and takes over at the hand-over, and with nothing running it starts
+   * as ever. Asked on every tick a less urgent goal runs: a look only. The survival goals are never asked.
+   */
+  cuts?: (s: Snapshot, world: WorldMemory) => boolean;
 }
 
 /**
@@ -106,6 +112,23 @@ export const fromGate = (g: (s: Snapshot, w: WorldMemory) => Gate): Pick<Goal, '
 
 /** game ticks as minutes of real time, to one place (a tick is 50 ms) */
 const tickMin = (ticks: number) => (ticks * 50 / 60_000).toFixed(1);
+
+/**
+ * Why the stash cannot make the `free` slots a goal needs (pockets.ts noRoom): the chests have no room left, are too
+ * far off to put anything in, the stash would empty only `loose` slots, or a put-away tried `failedMsAgo` and did not
+ * make the room.
+ */
+export interface PocketsLack { free: number; chestsFull?: boolean; outOfReach?: boolean; loose?: number; failedMsAgo?: number }
+
+/** the lack in words: the failed put-away first (it is what holds the goal back now), then where the chests are */
+function lacking(from: PocketsLack): string {
+  if (from.failedMsAgo !== undefined) {
+    const min = Math.floor(from.failedMsAgo / 60_000);
+    return `the stash made no room ${min < 1 ? 'just now' : `${min} min ago`}`;
+  }
+  if (from.outOfReach) return 'the chests out of reach';
+  return from.loose ? `only ${from.loose} more to put away` : 'nothing to put away';
+}
 
 /**
  * The declines the gates share: the same words wherever they are said, each with its numbers and with who says it
@@ -124,8 +147,19 @@ export const no = {
     text: food === undefined ? `health ${Math.round(s.health)} (${who} needs ${health})`
       : `health ${Math.round(s.health)}, food ${Math.round(s.food)} (${who} needs ${health} and ${food})`
   }),
-  /** too full to carry what it would bring in: it runs with fewer than `from` slots used */
-  pockets: (s: Snapshot, who: string, from: number): Decline => ({ cause: 'pockets', text: `${s.slotsUsed}/36 slots (${who} runs under ${from})` }),
+  /**
+   * Too full to carry what it would bring in. With a number: the goal's own limit (it runs with fewer than `from`
+   * slots used). With the room rule's answer (pockets.ts noRoom, which knows the chests): the free slots the goal
+   * needs and why the stash cannot make them, so the line says which thing to go and look at: pockets with nothing in
+   * them to put away, or with `loose` slots the stash would empty and that still too few; chests too far off to put it
+   * in; chests with no room left; or a put-away `failedMsAgo` that did not make the room it was sent for.
+   */
+  pockets: (s: Snapshot, who: string, from: number | PocketsLack): Decline => ({
+    cause: 'pockets',
+    text: typeof from === 'number' ? `${s.slotsUsed}/36 slots (${who} runs under ${from})`
+      : from.chestsFull ? `chests full (${s.slotsUsed}/36 slots)`
+        : `${s.slotsUsed}/36 slots, ${lacking(from)} (${who} needs ${from.free} free)`
+  }),
   /**
    * Not work time, or under `ticks` of daylight left; null by day with time enough. A gate says this last: the hour is
    * the reason only when nothing else stands in the goal's way (a goal with nothing to do is not idle for being late).

@@ -4,10 +4,14 @@ import { fromGate, no, outsideBy, type Gate, type Goal, type GoalContext, type S
 // lives with the goal that walks the bot back to the yard now (goals.ts cannot import from here); still found here
 export { outsideBy } from './goals.js';
 import { COOKS_TO } from './food.js';
-import { ownItems } from './community.js';
+import { owedItems, ownItems } from './community.js';
+// (deep.ts comes in through community.ts already; its goal is asked inside a function only)
+import { deepTrip } from './deep.js';
 import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
-import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign } from './storage.js';
-import { kitNeeds, stashPlan, type KitNeed, type PlanStep } from './kit.js';
+import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign, type Deposit } from './storage.js';
+import { kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
+// the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
+import { FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, makeRoom, noRoom, room, type RoomKind } from './pockets.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
 import { fuelFor } from './project.js';
@@ -20,8 +24,6 @@ import type { Box } from '../survey.js';
  * replacing worn tools and armour, fetching materials, and keeping the yard lit so nothing spawns in it.
  */
 
-/** Near enough home for chores at the chests and furnace. */
-const NEAR_HOME = 10;
 const MINUTE = 60_000;
 
 const awakeAtHome = (s: Snapshot) => !s.sleeping && s.dimension === 'overworld' && !!s.home && s.distHome <= NEAR_HOME;
@@ -67,12 +69,26 @@ function projectCarry(world: WorldMemory): Set<string> {
  * kit couldn't take the coal for a torch (a LOOP every half hour) nor the cow barn start.
  */
 const CAST_EMPTY_BUCKETS = 5;
-/** What the stash leaves on the bot: the project's and the jobs' materials, capped where they would hog the slots. */
-export const stashKeep = (world: WorldMemory) => ({
-  foods: foods(), keep: projectCarry(world),
+/**
+ * What the stash leaves on the bot: food (a stack of each kind: all of it stayed before, 541 bread in nine slots), the
+ * project's and the jobs' materials, capped where they would hog the slots.
+ *
+ * Making room for a trip (`kind` trip or deep) it does not leave the project's and the jobs' materials, nor the
+ * casting's buckets: they were what held the pockets full (208 logs and 128 planks at 31 slots, five empty buckets at
+ * 33), and a trip has no use for them. Nothing brings them back afterwards and nothing needs to: the bills count the
+ * chests with the pockets, and the project and the jobs take what they build with from the chests when they next run.
+ * Not while a build job is building: its load is in the pockets to be placed, and stays there whoever asks.
+ */
+export function stashKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
+  const away = (kind === 'trip' || kind === 'deep') && !activeJobs(world).some(j => j.phase === 'building');
+  const keep = away ? new Set<string>() : projectCarry(world);
+  // food a bill carries is material, not provisions: it keeps the bill's own cap, or none
+  const cap: Record<string, number> = {};
+  for (const f of foods()) if (!keep.has(f)) cap[f] = FOOD_CARRY;
   // a build job's carry is its own: only the project's capped (what its bill could still use, billCarryCap)
-  cap: { ...projectCap(world), ...(castingAhead(world) ? { bucket: CAST_EMPTY_BUCKETS } : {}) }
-});
+  if (!away) Object.assign(cap, projectCap(world), castingAhead(world) ? { bucket: CAST_EMPTY_BUCKETS } : {});
+  return { foods: foods(), keep, cap };
+}
 
 /** The project's carry caps, less anything a build job carries too (its own load, never capped here). */
 function projectCap(world: WorldMemory): Record<string, number> {
@@ -100,15 +116,18 @@ async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<
 // ------------------------------------------------------------------------------------------------ stash
 
 /** Empty the pockets into the home chests: when nearly full, and once in a while when home anyway. */
-/** Most slots used to set out on a materials trip (the stash makes room when one waits). */
+
 /**
- * Most slots used to set out on a materials trip: 3 free carry 192 of a block. At 30, with the pockets holding what
- * the stash keeps carried (gear, food, the casting's buckets and obsidian), the sugar cane trip for the enchanting
- * room never left: 31 used, the stash put away all it might and stayed at 31, and the bot idled 68% of the day.
+ * A trip that would set out now and has to make room first (its gate wants, and the pockets rule says the stash can
+ * make the slots): for materials (3 free carry 192 of a block) or down the mine (10). The stash goes first then, with
+ * all it has to put away; what it leaves carried for the project the trip's own run puts away after (makeRoom).
  */
-export const STOCK_SLOTS = 33;
-/** How far out (the yard, a build job's site) the stash still goes home to make room for a waiting trip. */
-const TRIP_STASH_RANGE = 40;
+function tripWaiting(s: Snapshot, world: WorldMemory): string | null {
+  // room first: with room to spare it does no sums, and a gate is asked only when its trip is the one held up
+  if (room('trip', s, world) === 'stash' && stock.wants(s, world) !== null) return 'a materials trip';
+  if (room('deep', s, world) === 'stash' && deepTrip.wants(s, world) !== null) return 'the deep trip';
+  return null;
+}
 
 /** A chest to put down: one carried, or 8 planks to make one. */
 function canFirstChest(s: Snapshot): boolean {
@@ -128,38 +147,46 @@ export const stash: Goal = {
     if (s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
     // no chest at home yet (a new bot, before its storage house): one put down beside home will do, if it has one
     if (!world.landmarks.chests.length && !canFirstChest(s)) return null;
-    // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used) is worth the walk home: the
-    // build job keeps the bot at its site, 24 blocks out, where it waited all day at 31 slots
+    // a trip waiting for room is worth the walk home: the build job keeps the bot at its site, 24 blocks out, where
+    // it waited all day at 31 slots
     // (not while a build job carries its load: those pockets are full on purpose)
-    const tripWaits = s.slotsUsed >= STOCK_SLOTS && s.distHome <= TRIP_STASH_RANGE && stockShort(s, world).length > 0 &&
-      !activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
+    const building = buildingLoad(world);
+    const tripWaits = building ? null : tripWaiting(s, world);
     // really full in the yard is worth the walk too: the bed is 16 from the home point there, the bot woke and sat
     // by it at 34/36 slots all day (live 2026-11-09), nothing stashed, and the cane round won't go out at 34
     const fullAt = world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27;
-    const building = activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
     // once in 10 min: what it carries for the project fills 31 slots, and a farm round's seeds took it back to 33 at
     // once (the stash ran 6 times in 5 min, stopping the farm, the lights and the trees each time)
     const fullOut = s.slotsUsed >= fullAt && !s.sleeping && s.distHome <= TRIP_STASH_RANGE && !building &&
       since(world, 'stash', s.now) > 10 * MINUTE;
     if (!awakeAtHome(s) && !tripWaits && !fullOut) return null;
-    const plan = stashPlan(s.items, stashKeep(world));
-    if (!dumpsJunk(s)) plan.drop = [];
-    // only what can really go: a worse duplicate of a kept tool can't be told apart, and a project's materials stay
-    // (a full pocket of planks for the storage house had the stash stop the build over and over, storing nothing)
-    const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
-    plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
+    const plan = stashList(s, world);
     if (!plan.deposit.length && !plan.drop.length) return null;
-    // a project carrying its materials fills the pockets on purpose: only stop it when really full (a build job
-    // carrying its load: once in 10 min, as fullOut; the build runs with full pockets now, and a dug block each
-    // station would have the stash stop it at every one)
-    if (s.slotsUsed >= fullAt && (!building || since(world, 'stash', s.now) > 10 * MINUTE)) return `${s.slotsUsed}/36 slots used`;
-    // a materials trip waiting for room (it sets out with fewer than STOCK_SLOTS used): make the room. Between the
-    // two limits the bot sat idle all day at 31 slots, its build job waiting on 77 logs and the pockets full of seeds
-    if (tripWaits) return `${s.slotsUsed}/36 slots used, and a materials trip waits for room`;
+    if (building) {
+      // a build job carrying its load fills the pockets on purpose and runs with them full: it is left alone until
+      // there is not a slot free, and then stopped once in 10 min (a dug block each station would have the stash stop
+      // it at every one). From 33 slots, as the rule was, the stash stopped the lookout's build at 35/36 to put away
+      // a handful of things, with a slot still free for what the next station dug
+      if (s.slotsUsed >= 36 && since(world, 'stash', s.now) > 10 * MINUTE) return `${s.slotsUsed}/36 slots used`;
+    } else if (s.slotsUsed >= fullAt) {
+      // a project carrying its materials fills the pockets on purpose: only stop it when really full
+      return `${s.slotsUsed}/36 slots used`;
+    }
+    // a trip waiting for room: make the room. Under the stash's own limit the bot sat idle all day at 31 slots, its
+    // build job waiting on 77 logs and the pockets full of seeds.
+    // Once in 10 min, as from out in the yard above: what this stash leaves carried for the project only the trip's
+    // own run puts away, so the trip still waits after it, and each new kind picked up would send the bot home again
+    // (the deep trip outranked all morning by the larder and the farm: a walk home after every one of their rounds)
+    if (tripWaits && since(world, 'stash', s.now) > 10 * MINUTE) return `${s.slotsUsed}/36 slots used, and ${tripWaits} waits for room`;
     if (!awakeAtHome(s)) return null;
     if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
     return null;
   },
+  // Worth stopping a running goal for only when that goal would start losing what it picks up: fewer free slots than
+  // a round in the yard needs (a build job carrying its load: none at all, as its own rule above says). With more
+  // room the stash waits for the run to end and takes over at the hand-over, 2 s later: at home with the kept kit at
+  // 28 slots it cut every job short for a handful of things, and the signs round never got through its chests
+  cuts: (s, world) => (buildingLoad(world) ? s.slotsUsed >= 36 : 36 - s.slotsUsed < ROOM.yard),
   run: async ctx => {
     if (!ctx.world.landmarks.chests.length) {
       const at = await firstChest(ctx);
@@ -167,72 +194,167 @@ export const stash: Goal = {
       ctx.world.landmarks.chests.push(at);
       ctx.progress(`no chest at home yet: put one down at (${at.x}, ${at.y}, ${at.z})`);
     }
-    const plan = stashPlan(ctx.s.items, stashKeep(ctx.world));
-    if (!dumpsJunk(ctx.s)) plan.drop = [];
-    const names = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).length;
-    let stored = 0;
-    const deposit = plan.deposit.filter(e => e.slot === undefined || names(e.name) <= 1);
-    // a worse duplicate of a kept tool shares its name: store-in-chest can't tell them apart, so it stays carried
-    if (ctx.world.landmarks.chests.length >= 3) {
-      // sorted: each kind of thing to its own chest
-      const assign = chestAssignment(ctx.world);
-      const want = new Map(deposit.map(e => [e.name, e.count] as const));
-      const total = (n: string) => ctx.s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
-      const sorted = depositPlan(ctx.s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, ctx.world.chestItems ?? {});
-      for (const m of sorted.moves) {
-        const [x, y, z] = m.chest.split(',').map(Number);
-        const r = await ctx.act('store-in-chest', { x, y, z, item: m.name, count: m.count });
-        rememberReply(ctx.world, { x, y, z }, r.text);
-        stored += Number(/^Stored (\d+)/.exec(r.text)?.[1] ?? 0);
-      }
-      ctx.world.storageFull = sorted.full;
-      for (const u of sorted.unplaced) stored += await storeInChests(ctx, u.name, u.count);
-    } else {
-      for (const e of deposit) stored += await storeInChests(ctx, e.name, e.count);
-    }
-    done(ctx.world, 'stash', ctx.s.now);
-    let dropped = 0;
-    if (plan.drop.length) {
-      // thrown where the bot stands it picks them straight back up, and anything it walks over it picks up too (the
-      // farm round, then a fishing walk, brought back hundreds of dirt and leaf litter thrown minutes before): throw
-      // them 8 blocks out from the fence on the side it walks least (the heat map), where they despawn in 5 minutes
-      const yard = ctx.world.yard;
-      const dumps = yard ? dumpSpots(yard, ctx.world.heat ? HeatMap.fromJSON(ctx.world.heat) : undefined) : [(() => {
-        const home = ctx.s.home!;
-        const f = farmCentre(ctx.world);
-        const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
-        const len = Math.hypot(dx, dz) || 1;
-        return { x: Math.round(home.x + dx / len * 14), y: home.y, z: Math.round(home.z + dz / len * 14) };
-      })()];
-      // the least walked side first, the next if it can't get there (the east spot was in a stone hill, and the stash
-      // failed there every time, storing nothing and dropping nothing, all day)
-      let there = false;
-      for (const dump of dumps) {
-        if (ctx.signal.aborted) break;
-        try {
-          await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
-          there = true;
-        } catch {
-          // near enough will do, as long as it's well outside the fence
-          const me = (await ctx.status()).position;
-          there = !!me && (!yard || outsideBy(yard, me) >= 4);
-        }
-        if (there) break;
-      }
-      if (there) {
-        for (const e of plan.drop) {
-          const r = await ctx.act('drop-item', { item: e.name, count: e.count });
-          const m = /^Dropped (\d+)/.exec(r.text);
-          if (m) dropped += Number(m[1]);
-        }
-      } else ctx.progress('no dump spot outside the fence it could get to: the junk stays carried');
-      await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 }).catch(() => undefined);
-    }
-    ctx.progress(`stored ${stored}, dropped ${dropped}`);
+    const { stored, dropped } = await putAway(ctx, ctx.s, stashKeep(ctx.world));
     if (!stored && !dropped) throw new Error('nothing could be put away');
     return `put ${stored} item(s) in the chests${dropped ? `, threw away ${dropped} junk` : ''}`;
   }
 };
+
+/** A build job is building with its load in the pockets: they are full on purpose. */
+const buildingLoad = (world: WorldMemory) => activeJobs(world).some(j => j.phase === 'building' && j.carry?.length);
+
+/**
+ * How long a levelling's fill stays marked after the growth's last try. Live tries of one growth came up to 2 h 10
+ * apart; a growth dropped, cancelled or bypassed (the yard had room after all) never clears its mark.
+ */
+const FILL_HOLD = 4 * 60 * MINUTE;
+
+/** The kinds a yard growth still under way took out of the chests as fill (progress.fill, while its mark is fresh). */
+function fillKinds(s: Snapshot, world: WorldMemory): string[] {
+  const p = world.progress;
+  const age = s.now - (p?.fillAt ?? 0);
+  return p?.fill && age >= 0 && age < FILL_HOLD ? p.fill : [];
+}
+
+/**
+ * Kinds a bill carries, is being secured for or is short of (the project's, the build jobs', the community's), and
+ * what a levelling's fill took out of the chests for the yard (progress.fill): never glut.
+ */
+function billKinds(s: Snapshot, world: WorldMemory): Set<string> {
+  const out = new Set<string>([...projectCarry(world), ...fillKinds(s, world), ...Object.keys(allNeeds(world)),
+    ...Object.keys(world.progress?.blocked?.need ?? {}), ...Object.keys(owedItems(world))]);
+  for (const j of activeJobs(world)) for (const k of [...Object.keys(j.bill ?? {}), ...Object.keys(j.missing ?? {})]) out.add(k);
+  for (const held of Object.values(world.reserved ?? {})) for (const [k, n] of Object.entries(held)) if (n > 0) out.add(k);
+  return out;
+}
+
+/** The kinds the chests hold enough of (GLUT, by the stored totals as last seen), less what a bill has a use for. */
+function glutKinds(s: Snapshot, world: WorldMemory): Set<string> {
+  const stored = chestTotals(world);
+  const over = Object.keys(GLUT).filter(n => (stored[n] ?? 0) >= GLUT[n]);
+  if (!over.length) return new Set();
+  const billed = billKinds(s, world);
+  return new Set(over.filter(n => !billed.has(n)));
+}
+
+/**
+ * What the stash would put away now and what it would throw away: the one list its trigger, its run and the room rule
+ * (pockets.ts) all read, so the rule never promises room the run then does not make.
+ */
+export function stashList(s: Snapshot, world: WorldMemory, keep: StashOptions = stashKeep(world)): { deposit: StashEntry[]; drop: StashEntry[] } {
+  const plan = stashPlan(s.items, keep);
+  // what the project or a job carries, and a levelling's fill, is never junk, kept or not: making room for a trip
+  // keeps none of it (stashKeep), and the junk rule spares only what is kept, so the trip sent for a job's logs threw
+  // 136 of the job's 200 dirt and its seeds and saplings on the dump. Into the chests, where the bills count them
+  const mine = new Set([...projectCarry(world), ...fillKinds(s, world)]);
+  plan.deposit.push(...plan.drop.filter(e => mine.has(e.name)));
+  plan.drop = plan.drop.filter(e => !mine.has(e.name));
+  if (!dumpsJunk(s)) plan.drop = [];
+  // only what can really go: a worse duplicate of a kept tool shares its name, and store-in-chest can't tell them
+  // apart, so it stays carried; and a project's materials stay (a full pocket of planks for the storage house had the
+  // stash stop the build over and over, storing nothing)
+  const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
+  plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
+  // enough of it in the chests already: thrown away with the junk, not stored (the storage house filled up with
+  // cobblestone, and then nothing had room). Like the junk it waits for the morning: by evening it stays carried
+  const glut = glutKinds(s, world);
+  if (glut.size) {
+    const over = plan.deposit.filter(e => e.slot === undefined && glut.has(e.name));
+    plan.deposit = plan.deposit.filter(e => !over.includes(e));
+    if (dumpsJunk(s)) plan.drop.push(...over);
+  }
+  return plan;
+}
+
+/** The stash's list with where each thing goes. */
+export interface StashWork {
+  /** each kind of thing to its own chest (three chests or more) */
+  moves: Deposit[];
+  /** to the first chest with room: everything with fewer chests, else what its own chests have no room for */
+  rest: StashEntry[];
+  /** thrown away at the dump spot: junk, and what the chests hold enough of */
+  drop: StashEntry[];
+  /** kinds of things with no room left in their chests (sorted storage only) */
+  full?: string[];
+}
+
+/** The stash's work for these pockets. It looks and never writes: `assign` is the chests' kinds when the caller has them. */
+export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = stashKeep(world), assign?: ChestAssign): StashWork {
+  const { deposit, drop } = stashList(s, world, keep);
+  if (world.landmarks.chests.length < 3) return { moves: [], rest: deposit, drop };
+  // sorted: each kind of thing to its own chest
+  assign ??= assignChests(world.landmarks.chests, CATEGORIES, world.chestItems ?? {}, world.chestAssign ?? {});
+  const want = new Map(deposit.map(e => [e.name, e.count] as const));
+  const total = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
+  const sorted = depositPlan(s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, world.chestItems ?? {});
+  return { moves: sorted.moves, rest: sorted.unplaced, drop, full: sorted.full };
+}
+
+/**
+ * The stash's body: put away and throw away what the plan says for the pockets `s`, leaving `keep` carried. One body
+ * for the stash goal and for a goal making room before it sets out (pockets.ts makeRoom, which keeps less). `note`
+ * says what it could not do without that being a failure of its own (no dump spot it could get to).
+ */
+export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions): Promise<{ stored: number; dropped: number; note?: string }> {
+  const world = ctx.world;
+  const sorts = world.landmarks.chests.length >= 3;
+  const work = stashWork(s, world, keep, sorts ? chestAssignment(world) : undefined);
+  let stored = 0;
+  for (const m of work.moves) {
+    const [x, y, z] = m.chest.split(',').map(Number);
+    const r = await ctx.act('store-in-chest', { x, y, z, item: m.name, count: m.count });
+    rememberReply(world, { x, y, z }, r.text);
+    stored += Number(/^Stored (\d+)/.exec(r.text)?.[1] ?? 0);
+  }
+  if (sorts) world.storageFull = work.full ?? [];
+  for (const e of work.rest) stored += await storeInChests(ctx, e.name, e.count);
+  done(world, 'stash', s.now);
+  let dropped = 0;
+  // what kept it from doing all of its list, for a caller that needed the room (said, not thrown: what went in the
+  // chests still counts)
+  let note: string | undefined;
+  if (work.drop.length) {
+    // thrown where the bot stands it picks them straight back up, and anything it walks over it picks up too (the
+    // farm round, then a fishing walk, brought back hundreds of dirt and leaf litter thrown minutes before): throw
+    // them 8 blocks out from the fence on the side it walks least (the heat map), where they despawn in 5 minutes
+    const yard = world.yard;
+    const dumps = yard ? dumpSpots(yard, world.heat ? HeatMap.fromJSON(world.heat) : undefined) : [(() => {
+      const home = s.home!;
+      const f = farmCentre(world);
+      const dx = f ? home.x - f.x : -1, dz = f ? home.z - f.z : -1;
+      const len = Math.hypot(dx, dz) || 1;
+      return { x: Math.round(home.x + dx / len * 14), y: home.y, z: Math.round(home.z + dz / len * 14) };
+    })()];
+    // the least walked side first, the next if it can't get there (the east spot was in a stone hill, and the stash
+    // failed there every time, storing nothing and dropping nothing, all day)
+    let there = false;
+    for (const dump of dumps) {
+      if (ctx.signal.aborted) break;
+      try {
+        await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
+        there = true;
+      } catch {
+        // near enough will do, as long as it's well outside the fence
+        const me = (await ctx.status()).position;
+        there = !!me && (!yard || outsideBy(yard, me) >= 4);
+      }
+      if (there) break;
+    }
+    if (there) {
+      for (const e of work.drop) {
+        const r = await ctx.act('drop-item', { item: e.name, count: e.count });
+        const m = /^Dropped (\d+)/.exec(r.text);
+        if (m) dropped += Number(m[1]);
+      }
+    } else {
+      note = 'no dump spot outside the fence it could get to';
+      ctx.progress(`${note}: the junk stays carried`);
+    }
+    await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 }).catch(() => undefined);
+  }
+  ctx.progress(`stored ${stored}, dropped ${dropped}`);
+  return note ? { stored, dropped, note } : { stored, dropped };
+}
 
 /** Which home chest holds which kind of thing: kept, extended to new chests. */
 export function chestAssignment(world: WorldMemory): ChestAssign {
@@ -569,14 +691,15 @@ const stockGate = (s: Snapshot, world: WorldMemory): Gate => {
   }
   if (s.distHome > world.leash) return no.away(s, 'stock', world.leash);
   if (s.health < 14 || s.food < 10) return no.health(s, 'stock', 14, 10);
-  if (s.slotsUsed >= STOCK_SLOTS) return no.pockets(s, 'stock', STOCK_SLOTS);
+  // three slots free, or the stash able to make them (the run does that on its way out)
+  if (room('trip', s, world) === 'no') return noRoom('trip', 'stock', s, world);
   // under 2.5 minutes of daylight: not worth setting out
   return no.late(s, 'stock', 3000) ?? { want: `short of ${short.map(t => `${t.short} ${t.name}`).join(', ')}` };
 };
 
 /**
  * A materials trip by day: mine what the home is shortest of near home, timeboxed to be back before the evening, and
- * home again afterwards. Never with the pockets nearly full, low food or hurt.
+ * home again afterwards. Never low on food or hurt, and with three slots free: it puts things away first if it must.
  */
 export const stock: Goal = {
   name: 'stock',
@@ -588,7 +711,11 @@ export const stock: Goal = {
   retryMs: 8 * MINUTE,
   gate: stockGate,
   ...fromGate(stockGate),
-  run: async ctx => {
+  run: async run => {
+    // room for what it goes for, before it leaves: home to the chests where the pockets are too full. The trip is
+    // then planned from the bot as it is after that: what it still carries of the thing (the count to mine up to
+    // starts there, and the stash may just have put the logs away), and the hour
+    const ctx: GoalContext = { ...run, s: await makeRoom(run, 'trip') };
     const [t] = stockShort(ctx.s, ctx.world);
     if (!t) return 'nothing short';
     const carried = [...ctx.s.counts].filter(([n]) => t.counts.test(n)).reduce((a, [, k]) => a + k, 0);

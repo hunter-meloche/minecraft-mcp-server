@@ -21,6 +21,7 @@ import { treeFarm } from '../../src/client/brain/farming.js';
 import { larder } from '../../src/client/brain/food.js';
 import { donateGoal, missionGoal } from '../../src/client/brain/community.js';
 import { repairGoal } from '../../src/client/brain/repair.js';
+import { ROOM, pockets, room, type RoomKind } from '../../src/client/brain/pockets.js';
 
 const reply = (text: string) => ({ content: [{ type: 'text' as const, text }] });
 const settle = () => new Promise(r => setTimeout(r, 20));
@@ -59,8 +60,20 @@ function carrying(slots: number, filler = FILLER): InventoryItem[] {
   return [...items, ...ARMOUR];
 }
 
-const gridSnap = (slots: number, time: number, dist: number, filler = FILLER): Snapshot =>
-  snapOf(carrying(slots, filler), { timeOfDay: time, activity: activityAt(time), position: { x: dist, y: 64, z: 0 }, distHome: dist });
+/**
+ * The yard of the busy home: long to the west, its far end 64 from home (as the live yard has grown), 16 to the east.
+ * Only the pockets rule reads it here (the stash can be sent from anywhere in it, and the deep trip sets out from it).
+ */
+const YARD = { x1: -64, z1: -24, x2: 16, z2: 24, y: 64 };
+/**
+ * Where the grid stands the bot, by x: at home; 60 west, the far end of the busy home's yard; 50 east, outside that
+ * yard and further than the stash is sent home from (40).
+ */
+const PLACES = [0, -60, 50];
+const placed = (x: number) => (x === 0 ? 'at home' : x < 0 ? `${-x} west` : `${x} east`);
+
+const gridSnap = (slots: number, time: number, x: number, filler = FILLER): Snapshot =>
+  snapOf(carrying(slots, filler), { timeOfDay: time, activity: activityAt(time), position: { x, y: 64, z: 0 }, distHome: Math.abs(x) });
 
 /** The project with nothing done yet; `blocked`: every milestone waits ten minutes, short of cane and leather. */
 const projectAt = (blocked: boolean): NonNullable<WorldMemory['progress']> => ({
@@ -75,7 +88,7 @@ const projectAt = (blocked: boolean): NonNullable<WorldMemory['progress']> => ({
 function busyWorld(blocked: boolean): WorldMemory {
   const hourAgo = T0 - 60 * MIN;
   const world: WorldMemory = {
-    landmarks: { chests: [{ x: 1, y: 64, z: 1 }], farmland: [], bed: { x: -1, y: 64, z: 0 } }, leash: 96,
+    landmarks: { chests: [{ x: 1, y: 64, z: 1 }], farmland: [], bed: { x: -1, y: 64, z: 0 } }, leash: 96, yard: { ...YARD },
     chestItems: { '1,64,1': { diamond: 0, iron_ingot: 80, gold_ingot: 40 } },
     lastDone: { cane: hourAgo, trees: hourAgo, pens: hourAgo, deep: hourAgo },
     zones: { cane: [{ x: -10, y: 64, z: -10 }], 'trees:sapling': [{ x: -20, y: 64, z: -20 }], 'pen:cow': [{ x: 10, y: 64, z: 10, width: 7, length: 7 }] },
@@ -96,20 +109,25 @@ const newWorld = (blocked: boolean): WorldMemory => ({ landmarks: { chests: [], 
 const gated = (): Goal[] => [projectGoal(TREE), structureGoal({} as never), deepTrip, stock, caneRound, pens, treeFarm, larder, donateGoal, missionGoal];
 /** What a goal may give as its cause: `hold` is the brain's own (a goal it keeps back), `nothing` is nobody saying anything. */
 const SAID = ['away', 'health', 'pockets', 'late', 'kit', 'project', 'dry', 'stocked', 'unneeded'];
+/**
+ * The room each of the seven asks the one pockets rule for (pockets.ts ROOM). The other three have no slot limit of
+ * that kind: the larder and the donation never wait on the pockets, and the mission keeps the trip's fixed ten free.
+ */
+const KIND: Record<string, RoomKind> = { project: 'project', build: 'project', 'deep trip': 'deep', stock: 'trip', cane: 'yard', pens: 'yard', trees: 'yard' };
 
-test('wants is null exactly when declines is not: the ten gated goals over pockets x hour x project blocked or not x at home or 50 out', (t) => {
+test('wants is null exactly when declines is not: the ten gated goals over pockets x hour x project blocked or not x at home, at the far end of the yard or 50 out; and full pockets are the reason only where the stash could make no room', (t) => {
   const goals = gated();
   t.deepEqual(goals.map(g => g.name), ['project', 'build', 'deep trip', 'stock', 'cane', 'pens', 'trees', 'larder', 'donate', 'community']);
   // each cell at two homes: one where all ten have work (so the blockers decide), one where most have none
   const homes = { busy: busyWorld, new: newWorld };
   const bad: string[] = [];
-  const seen = new Map(Object.keys(homes).flatMap(home => goals.map(g => [`${home}: ${g.name}`, { wants: 0, causes: new Set<string>() }])));
+  const seen = new Map(Object.keys(homes).flatMap(home => goals.map(g => [`${home}: ${g.name}`, { wants: 0, causes: new Set<string>(), full: new Set<string>() }])));
   let cells = 0;
-  for (const slots of SLOTS) for (const time of TIMES) for (const blocked of [false, true]) for (const dist of [0, 50]) {
+  for (const slots of SLOTS) for (const time of TIMES) for (const blocked of [false, true]) for (const x of PLACES) {
     cells++;
-    const s = gridSnap(slots, time, dist);
+    const s = gridSnap(slots, time, x);
     for (const [home, make] of Object.entries(homes)) for (const g of goals) {
-      const say = (what: string) => bad.push(`${g.name} at the ${home} home, ${slots} slots, time ${time}, project ${blocked ? 'blocked' : 'free'}, ${dist} from home: ${what}`);
+      const say = (what: string) => bad.push(`${g.name} at the ${home} home, ${slots} slots, time ${time}, project ${blocked ? 'blocked' : 'free'}, ${placed(x)}: ${what}`);
       if (!g.gate || !g.declines) { say('no gate'); continue; }
       // a home of its own for each asking: wants() may write down what it finds (a milestone already done in the
       // world), and the two have to say the same whichever is asked first. declines() only looks (the next test)
@@ -129,6 +147,23 @@ test('wants is null exactly when declines is not: the ten gated goals over pocke
       rec.causes.add(no.cause);
       if (!SAID.includes(no.cause) || !no.text || /undefined|NaN|\[object/.test(no.text)) say(`a decline that does not say why: ${JSON.stringify(no)}`);
       if (no.until !== undefined && !(Number.isFinite(no.until) && no.until > s.now)) say(`until ${no.until} is no time to come`);
+      if (no.cause === 'pockets') {
+        // the one slot rule: full pockets hold a goal only where the stash could not make its room (nothing to put
+        // away, or the chests out of reach). With the room, or with the stash able to make it, the goal wants and its
+        // run makes the room first. brain.log 2026-11-08..10: 294.7 idle minutes with the pockets at 34-36 slots, each
+        // goal waiting under a limit of its own for a stash that was waiting for fuller pockets
+        const kind = KIND[g.name];
+        const answer = kind ? room(kind, s, make(blocked)) : undefined;
+        if (kind ? answer !== 'no' : g.name !== 'community' || 36 - slots >= 10) say(`pockets (${no.text}) while its room is ${answer ?? 'never asked'}`);
+        if (kind) {
+          // and counted here by hand, not by room(): short of its room, and the chests out of reach (none, or the bot
+          // outside the yard and over 40 from home) or the stash not able to make up the difference
+          const w = make(blocked), p = pockets(s, w, kind);
+          const reach = w.landmarks.chests.length > 0 && (Math.abs(x) <= 40 || (!!w.yard && x >= w.yard.x1 && x <= w.yard.x2));
+          if (!(p.free < ROOM[kind] && (!reach || p.free + p.loose < ROOM[kind]))) say(`pockets (${no.text}) with ${p.free} free, ${p.loose} to put away, the chests ${reach ? 'in' : 'out of'} reach`);
+        }
+        rec.full.add(`${slots} ${placed(x)}`);
+      }
       if (no.cause === 'late') {
         // the hour is the reason only when it is the only one: the same pockets and place in the morning, and it runs
         const morning = { ...s, timeOfDay: 1000, activity: activityAt(1000) };
@@ -136,7 +171,7 @@ test('wants is null exactly when declines is not: the ten gated goals over pocke
       }
     }
   }
-  t.is(cells, 360);
+  t.is(cells, 540);
   t.deepEqual(bad.slice(0, 20), []);
   // where all have work the grid shows each of them both ways
   for (const g of goals) {
@@ -147,22 +182,43 @@ test('wants is null exactly when declines is not: the ten gated goals over pocke
   // nothing and had the day marked done. The bound is its gate's now: it says "late", with the numbers, and only
   // where nothing else holds it (the loop above asks every "late" whether the morning would run)
   const deep = goals[2];
-  // at home with 10 or 26 slots, project blocked or not, at 0, 3000 and 5000 (it was 16 cells: those at 6000 too)
-  t.is(seen.get('busy: deep trip')!.wants, 12);
+  // at home or anywhere in the yard, project blocked or not, at 0, 3000 and 5000 (not at 6000, as it once did), and
+  // with any of the nine pockets: under ten slots free its run puts the grid's logs, sand and ingots away first (it
+  // was 12 cells: at home only, and only with 10 or 26 slots)
+  t.is(seen.get('busy: deep trip')!.wants, 108);
   for (const blocked of [false, true]) {
     t.is(deep.wants(gridSnap(10, 5000, 0), busyWorld(blocked)), '31 diamond(s) wanted: a deep trip');
     t.deepEqual(deep.declines!(gridSnap(10, 5001, 0), busyWorld(blocked)), { cause: 'late', text: 'deep trip needs 3 min, 2.9 left' });
     t.deepEqual(deep.declines!(gridSnap(10, 6000, 0), busyWorld(blocked)), { cause: 'late', text: 'deep trip needs 3 min, 2.1 left' });
     t.deepEqual(deep.declines!(gridSnap(10, 6800, 0), busyWorld(blocked)), { cause: 'late', text: 'time of day 6800 (deep trip sets out by 6000)' });
-    // not the hour's while something else holds it: full pockets say so at 6000 as they do at 5000
-    t.is(deep.declines!(gridSnap(36, 6000, 0), busyWorld(blocked))?.cause, deep.declines!(gridSnap(36, 5000, 0), busyWorld(blocked))?.cause);
-    t.not(deep.declines!(gridSnap(36, 6000, 0), busyWorld(blocked))?.cause, 'late');
+    // not the hour's while something else holds it: full pockets with no chest to empty them into say so at 6000 as
+    // they do at 5000
+    const noChest = () => { const w = busyWorld(blocked); w.landmarks.chests = []; return w; };
+    t.deepEqual(deep.declines!(gridSnap(36, 5000, 0), noChest()), { cause: 'pockets', text: '36/36 slots, nothing to put away (deep trip needs 10 free)' });
+    t.deepEqual(deep.declines!(gridSnap(36, 6000, 0), noChest()), deep.declines!(gridSnap(36, 5000, 0), noChest()));
+    // with the chest the trip's run makes the room: full pockets set out at 5000, and at 6000 only the hour is left
+    t.is(deep.wants(gridSnap(36, 5000, 0), busyWorld(blocked)), '31 diamond(s) wanted: a deep trip');
+    t.deepEqual(deep.declines!(gridSnap(36, 6000, 0), busyWorld(blocked)), { cause: 'late', text: 'deep trip needs 3 min, 2.1 left' });
     // nothing it asks writes the trip down as made
     const home = busyWorld(blocked), was = JSON.stringify(home);
     for (const time of [5000, 5001, 6000, 6800]) { deep.wants(gridSnap(10, time, 0), home); deep.declines!(gridSnap(10, time, 0), home); }
     t.is(JSON.stringify(home), was);
   }
   t.log([...seen].map(([name, rec]) => `${name}: wants ${rec.wants}, declines ${[...rec.causes].sort().join(' ')}`).join('\n'));
+  // every cell in which full pockets were the reason, by slots used and place (at some hour, the project blocked or not)
+  t.deepEqual(Object.fromEntries([...seen].filter(([, rec]) => rec.full.size).map(([name, rec]) => [name, [...rec.full].join(' | ')])), {
+    // the busy home: only 50 east, where the stash is not sent home from, and with less free than the goal's room
+    // (one slot for the project and a build, three for a materials trip). The yard rounds are too far from home
+    // there, the deep trip too; at home and in the yard the grid's logs, sand and ingots are there to put away
+    'busy: project': '36 50 east',
+    'busy: build': '36 50 east',
+    'busy: stock': '34 50 east | 35 50 east | 36 50 east',
+    // the new home has no chest to put anything in: short of its room a goal waits wherever it stands (the deep trip
+    // sets out from home only: no yard is drawn there yet)
+    'new: project': '36 at home | 36 60 west | 36 50 east',
+    'new: deep trip': '27 at home | 30 at home | 31 at home | 33 at home | 34 at home | 35 at home | 36 at home',
+    'new: stock': '34 at home | 34 60 west | 34 50 east | 35 at home | 35 60 west | 35 50 east | 36 at home | 36 60 west | 36 50 east'
+  });
 });
 
 test('declines() only looks: asked of the ten at any hour, at a home with work, one just begun and one with no project or job list yet, the world stays as it was', (t) => {
@@ -172,8 +228,8 @@ test('declines() only looks: asked of the ten at any hour, at a home with work, 
   const homes: Record<string, (blocked: boolean) => WorldMemory> = { busy: busyWorld, new: newWorld, bare: () => ({ landmarks: { chests: [], farmland: [] }, leash: 96 }) };
   const wrote = new Map<string, string>();
   let asked = 0;
-  for (const slots of SLOTS) for (const time of [...TIMES, 11_500, 14_000]) for (const blocked of [false, true]) for (const dist of [0, 50]) {
-    const s = gridSnap(slots, time, dist);
+  for (const slots of SLOTS) for (const time of [...TIMES, 11_500, 14_000]) for (const blocked of [false, true]) for (const x of PLACES) {
+    const s = gridSnap(slots, time, x);
     for (const [home, make] of Object.entries(homes)) for (const g of goals) {
       const world = make(blocked), who = `${g.name} at the ${home} home`;
       const before = JSON.stringify(world);
@@ -183,10 +239,10 @@ test('declines() only looks: asked of the ten at any hour, at a home with work, 
       // the first cell for each goal and home says what changed
       const was = JSON.parse(before) as Record<string, unknown>, is = world as unknown as Record<string, unknown>;
       const changed = [...new Set([...Object.keys(was), ...Object.keys(is)])].filter(k => JSON.stringify(was[k]) !== JSON.stringify(is[k]));
-      wrote.set(who, `${slots} slots, time ${time}, project ${blocked ? 'blocked' : 'free'}, ${dist} from home: ${changed.map(k => `${k} ${JSON.stringify(was[k])} became ${JSON.stringify(is[k])}`).join('; ')}`.slice(0, 500));
+      wrote.set(who, `${slots} slots, time ${time}, project ${blocked ? 'blocked' : 'free'}, ${placed(x)}: ${changed.map(k => `${k} ${JSON.stringify(was[k])} became ${JSON.stringify(is[k])}`).join('; ')}`.slice(0, 500));
     }
   }
-  t.is(asked, 9 * 12 * 2 * 2 * 3 * 10);
+  t.is(asked, 9 * 12 * 2 * 3 * 3 * 10);
   t.deepEqual([...wrote].map(([who, what]) => `${who}: ${what}`), []);
 
   // and there is something to write down at these homes: wants(), which the deciding brain asks, does write it (the
@@ -206,7 +262,7 @@ test('outside work hours none of the ten wants to run, and the hour is what it s
   const goals = gated();
   t.deepEqual([activityAt(11_500), activityAt(14_000), activityAt(6000, true)], ['return', 'rest', 'rest']);
   // for each goal a cell of the grid in which it runs at the busy home; then only the hour changes, or only the dimension
-  const cells = SLOTS.flatMap(slots => TIMES.flatMap(time => [0, 50].map(dist => gridSnap(slots, time, dist))));
+  const cells = SLOTS.flatMap(slots => TIMES.flatMap(time => PLACES.map(x => gridSnap(slots, time, x))));
   const hours: Record<string, (day: Snapshot) => Partial<Snapshot>> = {
     'on the way home at dusk': () => ({ timeOfDay: 11_500, activity: activityAt(11_500) }),
     'at night': () => ({ timeOfDay: 14_000, activity: activityAt(14_000) }),
@@ -231,16 +287,26 @@ test('outside work hours none of the ten wants to run, and the hour is what it s
 
 test('a decline names its numbers, and the hour is the reason only for a goal nothing else holds', (t) => {
   const project = projectGoal(TREE);
-  t.deepEqual(caneRound.declines!(gridSnap(35, 3000, 0), busyWorld(false)), { cause: 'pockets', text: '35/36 slots (cane runs under 34)' });
+  // one slot free and the round wants two: at the busy home its run puts the logs and sand away first; with no chest
+  // to put them in the pockets are the reason, and the line says what is missing
+  t.is(caneRound.wants(gridSnap(35, 3000, 0), busyWorld(false)), 'daily round: the sugar cane');
+  const noChest = busyWorld(false);
+  noChest.landmarks.chests = [];
+  t.deepEqual(caneRound.declines!(gridSnap(35, 3000, 0), noChest), { cause: 'pockets', text: '35/36 slots, nothing to put away (cane needs 2 free)' });
   t.deepEqual(project.declines!(gridSnap(10, 3000, 0), busyWorld(true)), { cause: 'project', text: 'short of 98 sugar_cane, 38 leather', until: T0 + 10 * MIN });
   // 2000 ticks of day left, the project needs 2400
   t.deepEqual(project.declines!(gridSnap(10, 9000, 0), busyWorld(false)), { cause: 'late', text: '1.7 min of daylight left (project needs 2.0)' });
-  // blocked, or full, at that hour: that is the reason, not the hour (the morning would not help)
+  // blocked, or full where the chests are out of reach, at that hour: that is the reason, not the hour (the morning
+  // would not help). Full at home is the hour's: in the morning the run would put the logs away and go on
   t.is(project.declines!(gridSnap(10, 9000, 0), busyWorld(true))?.cause, 'project');
-  t.deepEqual(project.declines!(gridSnap(36, 9000, 0), busyWorld(false)), { cause: 'pockets', text: '36/36 slots (project runs under 35)' });
-  // stock is short of logs and coal here: with pockets full of sand that is what stops it, at any hour; with room, the hour
+  t.deepEqual(project.declines!(gridSnap(36, 9000, 50), busyWorld(false)), { cause: 'pockets', text: '36/36 slots, the chests out of reach (project needs 1 free)' });
+  t.deepEqual(project.declines!(gridSnap(36, 9000, 0), busyWorld(false)), { cause: 'late', text: '1.7 min of daylight left (project needs 2.0)' });
+  // stock is short of logs and coal here: with pockets full of sand 50 out that is what stops it, at any hour; with
+  // room, or at home where the sand can go in the chest, the hour
   t.is(stock.wants(gridSnap(10, 3000, 0, ['sand']), busyWorld(false)), 'short of 32 log, 16 coal');
-  t.deepEqual(stock.declines!(gridSnap(36, 9800, 0, ['sand']), busyWorld(false)), { cause: 'pockets', text: '36/36 slots (stock runs under 33)' });
+  t.deepEqual(stock.declines!(gridSnap(36, 9800, 50, ['sand']), busyWorld(false)), { cause: 'pockets', text: '36/36 slots, the chests out of reach (stock needs 3 free)' });
+  t.is(stock.wants(gridSnap(36, 3000, 0, ['sand']), busyWorld(false)), 'short of 32 log, 16 coal');
+  t.deepEqual(stock.declines!(gridSnap(36, 9800, 0, ['sand']), busyWorld(false)), { cause: 'late', text: '1.0 min of daylight left (stock needs 2.5)' });
   t.deepEqual(stock.declines!(gridSnap(10, 9800, 0, ['sand']), busyWorld(false)), { cause: 'late', text: '1.0 min of daylight left (stock needs 2.5)' });
   // and with the logs and the coal in its pockets (the grid's filler) there is nothing to fetch
   t.deepEqual(stock.declines!(gridSnap(36, 9800, 0), busyWorld(false)), { cause: 'stocked', text: 'nothing short' });
@@ -547,29 +613,165 @@ test('the real goal list, pockets 36/36 and the project blocked, by day: brain-s
   for (let i = 0; i < 3; i++) { clock += 5000; await brain.tick(); await settle(); }
 
   t.deepEqual(acts, [], 'nothing ran');
-  t.is(statusLine(brain, 'Now:'), 'Now: idle (pockets): 36/36 slots (stock runs under 33).');
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (pockets): 36/36 slots, nothing to put away (stock needs 3 free).');
   t.is(statusLine(brain, 'Blocked:'), 'Blocked: project - short of 98 sugar_cane, 38 leather');
   t.deepEqual(today(brain), { day: 0, workMs: 15_000, idleMs: 15_000, emptyMs: 0, by: { pockets: 15_000 } });
   const lines = brain.status().split('\n');
-  t.true(lines.includes('- 14:00:15 idle 15s: pockets: 36/36 slots (stock runs under 33) | project: short of 98 sugar_cane, 38 leather | stocked: 320 food points at home (keep 60)'), lines.join('\n'));
+  t.true(lines.includes('- 14:00:15 idle 15s: pockets: 36/36 slots, nothing to put away (stock needs 3 free) | project: short of 98 sugar_cane, 38 leather | stocked: 320 food points at home (keep 60)'), lines.join('\n'));
   brain.setEnabled(false);
 });
 
-test('the real goal list over the grid: wherever no goal is chosen, one of them says why', (t) => {
+/** Food the stash leaves carried: one kind a slot, each under the stack it keeps of a kind. */
+const MEALS = ['bread', 'apple', 'cooked_porkchop', 'cooked_cod', 'cooked_salmon', 'cookie', 'melon_slice', 'dried_kelp', 'cooked_beef', 'cooked_chicken', 'carrot',
+  'baked_potato', 'pumpkin_pie', 'cooked_rabbit', 'cooked_mutton', 'beetroot', 'sweet_berries', 'glow_berries', 'porkchop', 'cod', 'salmon', 'beef', 'chicken',
+  'potato', 'rabbit', 'mutton', 'tropical_fish', 'honey_bottle'];
+
+/**
+ * Pockets the stash leaves as they are: the kit, a stack each of torches, cobblestone and dirt, then food. With
+ * `loose`, that many stacks of bones after the kit (all there is for the chests).
+ */
+function keptOnly(slots: number, loose = 0): InventoryItem[] {
+  const names = ['iron_pickaxe', 'iron_pickaxe', 'iron_axe', 'iron_shovel', 'iron_sword', 'iron_hoe', 'shield', 'torch', 'cobblestone', 'water_bucket', 'dirt',
+    ...Array.from({ length: loose }, () => 'bone'), ...MEALS];
+  return names.slice(0, slots).map((name, slot): InventoryItem => (
+    { slot, name, count: /pickaxe|axe|shovel|sword|hoe|shield|bucket/.test(name) ? 1 : MEALS.includes(name) && name !== 'bread' ? 8 : 64 }
+  )).concat(ARMOUR);
+}
+
+/** The rested home with what the stash needs: a chest (looked in, empty) and the yard round it. */
+const settledWorld = (blocked: boolean): WorldMemory => ({
+  ...restedWorld(blocked), landmarks: { chests: [{ x: 1, y: 64, z: 1 }], farmland: [], foundAt: T0 }, chestItems: { '1,64,1': {} }, yard: { ...YARD }
+});
+
+test('the real goal list over the grid: wherever no goal is chosen, one of them says why; where that is the pockets, the stash could not have made the room', (t) => {
   const goals = (new Brain(fakeRuntime({ pos: HOME, time: 6000 }).rt, { tickMs: 1e9, now: () => T0 }) as unknown as { goals: Goal[] }).goals;
-  const lead = new Map<string, number>();
-  const unsaid: string[] = [];
-  let chosen = 0;
-  for (const slots of SLOTS) for (const time of TIMES) for (const blocked of [false, true]) for (const dist of [0, 50]) {
-    const s = snapOf(kitted(slots), { timeOfDay: time, activity: activityAt(time), position: { x: dist, y: 64, z: 0 }, distHome: dist });
-    if (decide(s, restedWorld(blocked), goals, new Map())) { chosen++; continue; }
-    const why = explainIdle(s, restedWorld(blocked), goals, new Map(), new Map());
-    lead.set(why[0].cause, (lead.get(why[0].cause) ?? 0) + 1);
-    if (why[0].cause === 'nothing') unsaid.push(`${slots} slots, time ${time}, project ${blocked ? 'blocked' : 'free'}, ${dist} from home`);
+  const homes: Record<string, (blocked: boolean) => WorldMemory> = { 'no chest': restedWorld, 'a chest and a yard': settledWorld };
+  // cobblestone by the stack (all of it for the chests), nothing for the chests, and six stacks for them
+  const fillings: Record<string, (slots: number) => InventoryItem[]> = { 'cobblestone': kitted, 'kept things only': keptOnly, 'six stacks to put away': slots => keptOnly(slots, 6) };
+  const unsaid: string[] = [], bad: string[] = [], tally: string[] = [];
+  /** the cells idle for the pockets: who says so and how many cells (hours, project blocked or not), by home, pockets and place */
+  const full = new Map<string, { who: Set<string>; cells: number }>();
+  /** the same cells by home and pockets alone, to pin below */
+  const led = new Map<string, Set<string>>();
+  let all = 0, chosenAll = 0;
+  for (const [home, make] of Object.entries(homes)) for (const [filling, fill] of Object.entries(fillings)) {
+    const lead = new Map<string, number>();
+    let chosen = 0, cells = 0;
+    for (const slots of SLOTS) for (const time of TIMES) for (const blocked of [false, true]) for (const x of PLACES) {
+      cells++;
+      const s = snapOf(fill(slots), { timeOfDay: time, activity: activityAt(time), position: { x, y: 64, z: 0 }, distHome: Math.abs(x) });
+      if (decide(s, make(blocked), goals, new Map())) { chosen++; continue; }
+      const why = explainIdle(s, make(blocked), goals, new Map(), new Map());
+      lead.set(why[0].cause, (lead.get(why[0].cause) ?? 0) + 1);
+      const cell = `${home}, ${filling}, ${slots} slots, time ${time}, project ${blocked ? 'blocked' : 'free'}, ${placed(x)}`;
+      if (why[0].cause === 'nothing') unsaid.push(cell);
+      if (why[0].cause !== 'pockets') continue;
+      // who says the pockets, and do the pockets bear it out: short of that goal's room, and the chests out of reach
+      // (none, or the bot outside the yard and over 40 from home) or too little in the pockets for them
+      const w = make(blocked);
+      const reach = w.landmarks.chests.length > 0 && (Math.abs(x) <= 40 || (!!w.yard && x >= w.yard.x1 && x <= w.yard.x2));
+      const rec = full.get(`${home}, ${filling}, ${slots}/36 ${placed(x)}`) ?? { who: new Set<string>(), cells: 0 };
+      full.set(`${home}, ${filling}, ${slots}/36 ${placed(x)}`, rec);
+      rec.cells++;
+      led.set(`${home}, ${filling}`, (led.get(`${home}, ${filling}`) ?? new Set<string>()).add(`${slots} ${placed(x)}`));
+      for (const g of goals) {
+        const no = g.declines?.(s, make(blocked));
+        if (no?.cause !== 'pockets') continue;
+        const kind = KIND[g.name];
+        if (!kind) { bad.push(`${cell}: ${g.name} says ${no.text}, and has no room of its own in the rule`); continue; }
+        const p = pockets(s, w, kind);
+        rec.who.add(`${g.name} (needs ${ROOM[kind]}, ${p.loose} to put away${reach ? '' : ', chests out of reach'})`);
+        if (room(kind, s, w) !== 'no' || !(p.free < ROOM[kind] && (!reach || p.free + p.loose < ROOM[kind]))) {
+          bad.push(`${cell}: ${g.name} says ${no.text} with ${p.free} free and ${p.loose} to put away, the chests ${reach ? 'in' : 'out of'} reach`);
+        }
+        // the rule lets a goal wait with something to put away where that is still too little for it (ten free for
+        // the mine out of two free and six to put away). No cell here stands idle on that: the stash goes first
+        if (reach && p.loose) bad.push(`${cell}: ${g.name} says ${no.text}, idle with ${p.loose} slot(s) the stash could empty`);
+      }
+      if (!rec.who.size) bad.push(`${cell}: idle for the pockets, and no goal says so`);
+    }
+    all += cells; chosenAll += chosen;
+    tally.push(`${home}, ${filling}: a goal chosen in ${chosen} of ${cells} cells; idle put down to ${[...lead].map(([c, n]) => `${c} ${n}`).join(', ') || 'nothing'}`);
   }
   t.deepEqual(unsaid, []);
-  t.true(chosen > 0 && chosen < 360, `a goal chosen in ${chosen} of 360 cells`);
-  t.log(`a goal chosen in ${chosen} of 360 cells; idle put down to ${[...lead].map(([c, n]) => `${c} ${n}`).join(', ')}`);
+  t.deepEqual(bad.slice(0, 20), []);
+  t.is(all, 6 * 540);
+  t.true(chosenAll > 0 && chosenAll < all, `a goal chosen in ${chosenAll} of ${all} cells`);
+  t.log(tally.join('\n'));
+  t.log([...full].map(([where, rec]) => `${where}: ${rec.cells} cell(s): ${[...rec.who].join('; ')}`).join('\n'));
+  // every cell idle for the pockets (at some hour, the project blocked or not): at home only (out in the yard and
+  // beyond it the bot is walked back first), and only with no chest to put anything in or with nothing in the pockets
+  // for one. From 27 used the mine's ten are short, from 34 a materials trip's three, at 36 the project's one. With a
+  // chest and anything at all to put away (cobblestone by the stack, six stacks of bones) no cell is idle for them
+  const AT_HOME = [27, 30, 31, 33, 34, 35, 36].map(n => `${n} at home`).join(' | ');
+  t.deepEqual(Object.fromEntries([...led].map(([where, cells]) => [where, [...cells].join(' | ')])), {
+    'no chest, cobblestone': AT_HOME,
+    'no chest, kept things only': AT_HOME,
+    'no chest, six stacks to put away': AT_HOME,
+    'a chest and a yard, kept things only': AT_HOME
+  });
+});
+
+// ---- the one slot rule, goal by goal ----
+
+test('the one slot rule, goal by goal: with its room free a goal wants; short of it, it wants where the stash can make the room, and where it cannot it says which of the two is missing', (t) => {
+  // brain.log 2026-11-08..10: 294.7 idle minutes with the pockets at 34-36 slots. Each goal had a limit of its own
+  // (the cane and the pens ran under 34 used, the trees and a materials trip under 33, the project under 35, the mine
+  // with ten free) and none of them made room: they waited for a stash that started at 33, once in ten minutes
+  const goals = new Map(gated().map(g => [g.name, g]));
+  /** the free slots each sets out with (written out here, not read from the rule) */
+  const table: [name: string, kind: RoomKind, needs: number][] = [
+    ['project', 'project', 1], ['build', 'project', 1], ['stock', 'trip', 3], ['cane', 'yard', 2], ['pens', 'yard', 2], ['trees', 'yard', 2], ['deep trip', 'deep', 10]
+  ];
+  t.deepEqual(table.map(([name, kind]) => [name, kind]), Object.entries(KIND).sort((a, b) => table.findIndex(r => r[0] === a[0]) - table.findIndex(r => r[0] === b[0])));
+  // the busy home as it is (a chest, the yard 64 long to the west), with no yard drawn (40 from home is the reach
+  // then), and with no chest
+  const homes: Record<string, () => WorldMemory> = {
+    'a chest and a yard': () => busyWorld(false),
+    'a chest, no yard': () => { const w = busyWorld(false); delete w.yard; return w; },
+    'no chest': () => { const w = busyWorld(false); w.landmarks.chests = []; return w; }
+  };
+  const bad: string[] = [];
+  const seen = { 'room free': 0, 'the stash makes it': 0, 'nothing to put away': 0, 'too few to put away': 0, 'the chests out of reach': 0, away: 0 };
+  for (const [home, make] of Object.entries(homes)) for (const used of [26, 30, 33, 34, 35, 36]) for (const loose of [0, 1, 2, 3, 6, 10]) for (const x of [0, -20, -40, -60, 50]) {
+    // by 3000 of the day: the hour holds none of them
+    const s = snapOf(keptOnly(used, loose), { timeOfDay: 3000, activity: activityAt(3000), position: { x, y: 64, z: 0 }, distHome: Math.abs(x) });
+    for (const [name, kind, needs] of table) {
+      const g = goals.get(name)!;
+      const w = make();
+      const say = (what: string) => bad.push(`${name} at the home with ${home}, ${used}/36 of which ${loose} to put away, ${placed(x)}: ${what}`);
+      if (ROOM[kind] !== needs) say(`the rule gives it ${ROOM[kind]}`);
+      const chests = w.landmarks.chests.length > 0;
+      // the pockets as the test packed them: `loose` stacks of bones are all the stash would move, whatever the goal
+      if (chests && pockets(s, w, kind).loose !== loose) say(`the test's pockets: ${pockets(s, w, kind).loose} to put away`);
+      const near = Math.abs(x) <= 40 || (!!w.yard && x >= w.yard.x1 && x <= w.yard.x2);
+      const want = g.wants(s, w), no = g.declines!(s, make());
+      // what a gate asks before the pockets: a round in the yard runs within 24 of home, the mine is set out for
+      // from the yard or within 40 of home
+      if ((kind === 'yard' && Math.abs(x) > 24) || (kind === 'deep' && !near)) {
+        seen.away++;
+        if (want !== null || no?.cause !== 'away') say(`wants ${JSON.stringify(want)}, declines ${JSON.stringify(no)}; it is too far out`);
+        continue;
+      }
+      const free = 36 - used, reach = chests && near;
+      // with no chest there is nothing the stash could do with the bones
+      const put = chests ? loose : 0;
+      if (free >= needs || (reach && free + put >= needs)) {
+        seen[free >= needs ? 'room free' : 'the stash makes it']++;
+        if (want === null || no !== null) say(`wants ${JSON.stringify(want)}, declines ${JSON.stringify(no)}; ${free} free and ${reach ? put : 0} more from the stash is its room`);
+        continue;
+      }
+      // three ways to be short, each said as what it is: the chests too far, some to put away but too few, none at all
+      const lack = !reach && free + put >= needs ? 'the chests out of reach' : put > 0 ? 'too few to put away' : 'nothing to put away';
+      seen[lack]++;
+      const text = `${used}/36 slots, ${lack === 'too few to put away' ? `only ${put} more to put away` : lack} (${name} needs ${needs} free)`;
+      if (want !== null || JSON.stringify(no) !== JSON.stringify({ cause: 'pockets', text })) say(`wants ${JSON.stringify(want)}, declines ${JSON.stringify(no)}; expected ${text}`);
+    }
+  }
+  t.deepEqual(bad.slice(0, 20), []);
+  t.log(Object.entries(seen).map(([k, n]) => `${k}: ${n}`).join(', '));
+  for (const [k, n] of Object.entries(seen)) t.true(n > 0, `${k}: in no cell`);
+  t.is(Object.values(seen).reduce((a, n) => a + n, 0), 3 * 6 * 6 * 5 * 7);
 });
 
 /**

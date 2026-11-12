@@ -1,5 +1,6 @@
 import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from '../brain/goals.js';
 import type { BuildJob, Pos, WorldMemory } from '../brain/memory.js';
+import { makeRoom, noRoom, room } from '../brain/pockets.js';
 import { compile, type Compiled } from './format.js';
 import { pending, type Change } from './diff.js';
 import { plan } from './scan.js';
@@ -245,10 +246,11 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
       const missing = Object.entries(next.missing ?? {}).map(([k, v]) => `${k} x${v}`).join(', ');
       return { cause: 'project', text: `build of ${next.structure} waits${missing ? ` for ${missing} in a home chest` : ' to try again'}`, until: next.retryAt };
     }
-    // full pockets: the stash's turn, unless what fills them is this job's own load (live 2026-11-10: the lookout
-    // took its 292-item load to 35/36 slots, the stash stopped it at station 1 and could put none of it away, and
-    // at 34+ the job never ran again: a day's build stalled with its whole bill in hand)
-    if (s.slotsUsed >= 34 && !(j.phase === 'building' && j.carry?.length)) return no.pockets(s, 'build', 34);
+    // full pockets: a slot free will do, and the run makes it first where the stash can. Not asked at all when what
+    // fills them is this job's own load (live 2026-11-10: the lookout took its 292-item load to 35/36 slots, the
+    // stash stopped it at station 1 and could put none of it away, and at 34+ the job never ran again: a day's build
+    // stalled with its whole bill in hand)
+    if (!(j.phase === 'building' && j.carry?.length) && room('project', s, world) === 'no') return noRoom('project', 'build', s, world);
     // gathering: the stock trip clears job.need when it's back; until then (10 minutes at most) don't stop it for
     // the two logs it has so far (the job did, a minute into each trip, and built a package of one block)
     if (j.status === 'gathering' && j.need && Object.keys(j.need).length && s.now - j.updatedAt < 10 * MINUTE) {
@@ -263,9 +265,12 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
     retryMs: MINUTE,
     gate,
     ...fromGate(gate),
-    run: async ctx => {
-      const job = activeJob(ctx.world, ctx.s.now);
+    run: async run => {
+      const job = activeJob(run.world, run.s.now);
       if (!job) return 'no build job';
+      // a slot free first (home to the chests where there is none), and the job goes on from where the bot stands
+      // after that. A job building with its load runs with full pockets, as its gate lets it
+      const ctx: GoalContext = job.phase === 'building' && job.carry?.length ? run : { ...run, s: await makeRoom(run, 'project') };
       const stamp = (note: string, status: BuildJob['status'] = job.status) => { job.note = note; job.status = status; job.updatedAt = ctx.s.now; };
       const s = store.loadStructure(job.world, job.structure);
       if (!s) { stamp('its structure file is gone', 'failed'); return job.note!; }

@@ -3,6 +3,7 @@ import { foodsFor26 } from '../tools.js';
 import { AT_HOME, fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { collectFurnace, farmAll } from './chores.js';
+import { FOOD_CARRY } from './pockets.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { placeNearHome } from './firsts.js';
@@ -139,7 +140,12 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
       .sort(([a], [b]) => (COOKS_TO[a] ? 1 : 0) - (COOKS_TO[b] ? 1 : 0) || foods[b].foodPoints - foods[a].foodPoints);
     for (const [name, n] of edible) {
       if (enough()) break;
-      const want = COOKS_TO[name] ? n : Math.min(n, Math.ceil((target - readyFoodPoints(have)) / foods[name].foodPoints));
+      // never past the stack of a kind the stash leaves carried (FOOD_CARRY): all the raw meat of a chest came out to
+      // be cooked, and with more than a stack of it and a furnace that would not cook, the stash would put the rest
+      // back and this take it out again, turn about
+      const most = FOOD_CARRY - (have.get(name) ?? 0);
+      if (most <= 0) continue;
+      const want = Math.min(most, COOKS_TO[name] ? n : Math.min(n, Math.ceil((target - readyFoodPoints(have)) / foods[name].foodPoints)));
       const r = await ctx.act('take-from-chest', { ...chest, item: name, count: want });
       rememberReply(ctx.world, chest, r.text);
       if (r.ok) say(`took ${want} ${name}`);

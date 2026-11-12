@@ -59,7 +59,7 @@ function slotsUsed(items: Record<string, number>): number {
 }
 
 /** How many more of an item fit: the free slots plus the rest of its last partial stack. */
-function roomFor(items: Record<string, number>, name: string, slots: number): number {
+export function roomFor(items: Record<string, number>, name: string, slots: number): number {
   const stack = stackSize(name);
   const have = items[name] ?? 0;
   const partial = have % stack ? stack - (have % stack) : 0;

@@ -1,6 +1,7 @@
 import test from 'ava';
 import { deepTrip, diamondsWanted, tripCheck } from '../../src/client/brain/deep.js';
 import { kitNeeds } from '../../src/client/brain/kit.js';
+import { pockets } from '../../src/client/brain/pockets.js';
 import { activityAt } from '../../src/client/brain/schedule.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -138,4 +139,102 @@ test('the deep trip sets out exactly when it did before, but for the hour that l
     }
   }
   t.deepEqual(bad.slice(0, 10), []);
+});
+
+// ---- full pockets: the run makes its ten slots first ----
+
+/** Home at its east end, and 64 blocks of it to the west. */
+const YARD = { x1: -64, z1: -24, x2: 16, z2: 24, y: 64 };
+const FOODS = ['apple', 'cooked_porkchop', 'cooked_cod', 'cooked_salmon', 'cookie', 'melon_slice', 'dried_kelp', 'cooked_beef', 'cooked_chicken', 'carrot',
+  'baked_potato', 'pumpkin_pie', 'cooked_rabbit', 'cooked_mutton', 'beetroot', 'sweet_berries', 'glow_berries', 'porkchop', 'cod', 'salmon', 'beef'];
+/** The kit and 26 slots more, 30 in all: tools and one each of some foods, which the stash keeps, and `loose` stacks of logs. */
+const thirty = (loose: number) => [...KIT,
+  ...['iron_pickaxe', 'iron_axe', 'iron_shovel', 'iron_sword', 'iron_hoe'].map((name, i) => item(4 + i, name)),
+  ...FOODS.slice(0, 21 - loose).map((name, i) => item(9 + i, name)),
+  ...Array.from({ length: loose }, (_, i) => item(30 - loose + i, 'oak_log', 64))];
+
+/**
+ * A game that keeps count, for a run that makes room first: pockets the chest tool takes from (from the first slot
+ * on, while the chest has a slot), a bot that walks. `did` has the walks, what was asked of the chest and every other
+ * call that is not a look. The walk out to the mine finds no path, so the run ends where the trip sets out.
+ */
+function yardBot(s: Snapshot, world: WorldMemory, chest: Record<string, number> = {}) {
+  let items = s.items.map(i => ({ ...i }));
+  let position = { ...s.position };
+  const did: string[] = [];
+  const taken = () => Object.values(chest).reduce((n, c) => n + Math.ceil(c / 64), 0);
+  const ctx = {
+    s, world, signal: new AbortController().signal, progress: () => undefined, gain: () => undefined,
+    status: async () => ({ inWorld: true, username: 'b', screen: null, position, dimension: 'overworld', timeOfDay: s.timeOfDay, sleeping: false }),
+    call: (async (method: string, p: { x?: number; y?: number; z?: number; careful?: boolean } = {}) => {
+      if (method === 'inventory') return { items: items.map(i => ({ ...i })) };
+      if (method !== 'goto') { did.push(method); return { zones: [] }; }
+      did.push(`${p.careful ? 'on foot only' : 'out'} to (${p.x}, ${p.z})`);
+      if (!p.careful) throw new Error('no path');
+      position = { x: p.x!, y: p.y!, z: p.z! };
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: { x?: number; y?: number; z?: number; item?: string; count?: number } = {}) => {
+      if (tool !== 'store-in-chest') { did.push(tool); return { ok: true, text: 'ok' }; }
+      did.push(`store ${a.count} ${a.item}`);
+      let moved = 0;
+      for (const i of items.filter(x => x.name === a.item && x.slot < 36).sort((x, y) => x.slot - y.slot)) {
+        if (moved >= a.count! || taken() >= 27) break;
+        const n = Math.min(i.count, a.count! - moved);
+        i.count -= n;
+        moved += n;
+        chest[i.name] = (chest[i.name] ?? 0) + n;
+      }
+      items = items.filter(i => i.count > 0);
+      const holds = Object.entries(chest).map(([name, n]) => `${name} x${n}`).join(', ') || 'nothing';
+      return { ok: true, text: `Stored ${moved} ${a.item} in the chest at (${a.x}, ${a.y}, ${a.z})${moved < a.count! ? ' (the chest is full)' : ''}. It holds: ${holds}; ${27 - taken()}/27 slots free.` };
+    }
+  } as unknown as GoalContext;
+  return { ctx, did, used: () => items.filter(i => i.slot < 36).length };
+}
+
+test('30 used, kit ready, in the yard: the deep trip wants, and its run makes room first', async (t) => {
+  // the trip waited for ten free slots that nothing made: from 27 used there was no deep trip (83.7 min of the idle in
+  // brain.log 2026-11-08..10 were on "N free slots < 10"). And it set out from within 16 of home only, in a yard that
+  // reaches 64 out
+  const west = { position: { x: -60, y: 64, z: 0 }, distHome: 60 };
+  // the mine start it remembers is one the yard has since grown over
+  const grown = (): WorldMemory => ({ ...home(), yard: YARD, zones: { mine: [{ x: -40, y: 64, z: 0 }] } });
+  const s = at(1000, thirty(7), west);
+  t.deepEqual(pockets(s, grown(), 'deep'), { used: 30, free: 6, loose: 7 }, 'the fixture: six free, seven stacks of logs to put away');
+  t.is(deepTrip.wants(s, grown()), '31 diamond(s) wanted: a deep trip');
+  t.is(deepTrip.declines!(s, grown()), null);
+  // nothing in them the stash would put away: six free stay six, and the line says what is missing
+  const kept = at(1000, thirty(0), west);
+  t.deepEqual(pockets(kept, grown(), 'deep'), { used: 30, free: 6, loose: 0 });
+  t.is(deepTrip.wants(kept, grown()), null);
+  t.deepEqual(deepTrip.declines!(kept, grown()), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
+  // no yard drawn, and 60 from home: not where a trip sets out from, whatever the pockets hold
+  t.deepEqual(deepTrip.declines!(s, home()), { cause: 'away', text: '60 blocks from home (deep trip works within 40)' });
+  t.is(deepTrip.wants(at(1000, thirty(7), { position: { x: -40, y: 64, z: 0 }, distHome: 40 }), home()), '31 diamond(s) wanted: a deep trip');
+
+  // the run: home to the chests on foot, the logs into the chest, and only then out, from a start outside the yard
+  const w = grown();
+  const out = yardBot(s, w);
+  await t.throwsAsync(deepTrip.run(out.ctx), { message: 'no path' });
+  t.deepEqual(out.did, ['on foot only to (0, 0)', 'store 448 oak_log', 'foreign.zones', 'out to (0, -64)']);
+  t.is(out.used(), 23);
+  t.deepEqual(w.chestItems?.['1,64,1'], { oak_log: 448 });
+  t.is(w.lastDone?.deep, NOW, 'today\'s trip from where it set out');
+  t.deepEqual(w.zones?.mine, [{ x: 0, y: 64, z: -64 }]);
+
+  // the chest was filled since the bot last looked in it: no room made, so no trip, and it is not written down as
+  // today's (nor the mine start touched): the gate has the chest's answer from here on
+  const stale = grown();
+  const full = yardBot(s, stale, { cobblestone: 27 * 64 });
+  await t.throwsAsync(deepTrip.run(full.ctx), { message: 'pockets still 30/36 after putting away' });
+  t.deepEqual(full.did, ['on foot only to (0, 0)', 'store 448 oak_log']);
+  t.is(full.used(), 30);
+  t.is(stale.lastDone?.deep, NOW - 60 * MIN);
+  t.deepEqual(stale.zones?.mine, [{ x: -40, y: 64, z: 0 }]);
+  // the put-away that fell short is written down, but it is not the reason given: the chest, now known to be full, is
+  // what says no, and will after the mark has run out
+  t.is(stale.lastDone?.['no room: deep'], NOW);
+  t.deepEqual(deepTrip.declines!(s, stale), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
+  t.deepEqual(deepTrip.declines!({ ...s, now: NOW + 11 * MIN }, stale), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
 });

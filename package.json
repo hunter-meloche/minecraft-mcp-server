@@ -12,7 +12,8 @@
     ],
     "nodeArguments": [
       "--import=tsx"
-    ]
+    ],
+    "timeout": "2m"
   },
   "scripts": {
     "dev": "tsx src/main.ts",

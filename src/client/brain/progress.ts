@@ -51,6 +51,16 @@ export interface ProgressMemory {
   carry?: string[];
   /** the most of a carried kind the current step could still use (whole stacks): the stash takes the rest */
   carryCap?: Record<string, number>;
+  /**
+   * Kinds a levelling's fill took out of the chests and has not placed yet (the yard growing). Not a carry: the stash
+   * still puts them away as it does any stone, but it never throws them away as junk or as glut.
+   */
+  fill?: string[];
+  /**
+   * When a growth last set `fill` (ms). The mark lapses when no try has renewed it for hours (FILL_HOLD in chores.ts):
+   * a growth dropped, cancelled or no longer needed never clears it, and dirt and stone would be billed for good.
+   */
+  fillAt?: number;
   /** a step that failed: not before (ms) */
   blockedUntil?: Record<string, number>;
   /**

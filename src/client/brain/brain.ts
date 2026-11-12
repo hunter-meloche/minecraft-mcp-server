@@ -297,7 +297,10 @@ export class Brain {
         }
         if (r.goal.interruptible === false) return;
         const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
-        const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal)), this.retryAt);
+        // a goal can say its want is not worth stopping this one for (the stash with room still to spare): it is left
+        // out here, and takes over when this one ends. Survival is never asked, and a goal that cannot say cuts in
+        const cuts = (g: Goal) => { try { return g.cuts?.(s, world) ?? true; } catch { return true; } };
+        const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal) && (SURVIVAL.has(g.name) || cuts(g))), this.retryAt);
         if (next) await this.stopRunning(`${next.goal.name} is more urgent (${next.reason})`);
         return;
       }

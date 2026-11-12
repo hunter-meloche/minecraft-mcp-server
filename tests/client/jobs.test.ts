@@ -36,15 +36,36 @@ test('jobText: Terraslicer\'s phase, loads done, scaffold up, cells given up on'
   t.regex(jobText(j), /#1 apply tower: working \[Terraslicer: building, 2 load\(s\) done, 1 scaffold block\(s\) up\] \(load done\); 1 cell\(s\) given up on/);
 });
 
-test('build goal: full pockets wait for the stash, unless they hold the job\'s own load', (t) => {
+test('build goal: one free slot will do; full pockets wait only with nothing to put away, and never when they hold the job\'s own load', (t) => {
   // live 2026-11-10: the lookout's load filled 35/36 slots, the stash stopped it and could put none of it away, and
   // the job never ran again
   const w = world();
   const j = queueJob(w, 'seed:1', 'lookout', 'apply', 1000);
   const goal = structureGoal(new StructureStore(fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-'))));
-  const s = (slotsUsed: number) => ({ activity: 'work', sleeping: false, dimension: 'overworld', slotsUsed, now: 2000 }) as unknown as Snapshot;
+  const s = (slotsUsed: number, x = 0): Snapshot => {
+    const items = Array.from({ length: slotsUsed }, (_, slot) => ({ slot, name: 'cobblestone', count: 64 }));
+    return {
+      now: 2000, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: { x, y: 64, z: 0 }, dimension: 'overworld', sleeping: false,
+      raining: false, thundering: false, process: null, items, counts: new Map([['cobblestone', 64 * slotsUsed]]), slotsUsed,
+      home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, distHome: Math.abs(x)
+    };
+  };
   t.truthy(goal.wants(s(20), w));
-  t.is(goal.wants(s(35), w), null, 'queued, nothing carried for it: the stash first');
+  // it waited from 34 used for a stash that started at 33: the job picks up next to nothing, one slot will do
+  t.regex(String(goal.wants(s(34), w)), /apply lookout/);
+  t.regex(String(goal.wants(s(35), w)), /apply lookout/);
+  // not a slot free and no chest to make one in
+  t.is(goal.wants(s(36), w), null, 'queued, nothing carried for it, no chest');
+  t.deepEqual(goal.declines!(s(36), w), { cause: 'pockets', text: '36/36 slots, nothing to put away (build needs 1 free)' });
+  // a chest at home: the run makes the room itself, from the yard too (40 from home at most with no yard drawn)
+  const chest = { ...w, landmarks: { chests: [{ x: 1, y: 64, z: 0 }], farmland: [] }, chestItems: { '1,64,0': {} } };
+  t.regex(String(goal.wants(s(36), chest)), /apply lookout/);
+  t.regex(String(goal.wants(s(36, 40), chest)), /apply lookout/);
+  t.deepEqual(goal.declines!(s(36, 50), chest), { cause: 'pockets', text: '36/36 slots, the chests out of reach (build needs 1 free)' });
+  // the job's own load: never asked, with or without a chest
   Object.assign(j, { status: 'working', phase: 'building', carry: ['cobblestone', 'oak_log'] });
   t.regex(String(goal.wants(s(35), w)), /apply lookout/);
+  t.regex(String(goal.wants(s(36), w)), /apply lookout/);
+  t.regex(String(goal.wants(s(36, 50), chest)), /apply lookout/);
+  t.is(goal.declines!(s(36), w), null);
 });

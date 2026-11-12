@@ -72,7 +72,9 @@ const blockAt = async (ctx: GoalContext, p: P) =>
 /** Empty buckets enough for `lava` lava buckets and a water bucket (crafted from iron); true when it has them. */
 export async function bucketsFor(ctx: GoalContext, lava: number): Promise<string | undefined> {
   const water = await countOf(ctx, 'water_bucket');
-  const haveLava = await countOf(ctx, 'lava_bucket');
+  // full ones in the chests count too (a trip's room-making puts them away, and the cast takes them back out): asked
+  // for four more empties it could not make, the cast was skipped with four lava buckets in the gear chest
+  const haveLava = (await countOf(ctx, 'lava_bucket')) + (chestTotals(ctx.world).lava_bucket ?? 0);
   const empties = Math.max(0, lava - haveLava) + Math.max(0, WATER_BUCKETS - water);
   if ((await countOf(ctx, 'bucket')) < empties) {
     const short = await prepare(ctx, 'bucket', empties);

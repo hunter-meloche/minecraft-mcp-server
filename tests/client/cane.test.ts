@@ -92,7 +92,8 @@ test('cane round: cells filled with cobblestone are cleared and replanted from t
   let cane = 15;
   const acts: string[] = [];
   const ctx = {
-    world, s: { now: 1 }, progress: () => undefined, gain: () => undefined, signal: new AbortController().signal,
+    // (the round asks the pockets rule for room before it starts: one slot in use, the cane)
+    world, s: { now: 1, slotsUsed: 1 }, progress: () => undefined, gain: () => undefined, signal: new AbortController().signal,
     call: async (m: string, a: { x: number; y: number; z: number }) => (m === 'inventory'
       ? { items: [{ slot: 3, name: 'sugar_cane', count: cane }] }
       : { blocks: [0, 1, 2].map(dy => grid.get(`${a.x},${a.y + dy},${a.z}`) ?? 'air') }),
@@ -121,7 +122,7 @@ test('cane round: no cane carried and the cells bare, it takes cane from the che
   let cane = 0;
   const acts: string[] = [];
   const ctx = {
-    world, s: { now: 1 }, progress: () => undefined, gain: () => undefined, signal: new AbortController().signal,
+    world, s: { now: 1, slotsUsed: 0 }, progress: () => undefined, gain: () => undefined, signal: new AbortController().signal,
     call: async (m: string, a: { x: number; y: number; z: number }) => (m === 'inventory'
       ? { items: cane ? [{ slot: 3, name: 'sugar_cane', count: cane }] : [] }
       : { blocks: [0, 1, 2].map(dy => grid.get(`${a.x},${a.y + dy},${a.z}`) ?? 'air') }),

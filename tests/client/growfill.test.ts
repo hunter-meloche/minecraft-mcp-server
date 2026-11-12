@@ -1,6 +1,6 @@
 import test from 'ava';
 import { fillOf, growStep } from '../../src/client/brain/milestones.js';
-import { stockShort } from '../../src/client/brain/chores.js';
+import { stashList, stockShort } from '../../src/client/brain/chores.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 
@@ -50,6 +50,9 @@ test('growing the yard short of fill: blocked, the shortfall recorded for the st
   t.regex(r.text, /short of 38 dirt/);
   t.deepEqual(world.progress?.need, { dirt: 38 });
   t.false(acts.some(a => a.tool === 'level-area' && !a.args.dryRun));
+  // the fill it has so far is marked as the yard's: the stash stores it, and throws none of it away as junk or glut
+  t.deepEqual(world.progress?.fill, ['dirt', 'cobblestone', 'cobbled_deepslate']);
+  t.is(world.progress?.fillAt, ctx.s.now);
   // the stock trips now go for dirt (grass dug gives it)
   t.like(stockShort(snap({ counts: new Map([['dirt', 15]]) }), world).find(x => x.name === 'dirt'), { short: 38, mine: 'dirt,grass_block' });
 });
@@ -63,6 +66,35 @@ test('growing the yard with the fill carried: levels, grows, and the met need is
   t.regex(r.text, /^grew the yard/);
   t.is(world.progress?.need, undefined);
   t.true(acts.some(a => a.tool === 'level-area' && !a.args.dryRun));
+  // level: the fill is placed, and what is left of it is plain dirt and stone again
+  t.is(world.progress?.fill, undefined);
+  t.is(world.progress?.fillAt, undefined);
+});
+
+test('a growth stopped while it takes its fill out of the chests: what it took is marked already, and the stash throws none of it away', async (t) => {
+  const chest = { x: 1, y: 64, z: 0 };
+  const world: WorldMemory = {
+    landmarks: { chests: [chest], farmland: [] }, leash: 96, yard: { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 },
+    chestItems: { '1,64,0': { dirt: 400, cobblestone: 700 } }
+  };
+  const inventory: { name: string; count: number; slot: number }[] = [];
+  const { ctx } = fakeCtx(world, inventory, 'Level ...: cut 0 block(s), fill 200 dirt + 150 cobblestone; left alone: 0.');
+  const act = ctx.act;
+  let takes = 0;
+  ctx.act = (async (tool: string, args: Record<string, unknown> = {}) => {
+    if (tool !== 'take-from-chest') return act(tool, args);
+    // the dirt comes out; the run is stopped (a mob, nightfall) as it reaches for the cobblestone
+    if (++takes > 1) throw new Error('aborted');
+    [64, 64, 64, 8].forEach((count, i) => inventory.push({ name: 'dirt', count, slot: 3 + i }));
+    return { ok: true, text: 'Took 200 dirt' };
+  }) as GoalContext['act'];
+  await t.throwsAsync(() => growStep(ctx, world.yard!, { width: 8, length: 8 }, 'plot'), { message: 'aborted' });
+  t.is(takes, 2);
+  t.deepEqual(world.progress?.fill, ['dirt', 'cobblestone', 'cobbled_deepslate']);
+  t.is(world.progress?.fillAt, ctx.s.now);
+  const list = stashList(snap({ items: inventory, counts: new Map([['dirt', 200]]), slotsUsed: 4 }), world);
+  t.deepEqual(list.drop, []);
+  t.is(list.deposit.filter(e => e.name === 'dirt').reduce((a, e) => a + e.count, 0), 136);
 });
 
 test('a project short of sugar cane sends the stock trips for wild cane', (t) => {
@@ -76,7 +108,11 @@ test('a materials trip sets out with a few slots free, not only under 30 used', 
   const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96 };
   world.progress = { done: [], journal: [], need: { sugar_cane: 98 } } as unknown as WorldMemory['progress'];
   t.regex(stock.wants(snap({ slotsUsed: 31 }), world) ?? '', /sugar_cane/);
-  t.is(stock.wants(snap({ slotsUsed: 33 }), world), null);
+  // three free slots carry three stacks of what it went for: 33 used sets out (under 33 it was), 34 does not, with no
+  // chest at home to make the room in
+  t.regex(stock.wants(snap({ slotsUsed: 33 }), world) ?? '', /sugar_cane/);
+  t.is(stock.wants(snap({ slotsUsed: 34 }), world), null);
+  t.deepEqual(stock.declines!(snap({ slotsUsed: 34 }), world), { cause: 'pockets', text: '34/36 slots, nothing to put away (stock needs 3 free)' });
 });
 
 test('a build short of something slow takes nothing out of the chests and keeps nothing carried: the trips get the need', async (t) => {

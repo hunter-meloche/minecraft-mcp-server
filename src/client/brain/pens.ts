@@ -7,6 +7,7 @@ import { nextAnimalAction, PEN_FOOD, penState, strayToFetch, type Animal, type P
 import { prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
+import { makeRoom, noRoom, room } from './pockets.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -146,7 +147,8 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
   const last = world.lastDone?.pens ?? 0;
   if (!(s.now - last > 6 * MINUTE)) return no.notDue('pens', s.now, last, 6 * MINUTE);
   if (s.distHome > 24) return no.away(s, 'pens', 24);
-  if (s.slotsUsed >= 34) return no.pockets(s, 'pens', 34);
+  // two slots free for what the animals drop, or the stash able to make them (the round does that first)
+  if (room('yard', s, world) === 'no') return noRoom('yard', 'pens', s, world);
   return no.late(s, 'pens') ?? { want: 'the pens: lure, breed, cull, shear' };
 };
 
@@ -160,7 +162,11 @@ export const pens: Goal = {
   ...fromGate(gate),
   // a round that only looks (nothing to lure, breed or cull) is busy time to no gain
   gains: true,
-  run: async ctx => {
+  run: async run => {
+    // room for what the animals drop first (home to the chests where the pockets are too full), before the round is
+    // written down. The round then counts from the pockets as they are after that: the stash may just have put the
+    // wheat away, and with the old count the pen's food would not be taken out again
+    const ctx: GoalContext = { ...run, s: await makeRoom(run, 'yard') };
     (ctx.world.lastDone ??= {}).pens = ctx.s.now;
     const out: string[] = [];
     for (const [key, zs] of Object.entries(ctx.world.zones ?? {})) {

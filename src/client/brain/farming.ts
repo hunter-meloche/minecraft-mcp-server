@@ -5,6 +5,7 @@ import { progressOf } from './progress.js';
 import { prepareBill } from './project.js';
 import { addZone, readBox, siteStep } from './milestones.js';
 import { takeFromChests } from './chests.js';
+import { makeRoom, noRoom, room } from './pockets.js';
 import { digByHand } from '../structures/job.js';
 
 /**
@@ -219,7 +220,8 @@ const treeGate = (s: Snapshot, world: WorldMemory): Gate => {
   const last = world.lastDone?.trees ?? 0;
   if (!(s.now - last > 20 * MINUTE)) return no.notDue('trees', s.now, last, 20 * MINUTE);
   if (s.distHome > 24) return no.away(s, 'trees', 24);
-  if (s.slotsUsed >= 33) return no.pockets(s, 'trees', 33);
+  // two slots free for the logs and the saplings, or the stash able to make them (the round does that first)
+  if (room('yard', s, world) === 'no') return noRoom('yard', 'trees', s, world);
   return no.late(s, 'trees') ?? { want: 'daily round: the tree farm' };
 };
 
@@ -242,7 +244,10 @@ export const treeFarm: Goal = {
   ...fromGate(treeGate),
   // logs cut and saplings planted: a round over a plot where nothing has grown (or that only clears scaffold) brought none
   gains: true,
-  run: async ctx => {
+  run: async run => {
+    // room for the logs first (home to the chests where the pockets are too full), before the round is written down.
+    // The round then starts from where the bot stands after that, not from where it stood when the round began
+    const ctx: GoalContext = { ...run, s: await makeRoom(run, 'yard') };
     (ctx.world.lastDone ??= {}).trees = ctx.s.now;
     const cells = ctx.world.zones!['trees:sapling'];
     const box = treePlot(ctx.world, cells);
