@@ -17,7 +17,7 @@ import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { compile } from '../structures/format.js';
 import { LoopWatch, type Outcome, type Run } from './loops.js';
-import { explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
+import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
 /** Staying alive: never backed off by the loop watch. */
 const SURVIVAL = new Set(['wake', 'break out', 'recover', 'retreat', 'shelter', 'food']);
@@ -33,6 +33,8 @@ import { yardGrowGoal, yardGrowStatus } from './yardgrow.js';
 import { storageGoal } from './storehouse.js';
 import { bedGoal } from './home.js';
 import { spareGoal } from './spare.js';
+import { clearOut, dryBlocked, ladderOf, pick, releaseOldestDry, shareHolds, skippedLine, taskOf, workGoals, workLine, workTick } from './work.js';
+import { NEAR_HOME, out as afield } from './pockets.js';
 import { statusAnswer } from './chatstatus.js';
 
 /**
@@ -95,13 +97,19 @@ export function wedgedOut(pos: Pos, blocks: (string | null)[]): { block: string;
 const HAND_OVER_MS = 2000;
 /** An idle streak led by a hold lasts this long before one of the holds is let go early. */
 const HOLD_IDLE_MS = 60_000;
+/** Idle this long while a rung of the work queue waits on its dry marks (whatever leads the idle time): the oldest mark is let go. */
+const DRY_IDLE_MS = 30_000;
 /** The holds that may be let go early: a run that got wedged or stuck, ran out of time, or failed (not a loop's, not "until morning"). */
 const ORDINARY_HOLD = /^(wedged$|stuck$|timed out$|failed: )/;
 
-/** The goals in the order they are tried: the most urgent first. */
+/**
+ * The goals in the order they are tried: the most urgent first. Each urgency is asked once: inside the sort it was
+ * asked at every comparison, and the stock trip's makes a kit plan each time (a decision over the live homestead took
+ * 5.7 ms of the bot's core, 3.4 ms with each asked once)
+ */
 function inOrder(s: Snapshot, world: WorldMemory, goals: Goal[]): Goal[] {
-  const p = (g: Goal) => g.urgency?.(s, world) ?? g.priority;
-  return [...goals].sort((a, b) => p(b) - p(a));
+  const p = new Map(goals.map(g => [g, g.urgency?.(s, world) ?? g.priority] as const));
+  return [...goals].sort((a, b) => p.get(b)! - p.get(a)!);
 }
 
 /** The most urgent goal that wants to run (and isn't waiting out a failure), with its reason. */
@@ -171,6 +179,8 @@ export class Brain {
   private idleSaved?: number;
   /** how long the idle streak has been led by a hold, since it began or since a hold was last let go early */
   private holdIdle = 0;
+  /** the same for idle time while any rung of the work queue declines `dry` (its marks) */
+  private dryIdle = 0;
   /** the goals let go early: not a second time until a hold on them has run its full time (or the morning, or the idle watchdog) */
   private freedEarly = new Set<string>();
   /** what has gone wrong in the measuring and been noted (each kind once) */
@@ -183,7 +193,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -266,6 +276,7 @@ export class Brain {
         this.rt.setHomeZone?.({ x1: y.x1, z1: y.z1, x2: y.x2, z2: y.z2 });
       }
       this.idleTrack(s);
+      this.workQueue(s, world);
       const r = this.running;
       if (r) {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
@@ -300,7 +311,15 @@ export class Brain {
         // a goal can say its want is not worth stopping this one for (the stash with room still to spare): it is left
         // out here, and takes over when this one ends. Survival is never asked, and a goal that cannot say cuts in
         const cuts = (g: Goal) => { try { return g.cuts?.(s, world) ?? true; } catch { return true; } };
-        const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal) && (SURVIVAL.has(g.name) || cuts(g))), this.retryAt);
+        // one rule for a trip of the work queue that is out beyond the chores' reach of home: only survival cuts it
+        // short, and the kit when the bot has no pickaxe left to work with. Anything else (the stash, smelting, the
+        // stock, the kit's other wants) can wait for it to come home: each cost a trip its walk out, and the trip
+        // makes its own room. Nearer home, and for every other run, the goals say themselves what is worth a stop.
+        // (The kit goal itself wants only within reach of home, so out here the trip ends itself: a trip down with
+        // no pickaxe left comes up, deep.ts oreTrip, and the kit sees to one at home)
+        const tripOut = afield.trip && !!taskOf(r.goal) && s.distHome > NEAR_HOME;
+        const may = (g: Goal) => SURVIVAL.has(g.name) || (tripOut ? g.name === kit.name && !s.items.some(i => i.name.endsWith('_pickaxe')) : cuts(g));
+        const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal) && may(g)), this.retryAt);
         if (next) await this.stopRunning(`${next.goal.name} is more urgent (${next.reason})`);
         return;
       }
@@ -425,7 +444,10 @@ export class Brain {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
       if (today) lines.push(today);
-      lines.push(...idleReport(world, why));
+      // the work queue: what waits on dry marks goes with what is blocked, and its own line says where it stands
+      const ladder = ladderOf(this.goals);
+      lines.push(...idleReport(world, why, s && ladder.length ? dryBlocked({ ...s, now: this.now() }, world, ladder) : []));
+      if (ladder.length) lines.push(workLine(world, this.now(), ladder));
     });
     const loops = this.loops.found.filter(f => this.now() - f.at < 60 * 60_000);
     if (loops.length) lines.push('Loops in the last hour (fix these in the code):', ...loops.map(f => `- ${new Date(f.at).toISOString().slice(11, 19)} ${f.loop.kind}: ${f.loop.summary}`));
@@ -665,6 +687,11 @@ export class Brain {
       }
     };
     this.note(`start ${goal.name}: ${reason}`);
+    // a rung of the work queue: why each rung above it did not run instead, from the answers this choice was made by
+    this.measure('skipped', () => {
+      const line = skippedLine(goal, s, world, this.goals, g => this.heldWords(g, s.now));
+      if (line) this.note(line);
+    });
     // the stuck watchdog counts from now: it kept the last job's clock, and every retry after a stuck stop was
     // "stuck" 5 s in (the shelter's 3-minute retries at the south fence never got to walk or wall in)
     this.stillAt = '';
@@ -816,6 +843,7 @@ export class Brain {
     // on its own: whatever goes wrong in it, the time above is booked. And before the save below: one that cannot be
     // made (a full disk) throws out of here, and the hold's minute must not lose that tick
     this.measure('release', () => this.releaseHold(s, world, lead, dt));
+    this.measure('dry', () => this.releaseDry(s, world, dt));
     // a run's end saves the tally with the rest; standing idle nothing would, and a restart lost the day so far
     if (this.idleSaved === undefined) this.idleSaved = now;
     else if (now - this.idleSaved >= 60_000) { this.idleSaved = now; this.memory.save(); }
@@ -853,11 +881,55 @@ export class Brain {
     }
   }
 
+  /**
+   * The same for the work queue's dry marks, sooner: 30 s of counted idle time while a rung of the ladder waits on
+   * its dry marks lets the oldest mark go, of a variant that could run otherwise. Whatever leads the idle time: with
+   * the real ladder the deep rung's hour, its probation or the blocked project always outranked `dry`, and the bot
+   * stood five minutes at a time by a coal trip that only waited on its mark. Once per mark: a try that comes back
+   * dry again waits its whole, longer time (work.ts). The half minute starts again after each.
+   */
+  private releaseDry(s: Snapshot, world: WorldMemory, dt: number): void {
+    const waits = ladderOf(this.goals).some(t => { const c = pick(t, s, world); return 'decline' in c && c.decline.cause === 'dry'; });
+    if (!waits) { this.dryIdle = 0; return; }
+    this.dryIdle += dt;
+    if (this.dryIdle < DRY_IDLE_MS) return;
+    this.dryIdle = 0;
+    const key = releaseOldestDry(world, s.now, s, ladderOf(this.goals));
+    if (!key) return;
+    this.note(`idle ${DRY_IDLE_MS / 1000}s on dry marks: let go of ${key}`);
+    this.again = true; // the tick that follows this one at once starts it
+  }
+
+  /** The brain's words for a goal it keeps back (`held until 14:32 (failed: ...)`), as the idle log says them; undefined when it is not held. */
+  private heldWords(g: Goal, now: number): string | undefined {
+    const until = this.retryAt.get(g.name) ?? 0;
+    if (!(until > now)) return undefined;
+    const why = this.holdWhy.get(g.name);
+    return `held until ${clock(until)}${why ? ` (${why})` : ''}`;
+  }
+
+  /**
+   * The work queue's part of a tick, before anything is decided. Its flags are lowered whenever no run of its is the
+   * running goal (a run the brain gave up on that never unwound must not leave "a trip is out" standing: the stash
+   * and the kit would wait for it for ever), and the brain's holds are shared with it (roundDue). Then its
+   * housekeeping (work.ts workTick: deaths, old stamps, the day's count, the tiers), with what it did in the log.
+   * Nothing more with no rung on the ladder.
+   */
+  private workQueue(s: Snapshot, world: WorldMemory): void {
+    if (!this.running || !taskOf(this.running.goal)) clearOut();
+    // the home rounds ask whether a trip could go instead: one this brain holds back cannot
+    shareHolds(world, this.retryAt);
+    const ladder = ladderOf(this.goals);
+    if (!ladder.length) return;
+    this.measure('work', () => { for (const line of workTick(s, world, () => this.rt.lastDeath(), ladder)) this.note(line); });
+  }
+
   /** The idle streak is over (something runs, or the counted daytime stopped): say so when it was worth a line. */
   private endStreak(): void {
     const st = this.streak;
     this.streak = undefined;
     this.holdIdle = 0;
+    this.dryIdle = 0;
     if (st && st.ms >= 15_000) this.note(idleOverLine(st.ms, st.by));
   }
 

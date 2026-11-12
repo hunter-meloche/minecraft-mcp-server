@@ -3,11 +3,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { putAway, stash, stashKeep, stashList, stock } from '../../src/client/brain/chores.js';
-import { GLUT, ROOM, makeRoom, noRoom, pockets, room, type RoomKind } from '../../src/client/brain/pockets.js';
+import { GLUT, ROOM, makeRoom, noRoom, out as afield, pockets, room, type RoomKind } from '../../src/client/brain/pockets.js';
+import { workGoals, workOf, type WorkTask } from '../../src/client/brain/work.js';
 import { food, gatherFood } from '../../src/client/brain/food.js';
 import { deepTrip } from '../../src/client/brain/deep.js';
 import { no, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
-import { Brain } from '../../src/client/brain/brain.js';
+import { Brain, decide } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime, type InventoryItem, type Status } from '../../src/client/tools.js';
 import type { BuildJob, WorldMemory } from '../../src/client/brain/memory.js';
 import { stackSize } from '../../src/client/brain/storage.js';
@@ -1206,4 +1207,138 @@ test('the real goal list at 34/36 with six loose slots: the brain starts a goal,
   t.true(idle.workMs > 0);
   t.is(idle.idleMs, 0);
   t.deepEqual(idle.by, {});
+});
+
+// ---- the rungs of the work queue and the pockets (work.ts). Serial: a work run raises flags the whole process shares ----
+
+/** a rung for the stand-in game, with one place to go to, `dist` blocks from home */
+const rung = (name: string, rank: number, reach: WorkTask['reach'], kind: RoomKind, dist: number, run: WorkTask['run']): WorkTask => ({
+  name, rank, reach, room: kind, budgetMs: 120_000, variants: () => [{ id: 'only', dist }], ready: () => null, run,
+});
+/** a brain whose goals are these rungs (and `more` before them), the rungs on the brain's own clock */
+function ladder(m: Bot, tasks: WorkTask[], more: Goal[] = []) {
+  let now = () => 1_000_000;
+  const goals = workGoals(() => undefined, tasks, () => now());
+  const b = brainOf(m, [...more, ...goals]);
+  now = () => b.at.clock;
+  const recent = () => b.brain.status().split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(11));
+  return { ...b, goals, recent };
+}
+
+test.serial('the stash cuts into a yard work run only at 36/36', async t => {
+  const m = bot(kit());
+  const st = { began: 0, stopped: 0 };
+  const chop = rung('chop', 7, 'yard', 'yard', 0, ctx => new Promise((_res, rej) => {
+    st.began++;
+    ctx.signal.addEventListener('abort', () => { st.stopped++; rej(new Error('aborted')); });
+  }));
+  const { brain } = ladder(m, [chop], [stash]);
+  brain.setEnabled(true);
+  await brain.tick();
+  await settle();
+  t.is(st.began, 1, brain.status());
+  t.deepEqual(afield, { trip: false, work: true });
+
+  // one slot free: a plain job is stopped here (above). A rung made its room before it set to work and sees to its
+  // pockets itself between its rounds: the stash leaves it to that while anything still fits
+  m.inv = pack(35, 4);
+  await brain.tick();
+  await settle();
+  t.is(st.stopped, 0);
+  t.notRegex(brain.status(), /stash is more urgent/);
+
+  // full: what it picks up next would lie on the ground
+  m.inv = pack(36, 4);
+  await brain.tick();
+  await settle();
+  t.is(st.stopped, 1);
+  t.regex(brain.status(), /stopping work: chop: stash is more urgent \(36\/36 slots used\)/);
+  t.deepEqual(afield, { trip: false, work: false }, 'the run is over: so is what it asked of the stash');
+  await brain.tick();
+  await settle();
+  t.regex(brain.status(), /start stash: 36\/36 slots used/);
+  t.regex(brain.status(), /done stash in \d+s: put 256 item\(s\) in the chests/);
+  t.is(m.used(), 32);
+  brain.setEnabled(false);
+});
+
+test.serial('a rung whose room could not be made steps aside for 10 min, and the next rung runs', async t => {
+  const MIN = 60_000;
+  // 34/36 with four stacks of logs to put away, and the chest's lid will not lift
+  const m = bot(pack(34, 4));
+  const real = m.act;
+  m.act = (name, a) => {
+    if (name === 'store-in-chest') throw new Error('The chest at (1, 64, 0) did not open');
+    return real(name, a);
+  };
+  const ran: string[] = [];
+  const instant = (name: string): WorkTask['run'] => async () => { ran.push(name); return { gain: 1, text: 'done' }; };
+  // the cane walk needs three slots free, the tidying round in the yard two
+  const cane = rung('cane', 5, 'near', 'trip', 20, instant('cane'));
+  const tidy = rung('tidy', 6, 'yard', 'yard', 0, instant('tidy'));
+  const { brain, at, goals, recent } = ladder(m, [cane, tidy]);
+  brain.setEnabled(true);
+
+  // the plan says the stash makes the room, so the upper rung starts, and fails at the chest: said as it happened
+  await brain.tick();
+  await settle();
+  t.deepEqual(recent().slice(2), [
+    'start work: cane: only: 20 blocks out',
+    'work: cane: making room: The chest at (1, 64, 0) did not open',
+    'failed work: cane: pockets still 34/36 after putting away: The chest at (1, 64, 0) did not open',
+  ]);
+  const w = brain.worldMemory()!;
+  t.is(w.lastDone?.['no room: trip'], at.clock);
+  t.deepEqual(workOf(w).dry, {}, 'it never set out: the place has no mark');
+  t.deepEqual(afield, { trip: false, work: false });
+
+  // the next tick: the rung below has its two slots and runs; the one above says its pockets are why it does not
+  at.clock += 1000;
+  await brain.tick();
+  await settle();
+  t.deepEqual(recent().slice(5), [
+    'start work: tidy: only: in the yard',
+    'work: tidy: skipped: cane (pockets: 34/36 slots, the stash made no room just now (cane needs 3 free))',
+    'done work: tidy in 0s: [only] done',
+  ]);
+  t.deepEqual(ran, ['tidy']);
+  t.regex(brain.status(), /\nRetrying later: work: cane 299s\.\n/, 'a failed run, held as any goal\'s is');
+  brain.setEnabled(false);
+  await settle();
+
+  // for ten minutes, whatever the brain holds or lets go of meanwhile; then the plan is believed again
+  const caneGoal = goals.find(g => g.name === 'work: cane')!;
+  const look = (min: number) => snap(m.inv, { now: at.clock - 1000 + min * MIN, timeOfDay: 6000 });
+  t.deepEqual(caneGoal.declines!(look(9), w), { cause: 'pockets', text: '34/36 slots, the stash made no room 9 min ago (cane needs 3 free)' });
+  t.is(decide(look(9), w, goals, new Map())?.goal.name, 'work: tidy');
+  t.is(caneGoal.declines!(look(10), w), null);
+  t.deepEqual(decide(look(10), w, goals, new Map()), { goal: caneGoal, reason: 'only: 20 blocks out' });
+});
+
+test.serial('a put-away that took the last of the day: the rung does not set out, and says so without a mark against the place', async t => {
+  // 35/36: the round in the yard needs the stash first, and by the time the logs are in the chest it is evening
+  const m = bot(pack(35, 4));
+  const real = m.act;
+  m.act = (name, a) => {
+    const r = real(name, a);
+    if (name === 'store-in-chest') m.time = 10_800;
+    return r;
+  };
+  let began = 0;
+  const chop = rung('chop', 7, 'yard', 'yard', 0, async () => { began++; return { gain: 1, text: 'done' }; });
+  const { brain, recent } = ladder(m, [chop]);
+  brain.setEnabled(true);
+  await brain.tick();
+  await settle();
+  t.deepEqual(recent().slice(2), [
+    'start work: chop: only: in the yard',
+    'work: chop: stored 256, dropped 0',
+    'done work: chop in 0s: [only] not setting out: 0.2 min of daylight left (chop needs 0.3)',
+  ]);
+  t.is(began, 0);
+  t.is(m.used(), 31, 'the room was made');
+  t.deepEqual(workOf(brain.worldMemory()!).dry, {});
+  t.is(workOf(brain.worldMemory()!).last, undefined);
+  t.deepEqual(afield, { trip: false, work: false });
+  brain.setEnabled(false);
 });

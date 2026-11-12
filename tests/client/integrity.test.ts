@@ -165,9 +165,12 @@ test('repair: once a day at home by day, puts back what it carries or finds in t
     '; not put back: chest at 5,64,0 (a container (what it held is gone))');
   t.true(progress.includes('put back oak_planks at 2,64,0'));
   t.deepEqual(adopted, []);
-  // done for today
+  // done for today. Its time is up 20 min on, and then it is due in the evening, or when no trip could go instead, or
+  // when it has waited 40 min: here a trip for coal could (the chests hold none), so the morning is the trip's
   t.is(goal.wants(s, mem), null);
-  t.regex(goal.wants({ ...s, now: s.now + 21 * 60_000 }, mem) ?? '', /daily round/);
+  t.is(goal.wants({ ...s, now: s.now + 21 * 60_000 }, mem), null);
+  t.regex(goal.wants({ ...s, now: s.now + 21 * 60_000, timeOfDay: 8000 }, mem) ?? '', /daily round/);
+  t.regex(goal.wants({ ...s, now: s.now + 41 * 60_000 }, mem) ?? '', /daily round/);
 });
 
 test('repair: nothing built near home, nothing to want; blocks built before states were kept get one', async (t) => {

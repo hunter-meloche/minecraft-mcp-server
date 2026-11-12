@@ -30,6 +30,12 @@ const SHORT = 60_000;
 /** Same text but for numbers (counts, coordinates, seconds). */
 const shape = (t?: string) => (t ?? '').replace(/-?\d+(\.\d+)?/g, '#').slice(0, 120);
 
+/**
+ * A run that brought something in got somewhere, however it ended and however short it was: a trip the stash cuts
+ * into three times with ore in the pockets each time is the day's work, not two goals fighting.
+ */
+const gained = (r: Run) => (r.gain ?? 0) > 0;
+
 /** The loop the most recent finished runs show, if any. */
 export function findLoop(runs: Run[], now: number): Loop | undefined {
   const recent = runs.filter(r => r.outcome && now - r.at <= WINDOW);
@@ -45,10 +51,10 @@ export function findLoop(runs: Run[], now: number): Loop | undefined {
     const cycles = seq.length / 2;
     if (cycles >= 3) {
       const pairs = Array.from({ length: cycles }, (_, i) => seq.slice(2 * i, 2 * i + 2));
-      const losing = pairs.every(p => p.some(r => r.outcome !== 'done'));
-      const quick = pairs.every(p => p.every(r => (r.ms ?? 0) < QUICK));
+      const losing = pairs.every(p => p.some(r => r.outcome !== 'done' && !gained(r)));
+      const quick = pairs.every(p => p.every(r => (r.ms ?? 0) < QUICK && !gained(r)));
       if (losing || quick) {
-        const lost = (g: string) => seq.filter(r => r.goal === g && r.outcome !== 'done').length;
+        const lost = (g: string) => seq.filter(r => r.goal === g && r.outcome !== 'done' && !gained(r)).length;
         const victim = lost(a) >= lost(b) ? a : b;
         return {
           kind: 'ping-pong', goals: [b, a], victim, cycles, runs: seq,
@@ -60,9 +66,9 @@ export function findLoop(runs: Run[], now: number): Loop | undefined {
     }
   }
 
-  // one goal over and over with the same result
+  // one goal over and over with the same result, and nothing to show for it (a run with gain ends the streak)
   let k = 0;
-  while (k < tail.length && tail[k].goal === a && (tail[k].ms ?? 0) < SHORT && shape(tail[k].text) === shape(tail[0].text)) k++;
+  while (k < tail.length && tail[k].goal === a && (tail[k].ms ?? 0) < SHORT && !gained(tail[k]) && shape(tail[k].text) === shape(tail[0].text)) k++;
   if (k >= 4) {
     const seq = tail.slice(0, k).reverse();
     return {

@@ -1,5 +1,5 @@
 import test from 'ava';
-import { MINE_FROM_BUILDS, MINE_FROM_YARD, chooseMineSite, deepTripKit, deepTripReady, pickMineStart, tripBudgetMs, type TripCheck } from '../../src/client/brain/mine.js';
+import { MINE_FROM_BUILDS, MINE_FROM_YARD, MINE_ROOM, chooseMineSite, deepTripKit, deepTripReady, pickMineStart, tripBudgetMs, type TripCheck } from '../../src/client/brain/mine.js';
 
 const home = { x: 0, z: 0 };
 const col = (x: number, z: number, extra: Partial<{ ground: number; water: boolean; protected: boolean }> = {}) =>
@@ -81,6 +81,36 @@ test('a kept mine start inside the yard is dropped', t => {
   // with no yard known there is nothing to be inside of
   const near = { x: 3, y: 63, z: 3 };
   t.is(pickMineStart(home, undefined, near, none), near);
+});
+
+test('the mine start keeps room for the chase inside the leash: on the live yard, east, 56 out', t => {
+  // the live home and yard (Nov 12): the yard reaches 64 north of home, so 40 beyond it was 104 out, past the leash.
+  // Baritone's mine follows the ore it knows (30 blocks from its start on Nov 8): a side is used only MINE_ROOM inside
+  // the leash, and the north side has 2 blocks of such room
+  const home = { x: -549, y: 63, z: 2183 };
+  const yard = { x1: -565, z1: 2119, x2: -533, z2: 2215 };
+  const none = () => Infinity;
+  const out = (p: { x: number; z: number }) => Math.hypot(p.x - home.x, p.z - home.z);
+  const east = { x: -493, y: 63, z: 2183 };
+  t.is(MINE_ROOM, 30);
+  t.deepEqual(pickMineStart(home, yard, undefined, none, 96), east, 'east: 40 beyond the yard, 56 out');
+  t.deepEqual(pickMineStart(home, yard, undefined, none), { x: -549, y: 63, z: 2079 }, 'no leash given: north, 40 beyond, as before');
+  // the side the bot's memory still has from before (104 out), and one on the leash, are let go
+  t.deepEqual(pickMineStart(home, yard, { x: -549, y: 63, z: 2079 }, none, 96), east);
+  t.deepEqual(pickMineStart(home, yard, { x: -549, y: 63, z: 2087 }, none, 96), east);
+  // a kept start with the room is kept
+  t.deepEqual(pickMineStart(home, yard, { x: -500, y: 66, z: 2170 }, none, 96), { x: -500, y: 66, z: 2170 });
+  // a friend's base on each side in turn: none nearer the yard than 30, all MINE_ROOM inside the leash
+  const sides = [-1, 0, 1, 2].map(skip => pickMineStart(home, yard, undefined, p => {
+    const side = p.z < yard.z1 ? 0 : p.x > yard.x2 ? 1 : p.x < yard.x1 ? 2 : 3;
+    return side <= skip ? 10 : 100;
+  }, 96)!);
+  t.deepEqual(sides, [east, east, { x: -605, y: 63, z: 2183 }, { x: -549, y: 63, z: 2249 }]);
+  t.true(sides.every(p => out(p) <= 96 - MINE_ROOM));
+  t.deepEqual(sides.map(p => Math.round(out(p))), [56, 56, 56, 66]);
+  // a shorter leash: the set-out shrinks, never under 30 beyond the yard; under that no side will do
+  t.deepEqual(pickMineStart(home, yard, undefined, none, 80), { x: -499, y: 63, z: 2183 });
+  t.is(pickMineStart(home, yard, undefined, none, 75), undefined);
 });
 
 /** deepTripReady as it stood before the kit was split from it (commit 817d80b), word for word. */

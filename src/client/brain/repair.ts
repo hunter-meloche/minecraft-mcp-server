@@ -4,6 +4,7 @@ import { key } from './chests.js';
 import { prepare } from './project.js';
 import { missingBuilt, type BuiltBlock } from './integrity.js';
 import type { Pos, WorldMemory } from './memory.js';
+import { roundDue } from './work.js';
 
 /**
  * Once a day: look over everything the bot built around home and put back what went missing (a creeper's crater in
@@ -20,7 +21,6 @@ export const REPAIR_RADIUS = 24;
 const REGION_MAX = 65_536;
 
 // the same daily bookkeeping as chores.ts
-const since = (world: WorldMemory, chore: string, now: number) => now - (world.lastDone?.[chore] ?? 0);
 const done = (world: WorldMemory, chore: string, now: number) => { world.lastDone ??= {}; world.lastDone[chore] = now; };
 
 /** The blocks at `positions` (as world.region gives them: null where unloaded), read over their bounding box in slabs. */
@@ -50,7 +50,8 @@ export function repairGoal(rt: ClientRuntime): Goal {
     gains: true,
     wants: (s, world) => {
       if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > NEAR_HOME) return null;
-      if (since(world, 'repair', s.now) <= 20 * MINUTE) return null;
+      // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
+      if (!roundDue(s, world, 'repair', 20 * MINUTE)) return null;
       return rt.builtNear(s.home, REPAIR_RADIUS).length ? 'daily round: anything missing from what the bot built' : null;
     },
     run: async ctx => {

@@ -129,6 +129,39 @@ test('mine-blocks never digs up the home area: from home it walks out to ore bey
   t.true(r.isError);
   t.regex(r.text, /No coal_ore in sight outside the home area/);
   t.is(request.getCalls().filter(c => c.args[0] === 'mine').length, 2);
+
+  // the brain's leash: from the zone's edge the nearest ore lies 70 from home; with 50 as the most it walks to the
+  // one 45 from home, and with 40 to none
+  pos = { x: 20.5, y: 64, z: 0.5 };
+  ores = [{ x: 0, y: 40, z: 45 }, { x: 70, y: 62, z: 0 }];
+  gotos.length = 0;
+  t.regex((await run('mine-blocks', { block: 'coal_ore', count: 3 })).text, /^Mined for 20s/);
+  t.like(gotos[0], { x: 70, z: 0 }, 'no bound given: the nearest');
+  pos = { x: 20.5, y: 64, z: 0.5 };
+  gotos.length = 0;
+  await run('mine-blocks', { block: 'coal_ore', count: 3, maxFromHome: 50 });
+  t.like(gotos[0], { x: 0, z: 45 });
+  pos = { x: 20.5, y: 64, z: 0.5 };
+  const far = await run('mine-blocks', { block: 'coal_ore', count: 3, maxFromHome: 40 });
+  t.true(far.isError);
+  t.regex(far.text, /No coal_ore in sight outside the home area \(12\+ blocks past 24 blocks from home \(0, 64, 0\), within 40 of home\)/);
+
+  // and from outside the zone as well (the surface rung's later rounds, or a start from the cane patch 36 out): there
+  // Baritone's miner would head for the nearest it knows of, at any distance
+  const mines = () => request.getCalls().filter(c => c.args[0] === 'mine').length;
+  pos = { x: 36.5, y: 64, z: 0.5 };
+  ores = [{ x: 150, y: 60, z: 0 }];
+  gotos.length = 0;
+  const before = mines();
+  const beyond = await run('mine-blocks', { block: 'coal_ore', count: 3, maxFromHome: 96 });
+  t.true(beyond.isError);
+  t.regex(beyond.text, /within 96 of home/);
+  t.is(mines(), before, 'no mining: the only coal is past the leash');
+  t.is(gotos.length, 0);
+  ores = [{ x: 45, y: 60, z: 0 }, { x: 150, y: 60, z: 0 }];
+  t.regex((await run('mine-blocks', { block: 'coal_ore', count: 3, maxFromHome: 96 })).text, /^Mined for 20s/);
+  t.like(gotos[0], { x: 45, z: 0 }, 'to the coal within the leash first');
+  t.is(mines(), before + 1);
 });
 
 /** world.region answers: all air the first time (the materials check), then `blocks` (the check after building). */

@@ -89,24 +89,37 @@ export const MINE_FROM_BUILDS = 32;
  */
 export const MINE_FROM_YARD = 30;
 
+/**
+ * How far inside the leash a mine start must stand. Baritone's mine has no radius: it follows the ore it knows, and on
+ * Nov 8 a trip ended 30 blocks from where it went down. A start on the leash took every trip past it.
+ */
+export const MINE_ROOM = 30;
+
 type P3 = { x: number; y: number; z: number };
 
 /**
- * Where a deep trip sets out from: the remembered point while it's clear of others' builds on the surface and still
- * well outside the yard; otherwise the first clear one of the four sides of the yard, 40 blocks out (north first: the
- * old default, away from the lake). Undefined when every side has someone's build by it. `distance` measures to the
- * nearest build on the surface.
+ * Where a deep trip sets out from: the remembered point while it's clear of others' builds on the surface, still well
+ * outside the yard and MINE_ROOM inside the leash of home; otherwise the first clear one of the four sides of the
+ * yard, 40 blocks out, or as far out as that allows but never nearer the yard than MINE_FROM_YARD (north first: the
+ * old default, away from the lake; a side with no such room is not used). Undefined when no side will do.
+ * `distance` measures to the nearest build on the surface; `leash` is from home, across the ground (the live yard
+ * reaches 64 north of home, so the north side has no room inside the leash of 96 and the trips set out east).
  */
 export function pickMineStart(home: P3, yard: { x1: number; z1: number; x2: number; z2: number } | undefined, kept: P3 | undefined,
-  distance: (p: P3) => number): P3 | undefined {
+  distance: (p: P3) => number, leash = Infinity): P3 | undefined {
   const clear = (p: P3) => distance(p) >= MINE_FROM_BUILDS;
-  if (kept && clear(kept) && (!yard || outsideBy(yard, kept) >= MINE_FROM_YARD)) return kept;
+  const held = (p: P3) => Math.hypot(p.x - home.x, p.z - home.z) <= leash - MINE_ROOM;
+  if (kept && clear(kept) && held(kept) && (!yard || outsideBy(yard, kept) >= MINE_FROM_YARD)) return kept;
   const out = 40;
-  const sides: P3[] = [
-    { x: home.x, y: home.y, z: (yard?.z1 ?? home.z - 16) - out },
-    { x: (yard?.x2 ?? home.x + 16) + out, y: home.y, z: home.z },
-    { x: (yard?.x1 ?? home.x - 16) - out, y: home.y, z: home.z },
-    { x: home.x, y: home.y, z: (yard?.z2 ?? home.z + 16) + out }
+  // each side's yard edge, how far it is from home, and the point `by` blocks beyond it
+  const sides: [number, (by: number) => P3][] = [
+    [home.z - (yard?.z1 ?? home.z - 16), by => ({ x: home.x, y: home.y, z: (yard?.z1 ?? home.z - 16) - by })],
+    [(yard?.x2 ?? home.x + 16) - home.x, by => ({ x: (yard?.x2 ?? home.x + 16) + by, y: home.y, z: home.z })],
+    [home.x - (yard?.x1 ?? home.x - 16), by => ({ x: (yard?.x1 ?? home.x - 16) - by, y: home.y, z: home.z })],
+    [(yard?.z2 ?? home.z + 16) - home.z, by => ({ x: home.x, y: home.y, z: (yard?.z2 ?? home.z + 16) + by })]
   ];
-  return sides.find(clear);
+  return sides.flatMap(([edge, at]) => {
+    const by = Math.min(out, Math.floor(leash - MINE_ROOM - edge));
+    return by >= MINE_FROM_YARD ? [at(by)] : [];
+  }).find(clear);
 }

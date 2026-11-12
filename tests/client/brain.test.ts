@@ -324,6 +324,18 @@ test('decide uses a goal\'s urgency when it has one', (t) => {
   t.is(decide(snap({ now: 9000 }), world, [chores, late], new Map())?.goal.name, 'project');
 });
 
+test('decide asks each goal\'s urgency once, and orders by it as before', (t) => {
+  // the sort asked it at every comparison: the stock trip's urgency makes a kit plan, and over the real goal list a
+  // decision on the live homestead took 5.7 ms (3.4 ms asked once), every 5 s tick
+  const world = { landmarks: { chests: [], farmland: [] }, leash: 96 };
+  const asked = new Map<string, number>();
+  const counted = (name: string, priority: number, wants: boolean, urgency: number): Goal =>
+    ({ ...goal(name, priority, wants), urgency: () => { asked.set(name, (asked.get(name) ?? 0) + 1); return urgency; } });
+  const goals = [counted('a', 10, false, 30), counted('b', 20, true, 12), goal('c', 25, false), counted('d', 5, true, 15), counted('e', 1, false, 40), goal('f', 14, true)];
+  t.is(decide(snap(), world, goals, new Map())?.goal.name, 'd');
+  t.deepEqual(Object.fromEntries(asked), { a: 1, b: 1, d: 1, e: 1 });
+});
+
 test('idle watchdog: by day, standing still with nothing to do, it lets go of every hold at 3 min and forages at 6', async (t) => {
   const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
   const { rt } = fakeRuntime(state);

@@ -4,6 +4,7 @@ import type { Goal } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { readBox, yardOf } from './milestones.js';
 import { digByHand } from '../structures/job.js';
+import { roundDue } from './work.js';
 
 /**
  * Once a day: take away the stray blocks left standing on the lawn: an emergency wall-in, Baritone's scaffold, a
@@ -21,7 +22,6 @@ const MAX_CLUSTER = 16;
 /** Tries at a stray before it's left be (out of reach on foot: high on a wall, over water). */
 const TRIES = 2;
 
-const since = (world: WorldMemory, chore: string, now: number) => now - (world.lastDone?.[chore] ?? 0);
 const done = (world: WorldMemory, chore: string, now: number) => { world.lastDone ??= {}; world.lastDone[chore] = now; };
 
 /** The cells of the clusters to clear: small, scaffold kinds only, above `groundY`, and clear of built blocks. */
@@ -51,7 +51,8 @@ export function tidyGoal(rt: ClientRuntime): Goal {
     retryMs: 30 * MINUTE,
     wants: (s, world) => {
       if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 12 || s.dimension !== 'overworld') return null;
-      return since(world, 'tidy', s.now) > 20 * MINUTE ? 'daily round: stray blocks on the lawn' : null;
+      // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
+      return roundDue(s, world, 'tidy', 20 * MINUTE) ? 'daily round: stray blocks on the lawn' : null;
     },
     run: async ctx => {
       done(ctx.world, 'tidy', ctx.s.now);

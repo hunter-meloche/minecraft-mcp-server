@@ -2,12 +2,16 @@ import test from 'ava';
 import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stashKeep, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
 import { stashPlan } from '../../src/client/brain/kit.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
-import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
+import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
-import type { InventoryItem } from '../../src/client/tools.js';
+import type { ClientRuntime, InventoryItem } from '../../src/client/tools.js';
 import { deepTrip } from '../../src/client/brain/deep.js';
 import { billCarry, billCarryCap } from '../../src/client/brain/project.js';
 import { enchantRoom } from '../../src/client/brain/blueprints.js';
+import { tidyGoal } from '../../src/client/brain/tidy.js';
+import { repairGoal } from '../../src/client/brain/repair.js';
+import { signsGoal } from '../../src/client/brain/signs.js';
+import { EVENING_AT } from '../../src/client/brain/work.js';
 
 const CHEST = { x: 1, y: 64, z: 0 };
 const world = (over: Partial<WorldMemory> = {}): WorldMemory => ({
@@ -599,4 +603,47 @@ test('stash: a build job carrying its load is left alone until not a slot is fre
   const full = snap([...items, { slot: 8, name: 'string', count: 3 }, { slot: 9, name: 'gunpowder', count: 2 }]);
   t.regex(stash.wants(full, w(11 * 60_000)) ?? '', /36\/36 slots used/);
   t.is(stash.wants(full, w(60_000)), null);
+});
+
+test('a round is due in the evening, or when twice overdue, or when no far or deep rung is ready: lights, tidy, repair, signs and sort; a round not yet due is not started', (t) => {
+  const NOW = 10 * 60 * 60_000;
+  const MIN = 60_000;
+  const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
+  // each round with something to do: torches carried, a built block to look at, chests without their signs, logs in
+  // the stone chest
+  const rt = { builtNear: () => [{ at: { x: 2, y: 64, z: 3 }, state: 'oak_planks' }] } as unknown as ClientRuntime;
+  const rounds: [Goal, number][] = [[lights, 20], [tidyGoal(rt), 20], [repairGoal(rt), 20], [signsGoal, 20], [sortStorage, 30]];
+  // what the third chest holds decides the trips: every ore and the coal at their targets (no trip), no coal (coal
+  // from the surface), no iron (a deep trip: the kit carried is whole)
+  const FULL = { diamond: 16, raw_iron: 96, raw_gold: 32, redstone: 64, lapis_lazuli: 32, coal: 128 };
+  const stores: Record<string, Record<string, number>> = { 'no trip': FULL, 'coal from the surface': { ...FULL, coal: 0 }, 'a deep trip': { ...FULL, raw_iron: 0 } };
+  const home = (round: string, ago: number, store: Record<string, number>) => world({
+    landmarks: { chests, farmland: [] },
+    chestItems: { '1,64,0': { cobblestone: 64, oak_log: 10 }, '2,64,0': { oak_planks: 5 }, '3,64,0': { ...store } },
+    chestAssign: { '1,64,0': 'stone', '2,64,0': 'wood', '3,64,0': 'ores' },
+    lastDone: { [round]: NOW - ago }
+  });
+  const at = (timeOfDay: number) => snap(gear(), { now: NOW, timeOfDay });
+  const bad: string[] = [];
+  for (const [goal, every] of rounds) {
+    const due = (time: number, ago: number, store: string) => goal.wants(at(time), home(goal.name, ago * MIN, stores[store])) !== null;
+    const expect = (want: boolean, time: number, ago: number, store: string) => {
+      if (due(time, ago, store) !== want) bad.push(`${goal.name}: ${ago} min after its last, time ${time}, ${store}: ${want ? 'not due' : 'due'}`);
+    };
+    // its time is up, by day: a trip that could go comes first
+    expect(false, 3000, every + 5, 'coal from the surface');
+    expect(false, 3000, every + 5, 'a deep trip');
+    // in the evening it is due whatever else could go
+    expect(true, EVENING_AT, every + 5, 'coal from the surface');
+    expect(true, EVENING_AT, every + 5, 'a deep trip');
+    // waited twice its time: due at any hour
+    expect(false, 3000, 2 * every, 'a deep trip');
+    expect(true, 3000, 2 * every + 1, 'a deep trip');
+    // no trip to go on: due as soon as its time is up, as before
+    expect(true, 3000, every + 1, 'no trip');
+    // not yet its time: never, evening or no trip
+    expect(false, EVENING_AT, every - 1, 'no trip');
+    expect(false, 3000, every - 1, 'no trip');
+  }
+  t.deepEqual(bad, []);
 });

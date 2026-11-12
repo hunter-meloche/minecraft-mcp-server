@@ -114,6 +114,8 @@ const SAID = ['away', 'health', 'pockets', 'late', 'kit', 'project', 'dry', 'sto
  * that kind: the larder and the donation never wait on the pockets, and the mission keeps the trip's fixed ten free.
  */
 const KIND: Record<string, RoomKind> = { project: 'project', build: 'project', 'deep trip': 'deep', stock: 'trip', cane: 'yard', pens: 'yard', trees: 'yard' };
+/** The same for the rungs of the work queue on the real goal list (worktasks.ts). */
+const WORK_KIND: Record<string, RoomKind> = { 'work: trip kit': 'yard', 'work: deep': 'deep', 'work: surface': 'trip' };
 
 test('wants is null exactly when declines is not: the ten gated goals over pockets x hour x project blocked or not x at home, at the far end of the yard or 50 out; and full pockets are the reason only where the stash could make no room', (t) => {
   const goals = gated();
@@ -613,11 +615,12 @@ test('the real goal list, pockets 36/36 and the project blocked, by day: brain-s
   for (let i = 0; i < 3; i++) { clock += 5000; await brain.tick(); await settle(); }
 
   t.deepEqual(acts, [], 'nothing ran');
-  t.is(statusLine(brain, 'Now:'), 'Now: idle (pockets): 36/36 slots, nothing to put away (stock needs 3 free).');
+  // the work queue's rungs are said first: the deep rung, with its kit ready and nothing stored, is what full pockets keep at home
+  t.is(statusLine(brain, 'Now:'), 'Now: idle (pockets): 36/36 slots, nothing to put away (deep needs 10 free).');
   t.is(statusLine(brain, 'Blocked:'), 'Blocked: project - short of 98 sugar_cane, 38 leather');
   t.deepEqual(today(brain), { day: 0, workMs: 15_000, idleMs: 15_000, emptyMs: 0, by: { pockets: 15_000 } });
   const lines = brain.status().split('\n');
-  t.true(lines.includes('- 14:00:15 idle 15s: pockets: 36/36 slots, nothing to put away (stock needs 3 free) | project: short of 98 sugar_cane, 38 leather | stocked: 320 food points at home (keep 60)'), lines.join('\n'));
+  t.true(lines.includes('- 14:00:15 idle 15s: pockets: 36/36 slots, nothing to put away (deep needs 10 free) | project: short of 98 sugar_cane, 38 leather | stocked: 320 food points at home (keep 60)'), lines.join('\n'));
   brain.setEnabled(false);
 });
 
@@ -677,7 +680,7 @@ test('the real goal list over the grid: wherever no goal is chosen, one of them 
       for (const g of goals) {
         const no = g.declines?.(s, make(blocked));
         if (no?.cause !== 'pockets') continue;
-        const kind = KIND[g.name];
+        const kind = KIND[g.name] ?? WORK_KIND[g.name];
         if (!kind) { bad.push(`${cell}: ${g.name} says ${no.text}, and has no room of its own in the rule`); continue; }
         const p = pockets(s, w, kind);
         rec.who.add(`${g.name} (needs ${ROOM[kind]}, ${p.loose} to put away${reach ? '' : ', chests out of reach'})`);

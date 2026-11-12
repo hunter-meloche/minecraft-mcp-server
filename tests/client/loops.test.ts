@@ -48,3 +48,69 @@ test('LoopWatch reports a loop once per half hour', (t) => {
   }
   t.is(found, 1);
 });
+
+/** the stash cutting into the wood round `n` times over, the round with this much in the pockets each time */
+const cutShort = (n: number, gain?: number): Run[] => {
+  const runs: Run[] = [];
+  for (let i = 0; i < n; i++) {
+    runs.push({ ...run('work: yard', i * 15 * S, 8 * S, 'stopped', 'stash is more urgent (36/36 slots used)'), ...(gain === undefined ? {} : { gain }) });
+    runs.push(run('stash', i * 15 * S + 9 * S, 3 * S, 'done', 'put 64 item(s) in the chests'));
+  }
+  return runs;
+};
+
+test('no loop: a run stopped with something brought in is no lost turn, however often the stash cuts in', (t) => {
+  t.is(findLoop(cutShort(4, 12), 70 * S), undefined);
+  // the same turns with nothing to show are the loop they always were (told nothing, or told of nothing)
+  for (const runs of [cutShort(4), cutShort(4, 0)]) {
+    const loop = findLoop(runs, 70 * S)!;
+    t.is(loop.kind, 'ping-pong');
+    t.is(loop.victim, 'work: yard');
+    t.regex(loop.summary, /^work: yard and stash took turns 4 times in 54s \(work: yard never got anywhere\): /);
+  }
+  // one turn in three that brought something in: not every turn was lost, and that is no loop either
+  const mixed = cutShort(3);
+  mixed[2].gain = 5;
+  t.is(findLoop(mixed, 60 * S), undefined);
+
+  // two goals handing over every few seconds, each done: quick turns are a loop only while neither brings anything in
+  const quick = (gain?: number): Run[] => [0, 1, 2].flatMap(i => [
+    { ...run('work: cane', i * 10 * S, 4 * S, 'done', '[south] +3 things'), ...(gain === undefined ? {} : { gain }) },
+    run('larder', i * 10 * S + 5 * S, 2 * S, 'done', 'cooked nothing')
+  ]);
+  t.is(findLoop(quick(), 40 * S)?.kind, 'ping-pong');
+  t.regex(findLoop(quick(), 40 * S)!.summary, /kept stopping quickly/);
+  t.is(findLoop(quick(3), 40 * S), undefined);
+});
+
+test('spinning: the same nothing four times over is a loop; a run with gain ends the streak', (t) => {
+  const dry = (i: number) => run('work: scout', i * 30 * S, 20 * S, 'done', `[${i}] nothing found`);
+  const loop = findLoop([0, 1, 2, 3].map(dry), 150 * S)!;
+  t.is(loop.kind, 'spinning');
+  t.is(loop.summary, 'work: scout ran 4 times in 90s with the same result: done ([3] nothing found)');
+  // every run brought something in: the same words each time, and the day's work all the same
+  t.is(findLoop([0, 1, 2, 3, 4].map(i => ({ ...run('work: cane', i * 30 * S, 20 * S, 'done', '[south] +3 things'), gain: 3 })), 180 * S), undefined);
+  // three for nothing, one that found something, three for nothing: no four in a row
+  const broken = [0, 1, 2, 3, 4, 5, 6].map(dry);
+  broken[3].gain = 2;
+  t.is(findLoop(broken, 240 * S), undefined);
+  // the fourth for nothing after it is the loop again
+  t.is(findLoop([...broken, dry(7)], 270 * S)?.cycles, 4);
+});
+
+test('LoopWatch: the gain a run tells of as it goes is what its end is judged by', (t) => {
+  const turns = (gain: number) => {
+    const w = new LoopWatch();
+    let found = 0;
+    for (let i = 0; i < 5; i++) {
+      const a = w.begin('work: yard', '', i * 15 * S);
+      if (gain) a.gain = gain; // the brain writes it on the run as the goal reports it
+      if (w.end(a, 'stopped', 'stash is more urgent', i * 15 * S + 8 * S)) found++;
+      const b = w.begin('stash', '', i * 15 * S + 9 * S);
+      if (w.end(b, 'done', 'put 64 item(s) in the chests', i * 15 * S + 12 * S)) found++;
+    }
+    return found;
+  };
+  t.is(turns(0), 1);
+  t.is(turns(6), 0);
+});

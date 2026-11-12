@@ -131,6 +131,8 @@ export interface WorldMemory {
   fenceMove?: { side: 'north' | 'south' | 'west' | 'east'; old: { x1: number; z1: number; x2: number; z2: number; y: number } };
   /** the daytime it was busy, idle and busy to no gain, with the idle time by cause: today and the last week (idlelog.ts) */
   idle?: import('./idlelog.js').IdleMemory;
+  /** the work queue's marks: which variants came back dry and when, the deep trips and deaths, the last run (work.ts) */
+  work?: import('./work.js').WorkMemory;
 }
 
 export const DEFAULT_LEASH = 96;

@@ -5,6 +5,7 @@ import { chestAssignment } from './chores.js';
 import { categoryOfLabel, chestLabels, type Category } from './storage.js';
 import { prepare } from './project.js';
 import { allItems, mostWood } from './progress.js';
+import { roundDue } from './work.js';
 
 /**
  * A sign over every home chest naming what goes in it ("food1", "tools1", "ore2", ...), like a person labels their
@@ -88,7 +89,8 @@ export const signsGoal: Goal = {
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 24 || world.landmarks.chests.length < 3) return null;
-    if (s.now - (world.lastDone?.signs ?? 0) < 20 * MINUTE) return null;
+    // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
+    if (!roundDue(s, world, 'signs', 20 * MINUTE)) return null;
     // the assignment as it stands now (new chests in it), not as the stash last left it
     const labels = chestLabels(world.landmarks.chests, chestAssignment(world), world.chestSigns);
     const keys = new Set(world.landmarks.chests.map(key));

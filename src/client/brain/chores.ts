@@ -1,5 +1,5 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
-import { foodsFor26 } from '../tools.js';
+import { foodsFor26, type InventoryItem } from '../tools.js';
 import { fromGate, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 // lives with the goal that walks the bot back to the yard now (goals.ts cannot import from here); still found here
 export { outsideBy } from './goals.js';
@@ -9,15 +9,17 @@ import { owedItems, ownItems } from './community.js';
 import { deepTrip } from './deep.js';
 import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
 import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign, type Deposit } from './storage.js';
-import { kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
+import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
-import { FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, makeRoom, noRoom, room, type RoomKind } from './pockets.js';
+import { FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, makeRoom, noRoom, out as afield, room, type RoomKind } from './pockets.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
 import { fuelFor } from './project.js';
 import { daylightLeft } from './schedule.js';
 import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
+// (work.ts reaches this file through pockets.ts: its roundDue is asked inside the rounds' gates only)
+import { roundDue } from './work.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -185,8 +187,11 @@ export const stash: Goal = {
   // Worth stopping a running goal for only when that goal would start losing what it picks up: fewer free slots than
   // a round in the yard needs (a build job carrying its load: none at all, as its own rule above says). With more
   // room the stash waits for the run to end and takes over at the hand-over, 2 s later: at home with the kept kit at
-  // 28 slots it cut every job short for a handful of things, and the signs round never got through its chests
-  cuts: (s, world) => (buildingLoad(world) ? s.slotsUsed >= 36 : 36 - s.slotsUsed < ROOM.yard),
+  // 28 slots it cut every job short for a handful of things, and the signs round never got through its chests.
+  // A run of the work queue is cut short only with no slot left at all, like the build job: it made its own room as
+  // it set out and makes more between its units, and a walk home at 35/36 would cost it the trip (a trip more than
+  // 10 blocks out is not cut short by the stash at any count: the brain's rule for trips, brain.ts)
+  cuts: (s, world) => (buildingLoad(world) || afield.work ? s.slotsUsed >= 36 : 36 - s.slotsUsed < ROOM.yard),
   run: async ctx => {
     if (!ctx.world.landmarks.chests.length) {
       const at = await firstChest(ctx);
@@ -264,6 +269,34 @@ export function stashList(s: Snapshot, world: WorldMemory, keep: StashOptions = 
     if (dumpsJunk(s)) plan.drop.push(...over);
   }
   return plan;
+}
+
+/** Baritone's throwaway stone (the bridge's list, ClaudeBridge.java): a stack of it together is what a trip down keeps. */
+const THROWAWAY = new Set(['cobblestone', 'cobbled_deepslate', 'andesite', 'diorite', 'granite', 'tuff']);
+
+/**
+ * What a trip down the mine throws away where it stands, between its rounds (deep.ts oreTrip): the stone digging
+ * brings up by the stack beyond what it keeps of it (KIT.carryMax: one stack of throwaway stone together, cobblestone
+ * first, the bridge scaffolds the climb with it; a stack of any other kind in GLUT), and the stash's own junk beyond
+ * what the stash keeps of each. Nothing else: no ore, tool, food or torch is either. Never a kind a bill carries or is
+ * short of, whatever the count: the stash spares those too (billKinds). It looks and never writes.
+ */
+export function mineDrops(items: InventoryItem[], s: Snapshot, world: WorldMemory): StashEntry[] {
+  const billed = billKinds(s, world);
+  const main = items.filter(i => i.slot >= 0 && i.slot < 36);
+  // the junk, as the stash's own plan has it (what a bill carries is on its keep list, so spared)
+  const drop = stashPlan(main, { keep: billed }).drop;
+  const listed = new Set(drop.map(e => e.name));
+  const total = (n: string) => main.filter(i => i.name === n).reduce((a, i) => a + i.count, 0);
+  let stone = KIT.carryMax.cobblestone;
+  for (const name of Object.keys(GLUT)) {
+    const n = total(name);
+    if (!n || listed.has(name) || billed.has(name)) continue;
+    const keep = Math.min(n, THROWAWAY.has(name) ? stone : KIT.carryMax.cobblestone);
+    if (THROWAWAY.has(name)) stone -= keep;
+    if (n > keep) drop.push({ name, count: n - keep });
+  }
+  return drop;
 }
 
 /** The stash's list with where each thing goes. */
@@ -370,7 +403,8 @@ export const sortStorage: Goal = {
   retryMs: 20 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || !awakeAtHome(s) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
-    if (since(world, 'sort', s.now) < 30 * MINUTE) return null;
+    // after 30 min, and then in the evening, or when no trip could go instead (or it has waited an hour)
+    if (!roundDue(s, world, 'sort', 30 * MINUTE)) return null;
     const moves = misplaced(chestAssignment(world), world.chestItems ?? {});
     return moves.length ? `${moves.length} kind(s) of things in the wrong chest` : null;
   },
@@ -518,6 +552,11 @@ export const kit: Goal = {
     const needs = kitNeeds(ownItems(s.items, world), freeChestTotals(world)).filter(doable);
     return needs.length ? `needs ${needs.map(label).join(', ')}` : null;
   },
+  // not worth stopping a run of the work queue about the yard for: it ends within minutes, and the kit takes over at
+  // the hand-over. The work queue's `trip kit` is such a run, and does the kit's own steps from out in the yard: as
+  // it came to the chests, the kit wanted the same and stopped it every time ("stopping work: trip kit: kit is more
+  // urgent"), a run booked empty for the walk. A trip out is the brain's to rule on (brain.ts)
+  cuts: () => !(afield.work && !afield.trip),
   run: async ctx => {
     await refreshChests(ctx, 0);
     const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
@@ -547,6 +586,24 @@ async function runStep(ctx: GoalContext, step: PlanStep): Promise<string | undef
   }
   const r = await ctx.act('craft-item', { outputItem: step.craft, amount: step.times });
   return r.ok ? `crafted ${step.craft}${step.times > 1 ? ` x${step.times}` : ''}` : `could not craft ${step.craft}: ${r.text}`;
+}
+
+/**
+ * The kit's own steps for some of its kinds only, planned and done as the kit goal does them (the work queue's `trip
+ * kit`, worktasks.ts, which does from out in the yard what the kit goal does at home). What it did, a line a step.
+ */
+export async function kitSteps(ctx: GoalContext, kinds: readonly string[]): Promise<string[]> {
+  const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
+  const needs = kitNeeds(ownItems(inv.items, ctx.world), freeChestTotals(ctx.world)).filter(n => kinds.includes(n.kind) && doable(n));
+  const did: string[] = [];
+  for (const need of needs) {
+    for (const step of need.plan) {
+      if (ctx.signal.aborted) return did;
+      const r = await runStep(ctx, step);
+      if (r) { did.push(r); ctx.progress(`${label(need)}: ${r}`); }
+    }
+  }
+  return did;
 }
 
 // ------------------------------------------------------------------------------------------------ stock
@@ -870,7 +927,8 @@ export const lights: Goal = {
   retryMs: 15 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || !awakeAtHome(s) || (s.counts.get('torch') ?? 0) === 0) return null;
-    return since(world, 'lights', s.now) > 20 * MINUTE ? 'daily round: dark spots in the yard' : null;
+    // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
+    return roundDue(s, world, 'lights', 20 * MINUTE) ? 'daily round: dark spots in the yard' : null;
   },
   // a round that finds the yard lit placed nothing: busy time to no gain
   gains: true,

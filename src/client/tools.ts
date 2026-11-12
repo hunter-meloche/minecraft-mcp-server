@@ -502,28 +502,31 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   /**
    * Mining from inside the home zone: the game client won't let Baritone break ground or ore there, so its miner
    * would find nothing. Walk out first, to above the nearest block of the kind outside the zone. Returns an error
-   * reply when there's none in sight, else undefined (also when the bot isn't in the zone).
+   * reply when there's none in sight, else undefined (also when the bot isn't in the zone). Given `maxFromHome` (the
+   * brain's leash, across the ground), only to blocks no further from home than that, and from wherever the bot
+   * stands: outside the zone Baritone's miner heads for the nearest it knows of, at any distance.
    */
-  const leaveHomeZone = async (names: string[]): Promise<ReturnType<ToolFactory['createResponse']> | undefined> => {
+  const leaveHomeZone = async (names: string[], maxFromHome = Infinity): Promise<ReturnType<ToolFactory['createResponse']> | undefined> => {
     const s = await status();
     const world = worldIdFromSeed(s.hashedSeed ?? undefined);
     const home = world ? readHomes()[world]?.home : undefined;
     if (!home || home.dimension !== (s.dimension ?? 'overworld')) return undefined;
     const me = s.position!;
-    if (outsideZone(home, me) > 8) return undefined; // clear of it (the game client's rule reaches 6 past its edge)
+    // clear of it (the game client's rule reaches 6 past its edge), and no bound to keep to
+    if (outsideZone(home, me) > 8 && !Number.isFinite(maxFromHome)) return undefined;
     const away = zoneRect ? { awayX1: zoneRect.x1, awayZ1: zoneRect.z1, awayX2: zoneRect.x2, awayZ2: zoneRect.z2, awayMin: MINE_BEYOND }
       : { awayX: home.x, awayZ: home.z, awayMin: HOME_ZONE + MINE_BEYOND };
     let best: Pos | undefined;
     for (const name of names) {
       const found = await call<{ positions: Pos[] }>('world.findBlocks', { block: name, maxDistance: 128, count: 256, ...away }, 60_000);
       for (const p of found.positions) {
-        if (outsideZone(home, p) < MINE_BEYOND) continue;
+        if (outsideZone(home, p) < MINE_BEYOND || Math.hypot(p.x - home.x, p.z - home.z) > maxFromHome) continue;
         if (!best || Math.hypot(p.x - me.x, p.y - me.y, p.z - me.z) < Math.hypot(best.x - me.x, best.y - me.y, best.z - me.z)) best = p;
       }
     }
     if (!best) {
-      return factory.createErrorResponse(`No ${names.join(' or ')} in sight outside the home area (${MINE_BEYOND}+ blocks past ${zoneRect ? 'the yard' : `${HOME_ZONE} blocks from home ${fmt(home)}`}); ` +
-        "the bot doesn't mine in the home area. Go further out (explore) and mine from there.");
+      return factory.createErrorResponse(`No ${names.join(' or ')} in sight outside the home area (${MINE_BEYOND}+ blocks past ${zoneRect ? 'the yard' : `${HOME_ZONE} blocks from home ${fmt(home)}`}` +
+        `${Number.isFinite(maxFromHome) ? `, within ${maxFromHome} of home` : ''}); the bot doesn't mine in the home area. Go further out (explore) and mine from there.`);
     }
     const r = await call<ProcessResult & { arrived: boolean }>('goto', { ...best, xz: true, range: 3, timeoutMs: 180_000 }, 195_000);
     if (!r.arrived && outsideZone(home, (await status()).position!) <= 8) {
@@ -949,9 +952,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     {
       block: z.string().describe("Block to mine, e.g. 'oak_log', 'stone', or several comma-separated: 'iron_ore,deepslate_iron_ore'"),
       count: z.coerce.number().int().positive().optional().describe('How many of the item to have in the inventory when done (default: 1)'),
-      timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 300000)')
+      timeoutMs: z.number().int().min(1000).optional().describe('Give up after this long (default: 300000)'),
+      maxFromHome: z.coerce.number().positive().optional().describe('From inside the home area, walk out only to blocks at most this far from home (horizontally)')
     },
-    async ({ block, count = 1, timeoutMs = 300_000 }: { block: string; count?: number; timeoutMs?: number }) => {
+    async ({ block, count = 1, timeoutMs = 300_000, maxFromHome }: { block: string; count?: number; timeoutMs?: number; maxFromHome?: number }) => {
       const names = block.split(',').map(n => n.trim().replace(/^minecraft:/, '')).filter(Boolean);
       const dim = await dimension();
       let guarded = 0;
@@ -960,7 +964,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         guarded += near.positions.filter(p => protection.has(dim, p)).length;
       }
       if (guarded && names.length === 1) return mineAround(names[0], count, timeoutMs, dim, guarded);
-      const out = await leaveHomeZone(names);
+      const out = await leaveHomeZone(names, maxFromHome);
       if (out) return out;
       let r: ProcessResult & { gained: Record<string, number> };
       try {

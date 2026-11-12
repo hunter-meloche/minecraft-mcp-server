@@ -119,7 +119,10 @@ export function explainIdle(s: Snapshot, world: WorldMemory, goals: Goal[], retr
       out.push({ cause: 'hold', text: `${g.name} held until ${clock(until)}${why ? ` (${why})` : ''}`, until });
     }
   } catch { /* what could be told so far is told */ }
-  for (const g of goals) {
+  // the work ladder first, the top rung first (its goals are `work: <task>`, the higher rung the higher priority): it
+  // is what should fill an empty day, so its reasons are the ones to read; then every other goal's, in the list's order
+  const ladder = goals.filter(g => g.name.startsWith('work: ')).sort((a, b) => b.priority - a.priority);
+  for (const g of [...ladder, ...goals.filter(g => !ladder.includes(g))]) {
     const d = said.get(g);
     if (d) out.push(d);
   }
@@ -216,9 +219,10 @@ export function todayLine(world: WorldMemory): string | undefined {
 /**
  * brain-status: today's idle time by cause (in % of the counted daytime; under half a percent left out), and what is
  * blocked: the project's shortfall (as the project says it in `now`, with the try and the next one's time), and every
- * goal held back with why and until when (the `hold` reasons in `now`).
+ * goal held back with why and until when (the `hold` reasons in `now`), and after them what the caller adds (`more`:
+ * the work queue's rungs that wait on dry marks).
  */
-export function idleReport(world: WorldMemory, now: Decline[]): string[] {
+export function idleReport(world: WorldMemory, now: Decline[], more: string[] = []): string[] {
   const lines: string[] = [];
   try {
     const t = idleOf(world).today;
@@ -233,6 +237,7 @@ export function idleReport(world: WorldMemory, now: Decline[]): string[] {
     if (said) blocked.push(`project - ${said.text}`);
     else if (short.length) blocked.push(`project - short of ${short.map(([k, n]) => `${n} ${k}`).join(', ')}`);
     for (const d of now) if (d.cause === 'hold') blocked.push(d.text);
+    blocked.push(...more);
     if (blocked.length) lines.push(`Blocked: ${blocked.join(' | ')}`);
   } catch { /* the status goes without these lines */ }
   return lines;

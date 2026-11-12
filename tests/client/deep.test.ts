@@ -1,5 +1,8 @@
 import test from 'ava';
-import { deepTrip, diamondsWanted, tripCheck } from '../../src/client/brain/deep.js';
+import { deepTrip, diamondsWanted, oreTrip, setMineLookMs, tripCheck, type OreWant } from '../../src/client/brain/deep.js';
+import { workGoals, workOf, workTick } from '../../src/client/brain/work.js';
+import { LADDER } from '../../src/client/brain/worktasks.js';
+import type { InventoryItem } from '../../src/client/tools.js';
 import { kitNeeds } from '../../src/client/brain/kit.js';
 import { pockets } from '../../src/client/brain/pockets.js';
 import { activityAt } from '../../src/client/brain/schedule.js';
@@ -237,4 +240,413 @@ test('30 used, kit ready, in the yard: the deep trip wants, and its run makes ro
   t.is(stale.lastDone?.['no room: deep'], NOW);
   t.deepEqual(deepTrip.declines!(s, stale), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
   t.deepEqual(deepTrip.declines!({ ...s, now: NOW + 11 * MIN }, stale), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
+});
+
+// ---- one trip, several ores (oreTrip), and the rung and the old goal on it ----
+
+/** Pockets on a fake: `put` adds to a stack of the kind with room, then to the first free slots; `take` from the first slots on. */
+function pocket(items: InventoryItem[]) {
+  let inv = items.map(i => ({ ...i }));
+  const free = () => { for (let slot = 0; slot < 36; slot++) if (!inv.some(i => i.slot === slot)) return slot; return -1; };
+  return {
+    items: () => inv.map(i => ({ ...i })),
+    used: () => inv.filter(i => i.slot < 36).length,
+    count: (name: string) => inv.filter(i => i.name === name && i.slot < 36).reduce((n, i) => n + i.count, 0),
+    put: (name: string, n: number) => {
+      for (const i of inv.filter(x => x.name === name && x.slot < 36 && x.count < 64)) { const k = Math.min(n, 64 - i.count); i.count += k; n -= k; }
+      while (n > 0) { const slot = free(); if (slot < 0) return; inv.push({ slot, name, count: Math.min(n, 64) }); n -= 64; }
+    },
+    take: (name: string, n: number) => {
+      let left = n;
+      for (const i of inv.filter(x => x.name === name && x.slot < 36).sort((a, b) => a.slot - b.slot)) { const k = Math.min(left, i.count); i.count -= k; left -= k; }
+      inv = inv.filter(i => i.count > 0);
+      return n - left;
+    }
+  };
+}
+
+/**
+ * A trip down on fakes: the walk out arrives (unless `walk` is false), the look round sees nobody's build, and each
+ * round of mining brings what `rounds` says and takes as long on the trip's clock (the time asked for, unless it
+ * says); a round can also take things away (`take`: a pickaxe worn out), fail as the tool does (`fail`), or be
+ * followed by an inventory look that fails (`blind`). `asked` has each round as the trip asked for it (`iron_ore to
+ * 20 in 180s`) and each throw (`drop 64 cobbled_deepslate`).
+ */
+function mineBot(items: InventoryItem[], rounds: { add?: Record<string, number>; ms?: number; take?: string[]; fail?: string; blind?: true; y?: number; z?: number }[],
+  over: { tod?: number; health?: number; world?: WorldMemory; walk?: false; y?: number } = {}) {
+  const clock = { now: NOW, tod: over.tod ?? 0 };
+  // where the bot stands, when the test says (`y`: the level at the mine start; a round's `y` is where it leaves the bot)
+  const level: { y?: number; z: number } = { y: over.y, z: -56 };
+  const position = () => (level.y === undefined ? {} : { position: { x: 0, y: level.y, z: level.z } });
+  const bag = pocket(items);
+  const asked: string[] = [];
+  const gains: number[] = [];
+  const world = over.world ?? home();
+  let blind = false;
+  const ctx = {
+    s: at(clock.tod, bag.items()), world, signal: new AbortController().signal, progress: () => undefined, gain: (n: number) => { gains.push(n); },
+    status: async () => ({ inWorld: true, username: 'b', screen: null, timeOfDay: clock.tod, health: over.health ?? 20, ...position() }),
+    call: (async (method: string) => {
+      if (method === 'inventory') {
+        if (blind) { blind = false; throw new Error('timed out'); }
+        return { items: bag.items() };
+      }
+      if (method === 'foreign.zones') return { zones: [] };
+      if (method === 'goto' && over.walk === false) return { arrived: false };
+      if (method === 'status') return position();
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: { block?: string; count?: number; timeoutMs?: number; item?: string } = {}) => {
+      if (tool === 'drop-item') { asked.push(`drop ${a.count} ${a.item}`); return { ok: true, text: `Dropped ${bag.take(a.item!, a.count!)} ${a.item}` }; }
+      if (tool !== 'mine-blocks') { asked.push(tool); return { ok: true, text: 'ok' }; }
+      asked.push(`${a.block!.split(',')[0]} to ${a.count} in ${a.timeoutMs! / 1000}s`);
+      const r = rounds.shift() ?? {};
+      if (r.fail) return { ok: false, text: r.fail };
+      blind = !!r.blind;
+      if (r.y !== undefined) level.y = r.y;
+      if (r.z !== undefined) level.z = r.z;
+      for (const name of r.take ?? []) bag.take(name, 64);
+      for (const [name, n] of Object.entries(r.add ?? {})) bag.put(name, n);
+      const ms = r.ms ?? a.timeoutMs!;
+      clock.now += ms;
+      clock.tod += ms / 50;
+      const got = Object.entries(r.add ?? {}).map(([n, k]) => `${n} x${k}`).join(', ');
+      return { ok: true, text: `Mined for ${ms / 1000}s: ${got || 'nothing gained'}.` };
+    }
+  } as unknown as GoalContext;
+  return { ctx, asked, gains, clock, bag, world };
+}
+
+const IRON: OreWant = { family: 'iron', ores: 'iron_ore,deepslate_iron_ore', items: ['raw_iron', 'iron_ingot'], want: 20 };
+const GOLD: OreWant = { family: 'gold', ores: 'gold_ore,deepslate_gold_ore', items: ['raw_gold', 'gold_ingot'], want: 10 };
+const REDSTONE: OreWant = { family: 'redstone', ores: 'redstone_ore,deepslate_redstone_ore', items: ['redstone'], want: 30 };
+const LAPIS: OreWant = { family: 'lapis', ores: 'lapis_ore,deepslate_lapis_ore', items: ['lapis_lazuli'], want: 5 };
+
+test.serial('one trip, several ores: the want met moves on while 3 min are left; a slice with none of it marks that family dry and moves on; the budget ends the trip', async (t) => {
+  setMineLookMs(0);
+  // seven minutes at the ore, from sunrise (the day would allow 7.2): iron in two rounds, then gold, none of it, then
+  // redstone; the budget is spent before lapis
+  const m = mineBot(KIT, [{ add: { raw_iron: 12 }, ms: 2 * MIN }, { add: { raw_iron: 8 }, ms: MIN }, { ms: MIN }, { add: { redstone: 9 }, ms: 3 * MIN }]);
+  const r = await oreTrip(m.ctx, { wants: [IRON, GOLD, REDSTONE, LAPIS], budgetMs: 7 * MIN, now: () => m.clock.now });
+  t.deepEqual(r, { gain: 29, text: '+20 raw_iron, +9 redstone; dry: gold' });
+  // the second round asks for what it carries of the drop and the rest of the want: it stops when the want is met
+  t.deepEqual(m.asked, ['iron_ore to 20 in 180s', 'iron_ore to 20 in 180s', 'gold_ore to 10 in 180s', 'redstone_ore to 30 in 180s']);
+  t.deepEqual(m.gains, [12, 8, 9], 'told round by round');
+  t.deepEqual(workOf(m.world).dry, { 'deep:gold': { n: 1, at: NOW + 4 * MIN } }, 'gold is marked as the round that found none ended');
+  t.deepEqual(m.world.zones?.mine, [{ x: 0, y: 64, z: -56 }]);
+
+  // another ore only with a whole round's time left: iron met with two minutes to go, and no gold begun
+  const short = mineBot(KIT, [{ add: { raw_iron: 20 }, ms: 5 * MIN }]);
+  t.deepEqual(await oreTrip(short.ctx, { wants: [IRON, GOLD], budgetMs: 7 * MIN, now: () => short.clock.now }), { gain: 20, text: '+20 raw_iron' });
+  t.deepEqual(short.asked, ['iron_ore to 20 in 180s']);
+  t.deepEqual(workOf(short.world).dry, {});
+
+  // the budget: rounds of three minutes, then what is left of it, then up
+  const long = mineBot(KIT, [{ add: { raw_iron: 10 } }, { add: { raw_iron: 10 } }, { add: { raw_iron: 10 } }, { add: { raw_iron: 10 } }]);
+  t.deepEqual(await oreTrip(long.ctx, { wants: [{ ...IRON, want: 100 }], budgetMs: 7 * MIN, now: () => long.clock.now }), { gain: 30, text: '+30 raw_iron' });
+  t.deepEqual(long.asked, ['iron_ore to 100 in 180s', 'iron_ore to 100 in 180s', 'iron_ore to 100 in 60s']);
+
+  // and the day's clock, whatever the budget said: from time 4000 there are 230 s before the walk up must start
+  const late = mineBot(KIT, [{ add: { raw_iron: 10 } }, { add: { raw_iron: 10 } }], { tod: 4000 });
+  t.deepEqual(await oreTrip(late.ctx, { wants: [{ ...IRON, want: 100 }], budgetMs: 7 * MIN, now: () => late.clock.now }), { gain: 20, text: '+20 raw_iron' });
+  t.deepEqual(late.asked, ['iron_ore to 100 in 180s', 'iron_ore to 100 in 50s']);
+});
+
+test.serial('oreTrip comes up early hurt or with no ready food left, and never digs by someone else\'s build', async (t) => {
+  setMineLookMs(0);
+  // (a trip that never mined is untried: it says nothing of the place, nor counts as one that ended well)
+  const hurt = mineBot(KIT, [{ add: { raw_iron: 4 } }], { health: 8 });
+  t.deepEqual(await oreTrip(hurt.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => hurt.clock.now }), { gain: 0, text: 'nothing gained; health 8: up early', untried: true });
+  t.deepEqual(hurt.asked, []);
+  // the bread eaten on the way down
+  const hungry = mineBot(KIT.filter(i => i.name !== 'bread'), [{ add: { raw_iron: 4 } }]);
+  t.deepEqual(await oreTrip(hungry.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => hungry.clock.now }), { gain: 0, text: 'nothing gained; no ready food left: up early', untried: true });
+  t.deepEqual(workOf(hungry.world).dry, {}, 'not a dry place: it never mined');
+  // a build seen from the mine start: no digging, another side next time
+  const near = mineBot(KIT, []);
+  const build = { x1: -10, y1: 60, z1: -70, x2: 10, y2: 80, z2: -60, surface: true };
+  let looks = 0;
+  (near.ctx as { call: GoalContext['call'] }).call = (async (method: string) => {
+    if (method !== 'foreign.zones') return {};
+    // nothing seen from home; the build in sight from the mine start
+    return { zones: looks++ ? [build] : [] };
+  }) as GoalContext['call'];
+  t.deepEqual(await oreTrip(near.ctx, { wants: [IRON], budgetMs: 7 * MIN }), { gain: 0, text: "someone else's build 4 blocks from the mine site: the next trip sets out from another side", untried: true });
+  t.deepEqual(near.asked, []);
+  t.is(near.world.zones?.mine, undefined);
+});
+
+test.serial('oreTrip with no pickaxe left, or a round the mine tool cannot do, comes up and marks no vein dry', async (t) => {
+  setMineLookMs(0);
+  // the pickaxe wears out in the first round: the trip comes up with what it has, and gold is not marked dry for it
+  const KIT1 = KIT.filter(i => !i.name.endsWith('_pickaxe')).concat(item(3, 'iron_pickaxe'));
+  const worn = mineBot(KIT1, [{ add: { raw_iron: 6 }, take: ['iron_pickaxe'] }]);
+  t.deepEqual(await oreTrip(worn.ctx, { wants: [IRON, GOLD], budgetMs: 7 * MIN, now: () => worn.clock.now }), { gain: 6, text: '+6 raw_iron; no pickaxe left: up early' });
+  t.deepEqual(worn.asked, ['iron_ore to 20 in 180s']);
+  t.deepEqual(workOf(worn.world).dry, {});
+  // none from the start: it never mines, and the trip says nothing of the place
+  const none = mineBot(KIT.filter(i => !i.name.endsWith('_pickaxe')), []);
+  t.deepEqual(await oreTrip(none.ctx, { wants: [IRON], budgetMs: 7 * MIN }), { gain: 0, text: 'nothing gained; no pickaxe left: up early', untried: true });
+  t.deepEqual(none.asked, []);
+  // a pickaxe too poor for the ore: the tool cannot do the round, which says nothing of the diamonds; on to the iron,
+  // which this pickaxe can mine
+  const DIAMOND: OreWant = { family: 'diamond', ores: 'diamond_ore,deepslate_diamond_ore', items: ['diamond'], want: 5 };
+  const NEEDS = 'Mining diamond_ore needs an iron pickaxe or better. Craft one first.';
+  const poor = mineBot(KIT, [{ fail: NEEDS }, { add: { raw_iron: 20 } }]);
+  t.deepEqual(await oreTrip(poor.ctx, { wants: [DIAMOND, IRON], budgetMs: 7 * MIN, now: () => poor.clock.now }),
+    { gain: 20, text: `+20 raw_iron; the mine tool could not mine diamond (${NEEDS})` });
+  t.deepEqual(poor.asked, ['diamond_ore to 5 in 180s', 'iron_ore to 20 in 180s']);
+  t.deepEqual(workOf(poor.world).dry, {});
+  // every ore refused: it never mined, and the trip says nothing of the place, nor counts as one that ended well
+  const stone = mineBot(KIT, [{ fail: NEEDS }, { fail: 'Mining gold_ore needs an iron pickaxe or better. Craft one first.' }]);
+  t.deepEqual(await oreTrip(stone.ctx, { wants: [DIAMOND, GOLD], budgetMs: 7 * MIN, now: () => stone.clock.now }),
+    { gain: 0, text: `nothing gained; the mine tool could not mine diamond, gold (${NEEDS})`, untried: true });
+  t.deepEqual(stone.asked, ['diamond_ore to 5 in 180s', 'gold_ore to 10 in 180s']);
+  t.deepEqual(workOf(stone.world).dry, {});
+});
+
+test.serial('the deep rung with a pickaxe too poor for its first ore: no mark on it, the iron after it mined, and only a trip that mined counts', async (t) => {
+  setMineLookMs(0);
+  const rung = LADDER.find(task => task.name === 'deep')!;
+  const NEEDS = 'Mining diamond_ore needs an iron pickaxe or better. Craft one first.';
+  // nothing stored: diamonds first, then iron; the tool refuses the diamonds, the iron comes in one round
+  const m = mineBot(KIT, [{ fail: NEEDS }, { add: { raw_iron: 96 } }]);
+  const [goal] = workGoals(() => undefined, [rung], () => m.clock.now);
+  t.is(goal.wants(m.ctx.s, m.world), 'diamond: under ground');
+  t.is(await goal.run(m.ctx), `[diamond] +96 raw_iron; dry: gold; the mine tool could not mine diamond (${NEEDS}); back home`);
+  t.false('deep:diamond' in workOf(m.world).dry, 'the diamonds are not dry: this pickaxe cannot mine them');
+  t.deepEqual(workOf(m.world).next, { deep: 0 });
+  t.is(workOf(m.world).deep.clean, 1);
+  // every ore refused: no mark, no trip that ended well, and the brain is to hold the rung back (a failure)
+  const all = mineBot(KIT, Array.from({ length: 5 }, () => ({ fail: NEEDS })));
+  const [again] = workGoals(() => undefined, [rung], () => all.clock.now);
+  await t.throwsAsync(again.run(all.ctx), { message: /^\[diamond\] nothing gained; the mine tool could not mine diamond, iron, gold, redstone, lapis \(.*; back home$/ });
+  t.deepEqual(workOf(all.world).dry, {});
+  t.deepEqual(workOf(all.world).next, {});
+  t.deepEqual(workOf(all.world).deep, { starts: [NOW], clean: 0, deaths: [] });
+});
+
+test.serial('oreTrip judges no round by an inventory look that failed: the next look tells what both brought', async (t) => {
+  setMineLookMs(0);
+  // the look after the first round fails; the second round's look shows the 12 of the first and the 8 of the second
+  const m = mineBot(KIT, [{ add: { raw_iron: 12 }, blind: true }, { add: { raw_iron: 8 } }]);
+  t.deepEqual(await oreTrip(m.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => m.clock.now }), { gain: 20, text: '+20 raw_iron' });
+  t.deepEqual(m.asked, ['iron_ore to 20 in 180s', 'iron_ore to 20 in 180s']);
+  t.deepEqual(m.gains, [20]);
+  t.deepEqual(workOf(m.world).dry, {}, 'the round before the failed look is not a dry one');
+  // two looks in a row fail: up, rather than mine blind; and with nothing seen, the trip says nothing of the place
+  const lost = mineBot(KIT, [{ add: { raw_iron: 2 }, blind: true }, { add: { raw_iron: 2 }, blind: true }, { add: { raw_iron: 2 } }]);
+  t.deepEqual(await oreTrip(lost.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => lost.clock.now }),
+    { gain: 0, text: 'nothing gained (Mined for 180s: raw_iron x2.); the inventory could not be read: up early', untried: true });
+  t.is(lost.asked.length, 2);
+  t.deepEqual(workOf(lost.world).dry, {});
+});
+
+test.serial('oreTrip throws nothing away on the surface: not before it has mined, and not where a walk out stopped short', async (t) => {
+  setMineLookMs(0);
+  // it sets out carrying three stacks of dirt (a build's leftovers): at the mine start, on the surface, they stay; once
+  // it has been down a round, two of them go
+  const dirt = [...KIT, item(4, 'dirt', 64), item(5, 'dirt', 64), item(6, 'dirt', 64)];
+  const m = mineBot(dirt, [{ add: { raw_iron: 12 } }, { add: { raw_iron: 8 } }]);
+  t.deepEqual(await oreTrip(m.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => m.clock.now }), { gain: 20, text: '+20 raw_iron; dropped 128 dirt down there' });
+  t.deepEqual(m.asked, ['iron_ore to 20 in 180s', 'drop 128 dirt', 'iron_ore to 20 in 180s']);
+  // the walk to the mine start stopped short (the storage house door): nothing dropped or dug there, nothing marked,
+  // and the start kept for next time
+  const held = mineBot(dirt, [{ add: { raw_iron: 12 } }], { walk: false });
+  t.deepEqual(await oreTrip(held.ctx, { wants: [IRON], budgetMs: 10 * MIN }), { gain: 0, text: 'could not reach the mine start (0, -56)', untried: true });
+  t.deepEqual(held.asked, []);
+  t.deepEqual(held.world.zones?.mine, [{ x: 0, y: 64, z: -56 }]);
+  t.deepEqual(workOf(held.world).dry, {});
+  // a yard that reaches 64 north of home: the north side has no room inside the leash for the mine's chase, and the
+  // trip sets out east, 40 beyond the yard (56 out)
+  const long = mineBot(KIT, [], { walk: false, world: { ...home(), yard: { x1: -16, z1: -64, x2: 16, z2: 16, y: 63 } } });
+  t.like(await oreTrip(long.ctx, { wants: [IRON], budgetMs: 10 * MIN }), { text: 'could not reach the mine start (56, 0)' });
+  // a leash that leaves no side 30 beyond the yard: it says so, and not that someone's build is by every side
+  const tight = mineBot(KIT, [], { world: { ...home(), leash: 40, yard: { x1: -16, z1: -64, x2: 16, z2: 16, y: 63 } } });
+  await t.throwsAsync(oreTrip(tight.ctx, { wants: [IRON], budgetMs: 10 * MIN }), { message: 'no side of the yard has room for a mine start 30 beyond it and 30 inside the leash (40)' });
+  t.deepEqual(tight.asked, []);
+});
+
+test.serial('oreTrip comes up when a round has taken it past the leash', async (t) => {
+  setMineLookMs(0);
+  // down at the start, 56 out: the first round follows the iron north to 110 out, past the leash of 96: up, with what
+  // it has, and no second round
+  const m = mineBot(KIT, [{ add: { raw_iron: 4 }, y: 20, z: -110 }, { add: { raw_iron: 8 } }], { y: 64 });
+  t.is(m.world.leash, 96);
+  t.deepEqual(await oreTrip(m.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => m.clock.now }), { gain: 4, text: '+4 raw_iron; past the leash: up early' });
+  t.deepEqual(m.asked, ['iron_ore to 20 in 180s']);
+  // within the leash it goes on (95 out)
+  const ok = mineBot(KIT, [{ add: { raw_iron: 4 }, y: 20, z: -95 }, { add: { raw_iron: 16 } }], { y: 64 });
+  t.like(await oreTrip(ok.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => ok.clock.now }), { gain: 20 });
+  t.is(ok.asked.length, 2);
+});
+
+test.serial('oreTrip that never gets below the mine start throws nothing away up there, and is no trip down', async (t) => {
+  setMineLookMs(0);
+  // Baritone finds no way to any of the ore: "nothing gained" in seconds, and the bot stands where it was, on the
+  // surface at the mine start. Each ore is marked (from here the miner finds none), but nothing is thrown away there
+  const dirt = [...KIT, item(4, 'dirt', 64), item(5, 'dirt', 64), item(6, 'dirt', 64)];
+  const up = mineBot(dirt, [{ ms: 8000 }, { ms: 8000 }], { y: 64 });
+  t.deepEqual(await oreTrip(up.ctx, { wants: [GOLD, IRON], budgetMs: 7 * MIN, now: () => up.clock.now }),
+    { gain: 0, text: 'nothing gained (Mined for 8s: nothing gained.); dry: gold, iron; never got below the mine start', untried: true });
+  t.deepEqual(up.asked, ['gold_ore to 10 in 180s', 'iron_ore to 20 in 180s']);
+  t.deepEqual(Object.keys(workOf(up.world).dry), ['deep:gold', 'deep:iron']);
+  // down 50 in its first round, with none of it: the throwing away is down there, and the trip went down
+  const down = mineBot(dirt, [{ y: 14 }, { add: { raw_iron: 20 } }], { y: 64 });
+  t.deepEqual(await oreTrip(down.ctx, { wants: [GOLD, IRON], budgetMs: 7 * MIN, now: () => down.clock.now }),
+    { gain: 20, text: '+20 raw_iron; dry: gold; dropped 128 dirt down there' });
+  t.deepEqual(down.asked, ['gold_ore to 10 in 180s', 'drop 128 dirt', 'iron_ore to 20 in 180s']);
+  // its one round went down and found none: seen below as it comes up, a trip down all the same
+  const last = mineBot(KIT, [{ y: 10 }], { y: 64 });
+  t.deepEqual(await oreTrip(last.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => last.clock.now }),
+    { gain: 0, text: 'nothing gained (Mined for 180s: nothing gained.); dry: iron' });
+
+  // through the deep rung: five ores tried in 40 s from the surface is no trip that ended well, and a failure the
+  // brain holds the rung back for (the 30 s release of a dry mark would send it straight out again)
+  const rung = LADDER.find(task => task.name === 'deep')!;
+  const all = mineBot(KIT, Array.from({ length: 5 }, () => ({ ms: 8000 })), { y: 64 });
+  const [goal] = workGoals(() => undefined, [rung], () => all.clock.now);
+  await t.throwsAsync(goal.run(all.ctx), { message: '[diamond] nothing gained (Mined for 8s: nothing gained.); dry: diamond, iron, gold, redstone, lapis; never got below the mine start; back home' });
+  t.deepEqual(workOf(all.world).deep, { starts: [NOW], clean: 0, deaths: [] });
+  t.deepEqual(workOf(all.world).next, {});
+  t.deepEqual(all.asked.at(-1), 'go-home');
+});
+
+test.serial('oreTrip ends for home at 36/36 after dropping glut, and never drops ore, tools or food', async (t) => {
+  setMineLookMs(0);
+  // the kit, ore, food, a stack of cobblestone for the climb, and the tuff the project carries: 30 slots
+  const project = (): WorldMemory => ({ ...home(), progress: { done: [], journal: [], carry: ['tuff'] } });
+  const items = [...KIT, item(4, 'diamond_pickaxe'), item(5, 'diamond', 3), item(6, 'raw_iron', 10), item(7, 'apple', 30), item(8, 'tuff', 64), item(9, 'tuff', 36),
+    ...Array.from({ length: 20 }, (_, i) => item(10 + i, ['raw_gold', 'redstone', 'lapis_lazuli', 'emerald', 'flint'][i % 5], 5 + i))];
+  t.is(items.filter(i => i.slot < 36).length, 30);
+  // the first round brings iron and fills the pockets with deepslate and gravel; the second iron and what no rule throws away
+  const m = mineBot(items, [
+    { add: { raw_iron: 3, cobbled_deepslate: 128, gravel: 70, granite: 20 } },
+    { add: { raw_iron: 2, amethyst_shard: 1, pointed_dripstone: 1, glow_berries: 1, bone: 1 } }
+  ], { world: project() });
+  t.is(m.bag.used(), 30);
+  const r = await oreTrip(m.ctx, { wants: [{ ...IRON, want: 40 }], budgetMs: 7 * MIN, now: () => m.clock.now });
+  t.deepEqual(m.asked, [
+    'iron_ore to 50 in 180s',
+    // a stack of throwaway stone is kept, cobblestone first: here that is the kit's own; and a stack of gravel
+    'drop 128 cobbled_deepslate', 'drop 6 gravel', 'drop 20 granite',
+    // the 13 raw iron it carries now and the 37 still wanted
+    'iron_ore to 50 in 180s'
+  ]);
+  t.deepEqual(r, { gain: 5, text: '+5 raw_iron; dropped 128 cobbled_deepslate, 6 gravel, 20 granite down there; pockets full: up early' });
+  t.is(m.bag.used(), 36);
+  for (const name of ['iron_pickaxe', 'diamond_pickaxe', 'torch', 'bread', 'apple', 'diamond', 'raw_iron', 'raw_gold', 'redstone', 'emerald', 'tuff', 'cobblestone']) {
+    t.true(m.bag.count(name) > 0, `${name} kept`);
+  }
+  t.is(m.bag.count('tuff'), 100, 'what the project carries, whatever its count');
+  t.is(m.bag.count('cobblestone'), 64, 'the stack of throwaway stone for the climb');
+  t.is(m.bag.count('gravel'), 64);
+});
+
+test.serial('the old deep trip goal mines its diamonds through oreTrip and counts on probation', async (t) => {
+  setMineLookMs(0);
+  const w = home();
+  // five diamonds carried: the round asks for those and the 26 still wanted (it used to ask for 8, carried ones included)
+  const carried = [...KIT, item(5, 'diamond', 5)];
+  const s = at(1000, carried);
+  t.is(deepTrip.wants(s, w), '26 diamond(s) wanted: a deep trip');
+  const run = async (now: number, add: Record<string, number>) => {
+    const m = mineBot(carried, [{ add, ms: 10 * MIN }], { tod: 1000, world: w });
+    const ctx = { ...m.ctx, s: { ...at(1000, carried), now } } as GoalContext;
+    return { text: await deepTrip.run(ctx), m };
+  };
+  // (each round here takes the rest of the morning: the trip comes up with what it got)
+  const first = await run(NOW, { diamond: 4 });
+  t.is(first.text, '+4 diamond; back home');
+  t.deepEqual(first.m.asked, ['diamond_ore to 31 in 180s', 'go-home']);
+  t.is(w.lastDone?.deep, NOW);
+  t.deepEqual(workOf(w).deep, { starts: [NOW], clean: 1, deaths: [] }, 'a deep trip like the rung\'s, ended well');
+
+  // a second, 21 min on: two this hour, and the trips are few until three have ended well
+  await run(NOW + 21 * MIN, { diamond: 2 });
+  t.deepEqual(workOf(w).deep, { starts: [NOW, NOW + 21 * MIN], clean: 2, deaths: [] });
+  const later = at(1000, carried, { now: NOW + 42 * MIN });
+  t.deepEqual(deepTrip.declines!(later, w), { cause: 'hold', text: 'deep on probation: 2 trips this hour, next at 15:00', until: NOW + 60 * MIN });
+  t.is(deepTrip.wants(later, w), null);
+  t.is(deepTrip.wants({ ...later, now: NOW + 61 * MIN }, w), '26 diamond(s) wanted: a deep trip');
+
+  // a death on the way: the probation starts again, and the death is booked as one on a deep trip
+  const died = { at: { x: 0, z: -80 }, time: NOW + 61 * MIN + 1000 };
+  workGoals(() => died, []);
+  try {
+    const m = mineBot(carried, [{ add: { diamond: 1 }, ms: 10 * MIN }], { tod: 1000, world: w });
+    const ctx = { ...m.ctx, s: { ...at(1000, carried), now: NOW + 61 * MIN } } as GoalContext;
+    await deepTrip.run(ctx);
+  } finally {
+    workGoals(() => undefined, []);
+  }
+  t.deepEqual(workOf(w).deep, { starts: [NOW, NOW + 21 * MIN, NOW + 61 * MIN], clean: 0, deaths: [died.time] });
+  // a fruitless round marks the diamonds dry for the deep rung too
+  const none = mineBot(carried, [{}], { tod: 1000, world: home() });
+  t.is(await deepTrip.run(none.ctx), 'nothing gained (Mined for 180s: nothing gained.); dry: diamond; back home');
+  t.deepEqual(Object.keys(workOf(none.world).dry), ['deep:diamond']);
+  // a trip that never went down (the walk out stopped short) is today's try, but no trip that ended well
+  const short = mineBot(carried, [], { tod: 1000, world: home(), walk: false });
+  t.is(await deepTrip.run(short.ctx), 'could not reach the mine start (0, -56); back home');
+  t.deepEqual(workOf(short.world).deep, { starts: [NOW], clean: 0, deaths: [] });
+  t.is(short.world.lastDone?.deep, NOW);
+});
+
+test.serial('the old deep trip cut short on its walk home: a death on the way is one on the trip, and once home it is over', async (t) => {
+  setMineLookMs(0);
+  const carried = [...KIT, item(5, 'diamond', 5)];
+  /** a trip that mines its round and comes up; survival (retreat at health 8) cuts the walk home */
+  const cut = async (w: WorldMemory) => {
+    const m = mineBot(carried, [{ add: { diamond: 4 }, ms: 10 * MIN }], { tod: 1000, world: w });
+    const ac = new AbortController();
+    const ctx = {
+      ...m.ctx, signal: ac.signal,
+      act: async (tool: string, a?: Record<string, unknown>) => {
+        if (tool !== 'go-home') return m.ctx.act(tool, a);
+        ac.abort();
+        throw new Error('aborted');
+      }
+    } as GoalContext;
+    await t.throwsAsync(deepTrip.run(ctx), { message: 'aborted' });
+  };
+  const w = home();
+  await cut(w);
+  t.like(workOf(w).deep, { starts: [NOW], clean: 1, deaths: [] });
+  t.not(workOf(w).deep.away, undefined);
+  // the bot dies on the way, 16 out of home after the respawn by the time the queue looks
+  const died = { at: { x: 0, z: -80 }, time: NOW + MIN };
+  workTick(at(1000, [], { now: NOW + MIN + 5000, position: { x: 0, y: 64, z: -16 }, distHome: 16 }), w, () => died);
+  t.like(workOf(w).deep, { clean: 0, deaths: [died.time] });
+  t.is(workOf(w).deep.away, undefined);
+  // the same cut, but home alive first: a death after that is none of the trip's
+  const calm = home();
+  await cut(calm);
+  workTick(at(1000, [], { now: NOW + MIN }), calm, () => undefined);
+  workTick(at(1000, [], { now: NOW + 2 * MIN, position: { x: 0, y: 64, z: -40 }, distHome: 40 }), calm, () => ({ at: { x: 0, z: -40 }, time: NOW + 2 * MIN }));
+  t.like(workOf(calm).deep, { clean: 1, deaths: [] });
+});
+
+test.serial('the deep rung asks for the kit, the room rule for the slots: 30 used with the kit ready -> work: deep wants and makes room first', async (t) => {
+  setMineLookMs(0);
+  const rung = LADDER.find(task => task.name === 'deep')!;
+  const [goal] = workGoals(() => undefined, [rung], () => NOW);
+  const west = { position: { x: -60, y: 64, z: 0 }, distHome: 60 };
+  const grown = (): WorldMemory => ({ ...home(), yard: YARD, zones: { mine: [{ x: -40, y: 64, z: 0 }] } });
+  const s = at(1000, thirty(7), west);
+  // nothing stored: every ore as far below its target, diamonds first
+  t.is(goal.wants(s, grown()), 'diamond: under ground');
+  // nothing to put away: the room rule says so
+  t.deepEqual(goal.declines!(at(1000, thirty(0), west), grown()), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep needs 10 free)' });
+  // the kit is the rung's own question, after the room: without torches it says so
+  t.deepEqual(goal.declines!(at(1000, thirty(7).filter(i => i.name !== 'torch'), west), grown()),
+    { cause: 'kit', text: '0/16 torches (deep needs the deep kit)' });
+
+  // the run: home to the chests on foot, the logs into the chest, and only then out, from a start outside the yard
+  const w = grown();
+  const out = yardBot(s, w);
+  await t.throwsAsync(goal.run(out.ctx), { message: 'no path' });
+  t.deepEqual(out.did, ['on foot only to (0, 0)', 'store 448 oak_log', 'foreign.zones', 'out to (0, -64)']);
+  t.is(out.used(), 23);
+  t.deepEqual(workOf(w).deep.starts, [NOW], 'it set out');
+  t.deepEqual(workOf(w).dry, {}, 'a walk that failed has learnt nothing of the place');
 });

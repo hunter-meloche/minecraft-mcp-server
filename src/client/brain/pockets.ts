@@ -27,6 +27,12 @@ export const NEAR_HOME = 10;
 /** How far out (the yard, a build job's site) the stash still goes home to make room for a waiting trip. */
 export const TRIP_STASH_RANGE = 40;
 /**
+ * A run of the work queue is under way (`work`), and it is a trip out or down (`trip`): work.ts raises and lowers
+ * them round each run, the stash and the brain read them to leave such a run alone. Here, in the one module both
+ * sides import. In this process only: after a restart nothing is under way.
+ */
+export const out = { trip: false, work: false };
+/**
  * Most of one kind of food carried, a stack: the rest goes in the chests. All of it stayed carried before (live: 541
  * bread in nine slots, 265 in five the day before), slots a trip had no use for.
  */
