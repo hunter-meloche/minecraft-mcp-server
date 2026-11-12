@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { columns, rankSites, siteMap } from '../../src/client/structures/site.js';
+import { columns, keptSites, rankSites, siteMap } from '../../src/client/structures/site.js';
 import { StructureStore } from '../../src/client/structures/store.js';
 import { driftGoal } from '../../src/client/structures/job.js';
 import type { Design } from '../../src/client/structures/format.js';
@@ -49,6 +49,22 @@ test('rankSites: inside or outside the yard', (t) => {
   const yard = { x1: 3, z1: 0, x2: 9, z2: 5 };
   t.true(rankSites(area, b, 3, 3, { yard, where: 'inside' }).every(p => p.anchor.x >= 3 && p.anchor.x + 2 <= 9 && p.anchor.z + 2 <= 5));
   t.true(rankSites(area, b, 3, 3, { yard, where: 'outside' }).every(p => p.anchor.x + 2 < 3 || p.anchor.x > 9 || p.anchor.z > 5));
+});
+
+test('keptSites: the milestone\'s reserved site is kept off, with the zones but not the fence', (t) => {
+  // the enchanting room's 7x7 site, chosen by the brain but not yet built (the lookout's search ranked spots on it)
+  const mem = {
+    zones: { fence: [{ x: 0, z: 0, width: 12, length: 8 }], pen: [{ x: 9, z: 0, width: 3, length: 3 }], cane: [{ x: 4, z: 4 }] },
+    progress: { current: { data: { site: { x: 3, z: 0, width: 4, length: 4, rotated: false, y: 64 } } } }
+  };
+  const kept = keptSites(mem);
+  t.deepEqual(kept, [{ x: 9, z: 0, width: 3, length: 3 }, { x: 3, z: 0, width: 4, length: 4 }]);
+  const { area, b } = land();
+  const picks = rankSites(area, b, 2, 2, { avoid: kept, clearance: 0, count: 40 });
+  t.true(picks.length > 0);
+  t.false(picks.some(p => p.anchor.x < 7 && p.anchor.x + p.width > 3 && p.anchor.z < 4 && p.anchor.z + p.length > 0));
+  t.deepEqual(keptSites({ progress: { current: { data: {} } } }), []);
+  t.deepEqual(keptSites(undefined), []);
 });
 
 test('drift round: a structure that differs is noted, and with autoRepair gets a repair job', async (t) => {

@@ -30,6 +30,23 @@ export interface SiteOptions {
   count?: number;
 }
 
+type Rect = { x: number; z: number; width: number; length: number };
+
+/**
+ * The ground the brain keeps for itself, for a site search to stay off: its zones with a footprint (not the fence),
+ * and the site the current milestone has reserved (progress.current.data.site). Without the reserved site, the
+ * lookout's search (2026-11-10) ranked two spots on the enchanting room's 7x7 site 3rd and 4th: an improvement put
+ * there would have taken the room's ground before it was built.
+ */
+export function keptSites(mem?: { zones?: Record<string, { x: number; z: number; width?: number; length?: number }[]>; progress?: { current?: { data?: Record<string, unknown> } } }): Rect[] {
+  const zones = Object.entries(mem?.zones ?? {}).filter(([k]) => k !== 'fence').flatMap(([, zs]) => zs)
+    .filter(zz => zz.width && zz.length).map(zz => ({ x: zz.x, z: zz.z, width: zz.width!, length: zz.length! }));
+  const site = mem?.progress?.current?.data?.site as Partial<Rect> | undefined;
+  const reserved = site && typeof site.x === 'number' && typeof site.z === 'number' && site.width && site.length
+    ? [{ x: site.x, z: site.z, width: site.width, length: site.length }] : [];
+  return [...zones, ...reserved];
+}
+
 const name = (s: string | null | undefined) => (s ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
 const AIRY = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|dead_bush|bush|firefly_bush|leaf_litter|snow|vine|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|lily_of_the_valley|pink_petals|wildflowers|sweet_berry_bush|.*_sapling|torch|wall_torch)$/;
 const TREE = /_(log|leaves|wood)$|^(mangrove_roots|bee_nest)$/;

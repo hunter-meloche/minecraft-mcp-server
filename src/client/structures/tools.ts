@@ -13,7 +13,7 @@ import { StructureStore } from './store.js';
 import { jobsOf, jobText, queueJob } from './job.js';
 import { importChanges, importDesign } from './importer.js';
 import { readBox } from '../brain/milestones.js';
-import { rankSites, siteMap } from './site.js';
+import { keptSites, rankSites, siteMap } from './site.js';
 import { tidyBox } from './tidy.js';
 import { Voxels } from './terraslicer/world.js';
 import { slice, type Toolpath } from './terraslicer/slicer.js';
@@ -376,7 +376,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         const w = await world();
         const avoid = [
           ...store.listStructures(w).flatMap(n => { const s = store.loadStructure(w, n); if (!s) return []; try { const b = compile(designOf(s.design), s.anchor, s.rotation ?? 0).box; return [{ x: b.x, z: b.z, width: b.width, length: b.length }]; } catch { return []; } }),
-          ...Object.entries(mem?.zones ?? {}).filter(([k]) => k !== 'fence').flatMap(([, zs]) => zs).filter(zz => zz.width && zz.length).map(zz => ({ x: zz.x, z: zz.z, width: zz.width!, length: zz.length! }))
+          ...keptSites(mem)
         ];
         const picks = rankSites(area, blocks, c0.box.width, c0.box.length, { near: centre, yard: mem?.yard, where, avoid, count });
         if (!picks.length) return factory.createErrorResponse(`No spot within ${radius} of (${centre.x}, ${centre.z}) fits ${d.name} (${c0.box.width}x${c0.box.length}) ${where === 'any' ? '' : `${where} the yard `}clear of water and buildings. Try a bigger radius or another point.`);
