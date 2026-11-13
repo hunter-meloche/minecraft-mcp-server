@@ -622,7 +622,9 @@ test('the housekeeping: stamps a day old go, and the marks of rungs no longer on
   t.deepEqual(workTick(snap(), world, () => undefined, [cows], step), []);
   t.deepEqual(asked, [0, 1, 2]);
   t.is(w.tier, 2);
-  // the ladder as it stands, with nothing stored: no target is met, nothing steps
+  // the ladder as it stands, with nothing stored: no target is met, nothing steps. Its cows rung reaches past the
+  // leash: the cows' marks made under the leash go, once
+  t.deepEqual(workTick(snap(), world, () => undefined), ['work: cows reach 256 from home now (was 96): 2 terrain mark(s) let go']);
   t.deepEqual(workTick(snap(), world, () => undefined), []);
   t.is(w.tier, 2);
 });

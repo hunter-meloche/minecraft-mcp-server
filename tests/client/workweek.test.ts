@@ -629,14 +629,15 @@ function taskRuns({ game, rng }: Week): Record<string, WorkTask['run']> {
   };
   const at = (p: Pos) => `(${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)})`;
   /**
-   * A side walked out to the leash less 16 (work.ts alongSide's stops), looked round at each: what it saw (`chance` a
-   * stop), 45 to 85 out (where the forage's fetches found their cows) and up to 20 to either side, if anything.
+   * A side walked out to its bound less 16 (work.ts alongSide's stops, 32 apart: the leash's 80, the cows' range's
+   * 240), looked round at each: what it saw (`chance` a stop), 45 out at the least (where the forage's fetches found
+   * their cows) to `far`, within 16 of the stop and up to 20 to either side, if anything.
    */
-  const lookAlong = async (ctx: GoalContext, side: string, chance: number): Promise<Pos | undefined> => {
-    for (const d of [32, 64, 80]) {
+  const lookAlong = async (ctx: GoalContext, side: string, chance: number, last = 80, far = 85): Promise<Pos | undefined> => {
+    for (const d of [...Array.from({ length: Math.floor(last / 32) }, (_, i) => (i + 1) * 32), last]) {
       if (!await game.walk(along(side, d))) throw new Error('aborted');
       await wait(SECOND, ctx.signal);
-      if (rng.chance(chance)) return along(side, rng.int(Math.max(45, d - 16), Math.min(85, d + 16)), rng.int(-20, 20));
+      if (rng.chance(chance)) return along(side, rng.int(Math.max(45, d - 16), Math.min(far, d + 16)), rng.int(-20, 20));
     }
     return undefined;
   };
@@ -720,21 +721,22 @@ function taskRuns({ game, rng }: Week): Record<string, WorkTask['run']> {
       return back(`${[...parts, `planted ${planted} cane on the shore by (${POND.x1}, ${POND.y}, ${POND.z1})`].join('; ')} (${world.zones!.cane!.length} of 24 cells)`, planted);
     },
     cows: async (ctx, variant) => {
-      // where one was last seen, or one side out to the leash: a wild cow seen about 1 time in 2 (the forage's fetch found
-      // one 45 to 80 out a dozen times on Nov 11-12), fetched on the lead and lost on the way; where it was last seen
-      // is written down, as the fetch writes it
+      // where one was last seen, or one side out to the cow range (256, past the leash): a wild cow seen about 1 time
+      // in 2 (the forage's fetch found one 45 to 80 out a dozen times on Nov 11-12; on Nov 13 none within the leash and
+      // one 147 out), fetched on the lead and lost on the way; where it was last seen is written down, as the fetch
+      // writes it
       let cow: Pos | undefined;
       if (variant === 'in sight') {
         const seen = [...sitesOf(ctx.world, 'cow')].sort((a, b) => horiz(a, HOME) - horiz(b, HOME))[0];
-        if (!seen) return back('no wild cow seen within the leash any more', 0);
+        if (!seen) return back('no wild cow seen within the cow range any more', 0);
         if (!await game.walk(seen)) throw new Error('aborted');
         await wait(2 * SECOND, ctx.signal);
         if (!rng.chance(1 / 2)) { dropSite(ctx.world, 'cow', seen); return back(`no wild cow where one was seen at ${at(seen)}: forgotten`, 0); }
         cow = seen;
       } else {
-        // (1 in 5 a stop: about 1 in 2 a side)
-        cow = await lookAlong(ctx, variant, 1 / 5);
-        if (!cow) return back(`no wild cows ${variant} within the leash (96 from home)`, 0);
+        // (1 in 12 a stop over the range's 8 stops: about 1 in 2 a side, as 1 in 5 over the leash's 3 was)
+        cow = await lookAlong(ctx, variant, 1 / 12, 240, 245);
+        if (!cow) return back(`no wild cows ${variant} within the cow range (256 from home)`, 0);
       }
       const from = Math.round(horiz(cow, HOME));
       if (!await game.walk(cow)) throw new Error('aborted');
@@ -982,9 +984,10 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   // overdue: the repair round walks the bot home at first light, smelt and the farm round take over there and the
   // rounds run after the farm, all before the tree round, so every draw after falls differently. Over seeds 20261112
   // to 20261151 the week's idle went from 19.0% to 20.0%, sd 5.5 (seed by seed 1.1 points more, give or take 0.9):
-  // within the seeds' own spread)
+  // within the seeds' own spread. Nine trips since the cows go out to their range, 256, past the leash: each side is
+  // walked to 240 before it is given up, and where a cow was found and lost, out there, is `in sight` next)
   const cows = step5Week(t, { lines, runs, game, world }, account);
-  t.deepEqual(cows, ['north', 'east', 'in sight', 'south', 'west', 'in sight', 'north', 'east', 'south', 'west', 'north'], account);
+  t.deepEqual(cows, ['north', 'in sight', 'east', 'in sight', 'south', 'west', 'north', 'in sight', 'east'], account);
   // the coal fills the afternoons while it is short of 128, its dry marks let go after 30 s of standing idle (the
   // full shore's never: it is written down, and the patch asks no more)
   t.true(lines.some(l => l.text.endsWith('on dry marks: let go of surface:coal')), account);
@@ -994,15 +997,17 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   // lake's cane, which the farm round cut). Before the rounds started from the yard: day 2 none, days 3 and 4 13.4% and
   // 2.6%, days 5 to 7 22.2%, day 7 36% (late). Over seeds 20261112 to 20261151 days 5 to 7 are 14 to 61% idle together,
   // 34.6% on average (19 to 60%, 33.5%, before), and day 7 11 to 97%, 51.6% on average (20 to 85%, 50.6%, before),
-  // all of it hold, late and away.
-  // The empty time is the cow fetch at its measured rate (401 s, all of it: a side where one was found and lost comes
-  // round again after 20 min), the tree and light rounds' empty rounds, and a deep trip that finds nothing (3 of 12:
-  // day 2's)
+  // all of it hold, late and away. Since the cows go out to their range (the sides' walks to 240 fill what was the
+  // evening's and the probation's): days 2 to 4 0%, 8.4% and 0% (late), days 5 to 7 15.5% together, and day 7 13.6%,
+  // late 75 s alone (its morning, held on the deep rung's probation before, goes to the cows' walk north to 240).
+  // The empty time is the cow fetch at its measured rate (517 s, all of it, since it goes out to 240: a side where one
+  // was found and lost comes round again after 20 min), the tree and light rounds' empty rounds, and a deep trip that
+  // finds nothing (3 of 12)
   t.true(days.slice(1, 4).every(d => share(d, d.idleMs) < 0.15), account);
   const held = days.slice(4, 7);
   t.true(held.reduce((n, d) => n + d.idleMs, 0) / held.reduce((n, d) => n + d.workMs, 0) < 0.40, account);
   const d7 = days[6];
-  t.deepEqual(CAUSES.filter(c => d7.by[c]), ['away', 'hold', 'late'], account);
+  t.deepEqual(CAUSES.filter(c => d7.by[c]), ['late'], account);
   t.true(share(d7, d7.idleMs) < 0.75, account);
 });
 
@@ -1126,17 +1131,20 @@ test.serial('a game day on the live homestead, the step-5 rungs and the cane rou
   t.true(said(/^(done work: cane patch in \d+s: |work: cane patch: )\[shore\]/).slice(1).every(l => /the shore round \(-512, 56, 2195\) is full/.test(l)));
   // the round: nothing grown at its first visit, all 20 cut at its next, never a walk to a dry cell
   t.deepEqual(said(/^done cane in /).map(l => l.replace(/ in \d+s/, '')), ['done cane: cut 0 stalk(s) (0 cane)', 'done cane: cut 20 stalk(s) (20 cane)']);
-  // the cows rung: each side walked to the leash less 16 and looked round, and none there; one lead taken for it.
-  // South set out on the third morning by its gate and was cut short twice: by smelt (the second morning's deep trip
-  // brought raw gold home this time) and by the scene's end. The scene starts at the bed with the home rounds 40 to 53
-  // min overdue: the repair round walks the bot home at first light, smelt and the farm round take over there and the
-  // rounds run after the farm, all before the tree round (which came first before), and the days' draws fall
-  // differently; before, the south walk came back as well
-  t.deepEqual(said(/^done work: cows/).map(l => l.replace(/ in \d+s/, '')), ['north', 'east'].map(side => `done work: cows: [${side}] no wild cows ${side} within the leash (96 from home); back home`));
-  t.deepEqual(said(/^work: cows: (looking south|out of the yard by its south)/).slice(0, 2), ['work: cows: looking south for wild cows, 64 blocks out', 'work: cows: out of the yard by its south gate (-549, 63, 2215)']);
-  // (north 32 out is inside the yard and 64 out the north gate itself: no stop there, out by that gate to 80)
-  t.deepEqual(said(/^work: cows: (looking north|out of the yard by its north)/), ['work: cows: looking north for wild cows, 80 blocks out', 'work: cows: out of the yard by its north gate (-549, 63, 2119)']);
-  t.is(game.count('lead'), 1);
+  // the cows rung: each side walked to the cow range less 16 (240: past the leash) and looked round, and none there;
+  // two leads taken for it (two kept on hand). East set out on the second morning by its gate and smelt cut it on its
+  // walk home (the first morning's deep trip brought raw gold home); its line is said all the same. With the sides to
+  // the leash only, north and east came back, and south set out on the third morning
+  t.deepEqual(said(/^(done work: cows|work: cows: \[)/).map(l => l.replace(/ in \d+s/, '')), [
+    'done work: cows: [north] no wild cows north within the cow range (256 from home); back home',
+    'work: cows: [east] no wild cows east within the cow range (256 from home); stopped on the walk home (its marks are written)'
+  ]);
+  t.deepEqual(said(/^work: cows: (looking east|out of the yard by its east)/).slice(0, 2), ['work: cows: looking east for wild cows, 32 blocks out', 'work: cows: out of the yard by its east gate (-533, 63, 2183)']);
+  // (north 32 out is inside the yard and 64 out the north gate itself: no stop there, out by that gate to 96, and on
+  // every 32 to 240)
+  t.deepEqual(said(/^work: cows: (looking north|out of the yard by its north)/), ['work: cows: looking north for wild cows, 96 blocks out', 'work: cows: out of the yard by its north gate (-549, 63, 2119)',
+    ...[128, 160, 192, 224, 240].map(d => `work: cows: looking north for wild cows, ${d} blocks out`)]);
+  t.is(game.count('lead'), 2);
   // and no walk for wild cane: the patch grows it
   t.deepEqual(said(/^start work: cane:/), []);
   // the home rounds' stand-ins walk home first as their real runs do: once, at first light from the bed 16 out, where

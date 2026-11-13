@@ -1,9 +1,9 @@
 /**
  * The rungs of the work ladder (work.ts runs them): what the bot does with a day that has no job in it, the top rung
- * first. The cane patch grown on the lake shore, a cow for the pen while the project waits on leather and wild cane
- * while it waits on cane, the kit for a trip down from out in the yard, a trip down for every ore the home keeps, and
- * coal from the surface. Each says why it does not run when it does not; the wrapper books what each brought in and
- * walks home.
+ * first. The cane patch grown on the lake shore, cows for the pen while it holds fewer than a pair (out past the
+ * leash: the herd is farmed for good) and wild cane while the project waits on cane, the kit for a trip down from out
+ * in the yard, a trip down for every ore the home keeps, and coal from the surface. Each says why it does not run
+ * when it does not; the wrapper books what each brought in and walks home.
  *
  * Gates only read: every total is counted afresh on each look (the chests as last seen with the pockets), so stock
  * that is used, given away or taken opens its target again at once. Nothing here is used at the module's top level:
@@ -23,7 +23,7 @@ import { allItems, stillShort } from './progress.js';
 import { WATER_FROM_HOME, cutStand, dropDeadCells, findWildCane, liveCells, plantCane, wildCane } from './cane.js';
 import type { Zone } from './courtesy.js';
 import { PEN_FOOD } from './animals.js';
-import { IN_SIGHT, fetchForPens, penAt } from './pens.js';
+import { IN_SIGHT, cowRange, fetchForPens, penAt } from './pens.js';
 import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult, type WorkTask } from './work.js';
 
 const MINUTE = 60_000;
@@ -163,6 +163,16 @@ const canePatch: WorkTask = {
 const PAIR = 2;
 /** The pens round's count of the pen holds this long (it looks every 6 min by day); older, it is not known. */
 const PEN_FRESH = 30 * MINUTE;
+/**
+ * Blocks a second of the walk home with a cow on the lead, as pens.ts bringIn walks it: a careful leg of 4 blocks
+ * (LEAD_LEG: about a second's walking, and a second or so for Baritone to set out and stop), the look at where the
+ * bot got to, then heelLead's looks 0.75 s apart until the cow is within 4 again (one or two: the game pulls it in
+ * from 6). 4 blocks in 2 to 3 s, 1.5 to 2 a second, slower on the turns at the gates: the slow end, so a fetch that
+ * sets out is home by dusk (work.ts needMs: from 200 out 260 s with the walk out at 3 a second and the least work,
+ * so it sets out until tod 5800; a side at the cow range, 256, 316 s, until tod 4680). (Here, not in pens.ts: the
+ * rung is made at this module's top level.)
+ */
+const LEAD_PACE = 1.5;
 
 /**
  * Something to walk a cow home by, carried or stored (beyond what a build job holds): a lead, or 4 string and a slime
@@ -176,16 +186,14 @@ function canLead(s: Pick<Snapshot, 'counts'>, world: WorldMemory): boolean {
 
 /**
  * Why no cow is fetched now, or null: no cow pen with a gate; the chests not all looked into (a half-read list would
- * show the leather short); the project not waiting on leather (what the blocked step's whole bill still lacks,
- * against everything carried and stored); the pen with a pair in it as the pens round last counted it (under half
- * an hour ago: older, it is not known, and a look is allowed); nothing to walk a cow home by.
+ * show nothing to lead a cow home with); the pen with a pair in it as the pens round last counted it (under half an
+ * hour ago: older, it is not known, and a look is allowed); nothing to walk a cow home by. Whatever the project needs:
+ * the herd is farmed for good (the user, Nov 13: "We need to be farming cows"), and with the leather of the project
+ * the only reason, the pen stood empty whenever the project waited on something else.
  */
 function cowsWhy(s: Snapshot, world: WorldMemory): Decline | null {
   if (!penAt(world, 'cow')) return { cause: 'unneeded', text: 'no cow pen with a gate' };
   if (!allLooked(world)) return unread;
-  const need = world.progress?.blocked?.need;
-  const short = need ? stillShort(need, allItems(s, world)).leather ?? 0 : 0;
-  if (!short) return { cause: 'unneeded', text: need?.leather ? 'the project has its leather' : 'the project is not waiting on leather' };
   const pen = penCount(world, 'cow');
   if (pen && s.now - pen.at < PEN_FRESH && pen.adults >= PAIR) return { cause: 'unneeded', text: `the pen has ${pen.adults} cows (they breed the rest)` };
   if (!canLead(s, world)) return { cause: 'kit', text: 'nothing to lead a cow home with (no lead, no 4 string and a slime ball for one, no wheat)' };
@@ -193,12 +201,15 @@ function cowsWhy(s: Snapshot, world: WorldMemory): Decline | null {
 }
 
 /**
- * Rung 2. A cow for the pen while the project waits on leather and the pen holds fewer than a pair: leather has one
- * route, the herd the pens round breeds (the pen never held a cow on the friend's server, and the enchanting room
- * waited on its 38 leather). Where one was last seen first (`in sight`: the pens round's looks and the fetches'
- * write down where wild ones stood, within the leash), then one side of home a run, out to the leash and no further.
- * Walked home on a lead (pens.ts fetchForPens), one cow a run; gain is the cow penned. The sides are terrain: a side
- * with no cow waits ever longer, and the 30-minute wait of the old fetch is these marks now.
+ * Rung 2. Cows for the pen while it holds fewer than a pair, whatever the project needs: the herd the pens round
+ * breeds and culls is the one route to leather and beef (the pen never held a cow on the friend's server). Where one
+ * was last seen first (`in sight`: the pens round's looks and the fetches' write down where wild ones stood), then one
+ * side of home a run, out to the cows' range (pens.ts COW_RANGE, 256: past the leash, which everything else keeps;
+ * within it every side came back with none, four times and more) and no further. Walked home on a lead (pens.ts
+ * fetchForPens), two at once when two graze together; gain is the cows penned. The way home on the lead is slow
+ * (LEAD_PACE): the day it needs, its budget and its timeout count it (work.ts needMs), so a fetch that sets out is
+ * home by dusk: a side at 256 sets out until tod 4680. The sides are terrain: a side with no cow waits ever longer,
+ * and a new range lets their marks go (workTick).
  */
 const cows: WorkTask = {
   name: 'cows',
@@ -207,13 +218,19 @@ const cows: WorkTask = {
   room: 'trip',
   budgetMs: 6 * MINUTE,
   terrain: true,
+  range: world => cowRange(world),
+  backPace: LEAD_PACE,
   variants: (s, world) => {
     if (cowsWhy(s, world)) return [];
     const home = s.home ?? s.position;
-    const seen = sitesOf(world, 'cow').filter(p => horiz(p, home) <= world.leash);
-    // (where one was seen is tried ahead of the sides' turn: `first`)
-    const sight = seen.length ? [{ id: IN_SIGHT, dist: Math.round(Math.min(...seen.map(p => horiz(p, home)))), first: true as const }] : [];
-    return [...sight, ...WOODS_DIRS.map(id => ({ id, dist: world.leash }))];
+    const range = cowRange(world);
+    const seen = sitesOf(world, 'cow').filter(p => horiz(p, home) <= range);
+    // (where one was seen is tried ahead of the sides' turn: `first`). Its distance is the farther of the two nearest
+    // places, as the day it needs: the fetch walks on to the second when the first holds none (pens.ts toSighting),
+    // and by the nearest alone a late run set out for 40 out, walked on to 200 and led a cow home from there at dusk
+    const near = seen.map(p => horiz(p, home)).sort((a, b) => a - b).slice(0, 2);
+    const sight = near.length ? [{ id: IN_SIGHT, dist: Math.round(near[near.length - 1]), first: true as const }] : [];
+    return [...sight, ...WOODS_DIRS.map(id => ({ id, dist: range }))];
   },
   none: (s, world) => cowsWhy(s, world) ?? { cause: 'unneeded', text: 'cows: nothing to do' },
   ready: (s, world) => cowsWhy(s, world),

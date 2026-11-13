@@ -70,6 +70,22 @@ test('too many adults: cull one, never one that is in love', (t) => {
   t.not(nextAnimalAction(pen, inside(3), {}, { minAdults: 3, maxAdults: 1 }).kind, 'cull');
 });
 
+test('a cull takes the adult with the fewest of the pen beside it, the nearest of those: the sword sweeps every one beside the one it hits', (t) => {
+  // seven adults: the nearest stands by a calf, five huddle at the far side, one stands clear in a corner
+  const near = cow(1, 1);
+  const calf = cow(1.5, 1.5, { baby: true });
+  const huddle = [cow(2.5, 3.5), cow(3, 3.5), cow(3.5, 3.5), cow(3, 4), cow(2.5, 4)];
+  const clear = cow(4.5, 0.5);
+  const herd = [near, calf, ...huddle, clear];
+  t.deepEqual(nextAnimalAction(pen, herd, {}, { maxAdults: 6 }), { kind: 'cull', id: clear.id });
+  // the clear one just fed (in love): the one beside the calf alone, not one of the huddle
+  clear.inLove = true;
+  t.deepEqual(nextAnimalAction(pen, herd, {}, { maxAdults: 6 }), { kind: 'cull', id: near.id });
+  // all beside as many: the nearest, as before
+  const row = inside(7);
+  t.deepEqual(nextAnimalAction(pen, row, {}, { maxAdults: 6 }), { kind: 'cull', id: row[0].id });
+});
+
 test('sheep with wool are sheared when shears are carried; unknown wool is left alone', (t) => {
   const sheepPen: Pen = { ...pen, kind: 'sheep' };
   const sheep = (extra: Partial<Animal>) => ({ ...cow(1, 1), name: 'sheep', ...extra });

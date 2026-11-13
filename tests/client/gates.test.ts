@@ -481,8 +481,9 @@ test('a gains goal with no gain is booked empty: the pens (one culled; nothing i
       }
     });
   };
+  // (with 6 adults left the herd breeds on, calves into the surplus: no wheat carried, it says so)
   const culled = await round(7);
-  t.deepEqual([culled.text, culled.gain, culled.day], ['cow: culled one (Killed cow); cow: the pen is full (6 adults, 0 babies)', 1, BUSY]);
+  t.deepEqual([culled.text, culled.gain, culled.day], ['cow: culled one (Killed cow); cow: need 2 wheat to breed (have 0)', 1, BUSY]);
   const none = await round(0);
   t.deepEqual([none.text, none.gain, none.day], ['cow: 0 cow in the pen and none within 32 to lure; 0 cow ready to breed', undefined, EMPTY]);
 });

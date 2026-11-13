@@ -33,22 +33,21 @@ test('by day something is always chosen, with the whole ladder: the design\'s cl
     (c.home === 'depleted' && (c.tod > 5000 || (c.loose === 0 && c.slots >= 27)));
   t.deepEqual(bad(missed.filter(c => !expected(c))), []);
   // (the real step-5 rungs say they have nothing to do before what would keep them home: the depleted home's cane
-  // patch has its 24 cells, and with the project free the cows and wild cane are unneeded, so full pockets there are
-  // told by the first rung with something to do: cows while the project waits on leather, else surface coal, or the
-  // deep trip in the morning. The stand-ins of step 5 said `pockets` for the cane patch in every such cell)
+  // patch has its 24 cells, and with the project free wild cane is unneeded, so full pockets there are told by the
+  // first rung with something to do: the cows, whatever the project needs (the herd is farmed for good: before, with
+  // the project free, the surface coal told 18 of these and the deep trip 3 more), or the deep trip in the morning.
+  // The stand-ins of step 5 said `pockets` for the cane patch in every such cell)
   t.deepEqual(idleCount(cells), {
     'depleted: late: deep needs 3 min, 0.0 left': 72,
+    'depleted: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 52,
     'live: pockets: N/36 slots, nothing to put away (cane patch needs 2 free)': 37,
-    'depleted: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 33,
     'live: late: 0.5 min of daylight left (cane patch needs 0.7)': 16,
     'live: late: 0.3 min of daylight left (cane patch needs 0.7)': 16,
-    'depleted: pockets: N/36 slots, nothing to put away (surface needs 3 free)': 16,
-    'depleted: pockets: N/36 slots, nothing to put away (deep needs 10 free)': 15,
+    'depleted: pockets: N/36 slots, nothing to put away (deep needs 10 free)': 12,
     'depleted: late: deep needs 3 min, 2.1 left': 8,
     'depleted: late: deep needs 3 min, 1.5 left': 8,
     'depleted: late: deep needs 3 min, 0.5 left': 8,
-    'live: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 2,
-    'live: pockets: N/36 slots, nothing to put away (surface needs 3 free)': 2
+    'live: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 4
   });
   t.deepEqual([cells.filter(c => !c.chose).length, missed.length, cells.length], [233, 149, 3168]);
 });

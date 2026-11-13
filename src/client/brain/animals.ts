@@ -21,6 +21,11 @@ export const PEN_FOOD: Readonly<Record<PenKind, readonly string[]>> = {
 };
 /** How far to look for strays to lure (animals follow held food from about 10 blocks; the bot walks to the rest). */
 export const LURE_RANGE = 32;
+/**
+ * Within this of the one hit, centre to centre along x and along z, another animal is in the sword's sweep: the
+ * game's reach is the hit one's box grown a block each way, and a cow's box is 0.9 wide.
+ */
+const SWEEP = 2;
 
 const bare = (name: string) => name.replace(/^minecraft:/, '');
 
@@ -69,7 +74,13 @@ export type AnimalAction =
 
 export interface AnimalOpts {
   minAdults?: number;
+  /** the adults kept: those above are culled */
   maxAdults?: number;
+  /**
+   * breeding stops once the pen holds this many, babies counted (default `maxAdults`): above `maxAdults` the calves
+   * grow into the surplus the cull takes
+   */
+  maxHerd?: number;
   /** False for an animal fed less than 5 minutes ago (it can't breed again yet; the client can't see that). */
   breedCooldownOk?: (id: number) => boolean;
 }
@@ -82,13 +93,15 @@ function foodFor(kind: PenKind, counts: Map<string, number> | Record<string, num
 
 /**
  * The one thing to do next at a pen, in order: lure strays in while there are too few adults to breed from, cull
- * the surplus beyond `maxAdults` (never below `minAdults`), shear woolly sheep, breed while the herd (babies counted:
- * they grow up and would only be culled) is below `maxAdults`, else wait. A lure that can't happen (no strays, no
- * food) falls through to the rest, so a pen that already has two adults still breeds.
+ * the surplus adults beyond `maxAdults` (never below `minAdults`, never a baby), shear woolly sheep, breed while the
+ * herd (babies counted: they grow up) is below `maxHerd`, else wait. With `maxHerd` at `maxAdults` (the default) a
+ * full pen is all it ever holds; above it the calves are what the cull takes once grown. A lure that can't happen (no
+ * strays, no food) falls through to the rest, so a pen that already has two adults still breeds.
  */
 export function nextAnimalAction(pen: Pen, entities: Animal[], counts: Map<string, number> | Record<string, number>, opts: AnimalOpts = {}): AnimalAction {
   const minAdults = opts.minAdults ?? 2;
   const maxAdults = Math.max(minAdults, opts.maxAdults ?? 8);
+  const maxHerd = Math.max(maxAdults, opts.maxHerd ?? maxAdults);
   const cooldownOk = opts.breedCooldownOk ?? (() => true);
   const s = penState(pen, entities);
   const { food, n } = foodFor(pen.kind, counts);
@@ -101,15 +114,20 @@ export function nextAnimalAction(pen: Pen, entities: Animal[], counts: Map<strin
     else return { kind: 'lure', target: s.outsideNear[0].id, food };
   }
   if (s.inside.adults > maxAdults) {
-    // not one that's in love: it was just fed to breed
-    const victim = [...s.adults].sort((a, b) => Number(!!a.inLove) - Number(!!b.inLove) || a.distance - b.distance)[0];
+    // not one that's in love: it was just fed to breed. Then the one with the fewest of the pen beside it, the nearest
+    // of those: the sword sweeps on every full swing (1 to each one within a block of the one hit, and knockback), a
+    // cow takes two swings, and animals do not heal, so the nearest among the herd, cull after cull, would kill the
+    // calves and the kept pair a little at a time
+    const herd = [...s.adults, ...s.babies];
+    const beside = (a: Animal) => herd.filter(o => o !== a && Math.abs(o.position.x - a.position.x) < SWEEP && Math.abs(o.position.z - a.position.z) < SWEEP).length;
+    const victim = [...s.adults].sort((a, b) => Number(!!a.inLove) - Number(!!b.inLove) || beside(a) - beside(b) || a.distance - b.distance)[0];
     return { kind: 'cull', id: victim.id };
   }
   if (pen.kind === 'sheep' && has('shears')) {
     const woolly = s.adults.filter(e => e.sheared === false).sort((a, b) => a.distance - b.distance)[0];
     if (woolly) return { kind: 'shear', id: woolly.id };
   }
-  if (s.inside.adults + s.inside.babies < maxAdults) {
+  if (s.inside.adults + s.inside.babies < maxHerd) {
     const ready = s.adults.filter(e => !e.inLove && cooldownOk(e.id)).sort((a, b) => a.distance - b.distance);
     if (ready.length < 2) why.push(`${ready.length} ${pen.kind} ready to breed`);
     else if (n < 2) why.push(`need 2 ${PEN_FOOD[pen.kind][0]} to breed (have ${n})`);

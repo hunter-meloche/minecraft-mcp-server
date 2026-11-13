@@ -41,25 +41,29 @@ test('by day something is always chosen, with the ladder as it stands: what is t
   // the cells that still choose nothing, by home and lead cause (the report's table). The live home's afternoons that
   // idled on the deep trip's hour (64 cells with step 4's rungs) go to the cane patch now; what is left there is its
   // own last half hour (its furthest cell is 37 blocks out: near, it sets out by about tod 10100) and full pockets.
-  // The depleted home has its 24 cells, so neither cane rung has anything to do; the cows rung takes its blocked
-  // afternoons up to tod 8520 (a side at the leash needs 2.1 min of the day: 40 of the 72 cells the deep trip's hour
-  // left idle), and from 34/36 with nothing loose its 3 free slots are what keeps it home
+  // The depleted home has its 24 cells, so neither cane rung has anything to do. The cows rung goes out to its range,
+  // 256, past the leash, and walks a cow home on the lead's pace: a side needs 5.3 min of the day, so it sets out
+  // until tod 4680, and the depleted home's afternoons, which it took up to tod 8520 when it kept to the leash (2.1
+  // min), are its `late` now (36 cells more idle). The herd is farmed whatever the project needs: with the project free
+  // the cows rung, not the surface coal, is the first with something to do, and from 34/36 with nothing loose its 3
+  // free slots are what keeps it home
   t.deepEqual(idleCount(cells), {
     'live: pockets: N/36 slots, nothing to put away (cane patch needs 2 free)': 37,
-    'depleted: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 33,
-    'depleted: late: deep needs 3 min, 0.0 left': 32,
+    'depleted: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 52,
     'live: late: 0.5 min of daylight left (cane patch needs 0.7)': 16,
     'live: late: 0.3 min of daylight left (cane patch needs 0.7)': 16,
-    'depleted: pockets: N/36 slots, nothing to put away (surface needs 3 free)': 16,
-    'depleted: late: 1.7 min of daylight left (cows needs 2.1)': 8,
-    'depleted: late: 1.0 min of daylight left (cows needs 2.1)': 8,
-    'depleted: late: 0.5 min of daylight left (cows needs 2.1)': 8,
-    'depleted: late: 0.3 min of daylight left (cows needs 2.1)': 8,
-    'depleted: pockets: N/36 slots, nothing to put away (deep needs 10 free)': 3,
-    'live: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 2,
-    'live: pockets: N/36 slots, nothing to put away (surface needs 3 free)': 2
+    'depleted: late: 1.7 min of daylight left (cows needs 5.3)': 16,
+    'depleted: late: 1.0 min of daylight left (cows needs 5.3)': 16,
+    'depleted: late: 0.5 min of daylight left (cows needs 5.3)': 16,
+    'depleted: late: 0.3 min of daylight left (cows needs 5.3)': 16,
+    'depleted: late: 4.2 min of daylight left (cows needs 5.3)': 8,
+    'depleted: late: 3.5 min of daylight left (cows needs 5.3)': 8,
+    'depleted: late: 2.5 min of daylight left (cows needs 5.3)': 8,
+    'depleted: late: 2.1 min of daylight left (cows needs 5.3)': 8,
+    'depleted: pockets: N/36 slots, nothing to put away (deep needs 10 free)': 4,
+    'live: pockets: N/36 slots, nothing to put away (cows needs 3 free)': 4
   });
-  t.is(cells.filter(c => c.chose).length, 2979);
+  t.is(cells.filter(c => c.chose).length, 2943);
 });
 
 test('the cows rung goes first on a fresh morning, once: after one unblocker trip today and no deep trip, the deep trip goes before it', (t) => {

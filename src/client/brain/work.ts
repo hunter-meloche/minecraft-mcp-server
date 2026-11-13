@@ -54,6 +54,16 @@ export interface WorkTask {
   /** its dry marks tell of the land, not of the hour: they go on doubling past 160 min */
   terrain?: true;
   /**
+   * how far from home its variants go, across the ground, when that is not the leash (the cows: the user let them go
+   * past it, Nov 13). Its terrain marks are kept to that range, and let go when it changes (workTick)
+   */
+  range?(world: WorldMemory): number;
+  /**
+   * blocks a second of the way back when the run brings its find home itself, slower than a walk (a cow on the
+   * lead): the day it needs, its budget and its goal's timeout count the way back inside the run, at this pace
+   */
+  backPace?: number;
+  /**
    * what it could do now, each with its distance from home in blocks; sync, reads only. `first`: a place known to hold
    * what the task is after (a stand of cane found before): tried ahead of the others whatever their turn, and its runs
    * do not move the turn on
@@ -100,6 +110,8 @@ export interface WorkMemory {
   last?: { task: string; variant: string; gain: number; text: string; at: number };
   /** the home and the leash the terrain marks were made under (`x,z,leash`): they tell of that land and no other */
   land?: string;
+  /** per task with a range of its own (the cows), the range its terrain marks were made under, blocks */
+  ranges?: Record<string, number>;
 }
 
 /** The wait after the 1st, 2nd, 3rd and every later dry run in a row. */
@@ -112,8 +124,13 @@ export const TRIP_URGENCY = 58;
 export const PROBATION = { clean: 3, perHour: 2 } as const;
 /** The least time at the place that makes a run worth the walk, ms. */
 export const MIN_WORK = { yard: 15_000, near: 20_000, far: 60_000 } as const;
-/** There and back at 3 blocks a second, and the least work: what a variant `dist` blocks out needs of the day, ms. */
-export const needMs = (dist: number, reach: Exclude<Reach, 'deep'>): number => 2 * dist / 3 * 1000 + MIN_WORK[reach];
+/**
+ * There and back at 3 blocks a second, and the least work: what a variant `dist` blocks out needs of the day, ms. A
+ * run that brings its find home at a slower pace (`backPace`, blocks a second: a cow on the lead) is counted back at
+ * that pace (to the whole ms).
+ */
+export const needMs = (dist: number, reach: Exclude<Reach, 'deep'>, backPace?: number): number =>
+  (backPace ? Math.round(dist * 1000 / 3 + dist * 1000 / backPace) : 2 * dist / 3 * 1000) + MIN_WORK[reach];
 /** the deep trip's walk back up, and the least mining worth going down for (as deep.ts has them) */
 const DEEP_WALK_BACK = 2 * MINUTE;
 const DEEP_WORTH = 3 * MINUTE;
@@ -152,6 +169,8 @@ function clean(raw: unknown): WorkMemory {
   for (const [k, v] of Object.entries(isObj(r.pen) ? r.pen : {})) {
     if (isObj(v) && fin(v.adults) && fin(v.babies) && fin(v.at)) pen[k] = { adults: v.adults, babies: v.babies, at: v.at };
   }
+  const ranges: Record<string, number> = {};
+  for (const [k, v] of Object.entries(isObj(r.ranges) ? r.ranges : {})) if (fin(v) && v > 0) ranges[k] = v;
   const d = isObj(r.deep) ? r.deep : {};
   const deep: WorkMemory['deep'] = { starts: stamps(d.starts), clean: fin(d.clean) && d.clean > 0 ? Math.floor(d.clean) : 0, deaths: stamps(d.deaths) };
   if (fin(d.kitHold)) deep.kitHold = d.kitHold;
@@ -164,6 +183,7 @@ function clean(raw: unknown): WorkMemory {
     m.last = { task: l.task, variant: l.variant, gain: l.gain, text: l.text, at: l.at };
   }
   if (typeof r.land === 'string') m.land = r.land;
+  if (Object.keys(ranges).length) m.ranges = ranges;
   return m;
 }
 
@@ -455,24 +475,27 @@ export async function outByGate(ctx: GoalContext, to: { x: number; z: number }, 
   return { shut: `no way out of the yard by ${tried.join(' or ')}` };
 }
 
+/** How far from home across the ground a walk may go, and what the words call that bound (`the leash`). */
+export interface Bound { blocks: number; name: string }
+
 /**
- * Look along one side of home for something (wild cane, a wild cow), no further out than the leash: from where the
- * bot stands, then from stops 32 blocks apart along that side, the last 16 inside the leash, `look` at each. The
- * explore tool would not do: it looks 96 round the bot from the first step and stops at the first it sees (the
- * bot's own cane patch, a cow in its own pen, or one past the leash), and it goes as far out as told from wherever the
- * bot is. A stop in the yard or within the bridge's margin round it is left out: there is nothing wild to look for
- * there (north 32 out is inside the yard, north 64 the gate itself); when that leaves none (a yard grown out that
- * way, a shorter leash), the first place past the margin is the stop, if it is within the leash. From inside the
- * fence the walk out goes by the gate on that side (outByGate). A stop not got to (water, a cliff) is looked round
- * from where the walk ended, and the side goes no further. Returns the first find, or why there was none (`what`
- * names it: `no wild cane east within the leash ...`, `no wild cane looked for north: no way out of the yard by the
- * north gate ...`); `short` when the run's time ran out before the side's end, so the side was not looked along to
- * the leash.
+ * Look along one side of home for something (wild cane, a wild cow), no further out than the leash (or the `bound`
+ * given: the cows go out to their range): from where the bot stands, then from stops 32 blocks apart along that side,
+ * the last 16 inside the leash, `look` at each. The explore tool would not do: it looks 96 round the bot from the first
+ * step and stops at the first it sees (the bot's own cane patch, a cow in its own pen, or one past the leash), and it
+ * goes as far out as told from wherever the bot is. A stop in the yard or within the bridge's margin round it is left
+ * out: there is nothing wild to look for there (north 32 out is inside the yard, north 64 the gate itself); when that
+ * leaves none (a yard grown out that way, a shorter leash), the first place past the margin is the stop, if it is
+ * within the leash. From inside the fence the walk out goes by the gate on that side (outByGate). A stop not got to
+ * (water, a cliff) is looked round from where the walk ended, and the side goes no further. Returns the first find, or
+ * why there was none (`what` names it: `no wild cane east within the leash ...`, `no wild cane looked for north: no way
+ * out of the yard by the north gate ...`); `short` when the run's time ran out before the side's end, so the side was
+ * not looked along to the leash.
  */
 export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: string, look: () => Promise<T | undefined>,
-  enough: () => boolean = () => false): Promise<{ found?: T; text: string; short?: true }> {
+  enough: () => boolean = () => false, bound: Bound = { blocks: ctx.world.leash, name: 'the leash' }): Promise<{ found?: T; text: string; short?: true }> {
   const home = ctx.s.home!;
-  const last = ctx.world.leash - SIDE_MARGIN;
+  const last = bound.blocks - SIDE_MARGIN;
   const [dx, dz] = SIDE_STEP[side];
   const stopAt = (d: number) => ({ x: Math.round(home.x + dx * d), y: home.y, z: Math.round(home.z + dz * d) });
   const yard = ctx.world.yard;
@@ -482,7 +505,7 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: strin
   // (every stop out in the yard or its margin: a look from home alone would say "none within the leash" and write the
   // side off for hours, never looked along. With the margin out past the leash that way, nothing wild is within it)
   if (legs.length === 1 && stops.length > 1) {
-    const edge = Array.from({ length: ctx.world.leash }, (_, i) => i + 1).find(wild);
+    const edge = Array.from({ length: bound.blocks }, (_, i) => i + 1).find(wild);
     if (edge !== undefined) legs.push(edge);
   }
   let out = 0;
@@ -511,14 +534,14 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: strin
         const got = at ? Math.round(horiz(at, home)) : out;
         const found = await look();
         if (found !== undefined) return { found, text: '' };
-        return { text: `no ${what} ${side} within the leash: got no further than ${got} blocks out` };
+        return { text: `no ${what} ${side} within ${bound.name}: got no further than ${got} blocks out` };
       }
     }
     out = d;
     const found = await look();
     if (found !== undefined) return { found, text: '' };
   }
-  return { text: `no ${what} ${side} within the leash (${ctx.world.leash} from home)` };
+  return { text: `no ${what} ${side} within ${bound.name} (${bound.blocks} from home)` };
 }
 
 /**
@@ -585,22 +608,40 @@ function common(task: WorkTask, s: Snapshot, world: WorldMemory): Decline | null
 
 /** Too little of the day left for this variant: the walk there and back and the least work do not fit before the return home. */
 function lateFor(task: WorkTask, dist: number, s: Snapshot): Decline | null {
-  if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(needMs(dist, task.reach)));
+  if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(needMs(dist, task.reach, task.backPace)));
   const left = tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
   // (rounded down, as deep.ts does: a tick too late is "2.9 left", not "3.0")
   return left < DEEP_WORTH ? { cause: 'late', text: `${task.name} needs ${DEEP_WORTH / MINUTE} min, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
 }
 
-/** What the run may spend at the place, ms: the task's own budget, or what the day leaves after the walk back and a margin. */
+/**
+ * What the run may spend at the place, ms: the task's own budget, or what the day leaves after the walk back and a
+ * margin. A run that walks its find home itself (`backPace`: a cow on the lead) has the way back in its budget: the
+ * way there and back at its pace and the least work (needMs) at the least, and what the day leaves bounds it (the
+ * walk home after is from the pen; one that lets its find go out there walks back faster than it would have led it).
+ * Counted as a walk, a fetch from 200 out could set out at tod 7140 with 111 s to bring home a cow 133 s off on the
+ * lead: let go on the way.
+ */
 function budgetFor(task: WorkTask, dist: number, s: Snapshot): number {
   if (task.reach === 'deep') return tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
-  return Math.max(0, Math.min(task.budgetMs, ticksToMs(daylightLeft(s.timeOfDay)) - dist / 3 * 1000 - 15_000));
+  const day = ticksToMs(daylightLeft(s.timeOfDay));
+  if (task.backPace) return Math.max(0, Math.min(Math.max(task.budgetMs, needMs(dist, task.reach, task.backPace)), day - 15_000));
+  return Math.max(0, Math.min(task.budgetMs, day - dist / 3 * 1000 - 15_000));
 }
 
-/** How long the brain lets a run of the task go on, from its start (the goal's timeout). */
-const timeoutOf = (task: WorkTask): number => (task.reach === 'deep' ? 12 * MINUTE : task.budgetMs + 2 * MINUTE);
-/** The run's own time left at the place when the brain will stop it, ms: what making room took and the walk there and back come off it. */
-const timeLeftFor = (task: WorkTask, dist: number, spentMs: number): number => timeoutOf(task) - spentMs - 2 * dist / 3 * 1000 - 30_000;
+/**
+ * How long the brain lets a run of the task go on, from its start (the goal's timeout). A run that walks its find
+ * home itself is given two minutes more: making room before it and the walk home from as far out as it lets its find
+ * go (85 s from 256 out) come on top of a budget that holds the whole way back.
+ */
+const timeoutOf = (task: WorkTask): number => (task.reach === 'deep' ? 12 * MINUTE : task.budgetMs + (task.backPace ? 4 : 2) * MINUTE);
+/**
+ * The run's own time left at the place when the brain will stop it, ms: what making room took and the walk there and
+ * back come off it (for a run that brings its find home itself, the walk home from out there only: the way back with
+ * it is the run's own).
+ */
+const timeLeftFor = (task: WorkTask, dist: number, spentMs: number): number =>
+  timeoutOf(task) - spentMs - (task.backPace ? dist / 3 : 2 * dist / 3) * 1000 - 30_000;
 
 function demotedBy(task: WorkTask, mark: DryMark | undefined, w: WorkMemory, world: WorldMemory): string | undefined {
   if (!isUnblocker(task)) return undefined;
@@ -802,7 +843,9 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
       // budget is the day's clock, which the put-away has already moved on)
       const spent = now() - startedAt;
       const left = timeLeftFor(task, dist, spent);
-      if (left < MIN_WORK[task.reach]) return `[${variant}] not setting out: making room took ${Math.round(spent / 1000)} s, too little of the run's time is left`;
+      // (a run that brings its find home needs the whole way there and back: cut short, it lets it go out there)
+      const least = task.backPace ? needMs(dist, task.reach, task.backPace) : MIN_WORK[task.reach];
+      if (left < least) return `[${variant}] not setting out: making room took ${Math.round(spent / 1000)} s, too little of the run's time is left`;
       budgetMs = Math.min(budgetMs, left);
     }
     const setOut = now();
@@ -1022,6 +1065,22 @@ export function workTick(
     wrote = true;
     if (gone) lines.push(`work: a new home or leash: ${gone} terrain mark(s) let go`);
   }
+  // a rung with a range of its own (the cows, past the leash) keeps the range its terrain marks were made under: at
+  // another range they say nothing of what lies out there (live, every side's mark had doubled four times within the
+  // leash, and the sides would have waited hours before a look past it). A memory with none kept made them under the
+  // leash
+  for (const t of tasks) {
+    if (!t.terrain || !t.range) continue;
+    const range = t.range(world);
+    const kept = w.ranges?.[t.name];
+    if (kept === range) continue;
+    let gone = 0;
+    if ((kept ?? world.leash) !== range) for (const key of Object.keys(w.dry)) if (taskOfKey(key) === t.name) { delete w.dry[key]; gone++; }
+    (w.ranges ??= {})[t.name] = range;
+    wrote = true;
+    if (gone) lines.push(`work: ${t.name} reach ${range} from home now (was ${kept ?? world.leash}): ${gone} terrain mark(s) let go`);
+  }
+  for (const name of Object.keys(w.ranges ?? {})) if (!known.has(name)) { delete w.ranges![name]; wrote = true; }
   if (w.farDay && w.farDay.day !== dayOf(world)) { delete w.farDay; wrote = true; }
   if (wrote) writes++;
   const next = step(s, world, w.tier);
