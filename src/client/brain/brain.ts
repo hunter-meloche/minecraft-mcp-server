@@ -287,7 +287,9 @@ export class Brain {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
         const here = `${Math.floor(s.position.x)},${Math.floor(s.position.y)},${Math.floor(s.position.z)}`;
         if (here !== this.stillAt || !s.process) { this.stillAt = here; this.stillSince = this.now(); }
-        // half a minute without a block's movement: wedged against a fence? step out by hand (Baritone never will)
+        // half a minute without a block's movement: wedged against a fence? step out by hand (Baritone never will).
+        // A walk with an animal on its lead too: it never waits in or by a gateway (pens.ts standsClear), so one
+        // standing in a gate this long is wedged, and only the brain gets it out (live, Nov 13: wedged in the north gate)
         if (s.process && this.now() - this.stillSince > 30_000 && this.wedgeLooked !== this.stillSince) {
           this.wedgeLooked = this.stillSince;
           const box = { x: Math.floor(s.position.x) - 1, y: Math.floor(s.position.y), z: Math.floor(s.position.z) - 1, width: 3, height: 2, length: 3 };

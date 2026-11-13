@@ -9,7 +9,7 @@ import { prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { makeRoom, noRoom, out as afield, room } from './pockets.js';
-import { addSite, alongSide, byYard, dropSite, gatesBetween, inFence, notePen, outByGate, sitesOf, type Bound, type HomeSide, type WorkResult } from './work.js';
+import { addSite, alongSide, byYard, CLEAR, dropSite, gatesBetween, inFence, notePen, outByGate, sitesOf, type Bound, type HomeSide, type WorkResult } from './work.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -347,35 +347,250 @@ async function offLead(ctx: GoalContext, ids: number[]): Promise<void> {
   }
 }
 
+// ---- where a lead walk stands, and the way round the pen to its gate
+
+type Cell = { x: number; z: number };
+/** The gates and doors world memory knows: the yard's, the pens', the buildings'. */
+const doorways = (world: WorldMemory) => Object.entries(world.zones ?? {}).filter(([k]) => /:(gate|door)$/.test(k)).flatMap(([, zs]) => zs);
+
 /**
- * The way to the pen's gate from out there: through the yard's gate that makes the shortest way round (its cell 2
- * outside, then 2 inside: work.ts gatesBetween, which the walks out of the yard go by too), then to the pen's. A leg
- * aimed at the pen through the fence had Baritone walk the fence round to a gate in one go, out of the animal's
- * reach. From inside the yard, or with no gate known, straight there.
+ * Where a walk with an animal may stop and wait for it: 2 cells clear of every gate and door, not on a fence line,
+ * and not inside what world memory knows is built or fenced (a pen, the storage house, the plot, the tree farm; the
+ * yard's own fence box aside). Live on Nov 13 two walks home on the lead stopped in the yard's north gate for the
+ * waits for the cow, and the brain's wedge watch stopped both there: "wedged in the oak_fence_gate at -549,63,2119",
+ * the cow let go outside the fence.
  */
-function routeFor(world: WorldMemory, from: Pos, way: Way): { points: Pos[]; gate?: Pos } {
-  if (!world.yard || inFence(world, from) || !inFence(world, way.outside)) return { points: [way.outside] };
-  const best = gatesBetween(world, mid(way.outside), from)[0];
-  return best ? { points: [best.outer, best.inner, way.outside], gate: best.gate } : { points: [way.outside] };
+export function standsClear(world: WorldMemory): (c: Cell) => boolean {
+  const ways = doorways(world);
+  const fence = fencesOf(world);
+  const built = builtAt(world);
+  return c => ways.every(g => Math.max(Math.abs(c.x - g.x), Math.abs(c.z - g.z)) >= 2) && !fence(c.x, c.z) && !built(c.x, c.z);
 }
 
-/** One leg toward `w`: `leg` blocks at most, careful (walk only: Baritone's tool pick took the wheat out of hand mid-leg); the last one to the cell itself. */
-async function stepToward(ctx: GoalContext, me: Pos, w: Pos, leg: number): Promise<void> {
+/** In a box world memory knows is built or fenced (every zone with a size but the yard's fence), or within `by` of one. */
+function builtAt(world: WorldMemory, by = 0): (x: number, z: number) => boolean {
+  const built = Object.entries(world.zones ?? {}).filter(([k]) => k !== 'fence').flatMap(([, zs]) => zs).filter(b => b.width && b.length);
+  return (x, z) => built.some(b => x >= b.x - by && x < b.x + b.width! + by && z >= b.z - by && z < b.z + b.length! + by);
+}
+
+/** The fence lines world memory knows, cell by cell: the yard's and the pens', their gates as shut but those in `open`. */
+function fencesOf(world: WorldMemory, open: Pos[] = []): (x: number, z: number) => boolean {
+  const rings = [
+    ...(world.yard ? [world.yard] : []),
+    ...Object.entries(world.zones ?? {}).filter(([k]) => /^pen:[a-z]+$/.test(k)).flatMap(([, zs]) => zs).filter(b => b.width && b.length)
+      .map(b => ({ x1: b.x, z1: b.z, x2: b.x + b.width! - 1, z2: b.z + b.length! - 1 }))
+  ];
+  return (x, z) => !open.some(g => g.x === x && g.z === z)
+    && rings.some(r => ((x === r.x1 || x === r.x2) && z >= r.z1 && z <= r.z2) || ((z === r.z1 || z === r.z2) && x >= r.x1 && x <= r.x2));
+}
+
+/**
+ * No fence cell on the straight line from a to b, the line a lead pulls an animal along: every cell it passes through,
+ * one it only clips the corner of too (a cow is 0.9 wide, a gateway 1).
+ */
+function lineClear(a: Cell, b: Cell, fence: (x: number, z: number) => boolean): boolean {
+  let x = Math.floor(a.x), z = Math.floor(a.z);
+  const dx = b.x - a.x, dz = b.z - a.z;
+  const sx = Math.sign(dx), sz = Math.sign(dz);
+  // (how far along the line, 0 to 1, the next cell edge across x and across z is, and the step between edges)
+  const next = (p: number, d: number, s: number) => (s === 0 ? Infinity : (s > 0 ? Math.floor(p) + 1 - p : p - Math.floor(p)) / Math.abs(d));
+  let tx = next(a.x, dx, sx), tz = next(a.z, dz, sz);
+  const stepX = sx ? 1 / Math.abs(dx) : Infinity, stepZ = sz ? 1 / Math.abs(dz) : Infinity;
+  for (let i = 0; i < 4096; i++) {
+    if (tx > 1 && tz > 1) return true;
+    if (tx < tz) { x += sx; tx += stepX; } else if (tz < tx) { z += sz; tz += stepZ; } else {
+      // through a corner exactly: both cells beside it are in its way
+      if (fence(x + sx, z) || fence(x, z + sz)) return false;
+      x += sx; z += sz; tx += stepX; tz += stepZ;
+    }
+    if (fence(x, z)) return false;
+  }
+  return true;
+}
+
+/** The cell `n` out from the pen's gate, on its line. */
+const outOf = (way: Way, n: number): Pos => ({ x: way.gate.x + n * OUT[way.side].x, y: way.gate.y, z: way.gate.z + n * OUT[way.side].z });
+
+/**
+ * The berths round a pen tried in turn, the first that keeps inside the yard and off what is built: blocks out from
+ * the fence on its three shut sides, and on its gate's side. 3 keeps a led animal pulled round a corner clear of the
+ * corner post, and of the cow barn's posts 1 out from the live pen's corners (at 2 the straight pull of one 2 behind
+ * the bot would cut across them); the gate's side further out, so the last stretch runs straight in along the gate's
+ * line with the animal behind the bot.
+ */
+const BERTHS: [number, number][] = [[3, 6], [3, 5], [3, 4], [3, 3], [2, 4], [2, 3], [2, 2]];
+
+/**
+ * The way round the pen to its gate from `from` (in the yard): onto a ring round the pen at a berth (BERTHS), round it
+ * the shorter way, past its corners, to the gate's line, and in along it to the cell 2 outside the gate. A lead pulls
+ * an animal in a straight line toward the bot, and a fence stops it: live on Nov 13 the walk from the north gate
+ * straight at the pen's south gate went round the pen close by, the cow drawn after it against the pen's north fence,
+ * and it stood there, 2 off the bot inside, across the fence ("at the gate it would not come in"). No ring fits: that
+ * cell straight, as before. Cells at the gate's height. `open`: what a look round the pen found a body can walk
+ * through (openRound): a ring, or the gate's line in from it, through a build world memory does not know is not
+ * tried (live, the sheep pen's every ring went through the cottage, 2 from its gate).
+ */
+export function penWay(world: WorldMemory, p: Pen, way: Way, from: Cell, open: (c: Cell) => boolean = () => true): Pos[] {
+  const y = way.gate.y;
+  const two = outOf(way, 2);
+  const ok = standsClear(world);
+  for (const [s, g] of BERTHS) {
+    const X0 = p.x1 - (way.side === 'west' ? g : s), X1 = p.x2 + (way.side === 'east' ? g : s);
+    const Z0 = p.z1 - (way.side === 'north' ? g : s), Z1 = p.z2 + (way.side === 'south' ? g : s);
+    const ring: Cell[] = [];
+    for (let x = X0; x <= X1; x++) ring.push({ x, z: Z0 }, { x, z: Z1 });
+    for (let z = Z0 + 1; z < Z1; z++) ring.push({ x: X0, z }, { x: X1, z });
+    if (!ring.every(c => ok(c) && (!world.yard || inFence(world, c)) && open(c))) continue;
+    if (!Array.from({ length: g - 1 }, (_, i) => outOf(way, i + 2)).every(open)) continue;
+    // where along the ring a cell of it is, clockwise from its north-west corner
+    const W = X1 - X0, H = Z1 - Z0, P = 2 * (W + H);
+    const along = (c: Cell) => (c.z === Z0 ? c.x - X0 : c.x === X1 ? W + c.z - Z0 : c.z === Z1 ? W + H + X1 - c.x : 2 * W + H + Z1 - c.z);
+    const corners: Cell[] = [{ x: X0, z: Z0 }, { x: X1, z: Z0 }, { x: X1, z: Z1 }, { x: X0, z: Z1 }];
+    // onto it: the nearest cell of it (from inside it, toward the nearest side)
+    const b = { x: Math.floor(from.x), z: Math.floor(from.z) };
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    let onto: Cell = { x: clamp(b.x, X0, X1), z: clamp(b.z, Z0, Z1) };
+    if (b.x > X0 && b.x < X1 && b.z > Z0 && b.z < Z1) {
+      const d = [b.z - Z0, X1 - b.x, Z1 - b.z, b.x - X0];
+      onto = [{ x: b.x, z: Z0 }, { x: X1, z: b.z }, { x: b.x, z: Z1 }, { x: X0, z: b.z }][d.indexOf(Math.min(...d))];
+    }
+    // (that one, or the nearest a straight walk to keeps a block clear of the builds world memory knows; with the bot
+    // standing by one, the nearest it keeps out of them: from the yard's south gate the nearest, the corner behind the
+    // storage house, lay through the house, its door and all, the cow on the lead)
+    for (const near of [builtAt(world, 1), builtAt(world)]) {
+      const to = lineClear(from, mid(onto), near) ? onto : ring.filter(c => lineClear(from, mid(c), near)).sort((c, d) => horiz(from, mid(c)) - horiz(from, mid(d)))[0];
+      if (to) { onto = to; break; }
+    }
+    const line = outOf(way, g);
+    const cw = (((along(line) - along(onto)) % P) + P) % P;
+    const back = (P - cw) % P;
+    const off = (c: Cell) => (cw <= back ? (((along(c) - along(onto)) % P) + P) % P : (((along(onto) - along(c)) % P) + P) % P);
+    const past = corners.filter(c => off(c) > 0 && off(c) < Math.min(cw, back)).sort((c, d) => off(c) - off(d));
+    const pts = [onto, ...past, line, two].filter((c, i, all) => i === 0 || c.x !== all[i - 1].x || c.z !== all[i - 1].z);
+    return pts.map(c => ({ x: c.x, y, z: c.z }));
+  }
+  return [two];
+}
+
+/** Plants a body walks through that CLEAR (work.ts) leaves out: a ring over a patch of pink petals goes through no build. */
+const PLANTS = /^(minecraft:)?(pink_petals|wildflowers|firefly_bush|short_dry_grass|tall_dry_grass|sunflower|lilac|rose_bush|peony|red_mushroom|brown_mushroom)(\[|$)/;
+
+/**
+ * What a body can walk through round a pen, by one look (world.region) at its gate's height, feet and head, out as far
+ * as the berths and the gate's line go (BERTHS): world memory knows the pens, the storage house and the plot, not
+ * every build. Live, the cottage's south wall stands 2 out from the sheep pen's gate (its cell 2 out), and every ring
+ * round that pen went through the cottage. A cell the look did not cover, or did not see (not loaded: a fetch from
+ * far out), or a look that failed: as world memory has it.
+ */
+async function openRound(ctx: GoalContext, p: Pen, y: number): Promise<(c: Cell) => boolean> {
+  const R = 6;
+  const box = { x: p.x1 - R, y, z: p.z1 - R, width: p.x2 - p.x1 + 1 + 2 * R, height: 2, length: p.z2 - p.z1 + 1 + 2 * R };
+  const blocks = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box).catch(() => undefined))?.blocks;
+  if (!blocks || blocks.length < box.width * box.height * box.length) return () => true;
+  // (x fastest, then z, then y)
+  const block = (c: Cell, dy: number) => blocks[dy * box.width * box.length + (c.z - box.z) * box.width + (c.x - box.x)];
+  return c => c.x < box.x || c.x >= box.x + box.width || c.z < box.z || c.z >= box.z + box.length
+    || [0, 1].every(dy => { const b = block(c, dy); return b === null || b === undefined || CLEAR.test(b) || PLANTS.test(b); });
+}
+
+/**
+ * The way round to the gate's side and in along its line (penWay, roundToGate) is open: nothing world memory does not
+ * know stands in the cell 2 out or the one by the gate (the cottage's wall 2 out from the sheep pen's gate). Not so: the
+ * walk to the cell outside the gate, and in, as before (from the row between the wall and the fence no led one ever
+ * stood on the gate's line, and every lure there ended "it would not come round to the gate").
+ */
+const roundable = (way: Way, open: (c: Cell) => boolean) => open(outOf(way, 2)) && open(way.outside);
+
+/** A stop on the way in: `pass`, one walk through the yard's gate from 2 before it to 2 beyond; `xz`, at any height; `exact`, to the cell itself. */
+interface Stop { at: Pos; pass?: true; xz?: true; exact?: true }
+
+/**
+ * The way to the pen's gate from out there: through the yard's gate that makes the shortest way round (its cell 2
+ * outside, then 2 inside in one walk: work.ts gatesBetween, which the walks out of the yard go by too), then round the
+ * pen to its gate (penWay) with an animal on a lead, or to the cell 2 outside the gate with one after food (a tempted
+ * animal walks the way round itself). On a lead, up to the yard's gate along its line from 6 out first (unless
+ * already on that line by the gate), and on in along it after the pass: the lead pulls in a straight line, and an
+ * animal brought in at the gate from the side, or turned there, is drawn across the post beside it. No way through a
+ * build the look round the pen saw (openRound). A leg aimed at the pen through the fence had Baritone walk the fence
+ * round to a gate in one go, out of the animal's reach. From inside the yard, or with no gate known, from where the
+ * bot stands.
+ */
+function routeFor(world: WorldMemory, me: Pos, from: Pos, p: Pen, way: Way, lead: boolean, open: (c: Cell) => boolean): { points: Stop[]; gate?: Pos } {
+  const two = outOf(way, 2);
+  // (onto the gate's line, and to the cell outside the gate, to the cells themselves: a walk to within 1 of one
+  // ends beside it, and the animal comes in at the gate from the side)
+  const pen = (start: Cell): Stop[] => {
+    // (no walking through the cell 2 out or the one by the gate: a build stands there that world memory does not
+    // know, the cottage's wall by the sheep pen's gate. To within 1 of the cell outside the gate, as before)
+    if (!roundable(way, open)) return [{ at: way.outside }];
+    const pts = lead ? penWay(world, p, way, start, open) : [two];
+    return pts.map((at, i) => ({ at, ...(i >= pts.length - (lead ? 2 : 1) ? { exact: true as const } : {}) }));
+  };
+  if (!world.yard || inFence(world, from) || !inFence(world, way.outside)) return { points: pen(me) };
+  const best = gatesBetween(world, mid(way.outside), from)[0];
+  if (!best) return { points: pen(me) };
+  const far = { x: best.gate.x + 3 * (best.outer.x - best.gate.x), y: best.gate.y, z: best.gate.z + 3 * (best.outer.z - best.gate.z) };
+  // (already on the gate's line outside it, and no further out than that stop: none. By the gate but to its side, a
+  // cow led in was caught on the post beside it. To the cell itself: a walk that ended within 1.5 of it, as other
+  // stops do, stood a block off the line, and the cow 2 behind was brought in from the side all the same)
+  const ux = (best.outer.x - best.gate.x) / 2, uz = (best.outer.z - best.gate.z) / 2;
+  const rx = me.x - mid(best.gate).x, rz = me.z - mid(best.gate).z;
+  const outward = rx * ux + rz * uz, aside = Math.abs(rx * uz - rz * ux);
+  const lineUp: Stop[] = lead && !(aside < 0.75 && outward >= 1.5 && outward <= 6.5) ? [{ at: far, xz: true, exact: true }] : [];
+  // on a lead, on in along the gate's line past the cell 2 in, up to 6 in where the yard and the builds allow: there
+  // the animal, 2 behind, stands in the gateway, and the next leg's turn pulled it onto the post beside it (the west
+  // gate, on the way to the pen's west side)
+  const ok = standsClear(world);
+  const inward = (n: number): Pos => ({ x: best.gate.x + n * (best.inner.x - best.gate.x) / 2, y: best.gate.y, z: best.gate.z + n * (best.inner.z - best.gate.z) / 2 });
+  const deep = lead ? [6, 5, 4, 3].find(m => ok(inward(m)) && inFence(world, inward(m)) && Array.from({ length: m - 2 }, (_, i) => inward(i + 3)).every(open)) : undefined;
+  // (by 4 in first, where that is further: there the animal 2 behind is in the fence, clear of the gateway, and the
+  // gate is shut from there, in reach. From 6 in the bot walked back toward it past the animal, and a run given up
+  // in that walk left the gate open till dusk: the click of a run given up walks nowhere, and reaches 4.5)
+  const deeper: Stop[] = deep === undefined ? [] : [...(deep > 4 && ok(inward(4)) ? [inward(4)] : []), inward(deep)].map(at => ({ at, exact: true as const }));
+  return { points: [...lineUp, { at: best.outer }, { at: best.inner, pass: true }, ...deeper, ...pen(mid(deeper.at(-1)?.at ?? best.inner))], gate: best.gate };
+}
+
+/**
+ * The cell a walk from `me` toward `to` gets to `s` blocks on: its floor at that point of the line.
+ */
+const onLine = (me: Cell, to: Cell, s: number): Cell => {
+  const d = horiz(me, to);
+  return { x: Math.floor(me.x + (to.x - me.x) * s / d), z: Math.floor(me.z + (to.z - me.z) * s / d) };
+};
+
+/**
+ * One leg toward `w`: `leg` blocks at most, careful (walk only: Baritone's tool pick took the wheat out of hand
+ * mid-leg); the last one to the cell itself (to within 1 of it, or `exact`). With `ok`, where the bot may stop and wait
+ * for its animal (standsClear): a leg that would end in a gateway, or by it, or in a building, ends at the last cell
+ * short of it that will do, or failing that goes on past it in one walk, as far as another leg (a gate: from 2
+ * before it to 2 beyond).
+ */
+async function stepToward(ctx: GoalContext, me: Pos, w: Pos, leg: number, o: { ok?: (c: Cell) => boolean; xz?: boolean; exact?: boolean } = {}): Promise<void> {
   const d = horiz(me, mid(w));
-  const t = Math.min(1, leg / d);
-  const to = t >= 1 ? { x: w.x, y: w.y, z: w.z, range: 1 }
+  let s = Math.min(leg, d);
+  if (o.ok && d > leg) {
+    const mine = cell(me);
+    const stand = (t: number) => { const c = onLine(me, mid(w), t); return (c.x !== mine.x || c.z !== mine.z) && o.ok!(c); };
+    const short = Array.from({ length: leg }, (_, i) => leg - i).find(stand);
+    const beyond = Array.from({ length: leg }, (_, i) => leg + 1 + i).find(t => t < d && stand(t));
+    s = short ?? beyond ?? (d <= 2 * leg ? d : leg);
+  }
+  const to = s >= d ? { x: w.x, y: w.y, z: w.z, ...(o.xz ? { xz: true } : {}), range: o.exact ? 0 : 1 }
     // (any height: the ground between here and there is not known)
-    : { x: Math.floor(me.x + (mid(w).x - me.x) * t), y: w.y, z: Math.floor(me.z + (mid(w).z - me.z) * t), xz: true, range: 1 };
+    : { ...onLine(me, mid(w), s), y: w.y, xz: true, range: 1 };
   await ctx.call('goto', { ...to, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
 }
 
 /**
  * After a leg on the lead: the animal close again (within 4, up to 6 s), and when it lags, a step back toward it to
- * give it slack, twice at most. Off the lead (`broke`), gone from sight, or as last seen.
+ * give it slack, twice at most: halfway back, or with `ok` the cell nearest halfway on the way back where the bot may
+ * stand (never back into a gateway: the step back from 2 inside the yard's gate toward a cow 4 outside it went to the
+ * gate itself), none at all when there is none. Off the lead (`broke`), gone from sight, or as last seen. `rounds`:
+ * of looks (up to 6 s each), the steps back between them.
  */
-async function heelLead(ctx: GoalContext, id: number): Promise<{ e?: Ent; broke?: true }> {
+async function heelLead(ctx: GoalContext, id: number, ok?: (c: Cell) => boolean, rounds = 3): Promise<{ e?: Ent; broke?: true }> {
   let e: Ent | undefined;
-  for (let tries = 0; tries < 3; tries++) {
+  for (let tries = 0; tries < rounds; tries++) {
     for (let w = 0; w < 8; w++) {
       e = await own(ctx, id);
       if (!e) return {};
@@ -383,9 +598,15 @@ async function heelLead(ctx: GoalContext, id: number): Promise<{ e?: Ent; broke?
       if (e.distance <= HEEL) return { e };
       await pause(750);
     }
-    if (tries === 2) return { e };
+    if (tries === rounds - 1) return { e };
     const me = await here(ctx);
-    await ctx.call('goto', { x: Math.floor((me.x + e!.position.x) / 2), y: Math.floor(e!.position.y), z: Math.floor((me.z + e!.position.z) / 2), xz: true, range: 1, careful: true, timeoutMs: 15_000 }, 25_000)
+    const half = { x: (me.x + e!.position.x) / 2, z: (me.z + e!.position.z) / 2 };
+    const mine = cell(me);
+    const steps = Math.floor(horiz(me, half) * 2);
+    const to = !ok ? { x: Math.floor(half.x), z: Math.floor(half.z) }
+      : Array.from({ length: steps }, (_, i) => onLine(me, half, (steps - i) / 2)).find(c => (c.x !== mine.x || c.z !== mine.z) && ok(c));
+    if (!to) continue;
+    await ctx.call('goto', { ...to, y: Math.floor(e!.position.y), xz: true, range: 1, careful: true, timeoutMs: 15_000 }, 25_000)
       .catch(() => undefined);
   }
   return { e };
@@ -434,8 +655,9 @@ async function toSecond(ctx: GoalContext, id: number, first: Led, home: Pos, bou
       const on = await leashOn(ctx, id, home, bound, used);
       return on.ok ? { e, why: '' } : { why: `it would not take the lead (${on.why})` };
     }
-    await stepToward(ctx, await here(ctx), cell(e.position), LEAD_LEG);
-    const h = await heelLead(ctx, first.id);
+    const ok = standsClear(ctx.world);
+    await stepToward(ctx, await here(ctx), cell(e.position), LEAD_LEG, { ok });
+    const h = await heelLead(ctx, first.id, ok);
     if (!h.e || h.broke) return { why: 'the first came off its lead on the way to it' };
     first.last = h.e;
   }
@@ -446,11 +668,13 @@ async function toSecond(ctx: GoalContext, id: number, first: Led, home: Pos, bou
  * Walk animals into their pen: up to the first, a lead on it (or its food in hand), and with `pair` (a second lead
  * carried) and another wild one within 8 of it, as a look from beside it shows, up to that one and the other lead on
  * it (two at once: the pair the pen breeds from in one walk; a look from 48 off, where the first was seen, misses one
- * grazing behind it). Home in short legs through the yard's gate (shut behind them once they are through), in at the
- * pen's gate, and right across the pen: a tempted animal stops 2.5 blocks from the bot (TemptGoal) and a led one 2
- * (PathfinderMob), and with the bot only 2 in, both stopped in the gateway. Off the lead there (picked up), or the
- * food put away, out, the gate shut. One of two lost or broken free on the way is let be, and the other walked on.
- * The words say where each broke off and how far: what a maintenance run reads.
+ * grazing behind it). Home in short legs through the yard's gate (shut behind them once they are through), on a lead
+ * round the pen to its gate's side (routeFor, penWay) and there till each led one has come round behind the bot
+ * (roundToGate), in at the pen's gate, and right across the pen: a tempted animal stops 2.5 blocks from the bot
+ * (TemptGoal) and a led one 2 (PathfinderMob), and with the bot only 2 in, both stopped in the gateway. Off the lead
+ * there (picked up), or the food put away, out, the gate shut. Every wait for the animals is 2 clear of the gates and
+ * doors (standsClear), and a gate is passed in one walk. One of two lost or broken free on the way is let be, and the
+ * other walked on. The words say where each broke off and how far: what a maintenance run reads.
  */
 async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first: Ent, hold: Hold, o: { home: Pos; enough: () => boolean; pair?: boolean }): Promise<Brought> {
   const lead = 'lead' in hold;
@@ -458,11 +682,18 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
   const bound = fetchBound(ctx.world, kind);
   /** the animals a lead went on (shown by the client or not): however the run ends, each is seen off it */
   const used = new Set<number>();
+  /** the client's closer was turned off (put back on however the walk ends), and is off now */
   let gatesOff = false;
+  let closerOff = false;
   /** the yard's gate the way in goes through, once the closer is off for it; and whether the pen's was opened */
   let yardGate: Pos | undefined;
   let penOpened = false;
-  const gatesAuto = async (on: boolean) => { if (!on) gatesOff = true; await ctx.call('gates.auto', { enabled: on }).catch(() => undefined); };
+  const gatesAuto = async (on: boolean) => {
+    if (closerOff === !on) return;
+    closerOff = !on;
+    if (!on) gatesOff = true;
+    await ctx.call('gates.auto', { enabled: on }).catch(() => undefined);
+  };
   /**
    * Shut a gate the walk opened: a careful walk up to it first when it is out of reach (use-item-on-block's own walk
    * there is a plain one, which may place and break blocks by the fence, with the animal on the lead), to 2 from it
@@ -472,7 +703,8 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
     if (!(await gateOpen(ctx, g).catch(() => false))) return;
     const me = await here(ctx);
     const c = mid(g), d = horiz(me, c);
-    if (d > 4) {
+    // (out of the click's reach, eye to the gate's top face, with a margin: from 4 in on its line the bot clicks)
+    if (Math.hypot(d, me.y + 1.62 - (g.y + 1)) > 4.4) {
       const near = { x: Math.floor(c.x + (me.x - c.x) * 2 / d), y: g.y, z: Math.floor(c.z + (me.z - c.z) * 2 / d) };
       await ctx.call('goto', { ...near, range: 1, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
     }
@@ -504,7 +736,8 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
     const said = [`${!lead ? `on the ${food}` : led.length > 1 ? 'on two leads' : 'on the lead'} from ${out} out${second}`];
     const name = (l: Led) => `the ${l.nth}${kind}`;
     const fromGate = async () => Math.round(horiz(await here(ctx), mid(way.outside)));
-    const route = routeFor(ctx.world, r.e.position, way);
+    const open = await openRound(ctx, p, way.gate.y);
+    const route = routeFor(ctx.world, await here(ctx), r.e.position, p, way, lead, open);
     let yardShut = !route.gate;
     /** where one not brought in was last seen (the first such): where to look next time */
     let lostAt: Pos | undefined;
@@ -518,46 +751,167 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
       const them = led.length > 1 ? 'them' : 'it';
       return { penned: 0, text: `${said.join('; ')}; ${why}: let go of ${them} there${picked ? `, the lead${led.length > 1 ? 's' : ''} picked up` : '; the lead not found where it fell'}`, last };
     };
+    const ok = standsClear(ctx.world);
+    /** on a lead, round to the gate's side and lined up on its line before it opens (penWay, roundToGate) */
+    const round = lead && roundable(way, open);
+    /**
+     * After a walk with them on their leads: each close again (heelLead), one lost or broken free said where (and put
+     * on again once, when there is time). `again`: one was put on again, so the next walk goes from where it stands
+     * (the yard's gate waits); `none`: none is left on a lead.
+     */
+    const heelAll = async (): Promise<'on' | 'again' | 'none'> => {
+      let again = false;
+      for (const l of [...led]) {
+        const h = await heelLead(ctx, l.id, ok);
+        if (!h.e) {
+          const g = await pickUpLead(ctx, l.last.position);
+          said.push(`${l.nth ? `${name(l)} ` : ''}lost on the way (last seen ${Math.round(l.last.distance)} off at ${at(l.last.position)})${g ? '; the lead picked up' : ''}`);
+          drop(l, l.last.position);
+          continue;
+        }
+        l.last = h.e;
+        if (!h.broke) continue;
+        l.broke++;
+        const where = `the lead broke ${await fromGate()} from the gate (${name(l)} ${Math.round(h.e.distance)} off)`;
+        const picked = await pickUpLead(ctx, h.e.position);
+        // once more from where it stands, when there is time: a lead caught on a tree breaks once
+        if (picked && l.broke === 1 && !o.enough()) {
+          const back = await reach(ctx, l.id, o.home, bound);
+          if (back.e && (await leashOn(ctx, l.id, o.home, bound)).ok) { l.last = back.e; said.push(`${where}, put on again`); again = true; continue; }
+        }
+        said.push(`${where}${picked ? '; the lead picked up' : '; the lead not found where it fell'}`);
+        drop(l, h.e.position);
+      }
+      return !led.length ? 'none' : again ? 'again' : 'on';
+    };
+    /** the fences a led one's pull is stopped by: the yard's gate the walk came through stands open till it is shut */
+    const fences = () => fencesOf(ctx.world, route.gate && !yardShut ? [route.gate] : []);
+    /**
+     * At the cell 2 outside the pen's gate, before it opens: each one still on its lead on the gate's side, within 3
+     * of that cell, and no fence on the line from it to there nor on the line from it to the cell 2 in, through the
+     * gateway: the line the lead pulls it along when the bot walks in (one to the side of the gate is drawn across the
+     * post beside it). Waited for up to 6 s while it still moves; not so, out along the gate's line to 6 out (or as far
+     * as the yard and the builds allow) and in again, which brings it round behind the bot, twice at most. Then in with
+     * those that came round, the others let go where they stand; none did: why, or `none` when none is left on a lead.
+     * `again`: after a let-go that took the bot off the cell 2 out (up to the one let go, onto its lead), back to it,
+     * and the rest waited for once more: walked in from where the let-go left it, the one lined up was drawn in at
+     * the gate from the side, onto the post.
+     */
+    const roundToGate = async (again = true): Promise<string | undefined> => {
+      const two = mid(outOf(way, 2));
+      const through = fencesOf(ctx.world, [way.gate]);
+      const ready = (e: Ent) => horiz(e.position, two) <= 3 && depthIn(way, e.position) < -0.5
+        && lineClear(e.position, two, fences()) && lineClear(e.position, mid(way.inside), through);
+      // (and the gate's line in from there to the cell 2 out clear of builds the look saw: none at all with that cell
+      // in a wall, as by the sheep pen's gate, where the cell 6 out is in the cottage)
+      const out6 = [6, 5, 4, 3].filter(n => Array.from({ length: n - 1 }, (_, i) => outOf(way, i + 2)).every(open)).map(n => outOf(way, n))
+        .find(c => ok(c) && (!ctx.world.yard || inFence(ctx.world, c)));
+      let seen: (Ent | undefined)[] = [];
+      for (let round = 0; round < 3; round++) {
+        for (let w = 0; w < 8; w++) {
+          if (ctx.signal.aborted) throw new Error('aborted');
+          const before = seen;
+          seen = (await ownAll(ctx, led.map(l => l.id))).filter(e => e?.leashed);
+          if (seen.every(e => ready(e!))) return undefined;
+          // (standing where it stands: no more waiting brings it round)
+          if (w > 0 && seen.every(e => { const b = before.find(o => o?.id === e!.id); return !!b && horiz(b.position, e!.position) < 0.2; })) break;
+          await pause(750);
+        }
+        if (round === 2 || !out6) break;
+        for (const c of [out6, outOf(way, 2)]) {
+          await stepToward(ctx, await here(ctx), c, LEAD_LEG, { ok, exact: true });
+          if ((await heelAll()) === 'none') return 'none';
+        }
+      }
+      if (seen.some(e => ready(e!))) {
+        // (in with those that came round only: one still out of line is let go where it stands, not pulled across the
+        // post beside the gate, nor walked out to through the open gate with the other loose in the pen)
+        for (const e of seen.filter(e => !ready(e!))) {
+          const l = led.find(x => x.id === e!.id)!;
+          const g = await letGo(ctx, l.id);
+          said.push(`${name(l)} would not come round to the gate (it stood ${Math.round(horiz(e!.position, two))} off at ${at(e!.position)}): let go of it there${g.picked ? '' : '; the lead not found where it fell'}`);
+          drop(l, e!.position);
+        }
+        if (again && horiz(await here(ctx), two) >= 0.75) {
+          await stepToward(ctx, await here(ctx), outOf(way, 2), LEAD_LEG, { ok, exact: true });
+          if ((await heelAll()) === 'none') return 'none';
+          return roundToGate(false);
+        }
+        return undefined;
+      }
+      const off = seen[0];
+      return `${led.length > 1 ? 'they' : 'it'} would not come round to the gate${off ? ` (it stood ${Math.round(horiz(off.position, two))} off at ${at(off.position)})` : ''}`;
+    };
+    const start = await here(ctx);
+    const passAt = route.points.findIndex(s => s.pass);
+    /** from a stray in the yard to a pen in it: no yard's gate on the way */
+    const yardOnly = !route.gate && inFence(ctx.world, r.e.position) && inFence(ctx.world, way.outside);
     for (const [i, w] of route.points.entries()) {
-      // from the yard's gate on (the way in through it, or straight to the pen's), nothing shuts a gate behind the
-      // bot: the client's closer shuts one as soon as the bot is 2 past it, on the animal's nose. The bot shuts them
-      // itself once the animal is through, and the yard's however the walk ends (the closer, off while it opened,
-      // never takes it as the bot's afterwards)
-      if ((i > 0 || route.points.length === 1) && !gatesOff) { await gatesAuto(false); yardGate = route.gate; }
-      const legs = Math.ceil(horiz(await here(ctx), mid(w)) / (lead ? LEAD_LEG : LEG)) + 10;
+      // from the yard's gate on (the way in through it, or straight to the pen's from out there), nothing shuts a gate
+      // behind the bot: the client's closer shuts one as soon as the bot is 2 past it, on the animal's nose. The bot
+      // shuts them itself once the animal is through, and the yard's however the walk ends (the closer, off while it
+      // opened, never takes it as the bot's afterwards). Once the yard's is shut behind them, and on a walk all in the
+      // yard, the closer is on again till the pen's gate: it shuts a door the walk passes, of a build world memory does
+      // not know (the cottage's, the windmill's: with the closer off one stood open through the night, out of the dusk
+      // sweep's reach, the bed behind it)
+      if (!yardOnly && (passAt < 0 || i >= passAt) && !gatesOff) { await gatesAuto(false); yardGate = route.gate; }
+      /** the stop before this one: where a led one caught behind a fence corner is stepped back toward */
+      const prev = i > 0 ? route.points[i - 1].at : cell(start);
+      let snags = 0;
+      let held = 0;
+      let passes = 0;
+      // (the stop out on the yard's gate's line is a help, not the way: one in water or up a bank is not tried for long)
+      const legs = Math.ceil(horiz(await here(ctx), mid(w.at)) / (lead ? LEAD_LEG : LEG)) + (w.xz ? 2 : 10);
       for (let leg = 0; leg < legs; leg++) {
         if (ctx.signal.aborted) throw new Error('aborted');
         const me = await here(ctx);
-        if (horiz(me, mid(w)) < 1.5) break;
+        if (horiz(me, mid(w.at)) < (w.exact || w.pass ? 0.75 : 1.5)) break;
         if (o.enough()) return leave(`the run's time ran out ${await fromGate()} from the gate`);
         if (food) await ctx.call('item.select', { name: food }).catch(() => undefined);
-        await stepToward(ctx, me, w, lead ? LEAD_LEG : LEG);
-        if (lead) {
-          /** one put on again this leg: on with the next leg first, as it stands (the yard's gate waits) */
-          let again = false;
-          for (const l of [...led]) {
-            const h = await heelLead(ctx, l.id);
-            if (!h.e) {
-              const g = await pickUpLead(ctx, l.last.position);
-              said.push(`${l.nth ? `${name(l)} ` : ''}lost on the way (last seen ${Math.round(l.last.distance)} off at ${at(l.last.position)})${g ? '; the lead picked up' : ''}`);
-              drop(l, l.last.position);
-              continue;
-            }
-            l.last = h.e;
-            if (!h.broke) continue;
-            l.broke++;
-            const where = `the lead broke ${await fromGate()} from the gate (${name(l)} ${Math.round(h.e.distance)} off)`;
-            const picked = await pickUpLead(ctx, h.e.position);
-            // once more from where it stands, when there is time: a lead caught on a tree breaks once
-            if (picked && l.broke === 1 && !o.enough()) {
-              const back = await reach(ctx, l.id, o.home, bound);
-              if (back.e && (await leashOn(ctx, l.id, o.home, bound)).ok) { l.last = back.e; said.push(`${where}, put on again`); again = true; continue; }
-            }
-            said.push(`${where}${picked ? '; the lead picked up' : '; the lead not found where it fell'}`);
-            drop(l, h.e.position);
+        if (w.pass) {
+          // through the yard's gate in one walk, from 2 outside it to 2 in (Baritone opens it): no wait in the
+          // gateway, where the wedge watch stops a run, and none by it
+          await ctx.call('goto', { ...w.at, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+          const now = await here(ctx);
+          if (!inFence(ctx.world, now) || !ok(cell(now))) {
+            if (++passes >= 2) return leave(`could not get through the yard's gate at ${at(route.gate!)}`);
+            continue;
           }
-          if (!led.length) return { penned: 0, text: said.join('; '), last: lostAt };
-          if (again) continue;
+        } else await stepToward(ctx, me, w.at, lead ? LEAD_LEG : LEG, { ok, ...(w.xz ? { xz: true } : {}), ...(w.exact ? { exact: true } : {}) });
+        if (lead) {
+          // (how far from the stop the leg got the bot, before the waits for them)
+          const went = horiz(await here(ctx), mid(w.at));
+          const h = await heelAll();
+          if (h === 'none') return { penned: 0, text: said.join('; '), last: lostAt };
+          if (h === 'again') continue;
+          // a lead pulls in a straight line, and a fence stops it: one caught behind a fence corner (the pen's) is
+          // stepped back toward, the way the bot came, until it is round; twice a stop at most, and still caught
+          // then, let go there: more legs to the stop never brought it round, each with its wait for it, and a lure
+          // with no time limit of its own ran on into the pens round's 8 minutes. Not back out through the yard's
+          // gate (from in the yard a walk out goes by its gate's cells: outByGate)
+          const now = await here(ctx);
+          // (on the way round to the gate's side only: on the walk straight to the cell outside the gate, as before, the
+          // game's own close-in brings one round a corner; there the rule let go of every sheep led round the sheep
+          // pen's corner)
+          const caught = round && inFence(ctx.world, prev) === inFence(ctx.world, now) ? led.find(l => !lineClear(l.last.position, now, fences())) : undefined;
+          if (caught && snags >= 2) return leave(`${name(caught)} was caught on the fence at ${at(caught.last.position)}`);
+          if (caught) {
+            snags++;
+            await stepToward(ctx, now, prev, LEAD_LEG, { ok });
+            const back = await heelAll();
+            if (back === 'none') return { penned: 0, text: said.join('; '), last: lostAt };
+            continue;
+          }
+          // held by what no fence world memory knows holds it by (a build, a post, a bank): the leg got the bot on,
+          // and the waits for it took the bot back (heelLead's steps back toward it). Three such legs at a stop: let go
+          // there. Each stop had its legs (ceil(d / 4) + 10), each with up to 18 s of waits: 100 led walks and 5
+          // minutes for one fetch, and a lure's three tries ran past the pens round's 8 minutes. (A leg that got the
+          // bot nowhere is the stop's own doing, a cell in water: its legs run out, as before)
+          const was = horiz(me, mid(w.at));
+          if (went < was - 1 && horiz(now, mid(w.at)) > was - 1 && ++held >= 3) {
+            const l = [...led].sort((a, b) => b.last.distance - a.last.distance)[0];
+            return leave(`${name(l)} would not follow (it stood ${Math.round(l.last.distance)} off at ${at(l.last.position)})`);
+          }
         } else {
           const e = await keepClose(ctx, led[0].id, food!);
           if (!e || e.distance > 10) {
@@ -569,18 +923,30 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
         if (!yardShut && route.gate && inFence(ctx.world, await here(ctx)) && led.every(l => inFence(ctx.world, l.last.position))) {
           yardShut = true;
           await shut(route.gate);
+          await gatesAuto(true);
         }
       }
     }
     // (legs that got nowhere: walking on into the pen in one go would leave it behind)
     const short = await fromGate();
     if (short > 3) return leave(`got no nearer than ${short} to the gate`);
-    if (!gatesOff) await gatesAuto(false);
+    if (round) {
+      const come = await roundToGate();
+      if (come === 'none') return { penned: 0, text: said.join('; '), last: lostAt };
+      if (come) return leave(come);
+    }
+    await gatesAuto(false);
     // in at the gate and across the pen, the animals after the bot
     penOpened = true;
     if (!(await gateOpen(ctx, way.gate))) await toggle(ctx, way.gate);
     if (food) await ctx.call('item.select', { name: food });
-    for (const c of [way.inside, way.deep]) await ctx.call('goto', { ...c, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+    for (const c of [way.inside, way.deep]) {
+      await ctx.call('goto', { ...c, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+      // on a lead, each let come through the gateway behind the bot from the cell 2 in before it walks on: from the
+      // far row the lead pulled one that lagged across the gate's post. One round of looks: in the pen there is no
+      // cell to step back to, and the gate stands open behind the bot with the herd inside
+      if (lead && c === way.inside) for (const l of led) await heelLead(ctx, l.id, ok, 1);
+    }
     const ids = led.map(l => l.id);
     let seen: (Ent | undefined)[] = [];
     for (let w = 0; w < 10; w++) {

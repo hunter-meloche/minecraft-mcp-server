@@ -410,7 +410,7 @@ export function gatesBetween(world: WorldMemory, inside: { x: number; z: number 
 }
 
 /** What a body stands in and walks through: the air, and what grows on the ground or hangs on a wall. */
-const CLEAR = /^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|large_fern|dead_bush|bush|leaf_litter|dandelion|poppy|\w+_tulip|cornflower|oxeye_daisy|azure_bluet|allium|blue_orchid|lily_of_the_valley|snow|torch|wall_torch)(\[|$)/;
+export const CLEAR = /^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|large_fern|dead_bush|bush|leaf_litter|dandelion|poppy|\w+_tulip|cornflower|oxeye_daisy|azure_bluet|allium|blue_orchid|lily_of_the_valley|snow|torch|wall_torch)(\[|$)/;
 const WET = /^(minecraft:)?(flowing_)?(water|lava)(\[|$)/;
 
 /**

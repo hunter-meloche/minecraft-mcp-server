@@ -7,7 +7,7 @@ import { brainRun, type ClientRuntime, type InventoryItem } from '../../src/clie
 import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import sinon from 'sinon';
-import { fetchForPens, pens } from '../../src/client/brain/pens.js';
+import { fetchForPens, pens, penWay, standsClear } from '../../src/client/brain/pens.js';
 import { out as afield } from '../../src/client/brain/pockets.js';
 import { LADDER } from '../../src/client/brain/worktasks.js';
 import { DRY_WAIT, alongSide, dryUntil, markDry, needMs, penCount, pick, sitesOf, workGoals, workOf, workTick, type WorkTask } from '../../src/client/brain/work.js';
@@ -17,10 +17,12 @@ import { DRY_WAIT, alongSide, dryUntil, markDry, needMs, penCount, pick, sitesOf
  * answers as the client and the game do: world.entities with each creature's distance from the bot and its marks
  * (on a lead, named, tamed, by someone's build), dropped items as `item` entities; entity.use within 4.5 blocks only,
  * a lead put on with a lead in hand and taken off (falling as an item where the animal stands) by a use with
- * anything else; a led animal walking after the bot to 2 blocks off it (PathfinderMob) and the lead breaking past 12
- * (Leashable), a tempted one to 2.5 (TemptGoal), within 10, wheat in hand; the yard's fence and the pen's, which an
- * animal crosses only through an open gate; Baritone opening a gate the bot walks through, and the client's closer
- * shutting it once the bot is 2.2 past it while gates.auto is on (Gates.java). Shaped like the live homestead: the
+ * anything else; a led animal pulled after the bot in a straight line to 2 blocks off it (PathfinderMob, Leashable),
+ * stopped where a fence cell is in its way (the yard's fence, the pen's, a shut gate; an open one it goes through),
+ * and the lead breaking past 12 (Leashable); a tempted one to 2.5 (TemptGoal), within 10, wheat in hand, which finds
+ * its own way round, through an open gate only; Baritone opening a gate the bot walks through, a walk to within 1 of
+ * a cell ending at the first cell within 1 of it on the bot's side (GoalNear), and the client's closer shutting a gate
+ * once the bot is 2.2 past it while gates.auto is on (Gates.java). Shaped like the live homestead: the
  * cow pen at (-558, 2165) 7 x 7 with its gate south at (-555, 63, 2171), the yard's four gates, home in the storage
  * house, leads, string and slime balls in the chests.
  */
@@ -98,6 +100,8 @@ class Pasture {
   farthest = 0;
   /** where it stood under the yard, if a walk took it down there */
   under?: Pos;
+  /** where the bot stood at each look while an animal was on its lead (the waits for it are looks) */
+  ledLooks: Pos[] = [];
   private nextDrop = 900;
   private nextCalf = 700;
   /** fed to breed and not yet paired: in love */
@@ -136,6 +140,18 @@ class Pasture {
        * a fresh look (foreign.zones), as the mod's scan of the chunks round the bot
        */
       scanReveals?: { id: number; buildDistance: number };
+      /**
+       * blocks of a build world memory does not know ("x,y,z": its block): a look at more than one block (world.region)
+       * answers them, and air round them (the walks and the animals go through them all the same)
+       */
+      solid?: Record<string, string>;
+      /**
+       * the game's own close-in on a lead (PathfinderMob.closeRangeLeashBehaviour): within this of the bot a led one
+       * walks its own way to 2 off it, through an open gate, as a tempted one does; further off, the straight pull
+       */
+      follow?: number;
+      /** doors of a build world memory does not know: a walk through one opens it (Baritone), the closer shuts it behind */
+      doors?: Pos[];
     } = {}) {
     this.items = items.map(i => ({ ...i }));
     this.chests = structuredClone(world.chestItems ?? {});
@@ -201,11 +217,55 @@ class Pasture {
   }
   private length = (pts: Pos[]) => pts.slice(1).reduce((n, p, i) => n + horiz(pts[i], p), 0);
 
+  /** a cell a fence fills: the yard's fence line and the pen's, a gate in them while shut (a blocked one always) */
+  fenceAt(x: number, z: number): boolean {
+    const gate = [...YARD_GATES, GATE].find(g => g.x === x && g.z === z);
+    if (gate) return !this.isOpen(gate) || !!this.opts.blocked?.includes(`${gate.x},${gate.z}`);
+    const ring = (x1: number, z1: number, x2: number, z2: number) => ((x === x1 || x === x2) && z >= z1 && z <= z2) || ((z === z1 || z === z2) && x >= x1 && x <= x2);
+    return ring(YARD.x1, YARD.z1, YARD.x2, YARD.z2) || ring(PEN.x, PEN.z, PEN.x + PEN.width - 1, PEN.z + PEN.length - 1);
+  }
+
+  /**
+   * A led one pulled toward the bot along the straight line between them, `by` blocks at most, to `stop` off it, and
+   * no further than the last point before a fence cell on that line: a lead pulls straight and snags on fences.
+   */
+  pull(c: Cow, stop: number, by = Infinity) {
+    const d = horiz(c.position, this.me);
+    const go = Math.min(by, d - stop);
+    if (go <= 0) return;
+    const ux = (this.me.x - c.position.x) / d, uz = (this.me.z - c.position.z) / d;
+    const n = Math.ceil(go / 0.05);
+    let got = 0;
+    for (let i = 1; i <= n; i++) {
+      const s = go * i / n;
+      if (this.fenceAt(Math.floor(c.position.x + ux * s), Math.floor(c.position.z + uz * s))) break;
+      got = s;
+    }
+    c.position = { ...c.position, x: c.position.x + ux * got, z: c.position.z + uz * got };
+  }
+
+  /** A led one within `opts.follow` of the bot: its own way to 2 off it (`by` at most), when no shut gate is in it. */
+  closeIn(c: Cow, by = Infinity): boolean {
+    if (!this.opts.follow || horiz(c.position, this.me) > this.opts.follow) return false;
+    // (through a gate only: the stand-in knows no way round a fence, and the straight pull is the rest)
+    const w = this.way(c.position, this.me, false);
+    if (!w || w.length < 3) return false;
+    const len = this.length(w);
+    if (len > 2) c.position = this.along(w, Math.min(by, len - 2));
+    return true;
+  }
+
   /** The bot walks to `to`; the client's closer, the led and the tempted animals, the lead breaking, what is picked up. */
   walk(to: Pos, label: string) {
     const from = this.me;
-    // (the gates it passes, opened on the way)
+    // (the gates it passes, opened on the way, and the doors)
     this.way(from, to, true);
+    for (const d of this.opts.doors ?? []) {
+      const n = Math.ceil(horiz(from, to) / 0.1);
+      const through = Array.from({ length: n + 1 }, (_, i) => i / Math.max(n, 1))
+        .some(f => Math.floor(from.x + (to.x - from.x) * f) === d.x && Math.floor(from.z + (to.z - from.z) * f) === d.z);
+      if (through && !this.isOpen(d)) { this.open.set(k(d), true); this.opened.add(k(d)); this.log.push(`baritone opens ${k(d)}`); }
+    }
     this.me = { ...to };
     this.farthest = Math.max(this.farthest, horiz(this.me, HOME));
     // the client's closer shuts what the bot opened as it gets 2.2 past it, while it is on
@@ -224,10 +284,13 @@ class Pasture {
         const back = horiz(from, this.me) ? { x: (from.x - this.me.x) / horiz(from, this.me), z: (from.z - this.me.z) / horiz(from, this.me) } : { x: 1, z: 0 };
         c.position = { x: this.me.x + back.x * 13, y: c.position.y, z: this.me.z + back.z * 13 };
         this.opts.breakOn = this.opts.breakOn.filter(n => n !== this.legs);
-      } else if (ledNow || (this.held && ['wheat'].includes(this.held) && horiz(c.position, this.me) <= 10 && !c.baby)) {
-        // after the bot to 2 off it on a lead, 2.5 tempted, through the gates (a shut one stops it at the fence)
+      } else if (ledNow) {
+        // after the bot on the lead, straight, to 2 off it (`lag`), as far as a fence lets it
+        if (!this.closeIn(c)) this.pull(c, this.opts.lag ?? 2);
+      } else if (this.held && ['wheat'].includes(this.held) && horiz(c.position, this.me) <= 10 && !c.baby) {
+        // after the bot to 2.5 off it tempted, its own way round, through the gates (a shut one stops it at the fence)
         const w = this.way(c.position, this.me, false);
-        if (w) { const len = this.length(w); const stop = ledNow ? this.opts.lag ?? 2 : 2.5; if (len > stop) c.position = this.along(w, len - stop); }
+        if (w) { const len = this.length(w); if (len > 2.5) c.position = this.along(w, len - 2.5); }
       } else if (this.opts.graze === c.id && !this.grazed.has(c.id) && horiz(c.position, this.me) <= 8) {
         this.grazed.add(c.id);
         c.position = { ...c.position, x: c.position.x + 12 };
@@ -270,11 +333,9 @@ class Pasture {
           };
           const seen = this.cows.map(c => ({ ...c, category: 'creature', position: { ...c.position }, distance: Math.round(horiz(c.position, this.me) * 100) / 100, ...(shown(c) ? { leashed: true } : {}) }))
             .filter(e => e.distance <= max).sort((a, b) => a.distance - b.distance);
-          // the bot stands: a led one that lags is pulled in, 2 a look, to 2 off it
-          for (const c of this.cows) {
-            const d = horiz(c.position, this.me);
-            if (this.led.has(c.id) && d > 2) { const t = Math.min(2, d - 2) / d; c.position = { ...c.position, x: c.position.x + (this.me.x - c.position.x) * t, z: c.position.z + (this.me.z - c.position.z) * t }; }
-          }
+          // the bot stands: a led one that lags is pulled in, 2 a look, to 2 off it, as far as a fence lets it
+          if (this.led.size) this.ledLooks.push({ ...this.me });
+          for (const c of this.cows) if (this.led.has(c.id) && !this.closeIn(c, 2)) this.pull(c, 2, 2);
           return { entities: seen };
         }
         if (method === 'useOn') {
@@ -287,14 +348,26 @@ class Pasture {
           this.log.push(`useOn ${k(g)}`);
           return { used: true };
         }
-        if (method === 'world.region') return { blocks: [`oak_fence_gate[facing=south,open=${this.isOpen(at(p))}]`] };
+        if (method === 'world.region') {
+          const [w, h, l] = [p.width, p.height, p.length].map(n => Number(n ?? 1));
+          if (!this.opts.solid || w * h * l === 1) return { blocks: [`oak_fence_gate[facing=south,open=${this.isOpen(at(p))}]`] };
+          // (x fastest, then z, then y)
+          const o = at(p);
+          return { blocks: Array.from({ length: w * h * l }, (_, i) => this.opts.solid![`${o.x + i % w},${o.y + Math.floor(i / (w * l))},${o.z + Math.floor(i / w) % l}`] ?? 'air') };
+        }
         if (method === 'item.select') {
           if (!this.count(String(p.name))) throw new Error(`no ${p.name} in inventory`);
           this.held = String(p.name);
           return { held: p.name };
         }
         if (method === 'sprint.set') { this.sprint = !!p.allowed; this.log.push(`sprint ${p.allowed ? 'on' : 'off'}`); return { allowed: p.allowed }; }
-        if (method === 'gates.auto') { this.gatesAuto = !!p.enabled; this.log.push(`gates.auto ${p.enabled ? 'on' : 'off'}`); return { enabled: p.enabled }; }
+        if (method === 'gates.auto') {
+          // (off, it forgets what it took as the bot's: Gates.java; on again, it takes only what opens from then on)
+          this.gatesAuto = !!p.enabled;
+          if (!p.enabled) this.opened.clear();
+          this.log.push(`gates.auto ${p.enabled ? 'on' : 'off'}`);
+          return { enabled: p.enabled };
+        }
         if (method === 'foreign.zones') {
           const r = this.opts.scanReveals;
           const c = r && this.cows.find(x => x.id === r.id);
@@ -321,7 +394,11 @@ class Pasture {
             this.walk(d > 10 ? { x: to.x + (this.me.x - to.x) * 10 / d, y: 63, z: to.z + (this.me.z - to.z) * 10 / d } : { ...this.me }, p.careful ? 'goto careful' : 'goto');
             return { arrived: false };
           }
-          this.walk(to, p.careful ? 'goto careful' : 'goto');
+          // with an animal on the lead, a walk to within 1 of a cell ends as Baritone's GoalNear does: at the first cell
+          // within 1 of it, the one on the bot's side (a walk to the cell 1 inside a gate from outside stood in the gateway)
+          const near = this.led.size && !p.xz && Number(p.range ?? 1) === 1 && horiz(this.me, to) > 1
+            ? [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => ({ x: to.x + dx, y: to.y, z: to.z + dz })).sort((a, b) => horiz(a, this.me) - horiz(b, this.me))[0] : to;
+          this.walk(near, p.careful ? 'goto careful' : 'goto');
           if (this.opts.abortOn && this.legs === this.opts.abortOn.leg) { this.opts.abortOn.abort(); }
           const hold = this.opts.holdNear;
           if (hold && this.led.size && horiz(this.me, mid(HOME)) <= hold.within) { this.opts.holdNear = undefined; hold.at?.(); await hold.until; }
@@ -574,6 +651,38 @@ test('a fetch the brain gives up in the pen\'s gateway: the cow let go, the pen\
   t.true(pa.gatesAuto && pa.sprint);
 });
 
+test('a fetch the brain gives up on its first leg in past the yard\'s gate, before the gate is shut behind the cow: the gate clicked shut from where the bot stands, in reach', async (t) => {
+  // after the pass the cow stands in the gateway, and the gate can be shut only once the bot is a leg further in: from
+  // 6 in a run given up there clicked from out of reach (6, against 4.5), and the gate stood open till the dusk sweep
+  const world = liveWorld();
+  const ac = new AbortController();
+  const pa = new Pasture([cow(7, -503, 2183)], world, KIT);
+  const base = pa.ctx(world, ac.signal);
+  const call = (async (method: string, p?: Record<string, unknown>, ms?: number) => {
+    const r = await base.call(method, p, ms);
+    if (method === 'goto' && pa.led.size && pa.me.x < -535.5 && pa.me.x > -541 && Math.floor(pa.me.z) === 2183) ac.abort();
+    return r;
+  }) as GoalContext['call'];
+  await t.throwsAsync(brainRun.run({ signal: ac.signal }, () => fetchForPens({ ...base, call }, 'east', { now: () => T0 })), { message: /aborted/ });
+  t.false(pa.isOpen(YARD_GATES[1]), pa.log.join('\n'));
+  t.true(pa.log.includes(`useOn ${k(YARD_GATES[1])}`), pa.log.join('\n'));
+  t.is(pa.led.size, 0);
+  t.true(pa.gatesAuto && pa.sprint);
+  // not given up, the walk to 4 in ending a little past the cell's middle (Baritone's to a block): clicked from there,
+  // in reach, no walk back toward the gate past the cow
+  const w2 = liveWorld();
+  const pb = new Pasture([cow(7, -503, 2183)], w2, KIT);
+  const b2 = pb.ctx(w2);
+  const call2 = (async (method: string, p?: Record<string, unknown>, ms?: number) => {
+    const r = await b2.call(method, p, ms);
+    if (method === 'goto' && pb.led.size && p?.x === -537 && p?.z === 2183) pb.me = { ...pb.me, x: pb.me.x - 0.35 };
+    return r;
+  }) as GoalContext['call'];
+  t.deepEqual(await fetchForPens({ ...b2, call: call2 }, 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 47 out; led in' });
+  const click = pb.log.indexOf(`use-item-on-block ${k(YARD_GATES[1])}`);
+  t.is(pb.log.slice(0, click).filter(l => l.startsWith('goto')).at(-1), 'goto careful -537,2183', pb.log.join('\n'));
+});
+
 test('a fetch given up with the cow lagging on the lead: it closes in as the bot stands, and comes off the lead', async (t) => {
   // live, a 4-block leg leaves a led cow up to 6 behind, past the 4.5 the use key reaches: one use at once left it on
   // the lead, dragged after whatever the bot did next
@@ -819,6 +928,387 @@ test('a named, tamed or someone\'s animal is never leashed: on a lead (a knot on
   const w3 = liveWorld();
   const pc = new Pasture([cow(8, -287, 2183)], w3, KIT);
   t.deepEqual(await fetchForPens(pc.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'no wild cows east within the cow range (256 from home)' });
+});
+
+// ---- into the pen with a cow on the lead (live, Nov 13: wedged in the north gate twice; a cow left outside the pen)
+
+/** within 1 of a gate (the yard's or the pen's), or in it: where no wait for a led animal may be */
+const byGate = (p: Pos) => [...YARD_GATES, GATE].some(g => Math.max(Math.abs(Math.floor(p.x) - g.x), Math.abs(Math.floor(p.z) - g.z)) < 2);
+
+test('the stand-in lead pulls as the game\'s: straight at the bot, to 2 off it, and no further than a fence in the way; through an open gate', (t) => {
+  const world = liveWorld();
+  // north of the pen, the bot south of it: drawn straight at it, it stops at the pen's north fence
+  const c = cow(7, -555, 2158);
+  const pa = new Pasture([c], world, KIT);
+  pa.led.add(7);
+  pa.me = { x: -554.5, y: 63, z: 2174.5 };
+  pa.walk({ x: -554.5, y: 63, z: 2175.5 }, 'goto careful');
+  t.true(c.position.z < PEN.z && c.position.z > PEN.z - 0.1 && c.position.x === -554.5, JSON.stringify(c.position));
+  // on the gate's line south of it, the bot in the pen, the gate open: in through the gateway, to 2 off the bot
+  const d = cow(8, -555, 2176);
+  const pb = new Pasture([d], world, KIT);
+  pb.led.add(8);
+  pb.open.set(k(GATE), true);
+  pb.me = { x: -554.5, y: 63, z: 2166.5 };
+  pb.walk({ x: -554.5, y: 63, z: 2166.5 }, 'goto careful');
+  t.deepEqual(d.position, { x: -554.5, y: 63, z: 2168.5 });
+  // a block to the side of the gate's line: the pull catches it on the post beside the gate
+  const e = cow(9, -553, 2176);
+  const pc = new Pasture([e], world, KIT);
+  pc.led.add(9);
+  pc.open.set(k(GATE), true);
+  pc.me = { x: -554.5, y: 63, z: 2166.5 };
+  pc.walk({ x: -554.5, y: 63, z: 2166.5 }, 'goto careful');
+  t.true(e.position.z >= GATE.z + 1, JSON.stringify(e.position));
+});
+
+test('the way round the pen to its gate: 3 out on its shut sides, 6 out on the gate\'s side and in along the gate\'s line; a nearer berth where the yard or a build is in the way; straight to the gate with none', (t) => {
+  const world = liveWorld();
+  const p = { x1: PEN.x, z1: PEN.z, x2: PEN.x + PEN.width - 1, z2: PEN.z + PEN.length - 1, kind: 'cow' as const };
+  const way = { gate: GATE, side: 'south' as const, outside: { ...GATE, z: GATE.z + 1 }, inside: { ...GATE, z: GATE.z - 2 }, deep: { ...GATE, z: GATE.z - 5 } };
+  const cells = (pts: Pos[]) => pts.map(q => `${q.x},${q.z}`);
+  // from 2 inside the north gate (live): down the east side, along the south side to the gate's line, in to 2 out
+  t.deepEqual(cells(penWay(world, p, way, { x: -548.5, z: 2121.5 })), ['-549,2162', '-549,2177', '-555,2177', '-555,2173']);
+  // from 2 inside the west gate: the other way round
+  t.deepEqual(cells(penWay(world, p, way, { x: -562.5, z: 2183.5 })), ['-561,2177', '-555,2177', '-555,2173']);
+  // from the north-west, close by the pen's north fence: onto the ring, round the west side
+  t.deepEqual(cells(penWay(world, p, way, { x: -556.5, z: 2163.5 })), ['-557,2162', '-561,2162', '-561,2177', '-555,2177', '-555,2173']);
+  // the storage house a block nearer (its box at z 2177): the gate's side 5 out
+  const built = liveWorld({ zones: { ...liveWorld().zones, storage: [{ x: -552, y: 62, z: 2177, width: 7, length: 9 }] } });
+  t.deepEqual(cells(penWay(built, p, way, { x: -548.5, z: 2121.5 })), ['-549,2162', '-549,2176', '-555,2176', '-555,2173']);
+  // the yard's west fence 2 off the pen: 2 out on that side
+  const tight = liveWorld({ yard: { ...YARD, x1: -561 } });
+  t.deepEqual(cells(penWay(tight, p, way, { x: -548.5, z: 2121.5 })), ['-550,2163', '-550,2175', '-555,2175', '-555,2173']);
+  // no room at all: to 2 out, straight, as before
+  const none = liveWorld({ yard: { ...YARD, x1: -560 } });
+  t.deepEqual(cells(penWay(none, p, way, { x: -548.5, z: 2121.5 })), ['-555,2173']);
+  // where a walk on the lead may stop and wait: 2 clear of every gate and door, not on a fence, not in a pen or a build
+  const ok = standsClear(liveWorld({ zones: { ...liveWorld().zones, 'storage:door': [{ x: -549, y: 63, z: 2186 }], plot: [{ x: -545, y: 62, z: 2161, width: 9, length: 9 }] } }));
+  t.deepEqual([[-549, 2121], [-549, 2120], [-548, 2120], [-547, 2121], [-555, 2173], [-554, 2172], [-549, 2184], [-555, 2168], [-565, 2150], [-541, 2165], [-546, 2165]].map(([x, z]) => ok({ x, z })),
+    [true, false, false, true, true, false, true, false, false, false, true]);
+});
+
+test('the live way in from the north gate: lined up on the gate, through it in one walk, round the pen and in along its gate\'s line, the cow behind the bot: in it comes; no wait in or by a gateway', async (t) => {
+  // live on Nov 13 at 16:06: to where a cow was seen north of the yard, on the lead from 71 out, home by the north
+  // gate and round the pen to its south gate: the cow, drawn straight after the bot, ended outside the pen's north
+  // fence, "at the gate it would not come in (it stood 2 off at (-555, 63, 2164))". At 15:56 and 15:59 the walks home
+  // stood in the north gate for the waits and the wedge watch stopped them there
+  const world = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -564, y: 68, z: 2108 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const herd = [cow(7, -561, 2112)];
+  const pa = new Pasture(herd, world, KIT);
+  const said: string[] = [];
+  t.deepEqual(await fetchForPens(pa.ctx(world, undefined, said), 'in sight', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 71 out; led in' });
+  t.true(penned(herd[0]), JSON.stringify(herd[0].position));
+  t.true(said.includes('out of the yard by its north gate (-549, 63, 2119)'), said.join('\n'));
+  // on the lead: to 6 out on the north gate's line, 2 out, through to 2 in in one walk, on along the gate's line to 4
+  // in (the gate shut from there) and 6 (the cow out of the gateway behind the bot before it turns); down the pen's east side 3 out (its corner passed
+  // within a block and a half, a leg's end), along its south side 6 out to the gate's line, in along it to 2 out; in
+  // to 2 in, and to the far row
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7')).filter(l => l.startsWith('goto'));
+  const stops = ['goto careful -549,2113', 'goto careful -549,2117', 'goto careful -549,2121', 'goto careful -549,2123', 'goto careful -549,2125', 'goto careful -549,2161', 'goto careful -549,2177', 'goto careful -555,2177', 'goto careful -555,2173', 'goto careful -555,2169', 'goto careful -555,2166'];
+  let was = -1;
+  for (const stop of stops) { const i = onLead.indexOf(stop, was + 1); t.true(i > was, `${stop}:\n${onLead.join('\n')}`); was = i; }
+  t.true(onLead.every(l => l.startsWith('goto careful')));
+  // the north gate shut behind the cow from 4 in, in reach: no walk back to it past the cow (a run given up in that
+  // walk left it open, the click of a run given up walking nowhere)
+  const click = pa.log.indexOf(`use-item-on-block ${k(YARD_GATES[0])}`);
+  t.is(pa.log.slice(0, click).filter(l => l.startsWith('goto')).at(-1), 'goto careful -549,2123', pa.log.join('\n'));
+  // through the north gate in one walk: from 2 out (3 out, the walk to within 1 of it) straight to 2 in
+  const through = onLead.indexOf('goto careful -549,2121');
+  t.is(onLead[through - 1], 'goto careful -549,2117');
+  // every look while it was on the lead (the waits for it are looks) 2 clear of the gates: none in a gateway or by one
+  t.true(pa.ledLooks.length >= 15, `${pa.ledLooks.length}`);
+  t.deepEqual(pa.ledLooks.filter(byGate).map(p => `${Math.floor(p.x)},${Math.floor(p.z)}`), []);
+  // both gates shut behind, the closer on again
+  t.false(pa.isOpen(YARD_GATES[0]) || pa.isOpen(GATE));
+  t.true(pa.gatesAuto);
+});
+
+test('a stray north of the pen is walked round it on the lead, not drawn against its far fence; one that stays out of line at the gate is not walked in with', async (t) => {
+  // the pens round's own lure goes by the same walk: a stray in the yard north of the pen, one cow in the pen
+  const world = liveWorld();
+  const herd = [cow(1, -556, 2168), cow(2, -552, 2155)];
+  const pa = new Pasture(herd, world, KIT);
+  const text = await pens.run(pa.ctx(world));
+  t.true(text.startsWith('cow: on the lead from 28 out; led in'), text);
+  t.true(penned(herd[1]), JSON.stringify(herd[1].position));
+  t.deepEqual(pa.ledLooks.filter(byGate), []);
+  // never into the pen but by its gate from its gate's side: no walk on the lead to a cell of the pen before the gate opened
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #2 lead'), pa.log.indexOf(`use-item-on-block ${k(GATE)}`));
+  t.false(onLead.some(l => /^baritone opens/.test(l) && l.endsWith(k(GATE))), onLead.join('\n'));
+  // a cow that will not come round behind the bot (caught on something 2 east of the gate's line, south of the
+  // pen): waited for, out along the gate's line and in again twice, not walked in with; let go there, said where
+  const w2 = liveWorld();
+  const h2 = [cow(7, -503, 2183)];
+  const pb = new Pasture(h2, w2, KIT);
+  const pull = pb.pull.bind(pb);
+  pb.pull = (c, stop, by) => { pull(c, stop, by); if (c.position.z > GATE.z && c.position.x < GATE.x + 2) c.position = { ...c.position, x: GATE.x + 2 }; };
+  const stuck = await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 });
+  t.regex(stuck.text, /^cow: on the lead from 47 out; it would not come round to the gate \(it stood 2 off at \(-553, 63, 217\d\)\): let go of it there, the lead picked up$/, stuck.text);
+  t.false(pb.log.includes(`use-item-on-block ${k(GATE)}`), 'the pen\'s gate never opened for it');
+  t.is(pb.log.filter(l => l === 'goto careful -555,2177').length, 3, pb.log.join('\n'));
+  t.is(pb.led.size, 0);
+  t.is(pb.count('lead'), 2);
+});
+
+test('a door the walk to the pen passes, of a build world memory does not know, is shut behind the bot: the closer is on from the yard\'s gate shut behind the cow (or all the way, for a stray in the yard) till the pen\'s gate', async (t) => {
+  // live, the cottage's and the windmill's doors are not in world memory and lie out of the dusk sweep's box: one
+  // the walk went through with the closer off stood open through the night, the bed behind it
+  const DOOR: Pos = { x: -551, y: 63, z: 2177 };
+  const ends = (pa: Pasture) => {
+    t.false(pa.isOpen(DOOR), pa.log.join('\n'));
+    t.true(pa.log.includes(`baritone opens ${k(DOOR)}`) && pa.log.includes(`the closer shuts ${k(DOOR)}`), pa.log.join('\n'));
+    // (off again for the pen's gate: the bot opens and shuts that one itself)
+    const opens = pa.log.indexOf(`use-item-on-block ${k(GATE)}`);
+    t.is(pa.log.lastIndexOf('gates.auto off', opens), opens - 1, pa.log.join('\n'));
+    t.false(pa.isOpen(GATE));
+    t.true(pa.gatesAuto);
+  };
+  // a stray north of the pen, in the yard: no yard's gate to pass, the closer on all the way to the pen's gate
+  const world = liveWorld();
+  const pa = new Pasture([cow(1, -556, 2168), cow(2, -552, 2155)], world, KIT, { doors: [DOOR] });
+  t.regex(await pens.run(pa.ctx(world)), /^cow: on the lead from 28 out; led in/);
+  t.is(pa.log.slice(0, pa.log.indexOf('entity.use #2')).filter(l => l === 'gates.auto off').length, 1, pa.log.join('\n'));
+  ends(pa);
+  // from 71 out north: off from the north gate's pass, on again once the gate is shut behind the cow
+  const w2 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -564, y: 68, z: 2108 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const pb = new Pasture([cow(7, -561, 2112)], w2, KIT, { doors: [DOOR] });
+  t.deepEqual(await fetchForPens(pb.ctx(w2), 'in sight', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 71 out; led in' });
+  const shutNorth = pb.log.indexOf(`use-item-on-block ${k(YARD_GATES[0])}`);
+  t.true(shutNorth > 0 && pb.log[shutNorth + 1] === 'gates.auto on', pb.log.join('\n'));
+  ends(pb);
+  t.false(pb.isOpen(YARD_GATES[0]));
+});
+
+/** the live storage house, its door and the plot, as world memory has them (the stand-in pasture knows no buildings) */
+const BUILT = {
+  storage: [{ x: -552, y: 62, z: 2178, width: 7, length: 9 }], 'storage:door': [{ x: -549, y: 63, z: 2186 }],
+  plot: [{ x: -545, y: 62, z: 2161, width: 9, length: 9 }]
+};
+const inHouse = (q: { x: number; z: number }) => Math.floor(q.x) >= -552 && Math.floor(q.x) < -545 && Math.floor(q.z) >= 2178 && Math.floor(q.z) < 2187;
+/** the cells walked to, as the log has them */
+const walkedTo = (log: string[]) => log.filter(l => l.startsWith('goto')).map(l => { const [x, z] = l.split(' ').at(-1)!.split(',').map(Number); return { x, z }; });
+
+test('the way round the pen keeps out of the builds world memory knows: in by the yard\'s south gate or its east gate, or a stray south of the storage house, never through the house with the cow on the lead', async (t) => {
+  // from the south gate the ring's nearest cell, its corner behind the storage house, lay straight through the house
+  // (its door, the home cell, its north wall), the cow drawn after the bot; from the east gate through its corner
+  for (const [side, x, z] of [['south', -549, 2245], ['east', -503, 2183]] as const) {
+    const world = liveWorld({ zones: { ...liveWorld().zones, ...BUILT } });
+    const herd = [cow(7, x, z)];
+    const pa = new Pasture(herd, world, KIT);
+    const r = await fetchForPens(pa.ctx(world), side, { now: () => T0 });
+    t.regex(r.text, /^cow: on the lead from \d+ out; led in$/, `${side}: ${r.text}`);
+    t.true(penned(herd[0]), `${side}: ${JSON.stringify(herd[0].position)}`);
+    const onLead = pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7'));
+    t.deepEqual(walkedTo(onLead).filter(inHouse), [], `${side}:\n${onLead.join('\n')}`);
+    t.deepEqual(pa.ledLooks.filter(inHouse), [], side);
+  }
+  // the pens round's lure of a stray just south of the house: round the house's west side, not through its door
+  const world = liveWorld({ zones: { ...liveWorld().zones, ...BUILT } });
+  const herd = [cow(1, -556, 2168), cow(2, -549, 2200)];
+  const pa = new Pasture(herd, world, KIT);
+  t.regex(await pens.run(pa.ctx(world)), /^cow: on the lead from 18 out; led in/);
+  t.true(penned(herd[1]));
+  t.deepEqual(walkedTo(pa.log.slice(pa.log.indexOf('entity.use #2 lead'))).filter(inHouse), []);
+  t.deepEqual(pa.ledLooks.filter(inHouse), []);
+  // the way itself: from 6 in at the south gate onto the ring west of the house, a block clear of its corner; with
+  // no house known, down x -549 to the ring's corner behind it, as before
+  const p = { x1: PEN.x, z1: PEN.z, x2: PEN.x + PEN.width - 1, z2: PEN.z + PEN.length - 1, kind: 'cow' as const };
+  const way = { gate: GATE, side: 'south' as const, outside: { ...GATE, z: GATE.z + 1 }, inside: { ...GATE, z: GATE.z - 2 }, deep: { ...GATE, z: GATE.z - 5 } };
+  const cells = (pts: Pos[]) => pts.map(q => `${q.x},${q.z}`);
+  t.deepEqual(cells(penWay(world, p, way, { x: -548.5, z: 2209.5 })), ['-556,2177', '-555,2177', '-555,2173']);
+  t.deepEqual(cells(penWay(liveWorld(), p, way, { x: -548.5, z: 2209.5 })), ['-549,2177', '-555,2177', '-555,2173']);
+});
+
+test('in by the yard\'s west gate, or from beside a gate but off its line: lined up on the gate first, on in along its line after the pass, and the cow comes in', async (t) => {
+  // under the lead's straight pull every fetch by the west gate failed: from 2 in, the cow in the gateway behind the
+  // bot, the first leg turned 6 south toward the ring and pulled it onto the post beside the gate ("got no nearer
+  // than 11 to the gate"); and a cow leashed 4 from the east gate, to its side, was brought straight in at the gate
+  // from the side, onto the post there ("got no nearer than 21")
+  const world = liveWorld();
+  const herd = [cow(7, -600, 2183)];
+  const pa = new Pasture(herd, world, KIT);
+  t.deepEqual(await fetchForPens(pa.ctx(world), 'west', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 51 out; led in' });
+  t.true(penned(herd[0]), JSON.stringify(herd[0].position));
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7')).filter(l => l.startsWith('goto'));
+  // through the west gate from 2 out to 2 in, on to 4 and 6 in on its line, then south to the ring
+  const pass = onLead.indexOf('goto careful -563,2183');
+  t.deepEqual(onLead.slice(pass - 1, pass + 3), ['goto careful -567,2183', 'goto careful -563,2183', 'goto careful -561,2183', 'goto careful -559,2183'], onLead.join('\n'));
+  t.deepEqual(pa.ledLooks.filter(byGate), []);
+  t.false(pa.isOpen(YARD_GATES[3]) || pa.isOpen(GATE));
+  // a cow by the east gate, 3 to its side: out to 6 on the gate's line first, then in
+  const w2 = liveWorld();
+  const h2 = [cow(7, -528, 2180)];
+  const pb = new Pasture(h2, w2, KIT);
+  t.deepEqual(await fetchForPens(pb.ctx(w2), 'in sight', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 22 out; led in' });
+  t.true(penned(h2[0]), JSON.stringify(h2[0].position));
+  const led2 = pb.log.slice(pb.log.indexOf('entity.use #7 lead'), pb.log.indexOf('entity.use #7')).filter(l => l.startsWith('goto'));
+  t.deepEqual(led2.slice(0, 5), ['goto careful -527,2183', 'goto careful -531,2183', 'goto careful -535,2183', 'goto careful -537,2183', 'goto careful -539,2183'], led2.join('\n'));
+});
+
+test('a led cow that stays caught on a fence is let go after two steps back toward it, not walked on leg after leg; the yard\'s gate shut behind', async (t) => {
+  // one that cannot follow (caught by the post beside the east gate, outside): every stop had its legs, each with
+  // up to 18 s of waiting for it, and a lure, which has no time limit of its own, ran into the pens round's 8 minutes
+  const world = liveWorld();
+  const herd = [cow(7, -503, 2183)];
+  const pa = new Pasture(herd, world, KIT);
+  const pull = pa.pull.bind(pa);
+  pa.pull = (c, stop, by) => { pull(c, stop, by); if (c.position.x < -531.95) c.position = { ...c.position, x: -531.95, z: 2182.5 }; };
+  const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.is(r.text, 'cow: on the lead from 47 out; the cow was caught on the fence at (-532, 63, 2182): let go of it there, the lead picked up');
+  // through the gate to 2 in; the leg to 4 in, the wait for it (a step back toward it, to 2 in: no nearer the gate)
+  // and the step back toward the stop before, twice; the leg to 4 in once more and the wait: let go there (the walk
+  // out to it to take the lead off follows)
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7')).filter(l => l.startsWith('goto'));
+  const pass = onLead.indexOf('goto careful -535,2183');
+  t.deepEqual(onLead.slice(pass, pass + 9).map(l => l.split(' ').at(-1)),
+    ['-535,2183', '-537,2183', '-535,2183', '-535,2183', '-537,2183', '-535,2183', '-535,2183', '-537,2183', '-535,2183'], onLead.join('\n'));
+  t.is(onLead.filter(l => l === 'goto careful -537,2183').length, 3, onLead.join('\n'));
+  t.false(pa.isOpen(YARD_GATES[1]) || pa.isOpen(GATE));
+  t.true(pa.gatesAuto);
+  t.is(pa.led.size, 0);
+  t.is(pa.count('lead'), 2);
+});
+
+test('a led cow held by what world memory does not know (a build, a post) is let go after three legs the waits for it took back, not walked on leg after leg', async (t) => {
+  // held once it is in the yard, west of x -541 (as by the windmill's corner): no fence world memory knows is in the
+  // way, so the snag rule never saw it, and every stop had its legs, each with the waits for it: 100 led walks and
+  // 5 minutes for one fetch ("got no nearer than 12 to the gate"), a lure's three tries past the pens round's 8 minutes
+  const world = liveWorld();
+  const herd = [cow(7, -503, 2183)];
+  const pa = new Pasture(herd, world, KIT);
+  const pull = pa.pull.bind(pa);
+  pa.pull = (c, stop, by) => { pull(c, stop, by); if (c.position.x < -540.5) c.position = { ...c.position, x: -540.5 }; };
+  const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.regex(r.text, /^cow: on the lead from 47 out; the cow would not follow \(it stood \d off at \(-541, 63, 21\d\d\)\): let go of it there, the lead picked up$/, r.text);
+  t.true(pa.legs <= 25, `${pa.legs} led walks`);
+  t.false(pa.log.includes(`use-item-on-block ${k(GATE)}`));
+  t.false(pa.isOpen(YARD_GATES[1]) || pa.isOpen(GATE));
+  t.true(pa.gatesAuto);
+  t.is(pa.led.size, 0);
+  t.is(pa.count('lead'), 2);
+});
+
+test('two on leads at the pen\'s gate, one lined up and one not: the one that would not come round is let go before the gate opens, the other walked in', async (t) => {
+  const world = liveWorld();
+  const herd = [cow(7, -469, 2183), cow(8, -466, 2187)];
+  const pa = new Pasture(herd, world, KIT);
+  // (the second caught on something 2 east of the gate's line, south of the pen)
+  const pull = pa.pull.bind(pa);
+  pa.pull = (c, stop, by) => { pull(c, stop, by); if (c.id === 8 && c.position.z > GATE.z && c.position.x < GATE.x + 2) c.position = { ...c.position, x: GATE.x + 2 }; };
+  t.deepEqual(await fetchForPens(pa.ctx(world), 'east', { now: () => T0 }),
+    { gain: 1, text: 'cow: on two leads from 81 out; the second cow would not come round to the gate (it stood 2 off at (-553, 63, 2174)): let go of it there; led in' });
+  t.true(penned(herd[0]));
+  t.false(penned(herd[1]));
+  // off its lead (and the lead picked up) before the pen's gate opened: never walked out to through the open gate
+  const off8 = pa.log.indexOf('entity.use #8');
+  t.true(off8 > 0 && off8 < pa.log.indexOf(`use-item-on-block ${k(GATE)}`), pa.log.join('\n'));
+  t.is(pa.count('lead'), 2);
+  t.false(pa.isOpen(YARD_GATES[1]) || pa.isOpen(GATE));
+  // the second held 3 or 4 east of the line: the walk up to it to take the lead off, and onto the lead, takes the bot
+  // off the cell 2 out; back to it, and the first waited for again before the gate opens (walked in from where the
+  // let-go left the bot, the first was drawn in at the gate from the side, onto the post, and neither was penned)
+  for (const by of [3, 4]) {
+    const w2 = liveWorld();
+    const h2 = [cow(7, -469, 2183), cow(8, -466, 2187)];
+    const pb = new Pasture(h2, w2, KIT);
+    const pull2 = pb.pull.bind(pb);
+    pb.pull = (c, stop, n) => { pull2(c, stop, n); if (c.id === 8 && c.position.z > GATE.z && c.position.x < GATE.x + by) c.position = { ...c.position, x: GATE.x + by }; };
+    const r = await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 });
+    t.regex(r.text, new RegExp(`^cow: on two leads from 81 out; the second cow would not come round to the gate \\(it stood ${by} off at \\(${GATE.x + by}, 63, 217\\d\\)\\): let go of it there; led in$`), `${by}: ${r.text}`);
+    t.true(penned(h2[0]), `${by}: ${JSON.stringify(h2[0].position)}`);
+    t.is(r.gain, 1);
+    t.false(pb.isOpen(YARD_GATES[1]) || pb.isOpen(GATE));
+  }
+});
+
+test('at the cell 2 in, with the pen\'s gate open behind the bot, a led one that lags is waited for one round of looks, not three', async (t) => {
+  // in the pen no cell is one to step back to: the old three rounds were 18 s of the gate open with the herd inside
+  const world = liveWorld();
+  const herd = [cow(7, -503, 2183)];
+  const pa = new Pasture(herd, world, KIT);
+  // (it stops following once the bot is in the pen)
+  const pull = pa.pull.bind(pa);
+  pa.pull = (c, stop, by) => { if (pa.me.z >= GATE.z) pull(c, stop, by); };
+  const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.regex(r.text, /^cow: on the lead from 47 out; at the gate it would not come in/);
+  t.is(pa.ledLooks.filter(q => Math.floor(q.x) === GATE.x && Math.floor(q.z) === GATE.z - 2).length, 8);
+  t.false(pa.isOpen(GATE));
+});
+
+test('a build world memory does not know 2 out from the pen\'s gate (the cottage\'s wall by the sheep pen\'s): no ring through it, and the lead and the food go to the cell outside the gate as before', (t) => {
+  // live, the cottage's south wall stands in the sheep pen's gate's cell 2 out, the cottage between it and the 6 out,
+  // and every ring round the pen went through the cottage: a walk to a cell in its wall, and by its door to its bed
+  const sp = { x1: -542, z1: 2196, x2: -536, z2: 2202, kind: 'sheep' as const };
+  const world = liveWorld({ zones: { ...liveWorld().zones, 'pen:sheep': [{ x: -542, y: 62, z: 2196, width: 7, length: 7 }], 'pen:sheep:gate': [{ x: -539, y: 63, z: 2196 }] } });
+  const way = { gate: { x: -539, y: 63, z: 2196 }, side: 'north' as const, outside: { x: -539, y: 63, z: 2195 }, inside: { x: -539, y: 63, z: 2198 }, deep: { x: -539, y: 63, z: 2201 } };
+  const wall = (c: { x: number; z: number }) => c.x >= -544 && c.x <= -536 && c.z >= 2188 && c.z <= 2194 && (c.x === -544 || c.x === -536 || c.z === 2188 || c.z === 2194);
+  const cells = (pts: Pos[]) => pts.map(q => `${q.x},${q.z}`);
+  t.deepEqual(cells(penWay(world, sp, way, { x: -548.5, z: 2190.5 })), ['-544,2192', '-539,2192', '-539,2194']);
+  t.deepEqual(cells(penWay(world, sp, way, { x: -548.5, z: 2190.5 }, c => !wall(c))), ['-539,2194']);
+});
+
+test('the look round the pen: a block world memory does not know on the ring has the walk take the next berth in; a patch of pink petals there does not', async (t) => {
+  const stops = async (block: string) => {
+    const world = liveWorld();
+    const herd = [cow(7, -503, 2183)];
+    const pa = new Pasture(herd, world, KIT, { solid: { '-549,63,2170': block } });
+    t.deepEqual(await fetchForPens(pa.ctx(world), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 47 out; led in' });
+    t.true(penned(herd[0]), `${block}: ${JSON.stringify(herd[0].position)}`);
+    return pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7')).filter(l => l.startsWith('goto')).map(l => l.split(' ').at(-1));
+  };
+  // (on the ring 3 out, down the pen's east side: x -549)
+  t.true((await stops('pink_petals')).includes('-549,2177'));
+  // a block there: the ring 2 out, its gate's side 4 out
+  const round = await stops('cobblestone');
+  t.false(round.some(c => c!.startsWith('-549,')), round.join(' '));
+  t.true(round.includes('-553,2175') && round.includes('-555,2175'), round.join(' '));
+});
+
+test('the walk to the pen with a wall 2 out from its gate that world memory does not know: to the cell outside the gate, and in, as before, on the lead and on the food; no walk into the wall', async (t) => {
+  // (the cow pen as the sheep pen stands to the cottage: a wall the length of its gate's side, 2 out)
+  const solid: Record<string, string> = {};
+  for (let x = -562; x <= -548; x++) for (const y of [63, 64]) solid[`${x},${y},${GATE.z + 2}`] = 'stone_bricks';
+  const walls = (q: { x: number; z: number }) => !!solid[`${q.x},63,${q.z}`];
+  // on the lead, a stray west of the gate in the row between the pen's fence and the wall: along the row to the cell
+  // outside the gate, the gate opened and in, as before, the cow after the bot by the game's own close-in (in the row
+  // it never stands on the gate's line: the wait for it to come round there let go of every one, 3 a pens round)
+  const world = liveWorld();
+  const herd = [cow(1, -556, 2168), cow(2, -561, GATE.z + 1)];
+  const pa = new Pasture(herd, world, KIT, { solid, follow: 6 });
+  const text = await pens.run(pa.ctx(world));
+  t.regex(text, /^cow: on the lead from \d+ out; led in/, text);
+  t.true(penned(herd[1]), JSON.stringify(herd[1].position));
+  t.false(text.includes('would not come round'), text);
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #2 lead'));
+  const [outside, opens, inside] = ['goto careful -555,2172', `use-item-on-block ${k(GATE)}`, 'goto careful -555,2169'].map(l => onLead.indexOf(l));
+  t.true(outside >= 0 && outside < opens && opens < inside, onLead.join('\n'));
+  t.deepEqual(walkedTo(pa.log).filter(walls), [], pa.log.join('\n'));
+  t.false(pa.isOpen(GATE));
+  // strays west and east of the pen, the walk straight to the cell outside the gate past the pen's corner: walked on
+  // round it, as before, not stepped back toward and let go ("caught on the fence"), as on the way round to a gate
+  for (const [x, z] of [[-563, 2168], [-546, 2168]]) {
+    const wx = liveWorld();
+    const hx = [cow(1, -556, 2168), cow(2, x, z)];
+    const px = new Pasture(hx, wx, KIT, { solid, follow: 6 });
+    const tx = await pens.run(px.ctx(wx));
+    t.regex(tx, /^cow: on the lead from \d+ out; led in/, `${x},${z}: ${tx}`);
+    t.true(penned(hx[1]), `${x},${z}: ${JSON.stringify(hx[1].position)}`);
+  }
+  // (the stand-in's straight pull, with no close-in: in, as before, and the cow left at the gate across the post)
+  const w1 = liveWorld();
+  const p1 = new Pasture([cow(1, -556, 2168), cow(2, -561, GATE.z + 1)], w1, KIT, { solid });
+  t.regex(await pens.run(p1.ctx(w1)), /^cow: on the lead from \d+ out; at the gate it would not come in/);
+  t.true(p1.log.includes('goto careful -555,2169'), p1.log.join('\n'));
+  t.false(p1.isOpen(GATE));
+  // on the wheat (no lead to be had): to the cell outside the gate, in, and it follows
+  const w2 = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 }, [k(DROPS_CHEST)]: { leather: 7 } });
+  const h2 = [cow(1, -556, 2168), cow(2, -561, GATE.z + 1)];
+  const pb = new Pasture(h2, w2, [...KIT, { slot: 3, name: 'wheat', count: 10 }], { solid });
+  t.regex(await pens.run(pb.ctx(w2)), /on the wheat from \d+ out; led in/);
+  t.true(penned(h2[1]));
+  t.true(pb.log.includes('goto careful -555,2172'), pb.log.join('\n'));
+  t.deepEqual(walkedTo(pb.log).filter(walls), [], pb.log.join('\n'));
 });
 
 // ---- past the leash (the user, Nov 13: "allowed to wander further to find its cows")

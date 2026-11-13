@@ -4,6 +4,7 @@ import { findLandmarks } from '../../src/client/brain/memory.js';
 import { Brain, decide, wedgedOut } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
 import { closeDoors, returnIdle, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
+import { out as afield } from '../../src/client/brain/pockets.js';
 
 const reply = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError } : {}) });
 
@@ -313,6 +314,42 @@ test('the watchdog steps a bot wedged in a fence out by hand after half a minute
   t.regex(brain.status(), /stuck is wedged in the oak_fence at 0,64,0: stepping out/);
   now += 6000; await brain.tick(); await settle();
   t.regex(brain.status(), /start stuck: test[\s\S]*start stuck: test/); // again in seconds, not 3 minutes
+  brain.setEnabled(false);
+});
+
+test('a walk with an animal on its lead that is wedged in a shut gate is stepped out of all the same: its word keeps the chores off it, not the wedge watch', async (t) => {
+  // pens.ts never waits for a led animal in or by a gateway any more (two walks home stood in the yard's north gate for
+  // the cow and were stopped there, Nov 13), so a led walk standing half a minute in a gate with Baritone on is a real
+  // wedge, and Baritone never steps out of one: the watch stops it, the run lets the cow off its lead
+  let now = 0;
+  const state = { pos: { x: 0.5, y: 64, z: 0.95 }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const call = rt.call;
+  const steered: unknown[] = [];
+  rt.call = (async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'world.region' && params?.width === 3) return { blocks: box3('oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]', [[1, 0], [-1, 0]]) };
+    if (method === 'steer') { steered.push(params); return { reached: true }; }
+    return call(method, params);
+  }) as ClientRuntime['call'];
+  let ledAs: AbortSignal | undefined;
+  const leading: Goal = {
+    name: 'leading', priority: 10, wants: () => 'test', timeoutMs: 60 * 60_000, retryMs: 1000,
+    run: async ctx => { ledAs = ctx.signal; afield.ledBy = ctx.signal; try { return (await ctx.act('slow')).text; } finally { if (afield.ledBy === ctx.signal) afield.ledBy = undefined; } }
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [leading], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  t.is(afield.ledBy, ledAs);
+  now += 5000; await brain.tick(); await settle();
+  now += 20_000; await brain.tick(); await settle();
+  t.is(steered.length, 0);
+  now += 15_000; await brain.tick(); await settle();
+  t.true(calls.includes('cancel'));
+  t.deepEqual(steered, [{ x: 0.5, y: 64, z: 1.5, within: 0.25, timeoutMs: 2000 }]);
+  t.regex(brain.status(), /leading is wedged in the oak_fence_gate at 0,64,0: stepping out/);
+  t.is(afield.ledBy, undefined);
   brain.setEnabled(false);
 });
 
