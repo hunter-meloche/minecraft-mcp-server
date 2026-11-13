@@ -1,7 +1,10 @@
 import type { InventoryItem, Status } from '../tools.js';
+import { tier } from './kit.js';
 import { daylightLeft, type Activity } from './schedule.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { IdleCause } from './idlelog.js';
+// (underyard.ts takes BELOW_HOME from here: each uses the other's exports inside functions only)
+import { underNow } from './underyard.js';
 
 /** What the brain knows at one moment: read fresh each tick. */
 export interface Snapshot {
@@ -78,6 +81,12 @@ export interface Goal {
   timeoutMs: number;
   /** wait after a failure before trying again */
   retryMs: number;
+  /**
+   * how long three failures in a row hold it back (absent: until the next morning). A goal that gets the bot out of
+   * where it is stuck cannot be left for the night: break out's morning hold, after waiting on a zombie that never
+   * despawns, left the bot walled in 55 under the yard
+   */
+  failHoldMs?: number;
   /** can a more urgent goal stop it midway (default yes) */
   interruptible?: boolean;
   /** may run while the bot is in bed (everything else waits for morning) */
@@ -114,6 +123,39 @@ export const fromGate = (g: (s: Snapshot, w: WorldMemory) => Gate): Pick<Goal, '
 const tickMin = (ticks: number) => (ticks * 50 / 60_000).toFixed(1);
 
 /**
+ * Home is a place on its level, not a column of the world: more than BELOW_HOME under the level of home (or more than
+ * ABOVE_HOME over it) the bot is not at home, however near it stands across the ground. Live on Nov 12 a deep trip's
+ * mining took the bot under the yard's edge, 16 from home across the ground and 55 below it, and every home chore took
+ * that for home: the stash ("chest too far to open"), the tree and cane rounds, and smelt cut three deep trips short
+ * inside the trip rule. The leash and every "how far out" (trip budgets, sides, sites, the mine start) stay across the
+ * ground: distHome.
+ */
+export const BELOW_HOME = 8;
+export const ABOVE_HOME = 16;
+
+/** On the level of home: not more than BELOW_HOME under it, nor ABOVE_HOME over it (with no home or no place known, nothing to say). */
+export const onHomeLevel = (p: { y: number } | undefined, home?: { y: number }): boolean =>
+  !home || !p || !Number.isFinite(p.y) || (p.y >= home.y - BELOW_HOME && p.y <= home.y + ABOVE_HOME);
+
+/**
+ * Within `range` of home across the ground and on its level: where its chests, furnace, bed and rounds are in reach.
+ * Every "near home" a chore judges by asks this, not distHome alone.
+ */
+export const nearHome = (s: Pick<Snapshot, 'home' | 'position' | 'distHome'>, range: number): boolean =>
+  s.distHome <= range && onHomeLevel(s.position, s.home);
+
+/** The same for a place seen during a run (the run's snapshot is from before it set out). */
+export const nearHomeAt = (p: Pos, home: Pos, range: number): boolean =>
+  Math.hypot(p.x - home.x, p.z - home.z) <= range && onHomeLevel(p, home);
+
+/** Off home's level, in words (`55 below it`), for the lines that say why a chore is not run from here. */
+const offLevel = (s: Pick<Snapshot, 'home' | 'position'>): string | undefined => {
+  if (!s.home || onHomeLevel(s.position, s.home)) return undefined;
+  const by = Math.round(s.home.y - s.position.y);
+  return by > 0 ? `${by} below it` : `${-by} above it`;
+};
+
+/**
  * Why the stash cannot make the `free` slots a goal needs (pockets.ts noRoom): the chests have no room left, are too
  * far off to put anything in, the stash would empty only `loose` slots, or a put-away tried `failedMsAgo` and did not
  * make the room.
@@ -139,7 +181,9 @@ export const no = {
   away: (s: Snapshot, who: string, within: number): Decline => ({
     cause: 'away',
     text: !s.home ? 'no home set' : s.dimension !== 'overworld' ? `in ${s.dimension}` : !Number.isFinite(s.distHome) ? 'no distance to home'
-      : `${Math.round(s.distHome)} blocks from home (${who} works within ${within})`
+      // (under the yard, 16 across the ground, is not "within 24": the line says where the bot is)
+      : offLevel(s) ? `${Math.round(s.distHome)} blocks from home and ${offLevel(s)} (${who} works within ${within}, on home's level)`
+        : `${Math.round(s.distHome)} blocks from home (${who} works within ${within})`
   }),
   /** under the health (and, where the goal asks for it, the food) it sets out with */
   health: (s: Snapshot, who: string, health: number, food?: number): Decline => ({
@@ -195,23 +239,111 @@ export const wake: Goal = {
   }
 };
 
+/** A mob the wall-in waits on: break out opens the wall to it only when the bot is this well and armoured. */
+const FIGHT_HEALTH = 14;
+const FIGHT_ARMOUR = 'iron';
+/**
+ * The mobs break out lets the Guardian's auto-defend fight through an opened wall: those that come to the bot and fight
+ * hand to hand. Never a creeper (it would blow the wall and the bot up), nor what shoots or throws from afar (a
+ * skeleton through the gap, a witch, a drowned with a trident), nor more than two at once.
+ */
+const MELEE = new Set(['zombie', 'husk', 'zombie_villager', 'spider', 'cave_spider']);
+const FIGHT_AT_MOST = 2;
+/** Waits on the same mob, running, before a bot strong enough opens its wall to it. */
+const WAITS = 3;
+/** How long a run that opened the wall stays for the fight before it lets the next run look again. */
+const FIGHT_MS = 30_000;
+
+/** The mob break out last waited on (its id, as world.entities gives it) and how many runs running it has. */
+let waitedOn: { id?: number; name: string; n: number } | undefined;
+/** For tests: no mob waited on yet. */
+export function resetBreakOut(): void { waitedOn = undefined; }
+
+/** The worst worn armour piece's material (`iron`, `diamond`), and whether every piece is iron or better; none worn: `no`. */
+function armourOf(items: InventoryItem[]): { words: string; ok: boolean } {
+  const worn = [36, 37, 38, 39].map(slot => items.find(i => i.slot === slot)?.name);
+  const tiers = worn.map(n => (n ? tier(n) : 0));
+  const worst = Math.min(...tiers);
+  const name = worn[tiers.indexOf(worst)];
+  return { words: name ? name.replace(/_(helmet|chestplate|leggings|boots)$/, '') : 'no', ok: worst >= tier(`${FIGHT_ARMOUR}_chestplate`) };
+}
+
 /**
  * Out of an emergency wall-in by day. The Guardian walls the bot in when a fight goes badly, and the shelter does at
  * night away from home; in the home zone the dirt it used can't be broken by Baritone (ground there is protected), so
  * every walk failed at once and it sat in its box at 7 health with nothing to eat. Digs the wall it built (all of it,
  * so no stray blocks are left on the lawn); a box it didn't build, it opens on the side toward home.
+ *
+ * It waits while a monster is within 10, but not for good: a zombie near a player never despawns, and live on Nov 12
+ * it waited an hour on one standing in the cave outside the wall (`waiting: zombie 2 blocks away` every 20 s, then
+ * the morning hold, and again). The third run running that finds the same mob, with the bot at health 14 or more and
+ * iron armour or better, opens its own wall 2 high on the side nearest the mob and stays half a minute for the
+ * Guardian's auto-defend to fight it (one or two mobs that fight hand to hand: never a creeper, nothing that shoots),
+ * then digs out the rest of its wall. Weaker, it goes on waiting, and three failures in a row hold it 10 min, not the
+ * night.
  */
 export const breakOut: Goal = {
   name: 'break out',
   priority: 92,
   timeoutMs: 3 * 60_000,
   retryMs: 20_000,
+  failHoldMs: 10 * 60_000,
   wants: s => (s.boxedIn && s.activity === 'work' && !s.sleeping ? 'walled in, and it is day' : null),
   run: async ctx => {
-    const { entities } = await ctx.call<{ entities: { name: string; category: string; distance: number }[] }>('world.entities', { maxDistance: 10 });
-    const threat = entities.find(e => e.category === 'monster');
-    if (threat) throw new Error(`waiting: ${threat.name} ${threat.distance.toFixed(0)} blocks away`);
+    type Seen = { id?: number; name: string; category: string; distance: number; position?: Pos };
+    const { entities } = await ctx.call<{ entities: Seen[] }>('world.entities', { maxDistance: 10 });
+    const monsters = entities.filter(e => e.category === 'monster');
+    const threat = monsters[0];
     const feet = { x: Math.floor(ctx.s.position.x), y: Math.floor(ctx.s.position.y), z: Math.floor(ctx.s.position.z) };
+    let opened: string | undefined;
+    if (threat) {
+      const n = waitedOn && waitedOn.name === threat.name && waitedOn.id === threat.id ? waitedOn.n + 1 : 1;
+      waitedOn = { id: threat.id, name: threat.name, n };
+      const armour = armourOf(ctx.s.items);
+      const fit = ctx.s.health >= FIGHT_HEALTH && armour.ok && monsters.length <= FIGHT_AT_MOST && monsters.every(m => MELEE.has(m.name));
+      const waiting = `waiting: ${threat.name} ${threat.distance.toFixed(0)} blocks away`;
+      if (n < WAITS || !fit || !threat.position) throw new Error(waiting);
+      // the side nearest the mob, 2 high: the gap it comes through, and the only one. Of the wall it built only, at
+      // both heights: beside it on the lawn may stand a chest of the storage house or a house wall, which is no wall
+      // to open, and where the wall-in filled only the head cell over one, a gap there is 1 high (no zombie comes
+      // through it, and with one side open the box is no box: break out never wants again). With no such side (a box
+      // it did not build has nothing of its own to open) it waits, as ever
+      const mob = threat.position;
+      const own = ctx.s.boxedIn ?? [];
+      const mine = (c: Pos) => own.some(d => d.x === c.x && d.y === c.y && d.z === c.z);
+      const sides = own.filter(c => c.y === feet.y && Math.abs(c.x - feet.x) + Math.abs(c.z - feet.z) === 1 && mine({ ...c, y: feet.y + 1 }));
+      const off = (c: Pos) => Math.hypot(c.x + 0.5 - mob.x, c.z + 0.5 - mob.z);
+      const toward = [...sides].sort((a, b) => off(a) - off(b))[0];
+      if (!toward) throw new Error(waiting);
+      // opened only when the bridge says so: `No block` is open too (the gap the last run made); a dig refused or
+      // timed out leaves the wall whole, and the run waits as ever (said as opened, it ran again every half minute)
+      let open = true;
+      for (const c of [toward, { ...toward, y: feet.y + 1 }]) {
+        if (ctx.signal.aborted) throw new Error('aborted');
+        const r = await ctx.act('dig-block', { ...c }).catch((e: Error) => ({ ok: false, text: e.message }));
+        if (!r.ok || !/^(Dug|No block)/.test(r.text)) open = false;
+      }
+      if (ctx.signal.aborted) throw new Error('aborted');
+      if (!open) throw new Error(waiting);
+      opened = `opened the wall toward the ${threat.name} (health ${Math.round(ctx.s.health)}, ${armour.words} armour)`;
+      ctx.progress(opened);
+      // the fight is the Guardian's (it hits what comes within reach): the run stays for it a while, then digs the
+      // rest of its wall as ever. Still about after that (or the bot hurt) all the same: the box is open, so no run
+      // comes after this one, and what it left standing would stay on the lawn for good (scaffold in the storage
+      // house's aisle, by a built block where the tidy round leaves it)
+      const until = Date.now() + FIGHT_MS;
+      let gone = false;
+      while (!ctx.signal.aborted) {
+        const seen = await ctx.call<{ entities: Seen[] }>('world.entities', { maxDistance: 10 }).catch(() => undefined);
+        gone = !!seen && !seen.entities.some(e => e.category === 'monster');
+        const health = (await ctx.status().catch(() => undefined))?.health ?? ctx.s.health;
+        if (gone || health < FIGHT_HEALTH || Date.now() >= until) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      if (ctx.signal.aborted) throw new Error('aborted');
+      if (!gone) opened = `${opened}; still about`;
+    }
+    waitedOn = undefined;
     let cells = [...(ctx.s.boxedIn ?? [])];
     if (!cells.length) {
       const home = ctx.s.home ?? feet;
@@ -227,6 +359,7 @@ export const breakOut: Goal = {
       const r = await ctx.act('dig-block', { ...c });
       if (r.ok && /^Dug/.test(r.text)) { dug++; ctx.progress(`dug (${c.x}, ${c.y}, ${c.z})`); }
     }
+    if (opened) return `${opened}; then dug out of the wall-in (${dug} more of ${cells.length} block(s))`;
     if (!dug) throw new Error(`could not dig out of the wall at (${feet.x}, ${feet.y}, ${feet.z})`);
     return `dug out of the wall-in (${dug} of ${cells.length} block(s))`;
   }
@@ -239,6 +372,17 @@ export const breakOut: Goal = {
  */
 export function shelterGoal(): Goal {
   let holedUp = false;
+  // where it walled in, as seen just after: moved on from there since, it is holed up no more. Out from under digs a
+  // night's wall-in under the yard open by night as well, and the bot stood up on the surface past the fence all night
+  let holedAt: Pos | undefined;
+  const stillHoled = (p: Pos | undefined) => holedUp && (!holedAt || !p || Math.hypot(p.x - holedAt.x, p.y - holedAt.y, p.z - holedAt.z) <= 2);
+  const wallIn = async (ctx: GoalContext) => {
+    const w = await ctx.act('wall-in');
+    holedUp = true;
+    holedAt = undefined;
+    try { holedAt = (await ctx.status()).position; } catch { /* no look: holed up until the morning, as ever */ }
+    return w;
+  };
   return {
     name: 'shelter',
     priority: 80,
@@ -246,24 +390,26 @@ export function shelterGoal(): Goal {
     retryMs: 20_000,
     interruptible: false,
     wants: (s, world) => {
-      if (s.activity === 'work') { holedUp = false; return null; }
-      if (holedUp || s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
+      if (s.activity === 'work') { holedUp = false; holedAt = undefined; return null; }
+      if (stillHoled(s.position) || s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
       // in the evening the fenced, lit yard is home enough (the chests and the furnace are in it: pulled back to the
-      // doorstep, the kit and the food goal never got to them); at night, the house
-      if (s.activity === 'return') return s.distHome > IN_YARD ? 'evening: head home before dark' : null;
-      if (s.distHome > AT_HOME) return 'night: get home';
+      // doorstep, the kit and the food goal never got to them); at night, the house. On its level: a cave under the
+      // yard is neither. Under the yard the walk home stops in a second, and three of those held the shelter until
+      // the morning, past the moment out from under brought the bot up: that is out from under's (the night's wall-in
+      // down there still is the shelter's)
+      if (s.activity === 'return') return !nearHome(s, IN_YARD) && !underNow(s, world) ? 'evening: head home before dark' : null;
+      if (!nearHome(s, AT_HOME)) return 'night: get home';
       if (s.activity === 'rest' && world.landmarks.bed) return 'night: go to bed';
       if (s.activity === 'rest' && !s.boxedIn) return 'night: no bed yet: wall in';
       return null;
     },
     run: async ctx => {
       const did: string[] = [];
-      if (ctx.s.distHome > AT_HOME) {
+      if (!nearHome(ctx.s, AT_HOME)) {
         const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
         if (!r.ok) {
           if (ctx.s.activity !== 'rest') throw new Error(r.text);
-          const w = await ctx.act('wall-in');
-          holedUp = true;
+          const w = await wallIn(ctx);
           return `could not get home at night (${r.text}); ${w.text}`;
         }
         did.push('walked home');
@@ -293,8 +439,7 @@ export function shelterGoal(): Goal {
         did.push(`asleep in the bed at (${bed.x}, ${bed.y}, ${bed.z})`);
       } else if (ctx.s.activity === 'rest' && !ctx.s.boxedIn) {
         // no bed yet: the night in a box of its own blocks, not out in the open with the mobs
-        const w = await ctx.act('wall-in');
-        holedUp = true;
+        const w = await wallIn(ctx);
         did.push(`no bed yet: ${w.text}`);
       }
       return did.join(', ') || 'home';
@@ -360,11 +505,14 @@ export const returnIdle: Goal = {
   retryMs: 5 * 60_000,
   wants: (s, world) => {
     if (s.activity !== 'work' || !s.home || !Number.isFinite(s.distHome)) return null;
+    // under the yard the walk home stops in a second: that is out from under's, and the walk is for when it is up
+    if (underNow(s, world)) return null;
     const yard = world.yard;
     // far from home, in the yard or out of it; or out past the fence, however near home. The fence counts only
     // while home stands inside it: the walk ends at home, and with home moved out of an old yard the bot would be
-    // "out here" again the moment it arrived, and walk for ever
-    const off = s.distHome > 32 || (!!yard && outsideBy(yard, s.home) === 0 && outsideBy(yard, s.position) > YARD_EDGE);
+    // "out here" again the moment it arrived, and walk for ever. Off home's level is out of the chores' reach too:
+    // the bot left standing down a mine shaft by a run would stay there all day
+    const off = !nearHome(s, 32) || (!!yard && outsideBy(yard, s.home) === 0 && outsideBy(yard, s.position) > YARD_EDGE);
     return off ? 'nothing to do out here: back to the yard' : null;
   },
   run: async ctx => {

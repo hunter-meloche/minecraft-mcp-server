@@ -1189,11 +1189,12 @@ test('the real goal list at 34/36 with six loose slots: the brain starts a goal,
   }
   brain.setEnabled(false);
   // the stash first (a materials trip waits for its room: two minutes after the last stash is no reason of its own),
-  // then the trip, for the cane first; nothing in the stand-in world is found, so it tries the next thing each time
+  // then the trip, for the logs first (the project's cane is the work queue's, not a materials trip's); nothing in
+  // the stand-in world is found, so it tries the next thing each time
   t.deepEqual(seen, [
     'Now: stash (34/36 slots used) for 0s.',
-    'Now: stock (short of 98 sugar_cane, 32 log, 16 coal, 16 iron_ingot) for 0s.',
     'Now: stock (short of 32 log, 16 coal, 16 iron_ingot) for 0s.',
+    'Now: stock (short of 16 coal, 16 iron_ingot) for 0s.',
     'Now: stock (short of 16 coal, 16 iron_ingot) for 0s.',
     'Now: stock (short of 16 coal, 16 iron_ingot) for 0s.',
     'Now: stock (short of 16 coal, 16 iron_ingot) for 0s.',

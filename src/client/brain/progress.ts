@@ -191,6 +191,8 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   furnace: { makes: 1, from: { cobblestone: 8 } },
   bucket: { makes: 1, from: { iron_ingot: 3 } },
   shears: { makes: 1, from: { iron_ingot: 2 } },
+  // the cows are walked home to the pen on a lead (pens.ts): two from four string and a slime ball
+  lead: { makes: 2, from: { string: 4, slime_ball: 1 } },
   paper: { makes: 3, from: { sugar_cane: 3 } },
   book: { makes: 1, from: { paper: 3, leather: 1 } },
   bookshelf: { makes: 1, from: { planks: 6, book: 3 } },

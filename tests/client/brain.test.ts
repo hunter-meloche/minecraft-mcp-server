@@ -336,12 +336,15 @@ test('decide asks each goal\'s urgency once, and orders by it as before', (t) =>
   t.deepEqual(Object.fromEntries(asked), { a: 1, b: 1, d: 1, e: 1 });
 });
 
-test('idle watchdog: by day, standing still with nothing to do, it lets go of every hold at 3 min and forages at 6', async (t) => {
+test('idle watchdog: by day, standing still with nothing to do, it lets go of every hold at 3 min, starts nothing itself, and goes round again after 16', async (t) => {
+  // (until step 5 it foraged at 6 min: a stock trip or a cow fetch without their own waits; the stock goal and the
+  // work queue's cows rung do those now)
   const state = { pos: { x: 0, y: 64, z: 0 }, time: 5000 };
   const { rt } = fakeRuntime(state);
   let clock = 1_000_000;
   const brain = new Brain(rt, { tickMs: 1e9, now: () => clock, goals: [goal('never', 1, false)] });
   brain.setEnabled(true);
+  const letGo = () => (brain.status().match(/idle \d+ min by day: let go/g) ?? []).length;
   await brain.tick();
   clock += 2 * 60_000;
   await brain.tick();
@@ -349,15 +352,20 @@ test('idle watchdog: by day, standing still with nothing to do, it lets go of ev
   clock += 61_000;
   await brain.tick();
   t.regex(brain.status(), /idle 3 min by day: let go of/);
-  clock += 3 * 60_000;
+  // standing on to 18 min: nothing is started (no forage at 6), and the holds are not let go again in that round
+  for (let i = 0; i < 15; i++) { clock += 60_000; await brain.tick(); await settle(); }
+  t.notRegex(brain.status(), /start (forage|never)/);
+  t.is(letGo(), 1);
+  // the next round began at 16 min: 3 min into it, the holds go again
+  clock += 61_000;
   await brain.tick();
-  await settle();
-  t.regex(brain.status(), /start forage: idle 6 min by day/);
+  t.is(letGo(), 2);
   // walking off starts the count again
   state.pos = { x: 20, y: 64, z: 0 };
   clock += 4 * 60_000;
   await brain.tick();
-  t.is((brain.status().match(/idle \d+ min by day: let go/g) ?? []).length, 1);
+  t.is(letGo(), 2);
+  brain.setEnabled(false);
 });
 
 test('idle watchdog: at 3 min it lets go of the holds and keeps every fruitless mark, the stock trips\' like spare time\'s (it would only go straight back)', async (t) => {
@@ -438,13 +446,15 @@ test('a LOOP back-off holds through the morning and the idle watchdog, and a loo
   await go(4, 60_000);
   t.is(runs, 4);
   t.notRegex(brain.status(), /let go of spin/);
-  // its 10 minutes up, it goes again; going round again within the half hour backs it off again, unreported
+  // its 10 minutes up, it goes again; going round again within the half hour backs it off again, unreported. Its
+  // old four turns are still within the watch's 15 minutes, so the first new one is the loop again (until step 5 the
+  // watchdog's forage ran in between at 6 min, and then it took four new turns)
   clock += 6 * 60_000;
   await go(6);
-  t.is(runs, 8); // the old turns have left the watch's window: four new ones
+  t.is(runs, 5);
   t.regex(brain.status(), /LOOP again \(spinning: spin\); spin backed off for 10 min/);
   await go(5);
-  t.is(runs, 8);
+  t.is(runs, 5);
   brain.setEnabled(false);
 });
 

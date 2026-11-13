@@ -1,4 +1,4 @@
-import type { Goal, GoalContext } from './goals.js';
+import { nearHome, type Goal, type GoalContext } from './goals.js';
 import type { Milestone, MilestoneState, StepResult } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
 import { progressOf } from './progress.js';
@@ -155,7 +155,7 @@ export const enchantGoal: Goal = {
   timeoutMs: 4 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || (s.xpLevel ?? 0) < 30 || !world.zones?.['enchanting:table']?.length || s.distHome > 24) return null;
+    if (s.activity !== 'work' || s.sleeping || (s.xpLevel ?? 0) < 30 || !world.zones?.['enchanting:table']?.length || !nearHome(s, 24)) return null;
     const piece = s.items.find(i => i.slot < 36 && WORTH.test(i.name) && !i.enchanted && tier(i.name) >= tier(i.name.replace(/^[a-z]+_/, 'diamond_')));
     if (!piece) return null;
     const lapis = (s.counts.get('lapis_lazuli') ?? 0) + (chestTotals(world).lapis_lazuli ?? 0);

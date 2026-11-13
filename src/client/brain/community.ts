@@ -1,4 +1,4 @@
-import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { freeChestTotals, takeFromChests } from './chests.js';
 import { pickMineStart, tripBudgetMs, MINE_FROM_BUILDS } from './mine.js';
@@ -284,7 +284,7 @@ const missionGate = (s: Snapshot, world: WorldMemory): Gate => {
   const src = sourceOf(m.item);
   if ('error' in src) return { cause: 'unneeded', text: `#${m.id}: ${src.error}` };
   if (!world.community?.chests[m.chest]) return { cause: 'unneeded', text: `#${m.id}: no community chest called ${m.chest}` };
-  if (s.distHome > 16) return no.away(s, 'community', 16);
+  if (!nearHome(s, 16)) return no.away(s, 'community', 16);
   const late = no.late(s, 'community');
   if (deliverNow(m, src)) return late ?? { want: `#${m.id}: ${owed(m)} ${m.item} to take to ${m.chest}` };
   // the kit, the food goal and the stash first
@@ -328,7 +328,7 @@ const donateGate = (s: Snapshot, world: WorldMemory): Gate => {
   if (s.now - (c.lastDonation ?? 0) < DONATE_EVERY) return no.notDue('donate', s.now, c.lastDonation ?? 0, DONATE_EVERY);
   const plan = donationPlan(ownTotals(s, world), diamondsWanted(s, world));
   if (!Object.keys(plan).length) return { cause: 'unneeded', text: 'nothing spare to give' };
-  if (s.distHome > 16) return no.away(s, 'donate', 16);
+  if (!nearHome(s, 16)) return no.away(s, 'donate', 16);
   return no.late(s, 'donate', 3000) ?? { want: `spare for the community: ${Object.entries(plan).map(([k, v]) => `${v} ${k}`).join(', ')}` };
 };
 

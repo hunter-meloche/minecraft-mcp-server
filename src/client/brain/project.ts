@@ -1,4 +1,4 @@
-import { fromGate, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import {
   allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, stepId, stillShort,
@@ -24,7 +24,7 @@ export function projectGoal(tree: Milestone[]): Goal {
   // its work is in and around the yard (it ran while the bot was out on a deep trip); its own materials can fill
   // the pockets (one slot free will do, and the step makes it first where the stash can); two minutes before the
   // evening it is not worth starting
-  const heldBack = (s: Snapshot, world: WorldMemory): Decline | null => (s.distHome > 64 ? no.away(s, 'project', 64) : s.health < 12 ? no.health(s, 'project', 12)
+  const heldBack = (s: Snapshot, world: WorldMemory): Decline | null => (!nearHome(s, 64) ? no.away(s, 'project', 64) : s.health < 12 ? no.health(s, 'project', 12)
     : room('project', s, world) === 'no' ? noRoom('project', 'project', s, world) : null) ?? no.late(s, 'project', 2400);
   /**
    * Run now? The "no" is said in this order: nowhere it could work from; no milestone that can be worked (that is the

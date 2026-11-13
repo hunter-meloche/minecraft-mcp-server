@@ -120,8 +120,11 @@ const WORK_KIND: Record<string, RoomKind> = { 'work: trip kit': 'yard', 'work: d
 test('wants is null exactly when declines is not: the ten gated goals over pockets x hour x project blocked or not x at home, at the far end of the yard or 50 out; and full pockets are the reason only where the stash could make no room', (t) => {
   const goals = gated();
   t.deepEqual(goals.map(g => g.name), ['project', 'build', 'deep trip', 'stock', 'cane', 'pens', 'trees', 'larder', 'donate', 'community']);
-  // each cell at two homes: one where all ten have work (so the blockers decide), one where most have none
-  const homes = { busy: busyWorld, new: newWorld };
+  // each cell at two homes: one where all ten have work (so the blockers decide), one where most have none. The
+  // blocked project is short of sand as well: the cane is the work queue's now, and the sand still sends the stock
+  // goal out, so the grid sees its pockets rule
+  const withSand = (w: WorldMemory) => { if (w.progress?.need) w.progress.need = { ...w.progress.need, sand: 20 }; return w; };
+  const homes = { busy: (b: boolean) => withSand(busyWorld(b)), new: (b: boolean) => withSand(newWorld(b)) };
   const bad: string[] = [];
   const seen = new Map(Object.keys(homes).flatMap(home => goals.map(g => [`${home}: ${g.name}`, { wants: 0, causes: new Set<string>(), full: new Set<string>() }])));
   let cells = 0;
@@ -210,8 +213,9 @@ test('wants is null exactly when declines is not: the ten gated goals over pocke
   // every cell in which full pockets were the reason, by slots used and place (at some hour, the project blocked or not)
   t.deepEqual(Object.fromEntries([...seen].filter(([, rec]) => rec.full.size).map(([name, rec]) => [name, [...rec.full].join(' | ')])), {
     // the busy home: only 50 east, where the stash is not sent home from, and with less free than the goal's room
-    // (one slot for the project and a build, three for a materials trip). The yard rounds are too far from home
-    // there, the deep trip too; at home and in the yard the grid's logs, sand and ingots are there to put away
+    // (one slot for the project and a build, three for a materials trip: the project's sand). The yard rounds are
+    // too far from home there, the deep trip too; at home and in the yard the grid's logs, sand and ingots are there
+    // to put away
     'busy: project': '36 50 east',
     'busy: build': '36 50 east',
     'busy: stock': '34 50 east | 35 50 east | 36 50 east',

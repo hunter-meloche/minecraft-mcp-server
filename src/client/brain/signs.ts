@@ -1,4 +1,4 @@
-import type { Goal, GoalContext } from './goals.js';
+import { nearHome, type Goal, type GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { key } from './chests.js';
 import { chestAssignment } from './chores.js';
@@ -88,7 +88,7 @@ export const signsGoal: Goal = {
   timeoutMs: 8 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 24 || world.landmarks.chests.length < 3) return null;
+    if (s.activity !== 'work' || s.sleeping || !s.home || !nearHome(s, 24) || world.landmarks.chests.length < 3) return null;
     // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
     if (!roundDue(s, world, 'signs', 20 * MINUTE)) return null;
     // the assignment as it stands now (new chests in it), not as the stash last left it

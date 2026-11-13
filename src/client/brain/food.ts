@@ -1,12 +1,13 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26 } from '../tools.js';
-import { AT_HOME, fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { AT_HOME, fromGate, nearHome, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { collectFurnace, farmAll } from './chores.js';
 import { FOOD_CARRY } from './pockets.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { placeNearHome } from './firsts.js';
+import { underNow } from './underyard.js';
 
 /** How far round the bot the hunt looks for game. */
 const HUNT_RANGE = 64;
@@ -71,7 +72,7 @@ export const food: Goal = {
     const need = short(s);
     if (need <= 0) return null;
     // at night only what can be done at home: cook, bake, the chest
-    if (s.activity !== 'work' && s.distHome > (starving(s) ? RETREAT_FROM : AT_HOME)) return null;
+    if (s.activity !== 'work' && !nearHome(s, starving(s) ? RETREAT_FROM : AT_HOME)) return null;
     return `carrying ${FOOD_TARGET - need} food points of ready food (want ${FOOD_TARGET})`;
   },
   run: ctx => gatherFood(ctx, FOOD_TARGET, true)
@@ -89,7 +90,7 @@ const larderGate = (s: Snapshot, world: WorldMemory): Gate => {
   if (!s.home || s.dimension !== 'overworld') return no.away(s, 'larder', 24);
   const total = readyFoodPoints(s.counts) + storedFood(world);
   if (!(total < LARDER)) return { cause: 'stocked', text: `${total} food points at home (keep ${LARDER})` };
-  if (s.distHome > 24) return no.away(s, 'larder', 24);
+  if (!nearHome(s, 24)) return no.away(s, 'larder', 24);
   if (s.health < 14 || s.food < 14) return no.health(s, 'larder', 14, 14);
   return no.late(s, 'larder', 3000) ?? { want: `${total} food points at home (keep ${LARDER})` };
 };
@@ -346,7 +347,10 @@ export const retreat: Goal = {
   retryMs: 60_000,
   // the yard counts as home: within it the food goal walks to the chests and the furnace, which is how it heals (with
   // AT_HOME it pulled the bot back to the doorstep every few steps, and the food never got fetched)
-  wants: s => (s.health < 10 && s.home && s.distHome > RETREAT_FROM && Number.isFinite(s.distHome) ? `health ${s.health.toFixed(1)}: home to heal` : null),
+  // (and under it: 15 from home across the ground in a cave 55 below the yard is not home). Under the yard itself the
+  // walk home stops in a second, and three of those held the retreat for the rest of the day: out from under heals
+  // first and digs out, and the retreat is for once it is up
+  wants: (s, world) => (s.health < 10 && s.home && !nearHome(s, RETREAT_FROM) && Number.isFinite(s.distHome) && !underNow(s, world) ? `health ${s.health.toFixed(1)}: home to heal` : null),
   run: async ctx => {
     const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
     if (!r.ok) throw new Error(r.text);

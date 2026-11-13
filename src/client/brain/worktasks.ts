@@ -1,23 +1,30 @@
 /**
  * The rungs of the work ladder (work.ts runs them): what the bot does with a day that has no job in it, the top rung
- * first. The kit for a trip down from out in the yard, a trip down for every ore the home keeps, and coal from the
- * surface. Each says why it does not run when it does not; the wrapper books what each brought in and walks home.
+ * first. The cane patch grown on the lake shore, a cow for the pen while the project waits on leather and wild cane
+ * while it waits on cane, the kit for a trip down from out in the yard, a trip down for every ore the home keeps, and
+ * coal from the surface. Each says why it does not run when it does not; the wrapper books what each brought in and
+ * walks home.
  *
  * Gates only read: every total is counted afresh on each look (the chests as last seen with the pockets), so stock
  * that is used, given away or taken opens its target again at once. Nothing here is used at the module's top level:
- * this file and chores.ts, deep.ts and work.ts import each other.
+ * this file and chores.ts, deep.ts, pens.ts and work.ts import each other.
  */
 import type { InventoryItem } from '../tools.js';
-import type { Decline, Snapshot } from './goals.js';
+import { nearHome, type Decline, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { freeChestTotals, key } from './chests.js';
 import { DEEP_TRIP, deepTripKit, type KitCheck } from './mine.js';
 import { kitDecline, oreTrip, tripCheck, type OreWant } from './deep.js';
 import { kitNeeds, tier } from './kit.js';
-import { kitSteps } from './chores.js';
+import { WOODS_DIRS, kitSteps } from './chores.js';
 import { ownItems } from './community.js';
 import { NEAR_HOME } from './pockets.js';
-import { dryUntil, tierOf, type WorkTask } from './work.js';
+import { allItems, stillShort } from './progress.js';
+import { WATER_FROM_HOME, cutStand, dropDeadCells, findWildCane, liveCells, plantCane, wildCane } from './cane.js';
+import type { Zone } from './courtesy.js';
+import { PEN_FOOD } from './animals.js';
+import { IN_SIGHT, fetchForPens, penAt } from './pens.js';
+import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult, type WorkTask } from './work.js';
 
 const MINUTE = 60_000;
 
@@ -60,6 +67,228 @@ const targets = (tierNow: number) => DEEP.map(f => `${f} ${target(f, tierNow)}`)
  */
 const allLooked = (world: WorldMemory) => world.landmarks.chests.every(c => !!world.chestItems?.[key(c)]);
 const unread: Decline = { cause: 'unneeded', text: 'the chests are not all looked into yet' };
+
+const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
+
+// ------------------------------------------------------------------------------------------------ cane patch
+
+/**
+ * The cells the cane patch grows to. Cane grows a block about every 18 min and the round cuts every 20: once grown,
+ * some 24 cane a round, the enchanting room's 101 short in under two hours.
+ */
+export const CANE_CELLS = 24;
+/** A live patch this big grows the cane the project waits on: no walks for wild cane then. */
+const PATCH_GROWS = 12;
+/** A shore found full is looked along again after this long, whatever the patch has: the lake rises and sinks. */
+const FULL_FOR = 24 * 60 * MINUTE;
+
+/** Cane carried, and in the chests beyond what a build job holds there: what the patch can be planted with. */
+const caneToPlant = (s: Pick<Snapshot, 'counts'>, world: WorldMemory) => (s.counts.get('sugar_cane') ?? 0) + (freeChestTotals(world).sugar_cane ?? 0);
+
+/**
+ * Why the patch needs nothing now, or null: whole (24 cells that can grow cane); its shore found full with as many
+ * live cells as it has now, under a day ago; or nothing to plant it with.
+ */
+function patchWhy(s: Snapshot, world: WorldMemory): Decline | null {
+  const live = liveCells(world).length;
+  if (live >= CANE_CELLS) return { cause: 'unneeded', text: `${live} cells` };
+  // (each try at a full shore read every cell and the shore, planted nothing and waited its mark: two tries a
+  // 160-min wait for as long as the bot lived, the 30 s release given to it ahead of the coal. A cell lost reopens it)
+  const full = world.caneFull;
+  if (full && live >= full.cells && s.now >= full.at && s.now - full.at < FULL_FOR) return { cause: 'unneeded', text: `the shore is full at ${full.cells} cells` };
+  if (caneToPlant(s, world) < 1) return allLooked(world) ? { cause: 'unneeded', text: 'no cane to plant' } : unread;
+  return null;
+}
+
+/**
+ * Rung 1. The cane patch, grown to 24 cells on the shore of the nearest open water (cane.ts plantCane, the cane
+ * milestone's own planting), with cane carried or taken from the chests. First it looks at every cell it has and
+ * drops the ones with no water beside them: by Nov 12 the lake had sunk from beside the first five (at y 63) to y
+ * 55-56, and the round cut nothing there 77 times in 100. A cell is live unless the bot has seen it dry (the round
+ * writes down what it sees, this run what it finds), so the gate reads memory only; and so is a shore found full
+ * (world.caneFull: the lake east of the yard holds 20 cells, not 24). How far: the furthest cell it has, or with none
+ * as far as open water is looked for.
+ */
+const canePatch: WorkTask = {
+  name: 'cane patch',
+  rank: 1,
+  reach: 'near',
+  room: 'yard',
+  budgetMs: 4 * MINUTE,
+  variants: (s, world) => {
+    if (patchWhy(s, world)) return [];
+    const home = s.home ?? s.position;
+    const cells = world.zones?.cane ?? [];
+    return [{ id: 'shore', dist: cells.length ? Math.round(Math.max(...cells.map(c => horiz(c, home)))) : WATER_FROM_HOME }];
+  },
+  none: (s, world) => patchWhy(s, world) ?? { cause: 'unneeded', text: 'cane patch: nothing to do' },
+  ready: (s, world) => patchWhy(s, world),
+  run: async (ctx, _variant, budgetMs, now) => {
+    const began = now();
+    const dead = await dropDeadCells(ctx, now());
+    const parts: string[] = [];
+    if (dead.length) {
+      const said = `dropped ${dead.length} dry cell(s) (no water beside them): ${dead.map(c => `${c.x},${c.y},${c.z}`).join(' ')}`;
+      ctx.progress(said);
+      parts.push(`dropped ${dead.length} dry cell(s)`);
+    }
+    const live = liveCells(ctx.world).length;
+    const max = Math.min(CANE_CELLS - live, caneToPlant(ctx.s, ctx.world));
+    if (max <= 0) {
+      parts.push(live >= CANE_CELLS ? `the patch has its ${live} cells` : 'no cane to plant');
+      return { gain: 0, text: parts.join('; ') };
+    }
+    const r = await plantCane(ctx, max, () => now() - began > budgetMs);
+    // the shore planted as far as it goes: written down for the gate (it waits till a cell is lost, or a day)
+    if (r.full) ctx.world.caneFull = { cells: live, at: now() };
+    else if (r.planted.length) delete ctx.world.caneFull;
+    parts.push(r.text);
+    return { gain: r.planted.length, text: `${parts.join('; ')} (${liveCells(ctx.world).length} of ${CANE_CELLS} cells)` };
+  }
+};
+
+// ------------------------------------------------------------------------------------------------ cows
+
+/** A pen with this many adults breeds the rest itself (the pens round, up to 6): no fetch then. */
+const PAIR = 2;
+/** The pens round's count of the pen holds this long (it looks every 6 min by day); older, it is not known. */
+const PEN_FRESH = 30 * MINUTE;
+
+/**
+ * Something to walk a cow home by, carried or stored (beyond what a build job holds): a lead, or 4 string and a slime
+ * ball to make one, or 2 wheat to lure one with. The run takes the same in that order (pens.ts holdFor).
+ */
+function canLead(s: Pick<Snapshot, 'counts'>, world: WorldMemory): boolean {
+  const free = freeChestTotals(world);
+  const n = (item: string) => (s.counts.get(item) ?? 0) + (free[item] ?? 0);
+  return n('lead') >= 1 || (n('string') >= 4 && n('slime_ball') >= 1) || PEN_FOOD.cow.some(f => n(f) >= 2);
+}
+
+/**
+ * Why no cow is fetched now, or null: no cow pen with a gate; the chests not all looked into (a half-read list would
+ * show the leather short); the project not waiting on leather (what the blocked step's whole bill still lacks,
+ * against everything carried and stored); the pen with a pair in it as the pens round last counted it (under half
+ * an hour ago: older, it is not known, and a look is allowed); nothing to walk a cow home by.
+ */
+function cowsWhy(s: Snapshot, world: WorldMemory): Decline | null {
+  if (!penAt(world, 'cow')) return { cause: 'unneeded', text: 'no cow pen with a gate' };
+  if (!allLooked(world)) return unread;
+  const need = world.progress?.blocked?.need;
+  const short = need ? stillShort(need, allItems(s, world)).leather ?? 0 : 0;
+  if (!short) return { cause: 'unneeded', text: need?.leather ? 'the project has its leather' : 'the project is not waiting on leather' };
+  const pen = penCount(world, 'cow');
+  if (pen && s.now - pen.at < PEN_FRESH && pen.adults >= PAIR) return { cause: 'unneeded', text: `the pen has ${pen.adults} cows (they breed the rest)` };
+  if (!canLead(s, world)) return { cause: 'kit', text: 'nothing to lead a cow home with (no lead, no 4 string and a slime ball for one, no wheat)' };
+  return null;
+}
+
+/**
+ * Rung 2. A cow for the pen while the project waits on leather and the pen holds fewer than a pair: leather has one
+ * route, the herd the pens round breeds (the pen never held a cow on the friend's server, and the enchanting room
+ * waited on its 38 leather). Where one was last seen first (`in sight`: the pens round's looks and the fetches'
+ * write down where wild ones stood, within the leash), then one side of home a run, out to the leash and no further.
+ * Walked home on a lead (pens.ts fetchForPens), one cow a run; gain is the cow penned. The sides are terrain: a side
+ * with no cow waits ever longer, and the 30-minute wait of the old fetch is these marks now.
+ */
+const cows: WorkTask = {
+  name: 'cows',
+  rank: 2,
+  reach: 'far',
+  room: 'trip',
+  budgetMs: 6 * MINUTE,
+  terrain: true,
+  variants: (s, world) => {
+    if (cowsWhy(s, world)) return [];
+    const home = s.home ?? s.position;
+    const seen = sitesOf(world, 'cow').filter(p => horiz(p, home) <= world.leash);
+    // (where one was seen is tried ahead of the sides' turn: `first`)
+    const sight = seen.length ? [{ id: IN_SIGHT, dist: Math.round(Math.min(...seen.map(p => horiz(p, home)))), first: true as const }] : [];
+    return [...sight, ...WOODS_DIRS.map(id => ({ id, dist: world.leash }))];
+  },
+  none: (s, world) => cowsWhy(s, world) ?? { cause: 'unneeded', text: 'cows: nothing to do' },
+  ready: (s, world) => cowsWhy(s, world),
+  run: async (ctx, variant, budgetMs, now) => {
+    const began = now();
+    return fetchForPens(ctx, variant, { kind: 'cow', enough: () => now() - began > budgetMs, now });
+  }
+};
+
+// ------------------------------------------------------------------------------------------------ cane (wild)
+
+/**
+ * Why no wild cane is wanted now, or null: the chests not all looked into (a half-read list would show the cane
+ * short); the project not waiting on cane (what it still lacks of the blocked step's whole bill, against everything
+ * carried and stored); or a live patch of 12 cells or more grows it.
+ */
+function caneWhy(s: Snapshot, world: WorldMemory): Decline | null {
+  if (!allLooked(world)) return unread;
+  const need = world.progress?.blocked?.need;
+  const short = need ? stillShort(need, allItems(s, world)).sugar_cane ?? 0 : 0;
+  if (!short) return { cause: 'unneeded', text: need?.sugar_cane ? 'the project has its sugar_cane' : 'the project is not waiting on sugar_cane' };
+  const live = liveCells(world).length;
+  return live >= PATCH_GROWS ? { cause: 'unneeded', text: `the patch grows it (${live} cells)` } : null;
+}
+
+/** a remembered stand's variant id */
+const standId = (p: { x: number; z: number }) => `stand ${p.x},${p.z}`;
+
+/**
+ * Rung 3. Wild cane for the project while the patch is too small to grow it: a stand found before (work.sites.cane,
+ * within the leash), cut from the second block up and its base left to grow again; else one side of home a run,
+ * walked out to the leash and no further, and a stand found is cut and remembered. Gain is the cane picked up. The
+ * sides are terrain: wild cane was found 1 time in 19 within 96 blocks, so a side with none waits ever longer.
+ */
+const cane: WorkTask = {
+  name: 'cane',
+  rank: 3,
+  reach: 'far',
+  room: 'trip',
+  budgetMs: 6 * MINUTE,
+  terrain: true,
+  variants: (s, world) => {
+    if (caneWhy(s, world)) return [];
+    const home = s.home ?? s.position;
+    // (a stand found is tried ahead of the sides' turn: `first`)
+    const stands = sitesOf(world, 'cane').filter(p => horiz(p, home) <= world.leash).map(p => ({ id: standId(p), dist: Math.round(horiz(p, home)), first: true as const }));
+    return [...stands, ...WOODS_DIRS.map(id => ({ id, dist: world.leash }))];
+  },
+  none: (s, world) => caneWhy(s, world) ?? { cause: 'unneeded', text: 'cane: nothing to do' },
+  ready: (s, world) => caneWhy(s, world),
+  run: async (ctx, variant, budgetMs, now) => {
+    const began = now();
+    const enough = () => now() - began > budgetMs;
+    const home = ctx.s.home!;
+    const zones = (await ctx.call<{ zones?: Zone[] }>('foreign.zones').catch(() => undefined))?.zones ?? [];
+    const wild = wildCane(ctx.world, home, zones);
+    const visit = async (at: { x: number; y: number; z: number }, found: string): Promise<WorkResult> => {
+      const v = await cutStand(ctx, at, wild, enough);
+      const where = `(${at.x}, ${at.y}, ${at.z})`;
+      // a remembered stand not got to waits its mark, as the land's marks do, and the sides have their turns (held
+      // back as a failure, it was chosen first again each time and the sides never ran); a side that found one it
+      // could not get to has still been looked along, and the stand is tried as itself next time
+      if (v.unreached) return { gain: 0, text: `${found}could not reach the stand at ${where}: ${v.unreached}` };
+      // (a stand forgotten takes its mark with it: from a side, the side's own mark stands)
+      const forget = found ? {} : { mark: 'forget' as const };
+      if (v.theirs !== undefined) { dropSite(ctx.world, 'cane', at); return { gain: 0, text: `${found}someone else's build ${v.theirs} blocks from the stand at ${where}: theirs, left alone and forgotten`, ...forget }; }
+      if (v.gone) { dropSite(ctx.world, 'cane', at); return { gain: 0, text: `${found}no cane at ${where} any more: forgotten`, ...forget }; }
+      const grown = v.cut ? `cut ${v.cut} stalk(s) above the base, ${v.bases} base(s) left to grow` : `none grown back yet: ${v.bases} base(s) left to grow`;
+      return { gain: v.got, text: `${found}${v.got ? `+${v.got} sugar_cane` : 'no cane picked up'} at ${where} (${grown})` };
+    };
+    if (variant.startsWith('stand ')) {
+      const site = sitesOf(ctx.world, 'cane').find(p => standId(p) === variant);
+      if (!site) return { gain: 0, text: 'the stand is no longer remembered', mark: 'forget' };
+      return visit(site, '');
+    }
+    const side = variant as (typeof WOODS_DIRS)[number];
+    const found = await findWildCane(ctx, side, wild, enough);
+    // (a side the run's time cut short was not looked along to its end: its count stays)
+    if (!found.at) return { gain: 0, text: found.text, ...(found.short ? { mark: 'same' as const } : {}) };
+    addSite(ctx.world, 'cane', found.at);
+    const out = Math.round(horiz(found.at, home));
+    ctx.progress(`wild cane ${side} at (${found.at.x}, ${found.at.y}, ${found.at.z}), ${out} blocks from home`);
+    return visit(found.at, `found wild cane ${side}, ${out} blocks from home: `);
+  }
+};
 
 /** The deep families under their targets, the furthest below first (have / target, then the order above), with what each still wants. */
 export function deepShort(s: Pick<Snapshot, 'counts'>, world: WorldMemory, tierNow = tierOf(world)): { family: DeepFamily; want: number }[] {
@@ -139,7 +368,7 @@ const tripKit: WorkTask = {
       const words = Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ');
       return { cause: 'kit', text: `${variant}: ${words ? `short of ${words}` : 'nothing in the chests to make them from'}` };
     }
-    return s.distHome <= NEAR_HOME ? { cause: 'unneeded', text: `${variant}: the kit goal sees to them at home` } : null;
+    return nearHome(s, NEAR_HOME) ? { cause: 'unneeded', text: `${variant}: the kit goal sees to them at home` } : null;
   },
   run: async (ctx, variant) => {
     const part = PARTS[variant];
@@ -188,7 +417,6 @@ const SURFACE_SLICE = 90_000;
 const SURFACE_WANT = 24;
 /** Less of the budget than this left: no other round. */
 const SURFACE_LAST = 20_000;
-const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 
 /**
  * Rung 6. Coal from the surface, near home (spare time's way: the mine tool walks out of the home area to the nearest
@@ -249,4 +477,4 @@ const surface: WorkTask = {
   }
 };
 
-export const LADDER: WorkTask[] = [tripKit, deep, surface];
+export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, deep, surface];

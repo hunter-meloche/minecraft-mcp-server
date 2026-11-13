@@ -342,35 +342,35 @@ test('stock: a trip that found nothing leaves that resource alone for a while', 
   t.deepEqual(stockShort({ ...s, now: s.now + 31 * 60_000 }, w).map(x => x.name), ['coal']);
 });
 
-test('stock: a trip for the project cane goes to the wild cane it found before, not only what is in sight from home', async (t) => {
-  // live 2026-11-09: the enchanting room short of 113 cane, the trip mined from home and failed "No sugar_cane in sight
-  // outside the home area" each time; the cane milestone had found wild cane 163 blocks south
+test('stock no longer walks for sugar_cane, and still does for the rest', async (t) => {
+  // live 2026-11-10..12: the stock trip walked out for the enchanting room's cane 30 times, a side picked by the clock
+  // ("no sugar_cane within 96 blocks of home north/east/south/west"), every half hour the watchdog let its mark go.
+  // The work queue's `cane patch` and `cane` rungs have the cane now: stock has nothing to say about it
   const s = snap(gear());
-  const run = async (mined: string) => {
-    const w = world({ chestItems: { '1,64,0': { oak_log: 40, cobblestone: 64, iron_ingot: 20, coal: 30 } }, progress: { done: [], journal: [], need: { sugar_cane: 113 } } });
-    w.zones = { wildcane: [{ x: 14, y: 63, z: 163 }] };
-    t.deepEqual(stockShort(s, w).map(x => x.name), ['sugar_cane']);
-    const acts: string[] = [];
-    const ctx = {
-      s, world: w, signal: new AbortController().signal,
-      act: async (tool: string, a: Record<string, unknown> = {}) => {
-        acts.push(tool === 'move-to-position' ? `${tool} ${a.x},${a.z}` : tool);
-        return { ok: true, text: tool === 'mine-blocks' ? mined : 'Home' };
-      },
-      // no cane in sight from home; there, some
-      call: (async () => ({ positions: acts.length ? [{ x: 15, y: 63, z: 165 }] : [] })) as GoalContext['call'],
-      status: async () => ({ inWorld: true, username: 'b', screen: null }),
-      progress: () => undefined, gain: () => undefined
-    } as GoalContext;
-    await stock.run(ctx);
-    return { acts, w };
-  };
-  const got = await run('Mined for 60s: sugar_cane x24.');
-  t.deepEqual(got.acts, ['move-to-position 14,163', 'mine-blocks', 'go-home']);
-  t.deepEqual(got.w.zones?.wildcane, [{ x: 14, y: 63, z: 163 }]);
-  // cut bare (or gone): forgotten, so the next trip looks for more
-  const bare = await run('Stopped after 72s (time limit): nothing gained.');
-  t.is(bare.w.zones?.wildcane, undefined);
+  const stocked = { oak_log: 40, cobblestone: 64, iron_ingot: 20, coal: 30 };
+  const caneOnly = world({ chestItems: { '1,64,0': stocked }, progress: { done: [], journal: [], need: { sugar_cane: 113 } } });
+  caneOnly.zones = { wildcane: [{ x: 14, y: 63, z: 163 }] };
+  t.deepEqual(stockShort(s, caneOnly), []);
+  t.is(stock.wants(s, caneOnly), null);
+  t.deepEqual(stock.declines!(s, caneOnly), { cause: 'stocked', text: 'nothing short' });
+
+  // the rest as before: the home's own stock, the kit's iron, and what a project is short of besides its cane
+  const mixed = world({ chestItems: { '1,64,0': { ...stocked, coal: 3 } }, progress: { done: [], journal: [], need: { sugar_cane: 113, sand: 20 } } });
+  t.deepEqual(stockShort(s, mixed).map(x => `${x.short} ${x.name}`), ['20 sand', '13 coal']);
+  const acts: string[] = [];
+  const ctx = {
+    s, world: mixed, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => { acts.push(tool === 'mine-blocks' ? `${tool} ${a.block}` : tool); return { ok: true, text: tool === 'mine-blocks' ? 'Mined for 60s: sand x20.' : 'Home' }; },
+    call: (async () => ({ positions: [] })) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined, gain: () => undefined
+  } as GoalContext;
+  await stock.run(ctx);
+  // straight to the sand, no walk to the wild cane remembered 163 blocks out; the project's cane is left in its need
+  // for the project to post again (and for the cane rungs to read off its blocked step)
+  t.deepEqual(acts, ['mine-blocks sand', 'go-home']);
+  t.deepEqual(mixed.progress?.need, { sugar_cane: 113 });
+  t.deepEqual(stockShort(s, mixed).map(x => x.name), ['coal']);
 });
 
 test('lightArea: a torch that lights nothing dark is taken back up', async (t) => {

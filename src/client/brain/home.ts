@@ -1,4 +1,4 @@
-import type { Goal, GoalContext } from './goals.js';
+import { nearHome, type Goal, type GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { Milestone, MilestoneState, Step, StepResult } from './progress.js';
 import { cabin, COLOURS, type Side } from './blueprints.js';
@@ -122,7 +122,7 @@ export const bedGoal: Goal = {
   timeoutMs: 6 * MINUTE,
   retryMs: 20 * MINUTE,
   wants: (s, world) => {
-    if (s.sleeping || s.activity !== 'work' || s.dimension !== 'overworld' || !s.home || s.distHome > 16) return null;
+    if (s.sleeping || s.activity !== 'work' || s.dimension !== 'overworld' || !s.home || !nearHome(s, 16)) return null;
     if (world.landmarks.bed || !world.zones?.['home:bed']?.length) return null;
     const have: Record<string, number> = { ...chestTotals(world) };
     for (const [n, k] of s.counts) have[n] = (have[n] ?? 0) + k;

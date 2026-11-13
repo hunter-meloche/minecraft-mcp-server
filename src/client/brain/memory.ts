@@ -94,6 +94,16 @@ export interface WorldMemory {
   progress?: import('./progress.js').ProgressMemory;
   /** places the projects made: storage, plots, pens, tree farm, mine entrance ... (kind -> boxes or points) */
   zones?: Record<string, { x: number; y: number; z: number; width?: number; length?: number }[]>;
+  /**
+   * cane cells ("x,y,z" of `zones.cane`) the cane round saw with no water beside the ground they stand on, and when:
+   * they grow nothing, and the cane patch rung drops them from the patch (cane.ts)
+   */
+  caneDry?: Record<string, number>;
+  /**
+   * the cane patch's planting found its shore full (every cell where cane can stand is the patch's, or a gap beside
+   * one) with this many live cells, and when: the patch rung waits till it has fewer, or a day (cane.ts, worktasks.ts)
+   */
+  caneFull?: { cells: number; at: number };
   /** which home chest ("x,y,z") holds which kind of thing (storage.ts categories) */
   chestAssign?: Record<string, string>;
   /** the label on the sign over each chest ("x,y,z" -> "food1"), as put up or as found */

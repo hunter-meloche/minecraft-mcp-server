@@ -481,6 +481,54 @@ test.serial('oreTrip comes up when a round has taken it past the leash', async (
   t.is(ok.asked.length, 2);
 });
 
+test.serial('oreTrip comes up when a round has taken it under the yard: the home zone\'s column, any depth', async (t) => {
+  setMineLookMs(0);
+  // home (0, 64, 0) with no yard known: the bridge's zone is the circle of 24 round home, and its rule holds 6 past it.
+  // Down at the start, 56 out: the first round follows the gold to 20 from home, 56 under the ground, where Baritone
+  // may break nothing (live: (-534, 8, 2182), an hour). The trip ends there, and no second round is tried
+  const m = mineBot(KIT, [{ add: { raw_gold: 4 }, y: 8, z: -20 }, { add: { raw_gold: 8 } }], { y: 64 });
+  t.deepEqual(await oreTrip(m.ctx, { wants: [GOLD], budgetMs: 10 * MIN, now: () => m.clock.now }), { gain: 4, text: '+4 raw_gold; under the yard: out to the side first' });
+  t.deepEqual(m.asked, ['gold_ore to 10 in 180s']);
+  // 31 out (past the margin) it goes on: Baritone may dig there
+  const out = mineBot(KIT, [{ add: { raw_gold: 4 }, y: 8, z: -31 }, { add: { raw_gold: 6 } }], { y: 64 });
+  t.like(await oreTrip(out.ctx, { wants: [GOLD], budgetMs: 10 * MIN, now: () => out.clock.now }), { gain: 10 });
+  t.is(out.asked.length, 2);
+  // and so it does in the column within 8 of the ground (a round that ends up by the start's shaft top is no trap)
+  const top = mineBot(KIT, [{ add: { raw_gold: 4 }, y: 57, z: -20 }, { add: { raw_gold: 6 } }], { y: 64 });
+  t.like(await oreTrip(top.ctx, { wants: [GOLD], budgetMs: 10 * MIN, now: () => top.clock.now }), { gain: 10 });
+  // the yard's rectangle, once it is known: under its far end, 40 from home, is under it as well
+  const yard = { ...home(), yard: { x1: -16, z1: -60, x2: 16, z2: 16, y: 63 } };
+  const far = mineBot(KIT, [{ add: { raw_gold: 4 }, y: 8, z: -60 }, { add: { raw_gold: 6 } }], { y: 64, world: yard });
+  t.like(await oreTrip(far.ctx, { wants: [GOLD], budgetMs: 10 * MIN, now: () => far.clock.now }), { gain: 4, text: '+4 raw_gold; under the yard: out to the side first' });
+});
+
+test.serial('oreTrip whose last round took it under the yard says so as well: none of it found there, or the want met', async (t) => {
+  setMineLookMs(0);
+  // the last round follows the gold to 20 from home, 56 down, and finds none: the vein is marked as ever (from this
+  // start it is out of reach), and the trip ends saying where it is, which no round's look caught
+  const dry = mineBot(KIT, [{ add: { raw_gold: 4 } }, { y: 8, z: -20 }], { y: 64 });
+  t.deepEqual(await oreTrip(dry.ctx, { wants: [GOLD], budgetMs: 10 * MIN, now: () => dry.clock.now }), { gain: 4, text: '+4 raw_gold; dry: gold; under the yard: out to the side first' });
+  // the round that meets the want, down there
+  const met = mineBot(KIT, [{ add: { raw_gold: 10 }, y: 8, z: -20 }], { y: 64 });
+  t.deepEqual(await oreTrip(met.ctx, { wants: [GOLD], budgetMs: 10 * MIN, now: () => met.clock.now }), { gain: 10, text: '+10 raw_gold; under the yard: out to the side first' });
+  // and the old deep trip goal then does not ask for the walk home, which stops in a second there
+  const w = home();
+  const m = mineBot([...KIT, item(5, 'diamond', 5)], [{ add: { diamond: 26 }, y: 8, z: -20 }], { tod: 1000, world: w, y: 64 });
+  t.is(await deepTrip.run(m.ctx), '+26 diamond; under the yard: out to the side first');
+  t.deepEqual(m.asked, ['diamond_ore to 31 in 180s']);
+});
+
+test.serial('the old deep trip goal under the yard does not try the walk home: it stops in a second there, and the trip stays open', async (t) => {
+  setMineLookMs(0);
+  const carried = [...KIT, item(5, 'diamond', 5)];
+  const w = home();
+  const m = mineBot(carried, [{ add: { diamond: 2 }, y: 8, z: -20 }, { add: { diamond: 2 } }], { tod: 1000, world: w, y: 64 });
+  t.is(await deepTrip.run(m.ctx), '+2 diamond; under the yard: out to the side first');
+  t.deepEqual(m.asked, ['diamond_ore to 31 in 180s']);
+  // not seen home: a death down there is still the trip's (workTick closes it once the bot is home)
+  t.not(workOf(w).deep.away, undefined);
+});
+
 test.serial('oreTrip that never gets below the mine start throws nothing away up there, and is no trip down', async (t) => {
   setMineLookMs(0);
   // Baritone finds no way to any of the ore: "nothing gained" in seconds, and the bot stands where it was, on the

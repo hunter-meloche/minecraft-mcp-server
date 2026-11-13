@@ -15,7 +15,10 @@ import { readyFoodPoints } from '../../src/client/brain/food.js';
  * step-3 build, the enchanting room blocked on cane and leather for 86 tries), copied by hand: what the gates read and
  * nothing else (no heat map, no build jobs: none is going; no torch spots: the lights round is a stand-in in the
  * tests that use this). Its times are kept as they stood against that moment, `T0`. Tests that use it run in the
- * world `seed:1`: the structure store would read the live world's own structure files from the home folder.
+ * world `seed:1`: the structure store would read the live world's own structure files from the home folder. Looked
+ * over again against brain.json at 20:58 UTC (step 5): the five cane cells, both pens and their gates, the 34 cane and
+ * 7 leather stored, the 2 leads and 9 slime balls stand as they are here (the string is 17 there, 14 here, and either
+ * makes leads; no work memory is copied: the live one has nothing of step 5's yet).
  */
 
 export const MINUTE = 60_000;
@@ -223,52 +226,21 @@ export function lookAt(items: InventoryItem[], tod: number, over: Partial<Snapsh
   };
 }
 
-// ---- the rungs of steps 5 and 6, as the design's table has their ready() ----
+// ---- the rungs of step 6, as the design's table has their ready() ----
 
-const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 const SIDES = ['north', 'east', 'south', 'west'];
 /** Carried and in the chests. */
 const have = (s: Snapshot, world: WorldMemory, item: string) => (s.counts.get(item) ?? 0) + (chestTotals(world)[item] ?? 0);
-/** What the blocked step still waits for of `item` (its totals less what the home has). */
-const stillShortOf = (s: Snapshot, world: WorldMemory, item: string) => Math.max(0, (world.progress?.blocked?.need?.[item] ?? 0) - have(s, world, item));
 const unneeded = (text: string): Decline => ({ cause: 'unneeded', text });
-export const CANE_CELLS = 24;
 export const SCOUT_TARGETS = ['sugar_cane', 'lava', 'cow', 'sheep', 'iron_ore', 'coal_ore'];
 
 /**
- * The six rungs of steps 5 and 6 (design section 5, rows 1-3 and 7-9), as stand-ins: their variants and ready() are
- * the table's, their runs a test's own (`run`). Nothing else of theirs is modelled.
+ * The three rungs of step 6 (design section 5, rows 7-9: scout, yard, fish), as stand-ins: their variants and ready()
+ * are the table's, their runs a test's own (`run`). Nothing else of theirs is modelled. (Step 5's three, the cane
+ * patch, the cows and wild cane, are on the real ladder now: no stand-in.)
  */
 export function laterRungs(run: (name: string) => WorkTask['run'] = () => async () => ({ gain: 0, text: 'not modelled' })): WorkTask[] {
   return [
-    {
-      name: 'cane patch', rank: 1, reach: 'near', room: 'yard', budgetMs: 4 * MINUTE,
-      variants: (s, world) => {
-        const cells = world.zones?.cane ?? [];
-        const mid = cells.length ? { x: cells.reduce((a, c) => a + c.x, 0) / cells.length, z: cells.reduce((a, c) => a + c.z, 0) / cells.length } : s.home!;
-        return [{ id: 'shore', dist: Math.round(horiz(mid, s.home ?? mid)) }];
-      },
-      ready: (s, world) => ((world.zones?.cane?.length ?? 0) >= CANE_CELLS ? unneeded(`${world.zones!.cane!.length} cells`)
-        : have(s, world, 'sugar_cane') < 1 ? unneeded('no cane to plant') : null),
-      run: run('cane patch')
-    },
-    {
-      name: 'cows', rank: 2, reach: 'far', room: 'trip', budgetMs: 6 * MINUTE, terrain: true,
-      variants: (_s, world) => SIDES.map(id => ({ id, dist: world.leash })),
-      ready: (s, world) => {
-        if (!stillShortOf(s, world, 'leather')) return unneeded('no leather wanted');
-        const pen = world.work?.pen?.cow;
-        return pen && s.now - pen.at < 30 * MINUTE && pen.adults >= 2 ? unneeded(`${pen.adults} cows in the pen`) : null;
-      },
-      run: run('cows')
-    },
-    {
-      name: 'cane', rank: 3, reach: 'far', room: 'trip', budgetMs: 6 * MINUTE, terrain: true,
-      variants: (s, world) => [...(world.work?.sites?.cane ?? []).filter(p => s.home && horiz(p, s.home) <= world.leash).map(p => ({ id: `${p.x},${p.z}`, dist: Math.round(horiz(p, s.home!)) })),
-        ...SIDES.map(id => ({ id, dist: world.leash }))],
-      ready: (s, world) => (stillShortOf(s, world, 'sugar_cane') ? null : unneeded('no cane wanted')),
-      run: run('cane')
-    },
     {
       name: 'scout', rank: 7, reach: 'far', room: 'trip', budgetMs: 4 * MINUTE, terrain: true,
       variants: (_s, world) => SIDES.map(id => ({ id, dist: world.leash })),
@@ -305,8 +277,10 @@ const RT = {
 } as unknown as ClientRuntime;
 /** The goal list as the brain builds it. */
 export const realGoals = (): Goal[] => (new Brain(RT, { tickMs: 1e9, now: () => T0 }) as unknown as { goals: Goal[] }).goals;
-/** The same with the rungs of steps 5 and 6 on the ladder beside this step's three, in their ranks. */
-export const wholeGoals = (): Goal[] => realGoals().flatMap(g => (!taskOf(g) ? [g] : g.name === 'work: trip kit' ? workGoals(() => undefined, [...LADDER, ...laterRungs()], () => T0) : []));
+/** The real ladder with `stand` in place of its rungs of the same name, and beside the rest: one goal a name. */
+export const ladderWith = (stand: WorkTask[]): WorkTask[] => [...LADDER.filter(t => !stand.some(x => x.name === t.name)), ...stand];
+/** The same with the rungs of step 6 on the ladder beside the real six, in their ranks (stand-ins, as their table has them). */
+export const wholeGoals = (): Goal[] => realGoals().flatMap(g => (!taskOf(g) ? [g] : g.name === 'work: trip kit' ? workGoals(() => undefined, ladderWith(laterRungs()), () => T0) : []));
 
 export const SLOTS = [10, 26, 27, 30, 31, 33, 34, 35, 36];
 export const TIMES = [0, 3000, 5000, 6000, 6800, 8000, 8520, 9000, 9800, 10400, 10700];

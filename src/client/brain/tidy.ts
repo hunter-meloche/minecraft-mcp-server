@@ -1,6 +1,6 @@
 import type { ClientRuntime } from '../tools.js';
 import { survey, type Cluster } from '../survey.js';
-import type { Goal } from './goals.js';
+import { nearHome, type Goal } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { readBox, yardOf } from './milestones.js';
 import { digByHand } from '../structures/job.js';
@@ -50,7 +50,7 @@ export function tidyGoal(rt: ClientRuntime): Goal {
     timeoutMs: 6 * MINUTE,
     retryMs: 30 * MINUTE,
     wants: (s, world) => {
-      if (s.activity !== 'work' || s.sleeping || !s.home || s.distHome > 12 || s.dimension !== 'overworld') return null;
+      if (s.activity !== 'work' || s.sleeping || !s.home || !nearHome(s, 12) || s.dimension !== 'overworld') return null;
       // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
       return roundDue(s, world, 'tidy', 20 * MINUTE) ? 'daily round: stray blocks on the lawn' : null;
     },

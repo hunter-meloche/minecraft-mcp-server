@@ -1,4 +1,4 @@
-import type { Goal } from './goals.js';
+import { nearHome, type Goal } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { growStep, yardOf } from './milestones.js';
 
@@ -34,7 +34,7 @@ export const yardGrowGoal: Goal = {
   retryMs: 15 * MINUTE,
   wants: (s, world) => {
     const r = world.yardGrow;
-    if (!r || s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > 32) return null;
+    if (!r || s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || !nearHome(s, 32)) return null;
     // the fence still moving out after the last growth: that first (the perimeter project sees to it)
     if (world.fenceMove) return null;
     return `room asked for: ${r.width}x${r.length} for ${r.why}`;

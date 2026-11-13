@@ -11,6 +11,7 @@ import { nearestZone, type Zone } from './courtesy.js';
 // (work.ts takes tripCheck from here, chores.ts the deep trip's gate: all three use the others' exports inside functions only)
 import { mineDrops } from './chores.js';
 import { deathNow, deepEnd, deepHold, deepStart, markDry, type WorkResult } from './work.js';
+import { underYard } from './underyard.js';
 import type { InventoryItem } from '../tools.js';
 
 /**
@@ -200,6 +201,9 @@ async function trip(ctx: GoalContext): Promise<string> {
     });
     // (a trip that never went down, by someone's build or short of the mine start, is no trip that ended well)
     ranItsCourse = !r.untried;
+    // under the yard the walk home stops in a second: the survival goal digs out first, and the trip stays open
+    // until the bot is seen home
+    if (r.text.endsWith(UNDER_YARD)) return r.text.slice(0, 160);
     const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
     if (!back.ok) throw new Error(`${r.text.slice(0, 120)}, but could not get home: ${back.text.slice(0, 120)}`);
     home = true;
@@ -226,6 +230,8 @@ export function setMineLookMs(ms: number): void { LOOK_MS = ms; }
 
 /** This far below the level of the mine start, the bot is down the mine (a shaft, a cave): no longer up on the surface. */
 const BELOW_START = 8;
+/** How a trip that a round took under the yard ends. */
+const UNDER_YARD = 'under the yard: out to the side first';
 
 const SLOTS = 36;
 const countsOf = (items: InventoryItem[]) => {
@@ -325,6 +331,10 @@ export async function oreTrip(ctx: GoalContext, opts: {
       // the leash holds down here too: a round of Baritone's mine follows the ore wherever it leads, and the start is
       // only MINE_ROOM inside the leash
       if (st?.position && Math.hypot(st.position.x - home.x, st.position.z - home.z) > ctx.world.leash) { why = 'past the leash'; break mining; }
+      // and it follows the ore under the yard: in the home zone's column, at any depth, the bridge lets Baritone break
+      // nothing, so no round mines there and no walk home gets out (live: an hour 55 below the lawn). The trip ends,
+      // and the survival goal digs out to the side (underyard.ts)
+      if (st?.position && underYard(st.position, home, ctx.world.yard)) { why = UNDER_YARD; break mining; }
       const time = left(st?.timeOfDay);
       if (time < LAST_SLICE) break mining;
       // another ore only with time for a whole round of it
@@ -379,14 +389,18 @@ export async function oreTrip(ctx: GoalContext, opts: {
   const last = countsOf(inv);
   const gains = wanted.map(item => [item, (last.get(item) ?? 0) - (first.get(item) ?? 0)] as const).filter(([, n]) => n > 0);
   const gain = gains.reduce((n, [, k]) => n + k, 0);
-  // (a last round that went down and found nothing: the next round's look never came)
-  if (!below) seeLevel((await ctx.status().catch(() => undefined))?.position);
+  // (a last round that went down and found nothing: the next round's look never came. Nor did it for a last round
+  // that took the bot under the yard, one that met the want or found none: the walk home after it stops in a second)
+  const end = (await ctx.status().catch(() => undefined))?.position;
+  if (!below) seeLevel(end);
+  const under = why === UNDER_YARD || (!!end && underYard(end, home, ctx.world.yard));
   const parts = [gain ? gains.map(([item, n]) => `+${n} ${item}`).join(', ') : `nothing gained${said ? ` (${said.slice(0, 100)})` : ''}`];
   if (dry.length) parts.push(`dry: ${dry.join(', ')}`);
   if (refused.length) parts.push(`the mine tool could not mine ${refused.join(', ')} (${refusal.slice(0, 100)})`);
   if (mined && !below && !gain) parts.push('never got below the mine start');
   if (dropped.size) parts.push(`dropped ${[...dropped].map(([n, k]) => `${k} ${n}`).join(', ')} down there`);
-  if (why) parts.push(`${why}: up early`);
+  if (why && why !== UNDER_YARD) parts.push(`${why}: up early`);
+  if (under) parts.push(UNDER_YARD);
   // never mined (or never got down from the start), or came up blind with nothing seen: the trip says nothing of the
   // place, and is no trip that ended well
   const untried = !gain && (!mined || !below || blind >= 2);

@@ -97,20 +97,25 @@ test('a growth stopped while it takes its fill out of the chests: what it took i
   t.is(list.deposit.filter(e => e.name === 'dirt').reduce((a, e) => a + e.count, 0), 136);
 });
 
-test('a project short of sugar cane sends the stock trips for wild cane', (t) => {
+test('a project short of sugar cane no longer sends the stock trips for it: the work queue grows it and walks for the wild', (t) => {
+  // live 2026-11-10..12: 30 stock trips for wild cane, a side picked by the clock, and none found within 96 blocks.
+  // The `cane patch` and `cane` rungs have it now; a project short of sand still sends a stock trip for sand
   const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96 };
-  world.progress = { done: [], journal: [], need: { sugar_cane: 116, leather: 38 } } as unknown as WorldMemory['progress'];
-  t.like(stockShort(snap(), world).find(x => x.name === 'sugar_cane'), { short: 116, mine: 'sugar_cane' });
+  world.progress = { done: [], journal: [], need: { sugar_cane: 116, leather: 38, sand: 20 } } as unknown as WorldMemory['progress'];
+  const short = stockShort(snap(), world);
+  t.is(short.find(x => x.name === 'sugar_cane'), undefined);
+  t.like(short.find(x => x.name === 'sand'), { short: 20, mine: 'sand' });
 });
 
 test('a materials trip sets out with a few slots free, not only under 30 used', async (t) => {
   const { stock } = await import('../../src/client/brain/chores.js');
   const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96 };
-  world.progress = { done: [], journal: [], need: { sugar_cane: 98 } } as unknown as WorldMemory['progress'];
-  t.regex(stock.wants(snap({ slotsUsed: 31 }), world) ?? '', /sugar_cane/);
+  // (sand, as a build's bill asks for it: the project's sugar cane is the work queue's now, not a materials trip's)
+  world.progress = { done: [], journal: [], need: { sand: 98 } } as unknown as WorldMemory['progress'];
+  t.regex(stock.wants(snap({ slotsUsed: 31 }), world) ?? '', /sand/);
   // three free slots carry three stacks of what it went for: 33 used sets out (under 33 it was), 34 does not, with no
   // chest at home to make the room in
-  t.regex(stock.wants(snap({ slotsUsed: 33 }), world) ?? '', /sugar_cane/);
+  t.regex(stock.wants(snap({ slotsUsed: 33 }), world) ?? '', /sand/);
   t.is(stock.wants(snap({ slotsUsed: 34 }), world), null);
   t.deepEqual(stock.declines!(snap({ slotsUsed: 34 }), world), { cause: 'pockets', text: '34/36 slots, nothing to put away (stock needs 3 free)' });
 });

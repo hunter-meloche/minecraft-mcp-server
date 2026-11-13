@@ -1,0 +1,919 @@
+import test from 'ava';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { Brain } from '../../src/client/brain/brain.js';
+import { brainRun, type ClientRuntime, type InventoryItem } from '../../src/client/tools.js';
+import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
+import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
+import { fetchForPens, pens } from '../../src/client/brain/pens.js';
+import { out as afield } from '../../src/client/brain/pockets.js';
+import { LADDER } from '../../src/client/brain/worktasks.js';
+import { DRY_WAIT, dryUntil, penCount, pick, sitesOf, workGoals, workOf, type WorkTask } from '../../src/client/brain/work.js';
+
+/**
+ * The cows rung (worktasks.ts `cows`), the fetch on a lead and the pens round (pens.ts), over a stand-in pasture that
+ * answers as the client and the game do: world.entities with each creature's distance from the bot and its marks
+ * (on a lead, named, tamed, by someone's build), dropped items as `item` entities; entity.use within 4.5 blocks only,
+ * a lead put on with a lead in hand and taken off (falling as an item where the animal stands) by a use with
+ * anything else; a led animal walking after the bot to 2 blocks off it (PathfinderMob) and the lead breaking past 12
+ * (Leashable), a tempted one to 2.5 (TemptGoal), within 10, wheat in hand; the yard's fence and the pen's, which an
+ * animal crosses only through an open gate; Baritone opening a gate the bot walks through, and the client's closer
+ * shutting it once the bot is 2.2 past it while gates.auto is on (Gates.java). Shaped like the live homestead: the
+ * cow pen at (-558, 2165) 7 x 7 with its gate south at (-555, 63, 2171), the yard's four gates, home in the storage
+ * house, leads, string and slime balls in the chests.
+ */
+
+const MINUTE = 60_000;
+const T0 = Date.UTC(2026, 10, 12, 20, 0, 0);
+const HOME: Pos = { x: -549, y: 63, z: 2183 };
+const YARD = { x1: -565, z1: 2119, x2: -533, z2: 2215, y: 62 };
+const PEN = { x: -558, y: 62, z: 2165, width: 7, length: 7 };
+const GATE: Pos = { x: -555, y: 63, z: 2171 };
+const YARD_GATES: Pos[] = [{ x: -549, y: 63, z: 2119 }, { x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 }];
+const GEAR_CHEST: Pos = { x: -547, y: 64, z: 2182 };
+const DROPS_CHEST: Pos = { x: -547, y: 65, z: 2179 };
+const FARM_CHEST: Pos = { x: -547, y: 63, z: 2182 };
+const k = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
+const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
+const mid = (c: Pos): Pos => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 });
+
+/** The live memory: the cow pen and its gate, the yard's gates, the chests, the enchanting room blocked on cane and leather. */
+function liveWorld(over: Partial<WorldMemory> = {}, chests: Record<string, Record<string, number>> = {}): WorldMemory {
+  return {
+    landmarks: { chests: [{ ...GEAR_CHEST }, { ...DROPS_CHEST }, { ...FARM_CHEST }], farmland: [], foundAt: T0 }, leash: 96, yard: { ...YARD },
+    chestItems: {
+      [k(GEAR_CHEST)]: { stone_shovel: 1, bucket: 8, lead: 2 }, [k(DROPS_CHEST)]: { leather: 7, string: 15, slime_ball: 9, bone: 44 },
+      [k(FARM_CHEST)]: { wheat: 1021 }, ...chests
+    },
+    zones: { 'pen:cow': [{ ...PEN }], 'pen:cow:gate': [{ ...GATE }], 'fence:gate': YARD_GATES.map(g => ({ ...g })), fence: [{ x: -565, y: 62, z: 2119, width: 33, length: 97 }] },
+    progress: { done: ['pen-cow'], journal: [], blocked: { id: 'enchanting/2', n: 94, at: T0 - MINUTE, need: { sugar_cane: 135, leather: 45 } } },
+    lastDone: {},
+    ...over
+  } as WorldMemory;
+}
+
+const countsOf = (items: InventoryItem[]) => {
+  const counts = new Map<string, number>();
+  for (const i of items) counts.set(i.name, (counts.get(i.name) ?? 0) + i.count);
+  return counts;
+};
+const look = (items: InventoryItem[], over: Partial<Snapshot> = {}): Snapshot => ({
+  now: T0, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: { ...HOME }, dimension: 'overworld', sleeping: false, raining: false,
+  thundering: false, process: null, items, counts: countsOf(items), slotsUsed: items.filter(i => i.slot < 36).length, home: { ...HOME, dimension: 'overworld' },
+  distHome: 0, ...over
+});
+const KIT: InventoryItem[] = [{ slot: 0, name: 'diamond_sword', count: 1 }, { slot: 1, name: 'iron_pickaxe', count: 1 }, { slot: 2, name: 'bread', count: 32 }];
+
+interface Cow { id: number; name: string; position: Pos; baby?: boolean; named?: boolean; tamed?: boolean; leashed?: boolean; foreign?: boolean; buildDistance?: number }
+
+/**
+ * The bot in the pasture. `breakOn`: the leg (a careful walk with an animal on the lead, counted from 1) on which the
+ * led one is caught on something and left 13 blocks back, and the lead breaks; `vanishOn` the same, the animal gone
+ * (killed). `graze`: an animal that has walked 12 blocks on by the time the bot first comes within 8 of it.
+ * `dropsLost`: a lead that comes off falls where it cannot be seen (into water). `shortOnce`: the first walk to an
+ * animal ends 4 short of it and says it could not get there (Baritone on a ledge). `lag`: a led animal trails this
+ * far behind after each walk (the game pulls it from 6), and closes in 2 at each look while the bot stands.
+ * `showsLate`: the client shows a lead put on only after this many looks. `stopShort`: that walk out along a side
+ * (counted from 1) ends 10 short and says so. Like the client, every call of a run the brain has given up fails.
+ */
+class Pasture {
+  me: Pos = mid(HOME);
+  items: InventoryItem[];
+  held?: string;
+  led = new Set<number>();
+  drops: { id: number; item: string; position: Pos }[] = [];
+  open = new Map<string, boolean>();
+  /** gates the bot opened by walking through them, for the client's closer */
+  opened = new Set<string>();
+  gatesAuto = true;
+  sprint = true;
+  /** what was done, in order (walks, uses, toggles, the client switches) */
+  log: string[] = [];
+  careful: boolean[] = [];
+  legs = 0;
+  chests: Record<string, Record<string, number>>;
+  /** the furthest the bot ever stood from home */
+  farthest = 0;
+  private nextDrop = 900;
+  private grazed = new Set<number>();
+  private walkedTo = false;
+  private sideWalks = 0;
+  /** looks the client has yet to make before it shows a lead just put on */
+  private unshown = new Map<number, number>();
+
+  constructor(public cows: Cow[], world: WorldMemory, items: InventoryItem[],
+    public opts: {
+      breakOn?: number[]; vanishOn?: number; graze?: number; dropsLost?: boolean; shortOnce?: boolean; abortOn?: { leg: number; abort: () => void };
+      lag?: number; showsLate?: number; stopShort?: number;
+      /** abort the run as soon as this gate is opened */
+      abortOnOpen?: { gate: Pos; abort: () => void };
+      /** the first walk on the lead that ends within `within` of home waits there for `until` (the test looks then); `at` says when it has */
+      holdNear?: { within: number; until: Promise<void>; at?: () => void };
+    } = {}) {
+    this.items = items.map(i => ({ ...i }));
+    this.chests = structuredClone(world.chestItems ?? {});
+  }
+
+  count(name: string) { return this.items.filter(i => i.slot < 36 && i.name === name).reduce((n, i) => n + i.count, 0); }
+  add(name: string, n: number) {
+    const has = this.items.find(i => i.slot < 36 && i.name === name);
+    if (has) { has.count += n; return; }
+    let slot = 0;
+    while (this.items.some(i => i.slot === slot)) slot++;
+    this.items.push({ slot, name, count: n });
+  }
+  take(name: string, n: number) {
+    const has = this.items.find(i => i.slot < 36 && i.name === name);
+    if (!has) return;
+    has.count -= n;
+    if (has.count <= 0) this.items = this.items.filter(i => i !== has);
+  }
+
+  private inPenBox = (p: { x: number; z: number }) => p.x >= PEN.x && p.x < PEN.x + PEN.width && p.z >= PEN.z && p.z < PEN.z + PEN.length;
+  private pastYard = (p: { x: number; z: number }) => Math.floor(p.x) > YARD.x1 && Math.floor(p.x) < YARD.x2 && Math.floor(p.z) > YARD.z1 && Math.floor(p.z) < YARD.z2;
+  isOpen = (g: Pos) => this.open.get(k(g)) ?? false;
+  /** the yard's gate a walk from a to b goes through (the nearest to where it crosses) */
+  private yardGateFor(a: Pos, b: Pos): Pos {
+    const m = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+    return [...YARD_GATES].sort((g, h) => horiz(mid(g), m) - horiz(mid(h), m))[0];
+  }
+
+  /**
+   * The way from a to b over the fences: through the yard's gate and the pen's where it crosses them, or undefined
+   * when a gate it must pass is shut (`opens`: the bot's own walk, which opens what it passes, as Baritone does).
+   */
+  private way(a: Pos, b: Pos, opens: boolean): Pos[] | undefined {
+    const pts: Pos[] = [a];
+    const gates: Pos[] = [];
+    if (this.pastYard(a) !== this.pastYard(b)) gates.push(this.yardGateFor(a, b));
+    if (this.inPenBox(a) !== this.inPenBox(b)) gates.push(GATE);
+    // out of the pen before the yard's gate when leaving; the yard's before the pen's when coming in
+    if (this.inPenBox(a)) gates.sort(g => (k(g) === k(GATE) ? -1 : 1));
+    for (const g of gates) {
+      if (!this.isOpen(g)) {
+        if (!opens) return undefined;
+        this.open.set(k(g), true);
+        this.opened.add(k(g));
+        this.log.push(`baritone opens ${k(g)}`);
+      }
+      pts.push(mid(g));
+    }
+    pts.push(b);
+    return pts;
+  }
+
+  /** along a way, `d` blocks from its start */
+  private along(pts: Pos[], d: number): Pos {
+    let left = d;
+    for (let i = 1; i < pts.length; i++) {
+      const seg = horiz(pts[i - 1], pts[i]);
+      if (left <= seg) { const t = seg ? left / seg : 0; return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i].y, z: pts[i - 1].z + (pts[i].z - pts[i - 1].z) * t }; }
+      left -= seg;
+    }
+    return { ...pts[pts.length - 1] };
+  }
+  private length = (pts: Pos[]) => pts.slice(1).reduce((n, p, i) => n + horiz(pts[i], p), 0);
+
+  /** The bot walks to `to`; the client's closer, the led and the tempted animals, the lead breaking, what is picked up. */
+  walk(to: Pos, label: string) {
+    const from = this.me;
+    // (the gates it passes, opened on the way)
+    this.way(from, to, true);
+    this.me = { ...to };
+    this.farthest = Math.max(this.farthest, horiz(this.me, HOME));
+    // the client's closer shuts what the bot opened as it gets 2.2 past it, while it is on
+    if (this.gatesAuto) {
+      for (const g of [...this.opened]) {
+        const [x, y, z] = g.split(',').map(Number);
+        if (horiz(mid({ x, y, z }), this.me) > 2.2) { this.open.set(g, false); this.opened.delete(g); this.log.push(`the closer shuts ${g}`); }
+      }
+    }
+    if (label === 'goto careful' && this.led.size) this.legs++;
+    for (const c of this.cows) {
+      const ledNow = this.led.has(c.id);
+      if (ledNow && this.opts.vanishOn === this.legs && label === 'goto careful') { this.cows = this.cows.filter(x => x !== c); this.led.delete(c.id); this.drop(c.position); continue; }
+      if (ledNow && this.opts.breakOn?.includes(this.legs) && label === 'goto careful') {
+        // caught on something as the bot went on: left 13 back the way it came, past what the lead holds
+        const back = horiz(from, this.me) ? { x: (from.x - this.me.x) / horiz(from, this.me), z: (from.z - this.me.z) / horiz(from, this.me) } : { x: 1, z: 0 };
+        c.position = { x: this.me.x + back.x * 13, y: c.position.y, z: this.me.z + back.z * 13 };
+        this.opts.breakOn = this.opts.breakOn.filter(n => n !== this.legs);
+      } else if (ledNow || (this.held && ['wheat'].includes(this.held) && horiz(c.position, this.me) <= 10 && !c.baby)) {
+        // after the bot to 2 off it on a lead, 2.5 tempted, through the gates (a shut one stops it at the fence)
+        const w = this.way(c.position, this.me, false);
+        if (w) { const len = this.length(w); const stop = ledNow ? this.opts.lag ?? 2 : 2.5; if (len > stop) c.position = this.along(w, len - stop); }
+      } else if (this.opts.graze === c.id && !this.grazed.has(c.id) && horiz(c.position, this.me) <= 8) {
+        this.grazed.add(c.id);
+        c.position = { ...c.position, x: c.position.x + 12 };
+      }
+      if (ledNow && horiz(c.position, this.me) > 12) {
+        this.led.delete(c.id);
+        c.leashed = false;
+        this.drop(c.position);
+        this.log.push(`the lead breaks (the cow ${Math.round(horiz(c.position, this.me))} off)`);
+      }
+    }
+    for (const d of [...this.drops]) if (horiz(d.position, this.me) <= 1.5) { this.drops = this.drops.filter(x => x !== d); this.add(d.item, 1); this.log.push(`picks up a ${d.item}`); }
+  }
+
+  drop(at: Pos) {
+    if (!this.opts.dropsLost) this.drops.push({ id: this.nextDrop++, item: 'lead', position: { ...at } });
+  }
+
+  ctx(world: WorldMemory, signal: AbortSignal = new AbortController().signal, said: string[] = []): GoalContext {
+    const at = (a: Record<string, unknown>): Pos => ({ x: Number(a.x), y: Number(a.y), z: Number(a.z) });
+    const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
+    // (as tools.ts: once the brain gives a run up, every call it makes fails at once; its tidy-up runs outside the run)
+    const given = () => !!brainRun.getStore()?.signal.aborted;
+    return {
+      s: look(this.items), world, signal,
+      progress: text => { said.push(text); },
+      gain: () => undefined,
+      status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...this.me }, dimension: 'overworld' }),
+      call: (async (method: string, p: Record<string, unknown> = {}) => {
+        if (given()) throw new Error('aborted: the brain gave this job up');
+        if (method === 'inventory') return { items: this.items.map(i => ({ ...i })) };
+        if (method === 'world.entities') {
+          const max = Number(p.maxDistance ?? 32);
+          if (p.type === 'item') return { entities: this.drops.filter(d => Math.hypot(d.position.x - this.me.x, d.position.z - this.me.z) <= max).map(d => ({ id: d.id, name: 'item', category: 'misc', item: d.item, count: 1, position: { ...d.position }, distance: horiz(d.position, this.me) })) };
+          const shown = (c: Cow) => {
+            if (!this.led.has(c.id)) return !!c.leashed;
+            const left = this.unshown.get(c.id) ?? 0;
+            if (left > 0) { this.unshown.set(c.id, left - 1); return false; }
+            return true;
+          };
+          const seen = this.cows.map(c => ({ ...c, category: 'creature', position: { ...c.position }, distance: Math.round(horiz(c.position, this.me) * 100) / 100, ...(shown(c) ? { leashed: true } : {}) }))
+            .filter(e => e.distance <= max).sort((a, b) => a.distance - b.distance);
+          // the bot stands: a led one that lags is pulled in, 2 a look, to 2 off it
+          for (const c of this.cows) {
+            const d = horiz(c.position, this.me);
+            if (this.led.has(c.id) && d > 2) { const t = Math.min(2, d - 2) / d; c.position = { ...c.position, x: c.position.x + (this.me.x - c.position.x) * t, z: c.position.z + (this.me.z - c.position.z) * t }; }
+          }
+          return { entities: seen };
+        }
+        if (method === 'useOn') {
+          // the bridge's own click: within 4.5 of the eye or not at all, and no walk
+          const g = at(p);
+          const d = horiz(mid(g), this.me);
+          if (d > 4.5) return { used: false, reason: 'too far', distance: d };
+          this.open.set(k(g), !this.isOpen(g));
+          this.opened.delete(k(g));
+          this.log.push(`useOn ${k(g)}`);
+          return { used: true };
+        }
+        if (method === 'world.region') return { blocks: [`oak_fence_gate[facing=south,open=${this.isOpen(at(p))}]`] };
+        if (method === 'item.select') {
+          if (!this.count(String(p.name))) throw new Error(`no ${p.name} in inventory`);
+          this.held = String(p.name);
+          return { held: p.name };
+        }
+        if (method === 'sprint.set') { this.sprint = !!p.allowed; this.log.push(`sprint ${p.allowed ? 'on' : 'off'}`); return { allowed: p.allowed }; }
+        if (method === 'gates.auto') { this.gatesAuto = !!p.enabled; this.log.push(`gates.auto ${p.enabled ? 'on' : 'off'}`); return { enabled: p.enabled }; }
+        if (method === 'foreign.zones') return { zones: [] };
+        if (method === 'goto') {
+          this.careful.push(!!p.careful);
+          const to = p.xz ? { x: Number(p.x) + 0.5, y: 63, z: Number(p.z) + 0.5 } : mid(at(p));
+          this.log.push(`goto ${p.careful ? 'careful ' : ''}${Math.floor(to.x)},${Math.floor(to.z)}`);
+          if (p.xz && this.opts.stopShort === ++this.sideWalks) {
+            // stopped 10 short (water, a cliff), and says so
+            const d = horiz(this.me, to);
+            this.walk(d > 10 ? { x: to.x + (this.me.x - to.x) * 10 / d, y: 63, z: to.z + (this.me.z - to.z) * 10 / d } : { ...this.me }, p.careful ? 'goto careful' : 'goto');
+            return { arrived: false };
+          }
+          this.walk(to, p.careful ? 'goto careful' : 'goto');
+          if (this.opts.abortOn && this.legs === this.opts.abortOn.leg) { this.opts.abortOn.abort(); }
+          const hold = this.opts.holdNear;
+          if (hold && this.led.size && horiz(this.me, mid(HOME)) <= hold.within) { this.opts.holdNear = undefined; hold.at?.(); await hold.until; }
+          return { arrived: true };
+        }
+        if (method === 'entity.use') {
+          if (p.item) {
+            if (!this.count(String(p.item))) throw new Error(`no ${p.item} in inventory`);
+            this.held = String(p.item);
+          }
+          const c = this.cows.find(x => x.id === Number(p.id));
+          if (!c) throw new Error(`no entity with id ${p.id} nearby`);
+          const d = horiz(c.position, this.me);
+          if (d > 4.5) throw new Error(`too far: ${Math.round(d * 10) / 10} blocks to the cow (max 4.5)`);
+          this.log.push(`entity.use #${c.id}${p.item ? ` ${p.item}` : ''}`);
+          // the game: a mob on this player's lead comes off whatever is in hand (but shears or a name tag), and the
+          // lead falls where it stands; with a lead in hand, on it goes, off anything else's lead (a fence post's knot)
+          if (this.led.has(c.id) && this.held !== 'name_tag') { this.led.delete(c.id); c.leashed = false; this.drop(c.position); return { result: 'Success', success: true }; }
+          if (this.held === 'lead') {
+            c.leashed = false; this.led.add(c.id); this.take('lead', 1);
+            if (this.opts.showsLate) this.unshown.set(c.id, this.opts.showsLate);
+            return { result: 'Success', success: true };
+          }
+          return { result: 'Pass', success: false };
+        }
+        return {};
+      }) as GoalContext['call'],
+      act: async (tool, a = {}) => {
+        if (given()) throw new Error('aborted: the brain gave this job up');
+        this.log.push(tool === 'take-from-chest' || tool === 'craft-item' ? `${tool} ${a.item ?? a.outputItem} ${a.count ?? a.amount}` : `${tool}${tool === 'use-item-on-block' ? ` ${k(at(a))}` : ''}`);
+        if (tool === 'go-home') { this.walk(mid(HOME), 'go-home'); return { ok: true, text: 'Home' }; }
+        if (tool === 'move-to-position') {
+          const target = at(a);
+          const r = Number(a.range ?? 1);
+          const d = horiz(this.me, target);
+          // to within `range` of it, on the line from where the bot stands
+          const stop = (n: number) => (d > n ? { x: target.x + (this.me.x - target.x) * n / d, y: target.y, z: target.z + (this.me.z - target.z) * n / d } : { ...this.me });
+          if (this.opts.shortOnce && !this.walkedTo) {
+            this.walkedTo = true;
+            this.walk(stop(r + 4), 'move');
+            return { ok: false, text: `Could not reach ${fmt(target)}: no path found. Stopped ${r + 4} blocks away.` };
+          }
+          this.walkedTo = true;
+          this.walk(stop(r), 'move');
+          return { ok: true, text: `Successfully moved to position near ${fmt(target)}` };
+        }
+        if (tool === 'use-item-on-block') {
+          const g = at(a);
+          // (out of reach, it walks to within 3 on the bot's side of it: tools.ts goNear, a plain goto, not careful)
+          const d = horiz(mid(g), this.me);
+          if (d > 4.5) {
+            const to = { x: mid(g).x + (this.me.x - mid(g).x) * 3 / d, y: this.me.y, z: mid(g).z + (this.me.z - mid(g).z) * 3 / d };
+            this.log.push(`goto ${Math.floor(to.x)},${Math.floor(to.z)}`);
+            this.walk(to, 'goto');
+          }
+          this.open.set(k(g), !this.isOpen(g));
+          this.opened.delete(k(g));
+          if (this.opts.abortOnOpen && k(this.opts.abortOnOpen.gate) === k(g) && this.isOpen(g)) this.opts.abortOnOpen.abort();
+          return { ok: true, text: `Used the held item on oak_fence_gate at ${fmt(g)}` };
+        }
+        if (tool === 'take-from-chest') {
+          const c = this.chests[k(at(a))] ??= {};
+          const item = String(a.item);
+          const n = Math.min(Number(a.count), c[item] ?? 0);
+          c[item] = (c[item] ?? 0) - n;
+          if (!c[item]) delete c[item];
+          if (n) this.add(item, n);
+          const holds = Object.entries(c).map(([i, m]) => `${i} x${m}`).join(', ') || 'nothing';
+          return { ok: true, text: `Took ${n} ${item} from the chest at ${fmt(at(a))}. It holds: ${holds}.` };
+        }
+        if (tool === 'craft-item' && a.outputItem === 'lead') {
+          const times = Number(a.amount ?? 1);
+          if (this.count('string') < 4 * times || this.count('slime_ball') < times) return { ok: false, text: 'missing ingredients' };
+          this.take('string', 4 * times);
+          this.take('slime_ball', times);
+          this.add('lead', 2 * times);
+          return { ok: true, text: `Successfully crafted lead ${times} time(s)` };
+        }
+        return { ok: false, text: `no ${tool} here` };
+      }
+    };
+  }
+}
+
+const cow = (id: number, x: number, z: number, over: Partial<Cow> = {}): Cow => ({ id, name: 'cow', position: { x: x + 0.5, y: 63, z: z + 0.5 }, ...over });
+const rung = (name: string): WorkTask => LADDER.find(t => t.name === name)!;
+const goalOf = (task: WorkTask, clock: { now: number }) => workGoals(() => undefined, [task], () => clock.now)[0];
+/** the pen's inside, off its fence */
+const penned = (c: Cow) => c.position.x >= PEN.x + 1 && c.position.x < PEN.x + PEN.width - 1 && c.position.z >= PEN.z + 1 && c.position.z < PEN.z + PEN.length - 1;
+
+function freeze<T>(v: T): T {
+  if (v && typeof v === 'object' && !Object.isFrozen(v)) {
+    Object.freeze(v);
+    for (const x of Object.values(v)) freeze(x);
+  }
+  return v;
+}
+
+// ---- the fetch on a lead
+
+test('a wild cow is put on a lead and walked in: through the yard\'s gate (shut behind it), off the lead inside, the lead picked up, the gate shut', async (t) => {
+  // a cow 80 east of home, out past the yard's east gate: not in sight from home (48), seen from the second stop
+  const world = liveWorld();
+  const herd = [cow(7, -469, 2183)];
+  const pa = new Pasture(herd, world, KIT);
+  const said: string[] = [];
+  const r = await fetchForPens(pa.ctx(world, undefined, said), 'east', { now: () => T0 });
+  t.deepEqual(r, { gain: 1, text: 'cow: on the lead from 81 out; led in' });
+  t.true(penned(herd[0]), JSON.stringify(herd[0].position));
+  // a lead from the chests (none was carried), on it went, off it came in the pen, and it is carried again
+  t.true(pa.log.includes('take-from-chest lead 1'));
+  t.deepEqual(pa.log.filter(l => l.startsWith('entity.use')), ['entity.use #7 lead', 'entity.use #7']);
+  t.is(pa.count('lead'), 1);
+  t.deepEqual(pa.drops, []);
+  // every walk on the lead is careful (walk only), none sprinting; the client's closer was off from the yard's gate on
+  // and is on again, and the sprint
+  t.true(pa.log.indexOf('sprint off') < pa.log.indexOf('entity.use #7 lead'));
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7'));
+  t.true(onLead.filter(l => l.startsWith('goto')).every(l => l.startsWith('goto careful')), onLead.join('\n'));
+  t.deepEqual(pa.log.slice(-2), ['sprint on', 'gates.auto on']);
+  // the yard's east gate: Baritone opened it on the way out (the closer shut it behind), and on the way in with the
+  // cow behind, the bot shut it once the cow was through; the pen's gate opened for them and shut behind the bot
+  t.false(pa.isOpen(YARD_GATES[1]));
+  t.false(pa.isOpen(GATE));
+  t.deepEqual(pa.log.filter(l => l.startsWith('use-item-on-block')), [`use-item-on-block ${k(YARD_GATES[1])}`, `use-item-on-block ${k(GATE)}`, `use-item-on-block ${k(GATE)}`]);
+  t.false(pa.log.includes('the closer shuts -533,63,2183') && pa.log.lastIndexOf('the closer shuts -533,63,2183') > pa.log.indexOf('entity.use #7 lead'), 'the closer never shut it on the cow');
+  // what it saw and did is written down: the pen holds one now, and the place it was seen is forgotten
+  t.like(penCount(world, 'cow'), { adults: 1, babies: 0, at: T0 });
+  t.deepEqual(sitesOf(world, 'cow'), []);
+  t.true(said.includes('looking east for wild cows, 32 blocks out'));
+  t.true(said.includes('fetching a cow for the pen: 48 blocks off, 81 from home'));
+});
+
+test('the walk to the cow ending a few blocks short still gets the lead on (live: "no path found ... 3.61 blocks away"), and one that grazed on is closed in on', async (t) => {
+  const world = liveWorld();
+  const herd = [cow(7, -503, 2183)];
+  const pa = new Pasture(herd, world, KIT, { shortOnce: true });
+  t.deepEqual(await fetchForPens(pa.ctx(world), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 47 out; led in' });
+  const grazing = [cow(8, -503, 2183)];
+  const pb = new Pasture(grazing, liveWorld(), KIT, { graze: 8 });
+  t.deepEqual(await fetchForPens(pb.ctx(liveWorld()), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 59 out; led in' });
+  t.true(penned(grazing[0]));
+});
+
+test('a lead that breaks is picked up and said where: put on again once, and a second break ends the fetch', async (t) => {
+  // caught on something on the third leg: the lead breaks, falls by the cow, is picked up, and goes on again
+  const world = liveWorld();
+  const herd = [cow(7, -469, 2183)];
+  const pa = new Pasture(herd, world, KIT, { breakOn: [3] });
+  const once = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.deepEqual(once, { gain: 1, text: 'cow: on the lead from 81 out; the lead broke 73 from the gate (the cow 13 off), put on again; led in' });
+  t.true(penned(herd[0]));
+  t.is(pa.count('lead'), 1);
+  // twice: the second time the fetch ends where it broke, the lead picked up; where the cow stood is kept for next time
+  const w2 = liveWorld();
+  const h2 = [cow(7, -469, 2183)];
+  const pb = new Pasture(h2, w2, KIT, { breakOn: [3, 9] });
+  const twice = await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 });
+  // (a cow found and not brought in: the side holds cows, and its next try waits a first mark's time, mark 'first')
+  t.deepEqual(twice, { gain: 0, text: 'cow: on the lead from 81 out; the lead broke 73 from the gate (the cow 13 off), put on again; the lead broke 62 from the gate (the cow 13 off); the lead picked up', mark: 'first' });
+  t.is(pb.count('lead'), 1);
+  t.deepEqual(pb.drops, []);
+  t.deepEqual(sitesOf(w2, 'cow').map(p => k(p)), [k({ x: Math.floor(h2[0].position.x), y: 63, z: Math.floor(h2[0].position.z) })]);
+  // a lead that fell where it cannot be seen: said so
+  const w3 = liveWorld();
+  const pc = new Pasture([cow(7, -469, 2183)], w3, KIT, { breakOn: [3], dropsLost: true });
+  t.deepEqual(await fetchForPens(pc.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'cow: on the lead from 81 out; the lead broke 73 from the gate (the cow 13 off); the lead not found where it fell', mark: 'first' });
+  // and a cow gone on the way (killed): where it was last seen
+  const w4 = liveWorld();
+  const pd = new Pasture([cow(7, -469, 2183)], w4, KIT, { vanishOn: 2 });
+  t.deepEqual(await fetchForPens(pd.ctx(w4), 'east', { now: () => T0 }),
+    { gain: 0, text: 'cow: on the lead from 81 out; lost on the way (last seen 2 off at (-473, 63, 2183)); the lead picked up', mark: 'first' });
+});
+
+test('a fetch cut short with the cow on the lead lets go of it, and puts the gates and the sprint back', async (t) => {
+  const world = liveWorld();
+  const herd = [cow(7, -469, 2183)];
+  const ac = new AbortController();
+  const pa = new Pasture(herd, world, KIT, { abortOn: { leg: 4, abort: () => ac.abort() } });
+  await t.throwsAsync(fetchForPens(pa.ctx(world, ac.signal), 'east', { now: () => T0 }), { message: 'aborted' });
+  // off the lead where it stood (nothing walked to after: the run is given up), the client's switches as they were
+  t.deepEqual(pa.log.filter(l => l.startsWith('entity.use')), ['entity.use #7 lead', 'entity.use #7']);
+  t.is(pa.led.size, 0);
+  // (cut short before the yard's gate: the client's closer was never turned off)
+  t.deepEqual(pa.log.slice(-2), ['entity.use #7', 'sprint on']);
+  t.true(pa.gatesAuto && pa.sprint);
+  // cut short past it, on the way to the pen: the closer is on again too
+  const w2 = liveWorld();
+  const ac2 = new AbortController();
+  const pb = new Pasture([cow(7, -469, 2183)], w2, KIT, { abortOn: { leg: 18, abort: () => ac2.abort() } });
+  await t.throwsAsync(fetchForPens(pb.ctx(w2, ac2.signal), 'east', { now: () => T0 }), { message: 'aborted' });
+  t.true(pb.log.includes('gates.auto off'));
+  t.deepEqual(pb.log.slice(-3), ['entity.use #7', 'sprint on', 'gates.auto on']);
+  t.is(pb.led.size, 0);
+});
+
+test('a fetch that ends past the yard\'s gate, short of the pen, shuts that gate behind it: lost on the way, the lead broken twice', async (t) => {
+  // live, the closer is off from the yard's gate on, and an already open gate is never taken as the bot's once it is
+  // on again: the gate stood open until the shelter's dusk sweep. Legs 16 and 17 are just past the east gate
+  const w1 = liveWorld();
+  const p1 = new Pasture([cow(7, -469, 2183)], w1, KIT, { vanishOn: 16 });
+  const lost = await fetchForPens(p1.ctx(w1), 'east', { now: () => T0 });
+  t.regex(lost.text, /^cow: on the lead from 81 out; lost on the way \(last seen 2 off at \(-5[23]\d, 63, 2183\)\)/);
+  t.false(p1.isOpen(YARD_GATES[1]), p1.log.join('\n'));
+  t.true(p1.gatesAuto);
+  const w2 = liveWorld();
+  const p2 = new Pasture([cow(7, -469, 2183)], w2, KIT, { breakOn: [16, 17] });
+  const broke = await fetchForPens(p2.ctx(w2), 'east', { now: () => T0 });
+  t.regex(broke.text, /the lead broke \d+ from the gate \(the cow 13 off\), put on again; the lead broke \d+ from the gate \(the cow 13 off\); the lead picked up$/);
+  t.false(p2.isOpen(YARD_GATES[1]), p2.log.join('\n'));
+  // and walked up to carefully: from the lead on, no plain walk (use-item-on-block's own, to a gate out of reach)
+  t.false(p2.log.slice(p2.log.indexOf('entity.use #7 lead')).some(l => /^goto -/.test(l)), p2.log.join('\n'));
+});
+
+test('a fetch the brain gives up in the pen\'s gateway: the cow let go, the pen\'s gate clicked shut from where the bot stands', async (t) => {
+  // live, every call of the run fails once the brain gives it up: the shut after the walk across the pen never came
+  const world = liveWorld();
+  const ac = new AbortController();
+  const pa = new Pasture([cow(7, -503, 2183)], world, KIT, { abortOnOpen: { gate: GATE, abort: () => ac.abort() } });
+  const ctx = pa.ctx(world, ac.signal);
+  await t.throwsAsync(brainRun.run({ signal: ac.signal }, () => fetchForPens(ctx, 'east', { now: () => T0 })), { message: /aborted/ });
+  t.false(pa.isOpen(GATE), pa.log.join('\n'));
+  t.true(pa.log.includes(`useOn ${k(GATE)}`), pa.log.join('\n'));
+  t.is(pa.led.size, 0);
+  t.true(pa.gatesAuto && pa.sprint);
+});
+
+test('a fetch given up with the cow lagging on the lead: it closes in as the bot stands, and comes off the lead', async (t) => {
+  // live, a 4-block leg leaves a led cow up to 6 behind, past the 4.5 the use key reaches: one use at once left it on
+  // the lead, dragged after whatever the bot did next
+  const world = liveWorld();
+  const ac = new AbortController();
+  const pa = new Pasture([cow(7, -469, 2183)], world, KIT, { lag: 6, abortOn: { leg: 3, abort: () => ac.abort() } });
+  const ctx = pa.ctx(world, ac.signal);
+  await t.throwsAsync(brainRun.run({ signal: ac.signal }, () => fetchForPens(ctx, 'east', { now: () => T0 })), { message: /aborted/ });
+  t.is(pa.led.size, 0, pa.log.join('\n'));
+  t.deepEqual(pa.log.filter(l => l.startsWith('entity.use')), ['entity.use #7 lead', 'entity.use #7']);
+  // nothing walked to after the run was given up
+  t.deepEqual(pa.log.slice(pa.log.lastIndexOf('entity.use #7 lead')).filter(l => /^goto/.test(l)).length, 3);
+  // and with the run going on, the lagging cow is waited for after each leg (heelLead) and comes in
+  const w2 = liveWorld();
+  const pb = new Pasture([cow(7, -469, 2183)], w2, KIT, { lag: 6 });
+  t.deepEqual(await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 81 out; led in' });
+});
+
+test('a lead the client is slow to show: the fetch says so, and takes it off again before it walks home with the cow behind', async (t) => {
+  const world = liveWorld();
+  const pa = new Pasture([cow(7, -503, 2183)], world, KIT, { showsLate: 5 });
+  const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.deepEqual(r, { gain: 0, text: 'cow: would not take the lead (the client used the lead on it, but it did not show on a lead)', mark: 'first' });
+  t.is(pa.led.size, 0, pa.log.join('\n'));
+  t.is(pa.count('lead'), 1, 'the lead picked up again');
+  t.deepEqual(pa.drops, []);
+});
+
+test('a fetch given up just as the lead goes on (the next look refused): the cow comes off the lead all the same, also when the client shows it late', async (t) => {
+  // the brain gives the run up while entity.use with the lead is under way (survival, the LLM, a higher chore: the run
+  // is not yet walking the cow home): the bridge's use still goes through, the next look is refused, and leashOn throws
+  for (const showsLate of [0, 1]) {
+    const world = liveWorld();
+    const ac = new AbortController();
+    const pa = new Pasture([cow(7, -503, 2183)], world, KIT, { showsLate });
+    const ctx = pa.ctx(world, ac.signal);
+    const call = ctx.call;
+    ctx.call = (async (method: string, p?: Record<string, unknown>) => {
+      const r = await call(method, p);
+      if (method === 'entity.use' && p?.item === 'lead') ac.abort();
+      return r;
+    }) as GoalContext['call'];
+    await t.throwsAsync(brainRun.run({ signal: ac.signal }, () => fetchForPens(ctx, 'east', { now: () => T0 })), { message: /aborted/ });
+    t.is(pa.led.size, 0, `showsLate ${showsLate}: ${pa.log.join('\n')}`);
+    t.deepEqual(pa.log.filter(l => l.startsWith('entity.use')), ['entity.use #7 lead', 'entity.use #7'], `showsLate ${showsLate}`);
+    t.true(pa.sprint);
+  }
+});
+
+// (serial: ledBy is the module's, and the fetches of the tests that run at once set it too)
+test.serial('the walk back to shut the yard\'s gate behind a fetch that ended short is the walk\'s too: only survival may cut it until the gate is shut', async (t) => {
+  // live, ledBy was cleared before the finally walked back to the gate: a chore more urgent than the pens round's
+  // stray fetch cut in on that walk, and the gate stood open until the dusk sweep
+  const world = liveWorld();
+  const pa = new Pasture([cow(7, -469, 2183)], world, KIT, { breakOn: [16, 17] });
+  const ctx = pa.ctx(world);
+  const call = ctx.call, act = ctx.act;
+  const seen: string[] = [];
+  ctx.call = (async (method: string, p?: Record<string, unknown>) => {
+    if (method === 'goto') seen.push(`goto ${p!.x},${p!.z}: ${afield.ledBy === ctx.signal ? 'led' : 'free'}`);
+    return call(method, p);
+  }) as GoalContext['call'];
+  ctx.act = async (tool, a = {}) => {
+    if (tool === 'use-item-on-block') seen.push(`click ${a.x},${a.z}: ${afield.ledBy === ctx.signal ? 'led' : 'free'}`);
+    return act(tool, a);
+  };
+  const r = await fetchForPens(ctx, 'east', { now: () => T0 });
+  t.regex(r.text, /the lead broke \d+ from the gate \(the cow 13 off\); the lead picked up$/);
+  // after the second break (the lead picked up): back to 2 from the east gate, and the click, both still the walk's
+  t.deepEqual(seen.slice(-2), ['goto -531,2183: led', 'click -533,2183: led']);
+  t.false(pa.isOpen(YARD_GATES[1]));
+  // and once the run is done, nothing is held
+  t.is(afield.ledBy, undefined);
+});
+
+test('the fetch keeps to the leash: a cow seen 95 out that grazes on past it is not followed', async (t) => {
+  const world = liveWorld();
+  const pa = new Pasture([cow(7, -454, 2183)], world, KIT, { graze: 7 });
+  t.deepEqual(await fetchForPens(pa.ctx(world), 'east', { now: () => T0 }), { gain: 0, text: 'cow: it wandered past the leash', mark: 'first' });
+  t.true(pa.farthest <= 96, `${pa.farthest}`);
+  t.false(pa.log.some(l => l.startsWith('entity.use')));
+});
+
+test('the walks out along a side are careful in and by the yard, plain beyond it; one that stops short looks from there; a run out of time says how far it looked', async (t) => {
+  // north: 32 out is inside the yard, 64 out the north gate, and the walk from there to 80 starts on the fence
+  const w1 = liveWorld();
+  const p1 = new Pasture([], w1, KIT);
+  t.deepEqual(await fetchForPens(p1.ctx(w1), 'north', { now: () => T0 }), { gain: 0, text: 'no wild cows north within the leash (96 from home)' });
+  t.deepEqual(p1.log.filter(l => l.startsWith('goto')), ['goto careful -549,2151', 'goto careful -549,2119', 'goto careful -549,2103']);
+  // east: out of the yard on the first leg, then plain
+  const w2 = liveWorld();
+  const p2 = new Pasture([], w2, KIT);
+  await fetchForPens(p2.ctx(w2), 'east', { now: () => T0 });
+  t.deepEqual(p2.log.filter(l => l.startsWith('goto')), ['goto careful -517,2183', 'goto -485,2183', 'goto -469,2183']);
+  // the second walk out stops 10 short: looked round from there, and no further
+  const w3 = liveWorld();
+  const p3 = new Pasture([], w3, KIT, { stopShort: 2 });
+  t.deepEqual(await fetchForPens(p3.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'no wild cows east within the leash: got no further than 55 blocks out' });
+  // the run's time out after the first stop: not "none within the leash", and its mark's count stays
+  const w4 = liveWorld();
+  let asked = 0;
+  t.deepEqual(await fetchForPens(new Pasture([], w4, KIT).ctx(w4), 'east', { now: () => T0, enough: () => asked++ > 0 }),
+    { gain: 0, text: 'no wild cows seen east as far as 32 blocks out: the run\'s time ran out', mark: 'same' });
+  // where one was seen within the yard's edge, walked to carefully
+  const w5 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -540, y: 63, z: 2130 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const p5 = new Pasture([], w5, KIT);
+  t.deepEqual(await fetchForPens(p5.ctx(w5), 'in sight', { now: () => T0 }), { gain: 0, text: 'no wild cow where one was seen at (-540, 63, 2130): forgotten' });
+  t.deepEqual(p5.log.filter(l => l.startsWith('goto')), ['goto careful -540,2130']);
+});
+
+test('no lead and none to craft: the wheat lure, which also goes right across the pen; a lead crafted from string and a slime ball when none is stored', async (t) => {
+  // no lead stored, 3 string: none to make one
+  const world = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 }, [k(DROPS_CHEST)]: { leather: 7, string: 3, slime_ball: 9 } });
+  const herd = [cow(7, -503, 2183)];
+  const pa = new Pasture(herd, world, [...KIT, { slot: 3, name: 'wheat', count: 10 }]);
+  const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.deepEqual(r, { gain: 1, text: 'cow: no lead to be had (short of 1 string for one): on the wheat from 47 out; led in' });
+  t.true(penned(herd[0]), JSON.stringify(herd[0].position));
+  t.false(pa.log.some(l => l.startsWith('entity.use')));
+  // 15 string and a slime ball in the chests: two leads made the kit's way, one walks the cow home
+  const w2 = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 } });
+  const pb = new Pasture([cow(7, -503, 2183)], w2, KIT);
+  t.deepEqual(await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 47 out; led in' });
+  t.deepEqual(pb.log.filter(l => /^(take-from-chest|craft-item)/.test(l)), ['take-from-chest string 4', 'take-from-chest slime_ball 1', 'craft-item lead 1']);
+  t.is(pb.count('lead'), 2);
+  // neither a lead, nor what makes one, nor wheat: nothing is tried
+  const w3 = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 }, [k(DROPS_CHEST)]: { leather: 7 }, [k(FARM_CHEST)]: { bone_meal: 3 } });
+  const pc = new Pasture([cow(7, -503, 2183)], w3, KIT);
+  t.deepEqual(await fetchForPens(pc.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'cow: no lead to be had (short of 4 string, 1 slime_ball for one), and no wheat to lure one with' });
+});
+
+test('a named, tamed or someone\'s animal is never leashed: on a lead (a knot on someone\'s post), named, tamed, by someone\'s build, in their pen', async (t) => {
+  const theirs = [
+    cow(1, -503, 2183, { leashed: true }), cow(2, -500, 2186, { named: true }), cow(3, -500, 2180, { tamed: true }),
+    cow(4, -505, 2190, { buildDistance: 10 }), cow(5, -505, 2176, { foreign: true }), cow(6, -498, 2183, { baby: true })
+  ];
+  const world = liveWorld();
+  const pa = new Pasture(theirs, world, KIT);
+  const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
+  t.deepEqual(r, { gain: 0, text: 'no wild cows east within the leash (96 from home)' });
+  t.false(pa.log.some(l => l.startsWith('entity.use')));
+  t.deepEqual(sitesOf(world, 'cow'), []);
+  // the pens round leaves them be too, near the pen as they are
+  // (in the bot's own yard an animal is its own, by a friend's build or not: those two stand outside the fence, 24 and
+  // 23 from home)
+  const near = [
+    ...[theirs[0], theirs[1], theirs[2], theirs[5]].map(c => ({ ...c, position: { ...c.position, x: c.position.x - 40, z: c.position.z - 15 } })),
+    cow(4, -525, 2183, { buildDistance: 10 }), cow(5, -526, 2178, { foreign: true })
+  ];
+  const w2 = liveWorld();
+  const pb = new Pasture(near, w2, [...KIT, { slot: 3, name: 'wheat', count: 10 }]);
+  t.is(await pens.run(pb.ctx(w2)), 'cow: 0 cow in the pen and none within 32 to lure; 0 cow ready to breed');
+  t.false(pb.log.some(l => l.startsWith('entity.use')));
+  // a cow past the leash (an old find under a longer leash) is not fetched either
+  const w3 = liveWorld();
+  const pc = new Pasture([cow(8, -451, 2183)], w3, KIT);
+  t.deepEqual(await fetchForPens(pc.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'no wild cows east within the leash (96 from home)' });
+});
+
+// ---- the pens round
+
+test('the pens round writes work.pen and the sightings each time it looks, and walks a stray in on a lead', async (t) => {
+  // one cow in the pen; two wild ones 40 and 45 off, out of the round's reach to lure (32)
+  const world = liveWorld();
+  const herd = [cow(1, -556, 2168), cow(2, -549 + 40, 2183), cow(3, -549, 2183 - 45), cow(4, -548, 2175, { named: true })];
+  const pa = new Pasture(herd, world, [...KIT, { slot: 3, name: 'wheat', count: 10 }]);
+  t.is(await pens.run(pa.ctx(world)), 'cow: 1 cow in the pen and none within 32 to lure; 1 cow ready to breed');
+  t.deepEqual(workOf(world).pen.cow, { adults: 1, babies: 0, at: T0 });
+  // the nearest first; the named one is no sighting
+  t.deepEqual(sitesOf(world, 'cow'), [{ x: -509, y: 63, z: 2183 }, { x: -549, y: 63, z: 2138 }]);
+  // a stray 20 off: on the lead and in, a second in the pen
+  const w2 = liveWorld();
+  const h2 = [cow(1, -556, 2168), cow(2, -540, 2175)];
+  const pb = new Pasture(h2, w2, [...KIT, { slot: 3, name: 'wheat', count: 10 }]);
+  const text = await pens.run(pb.ctx(w2));
+  t.true(text.startsWith('cow: on the lead from 12 out; led in; '), text);
+  t.true(penned(h2[1]));
+  t.true(pb.log.includes('entity.use #2 lead'));
+  t.is(workOf(w2).pen.cow.adults, 2);
+});
+
+// ---- the rung
+
+test('the cows rung: unneeded with 2 adults or no leather short, wants with a stale count, in sight before the sides; and pure', (t) => {
+  const task = rung('cows');
+  const ask = (w: WorldMemory, items: InventoryItem[] = KIT, over: Partial<Snapshot> = {}) => {
+    const c = pick(task, look(items, over), w);
+    return 'decline' in c ? `${c.decline.cause}: ${c.decline.text}` : `${c.variant}: ${c.why}`;
+  };
+  const work = (pen?: { adults: number; at: number }, sites: Pos[] = []): NonNullable<WorldMemory['work']> => ({
+    dry: {}, next: {}, sites: sites.length ? { cow: sites } : {}, pen: pen ? { cow: { ...pen, babies: 0 } } : {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] }
+  });
+  const worlds = {
+    live: liveWorld(),
+    pair: liveWorld({ work: work({ adults: 2, at: T0 - 5 * MINUTE }) }),
+    one: liveWorld({ work: work({ adults: 1, at: T0 - 5 * MINUTE }) }),
+    stale: liveWorld({ work: work({ adults: 2, at: T0 - 31 * MINUTE }) }),
+    met: liveWorld({}, { [k(DROPS_CHEST)]: { leather: 45 } }),
+    free: liveWorld({ progress: { done: [], journal: [] } }),
+    nopen: liveWorld({ zones: {} }),
+    unread: liveWorld({ chestItems: {} }),
+    nothing: liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 }, [k(DROPS_CHEST)]: { leather: 7, string: 3 }, [k(FARM_CHEST)]: { bone_meal: 3 } }),
+    seen: liveWorld({ work: work(undefined, [{ x: -509, y: 63, z: 2183 }, { x: -440, y: 63, z: 2183 }]) })
+  };
+  for (const w of Object.values(worlds)) freeze(w);
+  const before = JSON.stringify(worlds);
+  t.is(ask(worlds.live), 'north: 96 blocks out');
+  t.is(ask(worlds.pair), 'unneeded: the pen has 2 cows (they breed the rest)');
+  t.is(ask(worlds.one), 'north: 96 blocks out');
+  // half an hour old: not known any more, and a look is allowed
+  t.is(ask(worlds.stale), 'north: 96 blocks out');
+  t.is(ask(worlds.met), 'unneeded: the project has its leather');
+  t.is(ask(worlds.free), 'unneeded: the project is not waiting on leather');
+  t.is(ask(worlds.nopen), 'unneeded: no cow pen with a gate');
+  t.is(ask(worlds.unread), 'unneeded: the chests are not all looked into yet');
+  t.is(ask(worlds.nothing), 'kit: nothing to lead a cow home with (no lead, no 4 string and a slime ball for one, no wheat)');
+  // a lead carried is something to lead one with
+  t.is(ask(worlds.nothing, [...KIT, { slot: 3, name: 'lead', count: 1 }]), 'north: 96 blocks out');
+  // where one was seen within the leash, ahead of the sides' turn (the one past the leash is not offered)
+  t.deepEqual(task.variants(look(KIT), worlds.seen).map(v => `${v.id} ${v.dist}${v.first ? ' first' : ''}`), ['in sight 40 first', 'north 96', 'east 96', 'south 96', 'west 96']);
+  const turned = liveWorld({ work: { ...work(undefined, [{ x: -509, y: 63, z: 2183 }]), next: { cows: 2 } } });
+  freeze(turned);
+  t.is(ask(turned), 'in sight: 40 blocks out');
+  // unneeded before anything that would keep it at home
+  const full = Array.from({ length: 36 }, (_, slot): InventoryItem => ({ slot, name: 'cobblestone', count: 64 }));
+  t.is(ask(worlds.pair, full), 'unneeded: the pen has 2 cows (they breed the rest)');
+  t.is(JSON.stringify(worlds), before);
+});
+
+test('the cows rung: a penned cow is gain; a side with none is a terrain mark that goes on doubling; where one was seen and none is any more is forgotten', async (t) => {
+  const clock = { now: T0 };
+  const goal = goalOf(rung('cows'), clock);
+  // east first (the side a test wants: the queue's turn is the memory's)
+  const world = liveWorld();
+  workOf(world).next.cows = 1;
+  const herd = [cow(7, -469, 2183)];
+  const pa = new Pasture(herd, world, KIT);
+  t.is(await goal.run(pa.ctx(world)), '[east] cow: on the lead from 81 out; led in; back home');
+  t.deepEqual(workOf(world).dry, {});
+  t.is(workOf(world).next.cows, 1);
+  t.like(workOf(world).last, { task: 'cows', variant: 'east', gain: 1 });
+  // the pen has its one now; a second is still wanted, after a deep trip (one unblocker trip a day before it)
+  t.is(goal.wants(look(KIT), world), 'east: 96 blocks out (one such trip today already: the deep trip first)');
+
+  // a side with no cow: a terrain mark, 20 min after the first, and past 160 min it goes on doubling
+  const w2 = liveWorld();
+  const pb = new Pasture([], w2, KIT);
+  t.is(await goal.run(pb.ctx(w2)), '[north] no wild cows north within the leash (96 from home); back home');
+  t.deepEqual(workOf(w2).dry['cows:north'], { n: 1, at: T0 });
+  t.is(dryUntil(w2, 'cows:north'), T0 + DRY_WAIT[0]);
+  t.is(workOf(w2).next.cows, 1);
+  // the stops out: 32, 64 and 80 north of home, none past the leash
+  t.true(pb.log.filter(l => l.startsWith('goto')).every(l => { const [x, z] = l.split(' ').at(-1)!.split(',').map(Number); return horiz({ x, z }, HOME) <= 96 - 16 + 1; }));
+  workOf(w2).dry['cows:north'] = { n: 4, at: T0 - 200 * MINUTE };
+  workOf(w2).next.cows = 0;
+  t.is(goal.wants(look(KIT), w2), 'north: 96 blocks out, 4 dry before (dry 4 times: after the deep trip)');
+  await goal.run(new Pasture([], w2, KIT).ctx(w2));
+  t.deepEqual(workOf(w2).dry['cows:north'], { n: 5, at: T0 });
+  t.is(dryUntil(w2, 'cows:north') - T0, 320 * MINUTE);
+
+  // seen 40 east, gone by now: the place is forgotten, and `in sight` waits on its own mark
+  const w3 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -509, y: 63, z: 2183 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  t.is(goal.wants(look(KIT), w3), 'in sight: 40 blocks out');
+  const pc = new Pasture([], w3, KIT);
+  t.is(await goal.run(pc.ctx(w3)), '[in sight] no wild cow where one was seen at (-509, 63, 2183): forgotten; back home');
+  t.deepEqual(sitesOf(w3, 'cow'), []);
+  t.deepEqual(workOf(w3).dry['cows:in sight'], { n: 1, at: T0 });
+  t.is(goal.wants(look(KIT), w3), 'north: 96 blocks out (one such trip today already: the deep trip first)');
+  // and found there: walked in, the sides' turn left where it was
+  const w4 = liveWorld({ work: { dry: {}, next: { cows: 2 }, sites: { cow: [{ x: -509, y: 63, z: 2183 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const pd = new Pasture([cow(9, -469, 2190)], w4, KIT);
+  t.is(await goal.run(pd.ctx(w4)), '[in sight] cow: on the lead from 81 out; led in; back home');
+  t.is(workOf(w4).next.cows, 2);
+});
+
+test('the cows rung: a side where a cow was found and not brought in gets a first mark, not one more; a pen with its pair after all leaves the count as it was', async (t) => {
+  const clock = { now: T0 };
+  const goal = goalOf(rung('cows'), clock);
+  // east had come back dry four times (160 min); this time a cow is found there and lost on the way
+  const world = liveWorld();
+  workOf(world).next.cows = 1;
+  workOf(world).dry['cows:east'] = { n: 4, at: T0 - 200 * MINUTE };
+  const pa = new Pasture([cow(7, -469, 2183)], world, KIT, { vanishOn: 2 });
+  t.regex(await goal.run(pa.ctx(world)), /^\[east\] cow: on the lead from 81 out; lost on the way/);
+  t.deepEqual(workOf(world).dry['cows:east'], { n: 1, at: T0 });
+  t.is(dryUntil(world, 'cows:east'), T0 + DRY_WAIT[0]);
+  t.is(workOf(world).next.cows, 2);
+  // the pens round's count half an hour old, and the pen has its pair after all: nothing is learnt of the side
+  const w2 = liveWorld({ work: { dry: { 'cows:north': { n: 3, at: T0 - 100 * MINUTE } }, next: {}, sites: {}, pen: { cow: { adults: 2, babies: 0, at: T0 - 31 * MINUTE } }, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const pb = new Pasture([cow(1, -556, 2168), cow(2, -554, 2168)], w2, KIT);
+  t.is(await goal.run(pb.ctx(w2)), '[north] the cow pen has 2 already: none fetched');
+  t.deepEqual(workOf(w2).dry['cows:north'], { n: 3, at: T0 });
+  t.is(goal.wants(look(KIT), w2), null);
+});
+
+// ---- the log
+
+const settle = () => new Promise(r => setTimeout(r, 20));
+
+test.serial('done work: cows, as brain.log says it', async (t) => {
+  const world = liveWorld();
+  workOf(world).next.cows = 1;
+  const pa = new Pasture([cow(7, -469, 2183)], world, KIT);
+  const ctx = pa.ctx(world);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cows-'));
+  const file = path.join(dir, 'brain.json');
+  const logFile = path.join(dir, 'brain.log');
+  fs.writeFileSync(file, JSON.stringify({ 'seed:1': world }));
+  const reply = (r: { ok: boolean; text: string }) => ({ content: [{ type: 'text' as const, text: r.text }], ...(r.ok ? {} : { isError: true }) });
+  const actions = Object.fromEntries(['go-home', 'move-to-position', 'take-from-chest', 'use-item-on-block', 'craft-item'].map(tool => [tool, async (a: Record<string, unknown>) => reply(await ctx.act(tool, a))]));
+  const rt = {
+    actions,
+    call: (async (method: string, p?: Record<string, unknown>) => ctx.call(method, p)) as ClientRuntime['call'],
+    status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...pa.me }, block: { x: Math.floor(pa.me.x), y: 63, z: Math.floor(pa.me.z) }, timeOfDay: 1000,
+      hashedSeed: '1', dimension: 'overworld', sleeping: false, thundering: false, process: null, health: 20, food: 20 }),
+    home: () => ({ ...HOME, dimension: 'overworld' }),
+    lastDeath: () => undefined, setManualHook: () => undefined, builtNear: () => [], setHomeZone: () => undefined,
+    restoreBlock: async () => undefined, adoptStates: () => undefined, protectBuilt: () => undefined
+  } as unknown as ClientRuntime;
+  const goals: Goal[] = workGoals(() => undefined, [rung('cane patch'), rung('cows')], () => T0);
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => T0, goals, logFile, memoryFile: file });
+  brain.setEnabled(true);
+  await brain.tick();
+  for (let i = 0; i < 10; i++) await settle();
+  const said = fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map(l => l.slice(25)).filter(l => !/^(autonomy|landmarks:|idle )/.test(l));
+  t.deepEqual(said, [
+    'start work: cows: east: 96 blocks out',
+    'work: cows: skipped: cane patch (unneeded: no cane to plant)',
+    'work: cows: looking east for wild cows, 32 blocks out',
+    'work: cows: fetching a cow for the pen: 48 blocks off, 81 from home',
+    'done work: cows in 0s: [east] cow: on the lead from 81 out; led in; back home'
+  ]);
+  brain.setEnabled(false);
+  await settle();
+});
+
+/**
+ * The cows rung in a brain over the pasture with one more goal, `other` (it wants once `due` is set and the bot is
+ * within 10 of home): the fetch's walk on the lead waits where it first comes within 9 of home, the brain looks once
+ * more there, and the walk goes on. What the brain said, and the pasture.
+ */
+async function leadPastHome(other: (due: () => boolean) => Goal) {
+  const world = liveWorld();
+  workOf(world).next.cows = 1;
+  let release!: () => void;
+  let reached!: () => void;
+  const near = new Promise<void>(r => { reached = r; });
+  const pa = new Pasture([cow(7, -469, 2183)], world, KIT, { holdNear: { within: 9, until: new Promise<void>(r => { release = r; }), at: () => reached() } });
+  const ctx = pa.ctx(world);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cows-'));
+  const file = path.join(dir, 'brain.json');
+  const logFile = path.join(dir, 'brain.log');
+  fs.writeFileSync(file, JSON.stringify({ 'seed:1': world }));
+  const reply = (r: { ok: boolean; text: string }) => ({ content: [{ type: 'text' as const, text: r.text }], ...(r.ok ? {} : { isError: true }) });
+  const actions = Object.fromEntries(['go-home', 'move-to-position', 'take-from-chest', 'use-item-on-block', 'craft-item'].map(tool => [tool, async (a: Record<string, unknown>) => reply(await ctx.act(tool, a))]));
+  const rt = {
+    actions,
+    call: (async (method: string, p?: Record<string, unknown>) => ctx.call(method, p)) as ClientRuntime['call'],
+    status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...pa.me }, block: { x: Math.floor(pa.me.x), y: 63, z: Math.floor(pa.me.z) }, timeOfDay: 1000,
+      hashedSeed: '1', dimension: 'overworld', sleeping: false, thundering: false, process: null, health: 20, food: 20 }),
+    home: () => ({ ...HOME, dimension: 'overworld' }),
+    lastDeath: () => undefined, setManualHook: () => undefined, builtNear: () => [], setHomeZone: () => undefined,
+    restoreBlock: async () => undefined, adoptStates: () => undefined, protectBuilt: () => undefined
+  } as unknown as ClientRuntime;
+  let due = false;
+  const goals: Goal[] = [other(() => due), ...workGoals(() => undefined, [rung('cows')], () => T0)];
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => T0, goals, logFile, memoryFile: file });
+  brain.setEnabled(true);
+  await brain.tick();
+  await near;
+  const there = { ...pa.me };
+  due = true;
+  await brain.tick();
+  release();
+  for (let i = 0; i < 10; i++) await settle();
+  const said = () => fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map(l => l.slice(25)).filter(l => !/^(autonomy|landmarks:|idle )/.test(l));
+  return { pa, there, said, brain };
+}
+
+test.serial('a cow on the lead is not let go for a home round: the walk from the yard\'s gate to the pen passes within 10 of home, where only survival cuts it', async (t) => {
+  // the cows implementer's finding: from the east gate the way to the pen comes within 10 of home, inside the trip
+  // rule's reach, and a home round more urgent than the trip (smelt 66, the kit 70, the stash 60) stopped the run
+  // there: the cow was let go loose in the yard and its lead left lying
+  const smelt = (due: () => boolean): Goal => ({
+    name: 'smelt', priority: 66, wants: s => (due() && s.distHome <= 10 ? 'check the furnace for finished smelting' : null), run: async () => 'nothing to smelt', timeoutMs: 60_000, retryMs: 60_000
+  });
+  const a = await leadPastHome(smelt);
+  t.true(horiz(a.there, HOME) <= 10, `the bot at ${JSON.stringify(a.there)}`);
+  t.false(a.said().some(l => /^stopping work: cows/.test(l)), a.said().join('\n'));
+  t.true(a.said().includes('done work: cows in 0s: [east] cow: on the lead from 81 out; led in; back home'), a.said().join('\n'));
+  t.true(penned(a.pa.cows[0]));
+  // the walk in done and the lead off, the home round has its turn
+  await a.brain.tick();
+  await settle();
+  t.true(a.said().includes('start smelt: check the furnace for finished smelting'));
+  a.brain.setEnabled(false);
+  await settle();
+
+  // survival still cuts it short there: the cow is let go where it stands, and the run says what it had brought in
+  const shelter = (due: () => boolean): Goal => ({
+    name: 'shelter', priority: 80, wants: () => (due() ? 'evening: head home before dark' : null), run: async () => 'walked home', timeoutMs: 60_000, retryMs: 60_000
+  });
+  const b = await leadPastHome(shelter);
+  t.true(b.said().includes('stopping work: cows: shelter is more urgent (evening: head home before dark)'), b.said().join('\n'));
+  t.is(b.pa.led.size, 0);
+  t.false(penned(b.pa.cows[0]));
+  b.brain.setEnabled(false);
+  await settle();
+});

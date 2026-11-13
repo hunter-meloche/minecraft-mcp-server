@@ -1,4 +1,4 @@
-import type { Goal, GoalContext } from './goals.js';
+import { nearHome, type Goal, type GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { storageHouse, STORAGE_HOUSE_MAX_CHESTS, type Side } from './blueprints.js';
 import { key, peekChest } from './chests.js';
@@ -160,7 +160,7 @@ export const storageGoal: Goal = {
   timeoutMs: 8 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
-    if (s.sleeping || s.activity !== 'work' || s.dimension !== 'overworld' || !s.home || s.distHome > 16) return null;
+    if (s.sleeping || s.activity !== 'work' || s.dimension !== 'overworld' || !s.home || !nearHome(s, 16)) return null;
     if (!world.zones?.storage?.length) return null; // no storage house yet: the storage milestone builds it
     const last = world.lastDone?.storage ?? 0;
     if (world.storageFull?.length) {

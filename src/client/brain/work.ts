@@ -6,9 +6,10 @@
  *
  * Who writes: the gates (`pick`, a task's `ready` and `variants`, the goals' wants / declines / urgency, `roundDue`)
  * only read: they are asked many times a tick. `world.work` is written in two places, the run wrapper and `workTick`,
- * and by `markDry` / `releaseOldestDry`, which the tasks and the brain call.
+ * and by `markDry` / `releaseOldestDry` / `addSite` / `dropSite` / `notePen`, which the tasks, the pens round and the
+ * brain call.
  */
-import { fromGate, no, outsideBy, YARD_EDGE, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, nearHomeAt, no, outsideBy, YARD_EDGE, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { NEAR_HOME, TRIP_STASH_RANGE, inYardOrNear, makeRoom, noRoom, out, room, type RoomKind } from './pockets.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
@@ -16,6 +17,7 @@ import { deepTripKit, tripBudgetMs } from './mine.js';
 import { tripCheck } from './deep.js';
 import { clock } from './idlelog.js';
 import { LADDER, tierStep } from './worktasks.js';
+import { underYard } from './underyard.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -31,9 +33,13 @@ export type Reach = 'yard' | 'near' | 'far' | 'deep';
  * What a run brought in (items, cells, animals: whatever the task counts) and what it has to say. `untried`: it never
  * got to the work (the place was not reached, or someone's build stood by it), so it says nothing of the place: no dry
  * mark, the same variant first next time, and a deep trip that never went down is no trip that ended well. Home, the
- * wrapper ends such a run as a failure, which the brain holds back.
+ * wrapper ends such a run as a failure, which the brain holds back. `mark`: what a run that brought nothing learnt of
+ * its place, where that is not "nothing there": `first`, it holds what the task is after (a cow found there that did
+ * not come in), so a first mark whatever the count before, or the sides where cows graze would wait ever longer;
+ * `same`, it was not looked at to its end (the run's time ran out, the pen had its pair after all), so the count
+ * stays as it was; `forget`, the place is forgotten (a stand gone, or someone's), so its mark goes and none is written.
  */
-export interface WorkResult { gain: number; text: string; untried?: true }
+export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget' }
 
 export interface WorkTask {
   name: string;
@@ -44,8 +50,12 @@ export interface WorkTask {
   budgetMs: number;
   /** its dry marks tell of the land, not of the hour: they go on doubling past 160 min */
   terrain?: true;
-  /** what it could do now, each with its distance from home in blocks; sync, reads only */
-  variants(s: Snapshot, world: WorldMemory): { id: string; dist: number }[];
+  /**
+   * what it could do now, each with its distance from home in blocks; sync, reads only. `first`: a place known to hold
+   * what the task is after (a stand of cane found before): tried ahead of the others whatever their turn, and its runs
+   * do not move the turn on
+   */
+  variants(s: Snapshot, world: WorldMemory): { id: string; dist: number; first?: true }[];
   /** null = ready; sync, reads only, no calls */
   ready(s: Snapshot, world: WorldMemory, variant: string): Decline | null;
   /** what it says with no variant at all (default: `unneeded`, nothing to do) */
@@ -71,6 +81,7 @@ export interface WorkMemory {
   next: Record<string, number>;
   /** per kind, the places found (4 each) */
   sites: Record<string, { x: number; y: number; z: number; dryAt?: number }[]>;
+  /** per pen kind: what it held when the pens round or a fetch last looked into it (`at`: the brain's clock) */
   pen: Record<string, { adults: number; babies: number; at: number }>;
   /** how often every target was met: the targets double with each */
   tier: number;
@@ -244,8 +255,109 @@ export function deathNow(): Death | undefined {
 /** The tier the deep targets stand at (they double with each): a look only, for the tasks' gates. */
 export const tierOf = (world: WorldMemory): number => peek(world).tier;
 
-/** What `pick` answers for a task: the variant to run (its place in the task's list, its distance, why), or the one reason the task does not ask to run. */
-export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean } | { decline: Decline };
+/** The places of a kind the runs have found (wild cane, ...), the newest first: a look only, for the tasks' gates. */
+export const sitesOf = (world: WorldMemory, kind: string): readonly { x: number; y: number; z: number; dryAt?: number }[] => peek(world).sites[kind] ?? [];
+
+/** the same place, for a site: a find within this many blocks of one kept is that one again */
+const SAME_SITE = 8;
+
+/**
+ * A place found by a run (a stand of wild cane): kept first, in place of one kept within a few blocks of it, and the
+ * oldest let go beyond four a kind. A task calls it from its run, as it calls markDry.
+ */
+export function addSite(world: WorldMemory, kind: string, p: { x: number; y: number; z: number }): void {
+  const w = workOf(world);
+  const kept = (w.sites[kind] ?? []).filter(q => horiz(q, p) > SAME_SITE);
+  w.sites[kind] = [{ x: p.x, y: p.y, z: p.z }, ...kept].slice(0, SITES);
+  writes++;
+}
+
+/** A place that holds nothing any more (or is someone's after all): forgotten. */
+export function dropSite(world: WorldMemory, kind: string, p: { x: number; z: number }): void {
+  const w = workOf(world);
+  const list = w.sites[kind];
+  if (!list) return;
+  const kept = list.filter(q => q.x !== p.x || q.z !== p.z);
+  if (kept.length === list.length) return;
+  if (kept.length) w.sites[kind] = kept; else delete w.sites[kind];
+  writes++;
+}
+
+/** What a pen held when it was last looked into (adults, babies, when): a look only, for the cows rung's gate. */
+export const penCount = (world: WorldMemory, kind: string): Readonly<WorkMemory['pen'][string]> | undefined => peek(world).pen[kind];
+
+/** What a pen holds, as the pens round or a fetch saw it just now: written each time one looks into it. */
+export function notePen(world: WorldMemory, kind: string, count: { adults: number; babies: number; at: number }): void {
+  workOf(world).pen[kind] = { adults: count.adults, babies: count.babies, at: count.at };
+  writes++;
+}
+
+/** A side of home, and its step on the map. */
+export type HomeSide = 'north' | 'east' | 'south' | 'west';
+const SIDE_STEP: Record<HomeSide, [number, number]> = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
+/** the stops out along a side, blocks apart */
+const SIDE_LEG = 32;
+/** the last stop this far inside the leash: what is seen round it is within reach, and the walk back with it too */
+const SIDE_MARGIN = 16;
+
+/**
+ * In the yard or within its edge, one of these: a walk between them is careful (walk only), as pens.ts walks to an
+ * animal. Baritone's own walk climbs the fence and leaves its scaffold there (the stray cobblestone at the east fence),
+ * and every side's first stop lies in the yard or across its fence (north 32 out is inside it, north 64 the gate).
+ */
+export const byYard = (world: WorldMemory, ...ps: { x: number; z: number }[]): boolean =>
+  !!world.yard && ps.some(p => outsideBy(world.yard!, p) <= YARD_EDGE);
+
+/**
+ * Look along one side of home for something (wild cane, a wild cow), no further out than the leash: from where the
+ * bot stands, then from stops 32 blocks apart along that side, the last 16 inside the leash, `look` at each. The
+ * explore tool would not do: it looks 96 round the bot from the first step and stops at the first it sees (the
+ * bot's own cane patch, a cow in its own pen, or one past the leash), and it goes as far out as told from wherever the
+ * bot is. A stop not got to (water, a cliff) is looked round from where the walk ended, and the side goes no further.
+ * Returns the first find, or why there was none (`what` names it: `no wild cane east within the leash ...`); `short`
+ * when the run's time ran out before the side's end, so the side was not looked along to the leash.
+ */
+export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: string, look: () => Promise<T | undefined>,
+  enough: () => boolean = () => false): Promise<{ found?: T; text: string; short?: true }> {
+  const home = ctx.s.home!;
+  const last = ctx.world.leash - SIDE_MARGIN;
+  const legs = [0, ...Array.from({ length: Math.floor(last / SIDE_LEG) }, (_, i) => (i + 1) * SIDE_LEG), last].filter((d, i, a) => d >= 0 && d <= last && a.indexOf(d) === i);
+  const [dx, dz] = SIDE_STEP[side];
+  let out = 0;
+  let me: { x: number; z: number } = ctx.s.position;
+  for (const d of legs) {
+    if (ctx.signal.aborted) throw new Error('aborted');
+    if (d > 0) {
+      // (not "none within the leash": the rest of the side was never seen, and its mark must not say it was)
+      if (enough()) return { text: `no ${what} seen ${side} ${out ? `as far as ${out} blocks out` : 'from home'}: the run's time ran out`, short: true };
+      ctx.progress(`looking ${side} for ${what}, ${d} blocks out`);
+      const stop = { x: Math.round(home.x + dx * d), y: home.y, z: Math.round(home.z + dz * d) };
+      const careful = byYard(ctx.world, me, stop);
+      const r = await ctx.call<{ arrived?: boolean }>('goto', { ...stop, xz: true, range: 8, ...(careful ? { careful: true } : {}), timeoutMs: 90_000 }, 105_000)
+        .catch(() => ({ arrived: false }));
+      if (ctx.signal.aborted) throw new Error('aborted');
+      const at = (await ctx.status().catch(() => undefined))?.position;
+      me = at ?? stop;
+      // stopped short (water, a cliff): it looks from there, and goes no further
+      if (r.arrived === false) {
+        const got = at ? Math.round(horiz(at, home)) : out;
+        const found = await look();
+        if (found !== undefined) return { found, text: '' };
+        return { text: `no ${what} ${side} within the leash: got no further than ${got} blocks out` };
+      }
+    }
+    out = d;
+    const found = await look();
+    if (found !== undefined) return { found, text: '' };
+  }
+  return { text: `no ${what} ${side} within the leash (${ctx.world.leash} from home)` };
+}
+
+/**
+ * What `pick` answers for a task: the variant to run (its place in the task's turn, its distance, why; `first`: one
+ * tried ahead of the turn, whose run leaves the turn where it is), or the one reason the task does not ask to run.
+ */
+export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean; first?: true } | { decline: Decline };
 
 const isTrip = (task: WorkTask) => task.reach === 'far' || task.reach === 'deep';
 /** the rungs that unblock the project (cows, cane): they may not starve the deep rung */
@@ -339,13 +451,15 @@ function choose(task: WorkTask, s: Snapshot, world: WorldMemory): Choice {
   const gate = common(task, s, world);
   if (gate) return { decline: gate };
   const w = peek(world);
-  const from = (w.next[task.name] ?? 0) % all.length;
+  // the places known to hold it first, then the rest in turn from where the last run left the turn
+  const turn = all.filter(v => !v.first);
+  const from = turn.length ? (w.next[task.name] ?? 0) % turn.length : 0;
+  const order = [...all.filter(v => v.first), ...turn.slice(from), ...turn.slice(0, from)];
   let unready: Decline | undefined;
   let late: { dist: number; d: Decline } | undefined;
   const dry: { id: string; until: number }[] = [];
-  for (let i = 0; i < all.length; i++) {
-    const index = (from + i) % all.length;
-    const v = all[index];
+  for (const v of order) {
+    const index = v.first ? from : turn.indexOf(v);
     const r = task.ready(s, world, v.id);
     if (r) { unready ??= r; continue; }
     const mark = w.dry[`${task.name}:${v.id}`];
@@ -357,7 +471,7 @@ function choose(task: WorkTask, s: Snapshot, world: WorldMemory): Choice {
     const where = task.reach === 'yard' ? 'in the yard' : task.reach === 'deep' ? 'under ground' : `${Math.round(v.dist)} blocks out`;
     const tried = mark?.early ? `, let go early after ${mark.n} dry` : mark ? `, ${mark.n} dry before` : '';
     const below = demotedBy(task, mark, w, world);
-    return { variant: v.id, index, dist: v.dist, demoted: !!below, why: `${where}${tried}${below ? ` (${below})` : ''}` };
+    return { variant: v.id, index, dist: v.dist, demoted: !!below, why: `${where}${tried}${below ? ` (${below})` : ''}`, ...(v.first ? { first: true as const } : {}) };
   }
   // one answer for the task: that of the variant that got furthest
   if (late) return { decline: late.d };
@@ -481,7 +595,15 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     else if (task.reach === 'far' && isUnblocker(task)) { farDayOf(workOf(ctx.world), ctx.world).unblockers += 1; writes++; }
 
     let told = 0;
-    const r = await task.run({ ...ctx, s, gain: n => { told += n; ctx.gain(n); } }, variant, budgetMs, now);
+    let r: WorkResult;
+    try {
+      r = await task.run({ ...ctx, s, gain: n => { told += n; ctx.gain(n); } }, variant, budgetMs, now);
+    } catch (e) {
+      // stopped at the work (a home round cuts into a run in the yard or near it): the run's own line is never
+      // logged, only "stopped ...: aborted", as if it had come to nothing. What it had brought in is said here once
+      if (ctx.signal.aborted) ctx.progress(`[${variant}] stopped before its end, ${told ? `${told} brought in` : 'nothing brought in yet'} (no mark written)`);
+      throw e;
+    }
     // what the task counted at the end and had not told as it went still counts as brought in
     const gain = Math.max(told, fin(r.gain) && r.gain > 0 ? r.gain : 0);
     if (gain > told) ctx.gain(gain - told);
@@ -495,12 +617,19 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // (a mark the task itself wrote on this run stands: it saw the place empty as it left)
     const own = !!mark && mark.at >= setOut;
     // (one that never got to the work learnt nothing of the place: no mark, and it is tried first again)
+    // (a place tried ahead of the turn leaves the turn where it was: its own mark keeps it waiting)
     if (gain > 0) {
       if (mark && !own) delete w.dry[key];
-      w.next[task.name] = c.index;
+      if (!c.first) w.next[task.name] = c.index;
     } else if (!r.untried) {
-      if (!own) markDry(ctx.world, key, at);
-      w.next[task.name] = c.index + 1;
+      // (a stand forgotten left its mark behind for good: the key named a place no longer kept)
+      if (r.mark === 'forget') delete w.dry[key];
+      else if (!own) {
+        if (r.mark === 'first') w.dry[key] = { n: 1, at };
+        else if (r.mark === 'same') w.dry[key] = { n: Math.max(1, mark?.n ?? 0), at };
+        else markDry(ctx.world, key, at);
+      }
+      if (!c.first) w.next[task.name] = c.index + 1;
     }
     w.last = { task: task.name, variant, gain, text: r.text.slice(0, 160), at };
     writes++;
@@ -514,13 +643,21 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
       if (r.untried) throw new Error(said);
       return said;
     };
-    // the task stays where its work ended: the way home is the wrapper's, once, for every task
+    // the task stays where its work ended: the way home is the wrapper's, once, for every task. Home is on its level:
+    // down the mine under the yard's edge, 10 from home across the ground, is no end of the walk home
     let away = true;
+    let under = false;
     try {
       const st = await ctx.status();
-      if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) away = horiz(st.position, s.home) > NEAR_HOME;
+      if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) {
+        away = !nearHomeAt(st.position, s.home, NEAR_HOME);
+        under = underYard(st.position, s.home, ctx.world.yard);
+      }
     } catch { /* no look: the walk home is asked for, and says where the bot is */ }
     if (!away) return end(text);
+    // under the yard Baritone may break nothing, and the walk home stops in a second (live: `Stopped 57 blocks from
+    // home`): the survival goal digs out to the side first, and the trip stays open until the bot is seen home
+    if (under) return `${text}; under the yard: out from under first`;
     // a chore at home cuts in as the walk comes within its reach of home, and shelter at dusk: the run's own line
     // would never be logged then, only "stopped ...: aborted", as if the trip had come to nothing (the coal it
     // brought in, the mark it left). It is said here once, as the run was stopped
@@ -638,7 +775,7 @@ export function workTick(
     }
   }
   // home again alive (or long enough after it for whatever comes next to be no part of the trip): the trip is over
-  if (w.deep.away !== undefined && (s.distHome <= NEAR_HOME || s.now - w.deep.away >= AWAY_MS)) { delete w.deep.away; wrote = true; }
+  if (w.deep.away !== undefined && (nearHome(s, NEAR_HOME) || s.now - w.deep.away >= AWAY_MS)) { delete w.deep.away; wrote = true; }
   for (const list of ['starts', 'deaths'] as const) {
     const kept = w.deep[list].filter(t => s.now - t < DAY);
     if (kept.length !== w.deep[list].length) { w.deep[list] = kept; wrote = true; }

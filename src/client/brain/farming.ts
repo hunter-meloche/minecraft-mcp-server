@@ -1,4 +1,4 @@
-import { fromGate, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import type { Milestone, MilestoneState, Step, StepResult } from './progress.js';
 import { progressOf } from './progress.js';
@@ -219,7 +219,7 @@ const treeGate = (s: Snapshot, world: WorldMemory): Gate => {
   if (!world.zones?.['trees:sapling']?.length) return { cause: 'unneeded', text: 'no tree farm' };
   const last = world.lastDone?.trees ?? 0;
   if (!(s.now - last > 20 * MINUTE)) return no.notDue('trees', s.now, last, 20 * MINUTE);
-  if (s.distHome > 24) return no.away(s, 'trees', 24);
+  if (!nearHome(s, 24)) return no.away(s, 'trees', 24);
   // two slots free for the logs and the saplings, or the stash able to make them (the round does that first)
   if (room('yard', s, world) === 'no') return noRoom('yard', 'trees', s, world);
   return no.late(s, 'trees') ?? { want: 'daily round: the tree farm' };

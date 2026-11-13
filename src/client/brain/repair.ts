@@ -1,5 +1,5 @@
 import type { ClientRuntime } from '../tools.js';
-import type { Goal, GoalContext } from './goals.js';
+import { nearHome, type Goal, type GoalContext } from './goals.js';
 import { key } from './chests.js';
 import { prepare } from './project.js';
 import { missingBuilt, type BuiltBlock } from './integrity.js';
@@ -49,7 +49,7 @@ export function repairGoal(rt: ClientRuntime): Goal {
     // blocks put back: a round that finds nothing missing (or can put none of it back) brought nothing
     gains: true,
     wants: (s, world) => {
-      if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || s.distHome > NEAR_HOME) return null;
+      if (s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || !nearHome(s, NEAR_HOME)) return null;
       // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
       if (!roundDue(s, world, 'repair', 20 * MINUTE)) return null;
       return rt.builtNear(s.home, REPAIR_RADIUS).length ? 'daily round: anything missing from what the bot built' : null;

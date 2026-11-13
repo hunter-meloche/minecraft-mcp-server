@@ -1379,6 +1379,66 @@ test.serial('a trip out beyond 10 blocks is cut short only by a survival goal, o
   await b.off();
 });
 
+test.serial('down the mine under the yard\'s edge, 8 from home across the ground and 55 below it, a trip is beyond the chores\' reach: smelt waits, out from under cuts it', async (t) => {
+  // live on Nov 12 smelt (66) cut three deep trips "within 10 of home" from under the yard's edge: distHome is across
+  // the ground. The chores by name and urgency, as above; `out from under` is the survival goal's name
+  const want: Record<string, string> = {};
+  const chore = (name: string, priority: number): Goal => ({ name, priority, wants: () => want[name] ?? null, run: async () => `${name} seen to`, timeoutMs: 60_000, retryMs: 1000 });
+  const chores = [chore('out from under', 93), chore('kit', 70), chore('smelt', 66), chore('stash', 60)];
+  const state = atHome({ items: [{ slot: 0, name: 'iron_pickaxe', count: 1 }] });
+  const deep = stub('deep', 5, 'deep');
+  // (home (0, 64, 0): the round follows the ore to 8 from home, 55 under it)
+  deep.body = async (ctx) => { state.pos = { x: 8, y: 9, z: 0 }; await ctx.act('slow'); };
+  const b = brainOf(state, [deep], chores);
+  const stops = () => b.said().filter(l => l.startsWith('stopping '));
+  await b.tick(5000);
+  t.is(statusLine(b.brain, 'Now:'), 'Now: work: deep (only: under ground) for 0s.');
+  Object.assign(want, { kit: 'a better sword in the chest', smelt: '5 raw_gold to smelt', stash: '35/36 slots used' });
+  await b.tick(5000);
+  await b.tick(5000);
+  t.deepEqual(stops(), []);
+  t.is(statusLine(b.brain, 'Home'), 'Home (0, 64, 0), 8 blocks away, 55 below it.');
+  // on home's level, 8 out, the chores are in reach again, and the most urgent of them stops it (as above)
+  state.pos = { x: 8, y: 64, z: 0 };
+  await b.tick(5000);
+  t.deepEqual(stops(), ['stopping work: deep: kit is more urgent (a better sword in the chest)']);
+  // the survival goal cuts it wherever it is
+  for (const name of Object.keys(want)) delete want[name];
+  state.pos = { ...HOME };
+  await b.tick(5000);
+  t.is(statusLine(b.brain, 'Now:'), 'Now: work: deep (only: under ground) for 0s.');
+  want['out from under'] = '55 under the yard\'s ground';
+  await b.tick(5000);
+  t.deepEqual(stops().slice(1), ['stopping work: deep: out from under is more urgent (55 under the yard\'s ground)']);
+  await b.off();
+});
+
+test.serial('the run wrapper does not walk home from under the yard, where the walk stops in a second: the trip stays open until the bot is home', async (t) => {
+  const deep = stub('deep', 5, 'deep', [['iron', 0]]);
+  deep.gains = [5, 5];
+  const b = bench([deep]);
+  const world = emptyWorld();
+  // home (0, 64, 0) with no yard known: the bridge's zone is the circle of 24 round home and 6 past it, at any depth
+  const { text, d } = await b.run(deep, world, {}, { x: 8, y: 9, z: 0 });
+  t.is(text, '[iron] +5 things; under the yard: out from under first');
+  t.deepEqual(d.acts, [], 'no go-home');
+  t.like(workOf(world).deep, { starts: [T0], clean: 1, away: T0 });
+  // 8 from home across the ground and 55 under it is not home: the trip stays open, and closes once the bot is home
+  workTick(b.look({ position: { x: 8, y: 9, z: 0 }, distHome: 8 }), world, () => undefined);
+  t.is(workOf(world).deep.away, T0);
+  workTick(b.look({ position: { x: 2, y: 64, z: 0 }, distHome: 2 }), world, () => undefined);
+  t.is(workOf(world).deep.away, undefined);
+  // down the mine past the margin (31 out): the walk home as ever
+  const mine = await b.run(deep, emptyWorld(), {}, { x: 31, y: 9, z: 0 });
+  t.is(mine.text, '[iron] +5 things; back home');
+  t.deepEqual(mine.d.acts, ['go-home']);
+  // 8 out across the ground and 30 above home (on a tower, a hill) is no end of the walk home either
+  deep.gains = [5];
+  const high = await b.run(deep, emptyWorld(), {}, { x: 8, y: 94, z: 0 });
+  t.is(high.text, '[iron] +5 things; back home');
+  t.deepEqual(high.d.acts, ['go-home']);
+});
+
 test.serial('out.work and out.trip are false again after a run that throws, is pre-empted or times out; none of them books a dry mark', async (t) => {
   const left = (b: ReturnType<typeof brainOf>) => ({ out: { ...out }, dry: queue(b.brain).dry, last: queue(b.brain).last });
   const nothing = { out: { trip: false, work: false }, dry: {}, last: undefined };
@@ -1406,7 +1466,9 @@ test.serial('out.work and out.trip are false again after a run that throws, is p
   t.deepEqual(out, { trip: true, work: true });
   await two.brain.manual('dig-block');
   await settle();
-  t.deepEqual(two.said().slice(-2), ['stopping work: far: the LLM took over (dig-block)', 'stopped work: far: aborted: the brain gave this job up']);
+  // (a run stopped at its work says what it had brought in: its own line is never logged)
+  t.deepEqual(two.said().slice(-3), ['stopping work: far: the LLM took over (dig-block)', 'work: far: [only] stopped before its end, nothing brought in yet (no mark written)',
+    'stopped work: far: aborted: the brain gave this job up']);
   t.deepEqual(left(two), nothing);
   await two.off();
 
@@ -1417,7 +1479,8 @@ test.serial('out.work and out.trip are false again after a run that throws, is p
   t.deepEqual(out, { trip: true, work: true });
   t.is(statusLine(three.brain, 'Now:'), 'Now: work: far (only: 20 blocks out) for 240s.');
   await three.tick(1000);
-  t.deepEqual(three.said().slice(-2), ['stopping work: far: work: far ran out of time', 'stopped work: far: aborted: the brain gave this job up']);
+  t.deepEqual(three.said().slice(-3), ['stopping work: far: work: far ran out of time', 'work: far: [only] stopped before its end, nothing brought in yet (no mark written)',
+    'stopped work: far: aborted: the brain gave this job up']);
   t.is(statusLine(three.brain, 'Retrying later:'), 'Retrying later: work: far 300s.');
   t.deepEqual(left(three), nothing);
   await three.off();
@@ -1509,9 +1572,11 @@ test.serial('stash and work do not ping-pong: a work run the stash keeps cutting
       const before = b.said().length;
       await b.tick(5000);
       const lines = b.said().slice(before);
-      t.deepEqual(lines.slice(0, 4), ['stopping work: chop: stash is more urgent (36/36 slots used)', 'stopped work: chop: aborted: the brain gave this job up',
-        'start stash: 36/36 slots used', 'done stash in 0s: put 64 away']);
-      return lines.slice(4);
+      // (what the run had brought in is said as it is stopped: the logs, kept on abort)
+      t.deepEqual(lines.slice(0, 5), ['stopping work: chop: stash is more urgent (36/36 slots used)',
+        `work: chop: [only] stopped before its end, ${gain ? `${gain} brought in` : 'nothing brought in yet'} (no mark written)`,
+        'stopped work: chop: aborted: the brain gave this job up', 'start stash: 36/36 slots used', 'done stash in 0s: put 64 away']);
+      return lines.slice(5);
     };
     return { ...b, round };
   };
@@ -1582,7 +1647,7 @@ test.serial('30 s of dry idle frees the oldest mark once; stage 1 and morning fr
   t.is(statusLine(b.brain, 'Work queue:'),
     'Work queue: last scout [east] nothing found 0 min ago; tier 0; deep trips 0 in 24 h, on probation 0/3; dry: cane:south 20 min, cane:north 20 min, scout:east 20 min.');
 
-  // three minutes and more of it (under the six at which the bot goes foraging)
+  // three minutes and more of it (the idle watchdog lets go of the brain's holds at 3)
   for (let i = 0; i < 39; i++) await b.tick(5000);
   const said = b.said();
   // half a minute in, the oldest mark is let go and the bank looked at again; half a minute on, the next one. Each
@@ -1598,7 +1663,7 @@ test.serial('30 s of dry idle frees the oldest mark once; stage 1 and morning fr
 
   // the watchdog's first stage lets go of what the brain holds, not of what the places said
   t.true(said.includes('idle 3 min by day: let go of nothing (nothing was held)'));
-  t.false(said.some(l => l.startsWith('start forage')));
+  t.deepEqual(said.filter(l => l.startsWith('start ') && !l.startsWith('start work: ')), []);
   // and so does the morning: a bare bank is as bare the next day
   state.time = 23_700;
   await b.tick(5000);
@@ -2044,7 +2109,8 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
   await b.tick();
   t.deepEqual(b.said().filter(l => !l.startsWith('landmarks: ')).slice(1), [
     'start work: deep: iron: under ground',
-    'work: deep: skipped: trip kit (unneeded: kit ready)',
+    // (no cane to plant a patch with, no cow pen, and no project waiting on cane: the rungs above have nothing to do)
+    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready)',
     'work: deep: out to the mine at (0, -56)',
     'work: deep: mining iron for 23 more (180 s)',
     'work: deep: Mined for 100s: raw_iron x23.',
@@ -2077,7 +2143,7 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
     'work: every deep target met: tier 1 (diamond 32, iron 192, gold 64, redstone 128, lapis 64)',
     'start work: surface: coal: 96 blocks out',
     // the stored ingots make the armour: at home that is the kit goal's to do
-    'work: surface: skipped: trip kit (unneeded: armour: the kit goal sees to them at home) | deep (kit: armour below iron (deep needs the deep kit))',
+    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | deep (kit: armour below iron (deep needs the deep kit))',
     'work: surface: mining coal_ore for up to 24 (90 s)',
     'work: surface: mining coal_ore for up to 1 (90 s)',
     'done work: surface in 0s: [coal] +23 coal; back home'
@@ -2135,5 +2201,5 @@ test('the real rungs only look: asked over hours, pockets, places and stock, the
     }
     t.is(JSON.stringify(w), before);
   }
-  t.is(asked, 5 * 7 * 5 * 3 * 3);
+  t.is(asked, 5 * 7 * 5 * 3 * LADDER.length);
 });

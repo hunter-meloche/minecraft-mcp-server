@@ -5,7 +5,6 @@ import { worldIdFromSeed } from '../../build-protection.js';
 import { activityAt } from './schedule.js';
 import { BrainMemory, findLandmarks, type Pos, type WorldMemory } from './memory.js';
 import { tidyGoal } from './tidy.js';
-import { IDLE_FIRST, IDLE_FORAGE, forage } from './idle.js';
 import { treeFarm } from './farming.js';
 import { pens } from './pens.js';
 import { deepTrip } from './deep.js';
@@ -20,8 +19,9 @@ import { LoopWatch, type Outcome, type Run } from './loops.js';
 import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
 /** Staying alive: never backed off by the loop watch. */
-const SURVIVAL = new Set(['wake', 'break out', 'recover', 'retreat', 'shelter', 'food']);
-import { breakOut, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
+const SURVIVAL = new Set(['wake', 'out from under', 'break out', 'recover', 'retreat', 'shelter', 'food']);
+import { breakOut, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { outFromUnder } from './underyard.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
 import { farm, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
@@ -56,6 +56,11 @@ export interface BrainOptions {
   goals?: Goal[];
   now?: () => number;
 }
+
+/** The idle watchdog: standing still by day this long with nothing to do, every hold is let go. */
+const IDLE_FIRST = 3 * 60_000;
+/** ...and once it has stood this long, the count starts afresh (the next let-go comes IDLE_FIRST after that). */
+const IDLE_ROUND = 16 * 60_000;
 
 interface Running {
   goal: Goal; reason: string; started: number; abort: AbortController; done: Promise<void>;
@@ -193,7 +198,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -316,14 +321,18 @@ export class Brain {
         // stock, the kit's other wants) can wait for it to come home: each cost a trip its walk out, and the trip
         // makes its own room. Nearer home, and for every other run, the goals say themselves what is worth a stop.
         // (The kit goal itself wants only within reach of home, so out here the trip ends itself: a trip down with
-        // no pickaxe left comes up, deep.ts oreTrip, and the kit sees to one at home)
-        const tripOut = afield.trip && !!taskOf(r.goal) && s.distHome > NEAR_HOME;
-        const may = (g: Goal) => SURVIVAL.has(g.name) || (tripOut ? g.name === kit.name && !s.items.some(i => i.name.endsWith('_pickaxe')) : cuts(g));
+        // no pickaxe left comes up, deep.ts oreTrip, and the kit sees to one at home.) Down the mine under the yard's
+        // edge is out here too, however near home across the ground: smelt cut three deep trips there on Nov 12
+        const tripOut = afield.trip && !!taskOf(r.goal) && !nearHome(s, NEAR_HOME);
+        // and wherever it is, a run walking an animal home (on a lead, or after its food: the cows rung, the pens
+        // round's stray): it would be let go where the run stopped. Only this run's own word counts (its signal)
+        const leading = !!afield.ledBy && afield.ledBy === r.abort.signal;
+        const may = (g: Goal) => SURVIVAL.has(g.name) || (!leading && (tripOut ? g.name === kit.name && !s.items.some(i => i.name.endsWith('_pickaxe')) : cuts(g)));
         const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal) && may(g)), this.retryAt);
         if (next) await this.stopRunning(`${next.goal.name} is more urgent (${next.reason})`);
         return;
       }
-      if (this.idleWatch(s, world)) return;
+      this.idleWatch(s);
       const choice = decide(s, world, this.goals, this.retryAt);
       if (choice) this.start(choice.goal, choice.reason, s, world);
     } catch (e) {
@@ -344,14 +353,14 @@ export class Brain {
    * stood stuck were counted as idle, so the hold was undone as soon as it was set). Not the walk home with nothing to
    * do: that is idle time like the standing about before and after it, and each walk started the watchdog's 3 minutes
    * afresh. While it runs, and at the first look after it ended by itself (the bot has walked on since the last one),
-   * the bot's place is taken as it is and the count goes on. The watchdog's own forage counts as before.
+   * the bot's place is taken as it is and the count goes on.
    */
   private idleTrack(s: Snapshot): void {
     const here = { x: s.position.x, z: s.position.z };
     const run = this.running?.goal;
     const walkHome = run?.name === returnIdle.name || (this.walkedHomeAt !== undefined && this.now() - this.walkedHomeAt <= 15_000);
     this.walkedHomeAt = undefined;
-    const atWork = !!run && run.name !== returnIdle.name && run !== forage;
+    const atWork = !!run && run.name !== returnIdle.name;
     const moved = !this.idleAt || Math.hypot(here.x - this.idleAt.x, here.z - this.idleAt.z) > 3;
     if (atWork || (moved && !(walkHome && this.idleAt)) || s.activity !== 'work' || s.sleeping || !s.home) {
       this.idleAt = here;
@@ -362,11 +371,14 @@ export class Brain {
 
   /**
    * By day with nothing running, standing still: after IDLE_FIRST every hold is let go (backoffs, a goal left until
-   * the morning) so whatever was waiting tries again; after IDLE_FORAGE it forages (food when hungry, else what's
-   * short). Then it waits ten minutes before going round again. True when it started something.
+   * the morning) so whatever was waiting tries again, and after IDLE_ROUND of it the count starts afresh. It starts
+   * nothing itself. (At 6 min it used to forage: the stock trip without the stock goal's own conditions, or a cow
+   * fetched for the pen. It started 47 times from the step-3 build to Nov 12, and of the dozen cows it went for none
+   * came in. The cows rung and the stock goal do both now, with their own waits; a hungry bot is the food goal's,
+   * which wants by day whenever it carries under 20 food points, and goes for food the same way.)
    */
-  private idleWatch(s: Snapshot, world: WorldMemory): boolean {
-    if (s.activity !== 'work' || s.sleeping || !s.home) return false;
+  private idleWatch(s: Snapshot): void {
+    if (s.activity !== 'work' || s.sleeping || !s.home) return;
     const idle = this.now() - this.idleSince;
     const mins = Math.round(idle / 60_000);
     if (this.idleStage === 0 && idle >= IDLE_FIRST) {
@@ -382,18 +394,13 @@ export class Brain {
       this.morningHold.clear();
       this.freedEarly.clear();
       this.note(`idle ${mins} min by day: let go of ${held.join(', ') || 'nothing (nothing was held)'}`);
-      return false;
+      return;
     }
-    if (this.idleStage === 1 && idle >= IDLE_FORAGE) {
-      this.idleStage = 2;
-      this.start(forage, `idle ${mins} min by day`, s, world);
-      return true;
-    }
-    if (this.idleStage === 2 && idle >= IDLE_FORAGE + 10 * 60_000) {
+    // (the same 16-minute round as when it foraged in between: a hold is let go once in that long, no more often)
+    if (this.idleStage === 1 && idle >= IDLE_ROUND) {
       this.idleStage = 0;
       this.idleSince = this.now();
     }
-    return false;
   }
 
   status(): string {
@@ -414,7 +421,10 @@ export class Brain {
     });
     if (s) {
       lines.push(`Activity: ${s.activity} (time of day ${s.timeOfDay}${s.sleeping ? ', asleep' : ''}). Health ${s.health}, food ${s.food}, ${s.slotsUsed}/36 slots used.`);
-      lines.push(s.home ? `Home (${s.home.x}, ${s.home.y}, ${s.home.z}), ${Number.isFinite(s.distHome) ? Math.round(s.distHome) + ' blocks away' : 'in another dimension'}.` : 'No home set (set-home).');
+      // (and how far below or above it: "16 blocks away" from a cave 55 under the yard read as home)
+      const level = s.home && !onHomeLevel(s.position, s.home) ? Math.round(s.position.y - s.home.y) : 0;
+      const off = level < 0 ? `, ${-level} below it` : level > 0 ? `, ${level} above it` : '';
+      lines.push(s.home ? `Home (${s.home.x}, ${s.home.y}, ${s.home.z}), ${Number.isFinite(s.distHome) ? Math.round(s.distHome) + ' blocks away' + off : 'in another dimension'}.` : 'No home set (set-home).');
       // others' builds (a friend's base, a village): what it keeps its hands off
       if (s.foreign?.zones) {
         const surface = s.foreign.surface ?? s.foreign.zones, under = s.foreign.zones - surface;
@@ -712,7 +722,13 @@ export class Brain {
           // three failures in a row: something is in the way today; leave it until the next morning
           const n = (this.fails.get(goal.name) ?? 0) + 1;
           this.fails.set(goal.name, n);
-          if (n >= 3 && s) {
+          if (n >= 3 && s && goal.failHoldMs !== undefined) {
+            // a goal that gets the bot out of where it is stuck is not left for the night: a while, and it looks again
+            const min = Math.round(goal.failHoldMs / 60_000);
+            this.holdFor(goal.name, this.now() + goal.failHoldMs, `3 failures: ${min} min`);
+            this.fails.delete(goal.name);
+            this.note(`${goal.name} failed 3 times in a row: left for ${min} min`);
+          } else if (n >= 3 && s) {
             const tod = this.last?.timeOfDay ?? s.timeOfDay;
             const toMorning = (((24_000 - tod) % 24_000) || 24_000) * 50;
             this.holdFor(goal.name, this.now() + toMorning, '3 failures: until morning');

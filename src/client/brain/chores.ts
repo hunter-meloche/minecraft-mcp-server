@@ -1,6 +1,6 @@
 import { AVOID_UNLESS_ASKED } from '../../food.js';
 import { foodsFor26, type InventoryItem } from '../tools.js';
-import { fromGate, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 // lives with the goal that walks the bot back to the yard now (goals.ts cannot import from here); still found here
 export { outsideBy } from './goals.js';
 import { COOKS_TO } from './food.js';
@@ -28,7 +28,8 @@ import { roundDue } from './work.js';
 
 const MINUTE = 60_000;
 
-const awakeAtHome = (s: Snapshot) => !s.sleeping && s.dimension === 'overworld' && !!s.home && s.distHome <= NEAR_HOME;
+/** (on home's level: 55 under the yard's edge, 16 from home across the ground, the stash found every chest too far to open) */
+const awakeAtHome = (s: Snapshot) => !s.sleeping && s.dimension === 'overworld' && !!s.home && nearHome(s, NEAR_HOME);
 /**
  * Junk is thrown 8 blocks out from the fence, which in a grown yard is past IN_YARD from home: by day only. In the
  * evening the shelter called the bot back from the dump walk each time, and stash and shelter took turns (a LOOP) till
@@ -159,7 +160,7 @@ export const stash: Goal = {
     const fullAt = world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27;
     // once in 10 min: what it carries for the project fills 31 slots, and a farm round's seeds took it back to 33 at
     // once (the stash ran 6 times in 5 min, stopping the farm, the lights and the trees each time)
-    const fullOut = s.slotsUsed >= fullAt && !s.sleeping && s.distHome <= TRIP_STASH_RANGE && !building &&
+    const fullOut = s.slotsUsed >= fullAt && !s.sleeping && nearHome(s, TRIP_STASH_RANGE) && !building &&
       since(world, 'stash', s.now) > 10 * MINUTE;
     if (!awakeAtHome(s) && !tripWaits && !fullOut) return null;
     const plan = stashList(s, world);
@@ -618,9 +619,9 @@ export const STOCK: { name: string; want: number; mine: string; counts: RegExp }
   { name: 'sand', want: 0, mine: 'sand', counts: /^sand$/ },
   { name: 'clay_ball', want: 0, mine: 'clay', counts: /^clay_ball$/ },
   { name: 'gravel', want: 0, mine: 'gravel', counts: /^gravel$/ },
-  // paper for the enchanting room's books: wild cane, when a project is short of it (the room waited on 116 cane with
-  // the bot idle, no trip ever going for it: the cane plot's few cells grow it too slowly)
-  { name: 'sugar_cane', want: 0, mine: 'sugar_cane', counts: /^sugar_cane$/ },
+  // (no sugar cane: the work queue's `cane patch` grows it and its `cane` rung walks for wild cane, within the leash,
+  // one side a run, with marks that wait longer each time a side has none. The stock trips went for it 30 times from
+  // Nov 10 to 12, a side chosen by the clock, and found none within 96 blocks of home every time)
   // fill for levelling (the yard growing, a site): grass dug gives dirt
   { name: 'dirt', want: 0, mine: 'dirt,grass_block', counts: /^dirt$/ },
   { name: 'andesite', want: 0, mine: 'andesite', counts: /^andesite$/ },
@@ -789,20 +790,6 @@ export const stock: Goal = {
       }
       if (woods.text) ctx.progress(woods.text);
     }
-    // wild cane the same way, to where the cane milestone found it (163 blocks south): mining from home, the trip for
-    // the enchanting room's 113 cane failed "no sugar_cane in sight outside the home area" each time (live
-    // 2026-11-09). With none remembered, one side a trip: a fruitless trip waits half an hour, the next looks elsewhere
-    const wildCane = t.mine === 'sugar_cane';
-    if (wildCane) {
-      const side = WOODS_DIRS[Math.floor(ctx.s.now / FRUITLESS_WAIT) % WOODS_DIRS.length];
-      const wild = await toTheWoods(ctx, ['sugar_cane'], false, { zone: 'wildcane', what: 'sugar cane', dirs: [side] });
-      if (!wild.ok) {
-        done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
-        await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
-        return wild.text;
-      }
-      if (wild.text) ctx.progress(wild.text);
-    }
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
     // as much as the trip's time allows (a build job's whole bill, not a stack at a time)
     let r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
@@ -818,8 +805,6 @@ export const stock: Goal = {
       }
     }
     if (/nothing gained|in sight outside the home area/.test(r.text)) done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
-    // the remembered cane all cut (or never there): look again next time
-    if (wildCane && /nothing gained|in sight outside the home area/.test(r.text)) delete ctx.world.zones?.wildcane;
     // a project's shortfall is served once per trip: the project works out what's still short when it next runs
     // (left standing, it had the bot fetch 22 more birch logs trip after trip)
     const need = ctx.world.progress?.need;

@@ -1,5 +1,5 @@
 import type { InventoryItem } from '../tools.js';
-import { no, outsideBy, type Decline, type GoalContext, type Snapshot } from './goals.js';
+import { nearHome, no, onHomeLevel, outsideBy, type Decline, type GoalContext, type Snapshot } from './goals.js';
 import { key } from './chests.js';
 import { roomFor } from './storage.js';
 import type { WorldMemory } from './memory.js';
@@ -28,10 +28,11 @@ export const NEAR_HOME = 10;
 export const TRIP_STASH_RANGE = 40;
 /**
  * A run of the work queue is under way (`work`), and it is a trip out or down (`trip`): work.ts raises and lowers
- * them round each run, the stash and the brain read them to leave such a run alone. Here, in the one module both
- * sides import. In this process only: after a restart nothing is under way.
+ * them round each run, the stash and the brain read them to leave such a run alone. `ledBy`: the run (its signal)
+ * walking an animal home, on a lead or after its food (pens.ts), which the brain lets only survival cut short. Here, in the one module
+ * both sides import. In this process only: after a restart nothing is under way.
  */
-export const out = { trip: false, work: false };
+export const out: { trip: boolean; work: boolean; ledBy?: AbortSignal } = { trip: false, work: false };
 /**
  * Most of one kind of food carried, a stack: the rest goes in the chests. All of it stayed carried before (live: 541
  * bread in nine slots, 265 in five the day before), slots a trip had no use for.
@@ -120,9 +121,10 @@ export function pockets(s: Snapshot, world: WorldMemory, kind?: RoomKind): Pocke
 /**
  * In the yard or near enough home: where the stash can be sent from, and where a trip down the mine sets out from.
  * Anywhere in the yard, however far it has grown (its far end is 64 from home now), as long as home stands in it.
+ * On home's level: under the yard is not in it (Baritone may break nothing there, and the walk to the chests fails).
  */
 export function inYardOrNear(s: Snapshot, world: WorldMemory): boolean {
-  if (!s.home || !Number.isFinite(s.distHome)) return false;
+  if (!s.home || !Number.isFinite(s.distHome) || !onHomeLevel(s.position, s.home)) return false;
   const yard = world.yard;
   return s.distHome <= TRIP_STASH_RANGE || (!!yard && outsideBy(yard, s.home) === 0 && outsideBy(yard, s.position) === 0);
 }
@@ -219,7 +221,7 @@ export async function makeRoom(ctx: GoalContext, kind: RoomKind): Promise<Snapsh
   // nothing was tried: the reason in the words a gate would give it
   if (first === 'no') throw new Error(`pockets: ${noRoom(kind, WHO[kind], s, ctx.world).text}`);
   stopped();
-  if (s.home && s.distHome > NEAR_HOME) {
+  if (s.home && !nearHome(s, NEAR_HOME)) {
     // the body needs the chests. On foot only, as the chest tools' own first walk is: nothing placed or dug on the way
     // (scaffold a walk left in the storage house blocked the home cell for a whole evening). To within 3 of the home
     // cell, which the chests stand round; where this walk stops short, the chest tools walk the rest as they do today
