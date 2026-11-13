@@ -1,7 +1,8 @@
-import { HOME_ZONE } from '../tools.js';
+import { HOME_ZONE, type InventoryItem } from '../tools.js';
 // (goals.ts takes underNow from here, for the shelter and the walk back: each uses the other's exports inside functions only)
 import { BELOW_HOME, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
+import { zoneDistance, type Zone } from './courtesy.js';
 
 /**
  * Out from under the yard. The bridge keeps Baritone from breaking ground or ore whenever the bot stands in the home
@@ -41,6 +42,10 @@ const FURTHER = 4;
 const FURTHER_TRIES = 2;
 /** A side whose climb failed is left for the others this long: from the same pocket the same climb fails the same way. */
 const CLIMB_FAILED_MS = 60 * MINUTE;
+/** What the top of the shaft it came up by is filled with, the first of these carried: dirt is the meadow's own (grass again in a while), then the stone's. */
+const FILL = ['dirt', 'cobblestone', 'cobbled_deepslate'] as const;
+/** Of the columns round the climb's, this many at most are filled: its own, and a stair's step beside it. */
+const FILL_COLUMNS = 2;
 
 /** The sides whose climb failed lately, and until when each is left out. */
 const climbFailed = new Map<string, number>();
@@ -436,5 +441,66 @@ async function outFrom(ctx: GoalContext): Promise<string> {
     throw new Error(`${done}the climb to ${fmt(up)} failed: ${r.text.slice(0, 120)}${after}`);
   }
   ctx.progress(`climbed to ${fmt(top)}`);
-  return `${done}climbed to ${fmt(top)}`;
+  const filled = await fillShaft(ctx, col, up, top);
+  if (filled) ctx.progress(filled);
+  return `${done}climbed to ${fmt(top)}${filled ? `; ${filled}` : ''}`;
+}
+
+/**
+ * Up on the surface past the margin, the top of the shaft it came up by is filled: the block it climbed out of at
+ * the ground's level and the one under it, wherever round the climb's column the way down is open at both (its own
+ * column for a shaft, the step beside it for a stair), from the bot's carried dirt or stone, placed from where it
+ * stands beside it. Left open, a shaft joins the surface out here to the tunnel that runs back under the yard, a
+ * way down for any walk that is after a place under there (live on Nov 13 three of five falls under the yard were
+ * beside the climbs at x -523/-524, z 2150-2152). The tunnel's mouth under the margin is no matter once its way up
+ * is shut. Never inside the
+ * margin (the lawn, the paths, the doorways), never in water or lava, never in someone else's build, never where the
+ * bot stands (its feet and head are above the ground's level). Undefined when there is nothing open to fill; the
+ * words otherwise (what it filled, or why not: nothing to fill with is said too).
+ */
+async function fillShaft(ctx: GoalContext, col: Column, climb: Pos, top: Pos): Promise<string | undefined> {
+  const ground = top.y - 1;
+  const box = { x: climb.x - 1, y: ground - 1, z: climb.z - 1, width: 3, height: 2, length: 3 };
+  const cells = await region(ctx, box);
+  if (!cells) return `could not look at the shaft by ${fmt(top)}: left open`;
+  const at = (dx: number, dy: number, dz: number) => cells[dy * 9 + (dz + 1) * 3 + (dx + 1)];
+  const holes: Pos[] = [];
+  let wet: string | undefined;
+  for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    const c = { x: climb.x + dx, y: ground, z: climb.z + dz };
+    if (inColumn(col, c)) continue;
+    const lo = at(dx, 0, dz), hi = at(dx, 1, dz);
+    const liquid = [lo, hi].find(b => !!b && LIQUID.test(b));
+    // (water or lava there: nothing is placed by it. In the climb's own column it is said)
+    if (liquid) { if (!dx && !dz) wet = `${LAVA.test(liquid) ? 'lava' : 'water'} in the top of its shaft at ${fmt(c)}: left as it is`; continue; }
+    if (lo && hi && OPEN.test(lo) && OPEN.test(hi)) holes.push(c);
+  }
+  if (!holes.length) return wet;
+  const zones = await ctx.call<{ zones?: Zone[] }>('foreign.zones').then(r => r?.zones ?? [], () => undefined);
+  if (!zones) return `could not look for anyone's build by the shaft at ${fmt(holes[0])}: left open`;
+  const mine = holes.filter(h => !zones.some(z => zoneDistance(h, z) === 0 || zoneDistance({ ...h, y: h.y - 1 }, z) === 0)).slice(0, FILL_COLUMNS);
+  if (!mine.length) return `the shaft at ${fmt(holes[0])} is by someone else's build: left open`;
+  const items = (await ctx.call<{ items?: InventoryItem[] }>('inventory').catch(() => undefined))?.items ?? ctx.s.items;
+  const have = new Map<string, number>(FILL.map(k => [k, items.filter(i => i.slot < 36 && i.name === k).reduce((n, i) => n + i.count, 0)]));
+  if (!FILL.some(k => (have.get(k) ?? 0) > 0)) return `nothing to fill the shaft at ${fmt(mine[0])} with (no ${FILL.join(', ')} carried): left open`;
+  const placed: Pos[] = [];
+  const kinds = new Set<string>();
+  let stopped: string | undefined;
+  fill: for (const h of mine) {
+    // the lower first: the upper is placed on it
+    for (const y of [h.y - 1, h.y]) {
+      if (ctx.signal.aborted) throw new Error('aborted');
+      const kind = FILL.find(k => (have.get(k) ?? 0) > 0);
+      if (!kind) { stopped = 'nothing more to fill it with'; break fill; }
+      const p = { x: h.x, y, z: h.z };
+      const r = await ctx.act('place-block', { ...p, item: kind, faceDirection: 'down' }).catch((e: Error) => ({ ok: false, text: e.message }));
+      if (ctx.signal.aborted) throw new Error('aborted');
+      if (!/^Placed /.test(r.text)) { stopped = `could not place at ${fmt(p)}: ${r.text.slice(0, 80)}`; break; }
+      have.set(kind, (have.get(kind) ?? 1) - 1);
+      kinds.add(kind);
+      placed.push(p);
+    }
+  }
+  const did = placed.length ? `filled the top of its shaft with ${[...kinds].join(' and ')}: ${placed.map(fmt).join(', ')}` : '';
+  return [did, stopped && `${placed.length ? '' : 'the top of its shaft: '}${stopped}`].filter(Boolean).join('; ');
 }

@@ -1098,7 +1098,8 @@ test.serial('a game day on the live homestead, the step-5 rungs and the cane rou
   t.deepEqual(said(/^done cane in /).map(l => l.replace(/ in \d+s/, '')), ['done cane: cut 0 stalk(s) (0 cane)', 'done cane: cut 20 stalk(s) (20 cane)']);
   // the cows rung: each side walked to the leash less 16 and looked round, and none there; one lead taken for it
   t.deepEqual(said(/^done work: cows/).map(l => l.replace(/ in \d+s/, '')), ['north', 'east', 'south'].map(side => `done work: cows: [${side}] no wild cows ${side} within the leash (96 from home); back home`));
-  t.deepEqual(said(/^work: cows: looking/).slice(0, 3), [32, 64, 80].map(d => `work: cows: looking north for wild cows, ${d} blocks out`));
+  // (north 32 out is inside the yard and 64 out the north gate itself: no stop there, out by that gate to 80)
+  t.deepEqual(said(/^work: cows: (looking north|out of the yard by its north)/), ['work: cows: looking north for wild cows, 80 blocks out', 'work: cows: out of the yard by its north gate (-549, 63, 2119)']);
   t.is(game.count('lead'), 1);
   // and no walk for wild cane: the patch grows it
   t.deepEqual(said(/^start work: cane:/), []);

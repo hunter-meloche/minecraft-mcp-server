@@ -314,7 +314,7 @@ function mineBot(items: InventoryItem[], rounds: { add?: Record<string, number>;
       return { ok: true, text: `Mined for ${ms / 1000}s: ${got || 'nothing gained'}.` };
     }
   } as unknown as GoalContext;
-  return { ctx, asked, gains, clock, bag, world };
+  return { ctx, asked, gains, clock, bag, world, level };
 }
 
 const IRON: OreWant = { family: 'iron', ores: 'iron_ore,deepslate_iron_ore', items: ['raw_iron', 'iron_ingot'], want: 20 };
@@ -473,7 +473,7 @@ test.serial('oreTrip comes up when a round has taken it past the leash', async (
   // it has, and no second round
   const m = mineBot(KIT, [{ add: { raw_iron: 4 }, y: 20, z: -110 }, { add: { raw_iron: 8 } }], { y: 64 });
   t.is(m.world.leash, 96);
-  t.deepEqual(await oreTrip(m.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => m.clock.now }), { gain: 4, text: '+4 raw_iron; past the leash: up early' });
+  t.deepEqual(await oreTrip(m.ctx, { wants: [IRON], budgetMs: 10 * MIN, now: () => m.clock.now }), { gain: 4, text: '+4 raw_iron; past the leash: up early', upAt: { x: 0, y: 64, z: -56 } });
   t.deepEqual(m.asked, ['iron_ore to 20 in 180s']);
   // within the leash it goes on (95 out)
   const ok = mineBot(KIT, [{ add: { raw_iron: 4 }, y: 20, z: -95 }, { add: { raw_iron: 16 } }], { y: 64 });
@@ -542,12 +542,12 @@ test.serial('oreTrip that never gets below the mine start throws nothing away up
   // down 50 in its first round, with none of it: the throwing away is down there, and the trip went down
   const down = mineBot(dirt, [{ y: 14 }, { add: { raw_iron: 20 } }], { y: 64 });
   t.deepEqual(await oreTrip(down.ctx, { wants: [GOLD, IRON], budgetMs: 7 * MIN, now: () => down.clock.now }),
-    { gain: 20, text: '+20 raw_iron; dry: gold; dropped 128 dirt down there' });
+    { gain: 20, text: '+20 raw_iron; dry: gold; dropped 128 dirt down there', upAt: { x: 0, y: 64, z: -56 } });
   t.deepEqual(down.asked, ['gold_ore to 10 in 180s', 'drop 128 dirt', 'iron_ore to 20 in 180s']);
   // its one round went down and found none: seen below as it comes up, a trip down all the same
   const last = mineBot(KIT, [{ y: 10 }], { y: 64 });
   t.deepEqual(await oreTrip(last.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => last.clock.now }),
-    { gain: 0, text: 'nothing gained (Mined for 180s: nothing gained.); dry: iron' });
+    { gain: 0, text: 'nothing gained (Mined for 180s: nothing gained.); dry: iron', upAt: { x: 0, y: 64, z: -56 } });
 
   // through the deep rung: five ores tried in 40 s from the surface is no trip that ended well, and a failure the
   // brain holds the rung back for (the 30 s release of a dry mark would send it straight out again)
@@ -638,6 +638,38 @@ test.serial('the old deep trip goal mines its diamonds through oreTrip and count
   t.is(await deepTrip.run(short.ctx), 'could not reach the mine start (0, -56); back home');
   t.deepEqual(workOf(short.world).deep, { starts: [NOW], clean: 0, deaths: [] });
   t.is(short.world.lastDone?.deep, NOW);
+});
+
+test.serial('the old deep trip goal comes up where it went down before it walks home, and oreTrip says where that is', async (t) => {
+  setMineLookMs(0);
+  // home (0, 64, 0), no yard: the bridge's zone is the circle of 24 round home and 6 past it, at any depth. The trip
+  // goes down at the mine start (0, 64, -56) and its round ends 54 below it; from there Baritone's way home runs under
+  // the ground into the column, where it may break nothing (live: (-530, 7, 2189), 55 under the yard)
+  const carried = [...KIT, item(5, 'diamond', 5)];
+  const m = mineBot(carried, [{ add: { diamond: 4 }, ms: 10 * MIN, y: 10 }], { tod: 1000, world: home(), y: 64 });
+  const walks: string[] = [];
+  const ctx = {
+    ...m.ctx,
+    call: (async (method: string, p: Record<string, unknown> = {}) => {
+      // Baritone's walk to a block: there, the way it came
+      if (method === 'goto' && !p.xz) { walks.push(`goto ${p.x},${p.y},${p.z}`); m.level.y = Number(p.y); m.level.z = Number(p.z); return { arrived: true }; }
+      return m.ctx.call(method, p);
+    }) as GoalContext['call'],
+    act: async (tool: string, a?: Record<string, unknown>) => {
+      if (tool !== 'go-home') return m.ctx.act(tool, a);
+      m.asked.push(`go-home from y ${m.level.y}`);
+      if ((m.level.y ?? 64) < 56) { m.level.y = 10; m.level.z = -20; return { ok: false, text: 'Stopped 20 blocks from home after 1s' }; }
+      m.level.y = 64; m.level.z = 0;
+      return { ok: true, text: 'Home' };
+    }
+  } as GoalContext;
+  t.is(await deepTrip.run(ctx), '+4 diamond; back home');
+  t.deepEqual(walks, ['goto 0,64,-56']);
+  t.deepEqual(m.asked, ['diamond_ore to 31 in 180s', 'go-home from y 64']);
+  t.like(workOf(m.world).deep, { clean: 1 });
+  // oreTrip itself: the block it stood on at the start, for a trip that went down and is not under the yard
+  const r = mineBot(KIT, [{ add: { raw_iron: 20 }, y: 10 }], { y: 64 });
+  t.deepEqual(await oreTrip(r.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => r.clock.now }), { gain: 20, text: '+20 raw_iron', upAt: { x: 0, y: 64, z: -56 } });
 });
 
 test.serial('the old deep trip cut short on its walk home: a death on the way is one on the trip, and once home it is over', async (t) => {

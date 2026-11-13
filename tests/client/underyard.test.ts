@@ -187,9 +187,10 @@ type Seen = { id: number; name: string; category: string; position: Pos };
  * stays; someone else's build is refused; gravel falls into what was dug under it. The careful `goto` is Baritone's
  * GoalBlock: it walks into the next cell only, to a place open 2 high with a floor under it, dropping 3 at most on
  * the way (a cell with air under it has no path, and the bot stays put). `move-to-position` is Baritone free to dig
- * and pillar, straight up here: from inside the zone's column it may break nothing and finds no way up through the
- * rock, and within 24 of a block the bot built it breaks nothing of that block's kind (Protection.java: the yard's
- * dirt and grass), so a cap of those stops it under them.
+ * and pillar, straight up here, the bot on its last pillar block at the top (a test shapes another climb with
+ * climbLeaves: the steps of a stair dug up round the column): from inside the zone's column it may break nothing and
+ * finds no way up through the rock, and within 24 of a block the bot built it breaks nothing of that block's kind
+ * (Protection.java: the yard's dirt and grass), so a cap of those stops it under them.
  */
 class Rock {
   private cells = new Map<string, string>();
@@ -208,6 +209,8 @@ class Rock {
   entities: Seen[] = [];
   dug: Pos[] = [];
   climbed: Pos[] = [];
+  /** what place-block put down, in order */
+  placed: { at: Pos; item: string }[] = [];
   /** what a dig of these cells does to the mobs (the auto-defend kills the zombie through the gap) */
   onDig?: (p: Pos) => void;
 
@@ -277,6 +280,24 @@ class Rock {
     return new Set(this.built.filter(b => Math.hypot(b.x - p.x, b.y - p.y, b.z - p.z) <= 24).map(b => this.at(b)));
   }
 
+  /**
+   * place-block as the bridge answers it (Interact.java aimPlace): into an open or liquid cell, never the bot's feet
+   * or head, against a solid face beside it, within reach of the eyes.
+   */
+  place(p: Pos, item: string): { ok: boolean; text: string } {
+    const at = `(${p.x}, ${p.y}, ${p.z})`;
+    const b = this.at(p);
+    if (!this.open(p) && !LIQUID.test(b)) return { ok: true, text: `There's already a block (${b}) at ${at}` };
+    if (p.x === this.bot.x && p.z === this.bot.z && (p.y === this.bot.y || p.y === this.bot.y + 1)) return { ok: true, text: 'You can\'t place a block where you\'re standing or one block above' };
+    const faces = [[0, -1, 0], [0, 0, -1], [0, 0, 1], [1, 0, 0], [-1, 0, 0], [0, 1, 0]].map(([dx, dy, dz]) => this.at({ x: p.x + dx, y: p.y + dy, z: p.z + dz }));
+    if (!faces.some(f => !OPEN.test(f) && !LIQUID.test(f))) return { ok: true, text: `Failed to place block at ${at}: nothing solid next to it to place against` };
+    const eye = { x: this.bot.x + 0.5, y: this.bot.y + 1.62, z: this.bot.z + 0.5 };
+    if (Math.hypot(p.x + 0.5 - eye.x, p.y + 0.5 - eye.y, p.z + 0.5 - eye.z) > 4.5) return { ok: true, text: `Failed to place block at ${at}: too far` };
+    this.set(p, item);
+    this.placed.push({ at: { ...p }, item });
+    return { ok: true, text: `Placed ${item} at ${at} using down face` };
+  }
+
   climb(to: Pos): { ok: boolean; text: string } {
     const stuck = () => new Error(`Could not reach (${to.x}, ${to.y}, ${to.z}): no path found. Stopped at (${this.bot.x}, ${this.bot.y}, ${this.bot.z}), ${Math.round(to.y - this.bot.y)} blocks away.`);
     if (this.inZone(this.bot)) throw stuck();
@@ -288,6 +309,8 @@ class Rock {
     }
     this.climbed.push({ ...to });
     this.bot = { ...to };
+    // (on its last pillar block: no body stands on air, and a shaft open 1 wide is none Baritone climbs without one)
+    this.set({ ...to, y: to.y - 1 }, 'cobblestone');
     return { ok: true, text: `Successfully moved to position near (${to.x}, ${to.y}, ${to.z})` };
   }
 }
@@ -335,6 +358,7 @@ function ctxIn(rock: Rock, over: Partial<Snapshot> = {}, world: WorldMemory = li
       const p = { x: Math.floor(Number(a.x)), y: Math.floor(Number(a.y)), z: Math.floor(Number(a.z)) };
       if (tool === 'dig-block') return rock.dig(p);
       if (tool === 'move-to-position') return rock.climb(p);
+      if (tool === 'place-block') return rock.place(p, String(a.item));
       if (tool === 'go-home') return rock.inZone(rock.bot) ? { ok: false, text: 'Stopped 57 blocks from home after 1s' } : { ok: true, text: 'Home' };
       if (tool === 'wall-in') { for (const c of wallOf(rock.bot)) if (rock.open(c)) rock.set(c, 'dirt'); return { ok: true, text: `Walled in at (${rock.bot.x}, ${rock.bot.y}, ${rock.bot.z})` }; }
       throw new Error(`no tool ${tool}`);
@@ -604,6 +628,119 @@ test.serial('out from under: with every side\'s climb failed, they are all tried
   t.deepEqual(ways.slice(0, 4).sort(), ['east', 'north', 'south', 'west']);
   t.not(ways[4].slice(0, 22), 'every way out is shut');
   t.true(['east', 'west', 'south', 'north'].includes(ways[4]), ways[4]);
+});
+
+/** The climb's top as Baritone leaves it, after the rock's own climb: `shape` changes the cells round where it came up (`from`: where the climb set out). */
+function climbLeaves(rock: Rock, shape: (top: Pos, from: Pos) => void) {
+  const climb = rock.climb.bind(rock);
+  rock.climb = to => { const from = { ...rock.bot }; const r = climb(to); shape(rock.bot, from); return r; };
+}
+/** The live climbs' ring of columns (x -524/-523, z 2150-2152: the column the climb set out from and 5 round it), and a 2 x 2 one. */
+const RING_2X3: [number, number][] = [[0, 0], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1]];
+const RING_2X2: [number, number][] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+/**
+ * The climb as Baritone digs it through the rock to a goal straight over the tunnel's end (move-to-position, within 1
+ * of it): no shaft open 1 wide, which it cannot go up without pillaring, but a stair of ascend steps round a small
+ * ring of columns, each step one along and one up. A column is open where the bot stood (its feet and head) and one
+ * over its head (the head room the step up from there breaks), over a floor of rock; the last step comes up onto
+ * the ground beside the goal. Returns the ways down it leaves (waysDown).
+ */
+function stairUp(rock: Rock, ring: [number, number][]): { before: Pos[] } {
+  const left = { before: [] as Pos[] };
+  climbLeaves(rock, (top, from) => {
+    // (the rock's own climb went straight up the column, onto a pillar block: the rock is put back)
+    for (let y = from.y + 2; y < top.y; y++) rock.set({ ...from, y }, 'stone');
+    let at = { ...from };
+    for (let i = 0; at.y < top.y; i++) {
+      for (const dy of [0, 1, 2]) if (at.y + dy < top.y) rock.set({ ...at, y: at.y + dy }, 'air');
+      const [dx, dz] = ring[(i + 1) % ring.length];
+      at = { x: from.x + dx, y: at.y + 1, z: from.z + dz };
+    }
+    rock.bot = at;
+    left.before = waysDown(rock, from, top.y - 1);
+  });
+  return left;
+}
+/** The ways down from the surface round the climb's column (2 round it): a column open at the ground's level and the block under it (a walk steps down into it, and on). */
+const waysDown = (rock: Rock, c: { x: number; z: number }, ground: number): Pos[] => {
+  const out: Pos[] = [];
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    const p = { x: c.x + dx, y: ground, z: c.z + dz };
+    if (rock.open(p) && rock.open({ ...p, y: ground - 1 })) out.push(p);
+  }
+  return out;
+};
+
+test.serial('out from under fills the top of the stair it came up by: the walks out there can no longer go down it into the tunnel under the yard', async (t) => {
+  // live on Nov 13 three of five falls under the yard were beside the climbs at x -523/-524, z 2150-2152, which went up
+  // round a ring of 2 x 3 columns: a stair down from the surface past the margin to the tunnel that runs back under the lawn
+  setOutFromUnderTiming(1, 100);
+  for (const [ring, top] of [[RING_2X3, '(-524, 69, 2181)'], [RING_2X2, '(-523, 69, 2182)']] as const) {
+    const rock = livePocket();
+    const stair = stairUp(rock, [...ring]);
+    const run = ctxIn(rock);
+    const filled = 'filled the top of its shaft with dirt: (-524, 67, 2183), (-524, 68, 2183), (-523, 67, 2183), (-523, 68, 2183)';
+    t.is(await outFromUnder.run(run.ctx), `tunnel east from (-534, 8, 2182) to x -524 (14 dug); climbed to ${top}; ${filled}`);
+    t.is(run.said.at(-1), filled);
+    // the stair's two top steps that lead down from the ground's level (68 out here): each the block at that level
+    // and the one under it, with its carried dirt, the lower first; past the margin (x -527 is its edge), and nowhere
+    // the bot stands (its feet are at 69, on the ground beside them)
+    t.deepEqual(stair.before, [{ x: -524, y: 68, z: 2183 }, { x: -523, y: 68, z: 2183 }]);
+    t.deepEqual(rock.placed.map(p => p.item), ['dirt', 'dirt', 'dirt', 'dirt']);
+    t.true(rock.placed.every(p => !rock.inZone(p.at) && p.at.y < rock.bot.y));
+    // and no way down is left round it: what is open at the ground's level (the step it came up last) has rock under it
+    t.deepEqual(waysDown(rock, { x: -524, z: 2182 }, 68), []);
+    // the rest of the stair and the tunnel stay as they are: no blocks spent on what no walk reaches any more
+    t.true(rock.open({ x: -523, y: 66, z: 2183 }) && rock.open({ x: -530, y: 8, z: 2182 }));
+  }
+
+  // the bot beside a column open to the top (a narrow check of the order and the reach: Baritone climbs no such
+  // shaft without pillaring it): the lower first, placed from where the bot stands beside it
+  const beside = livePocket();
+  climbLeaves(beside, top => { beside.set({ ...top, y: top.y - 1 }, 'air'); beside.set({ ...top, y: top.y - 1, x: top.x + 1 }, 'stone'); beside.bot = { ...top, x: top.x + 1 }; });
+  t.regex(await outFromUnder.run(ctxIn(beside).ctx), /; climbed to \(-523, 69, 2182\); filled the top of its shaft with dirt: \(-524, 67, 2182\), \(-524, 68, 2182\)$/);
+  t.deepEqual(beside.placed.map(p => p.at), [{ x: -524, y: 67, z: 2182 }, { x: -524, y: 68, z: 2182 }]);
+  t.deepEqual(waysDown(beside, { x: -524, z: 2182 }, 68), []);
+
+  // Baritone pillared up on its own blocks: no way down left open, nothing placed and nothing said of it
+  const pillar = livePocket();
+  climbLeaves(pillar, top => { for (let y = 10; y < top.y; y++) pillar.set({ ...top, y }, 'cobblestone'); });
+  t.regex(await outFromUnder.run(ctxIn(pillar).ctx), /; climbed to \(-524, 69, 2182\)$/);
+  t.deepEqual(pillar.placed, []);
+  t.deepEqual(waysDown(pillar, { x: -524, z: 2182 }, 68), []);
+});
+
+test.serial('out from under with nothing to fill the shaft with says so; water in its top, or someone else\'s build by it, is left as it is', async (t) => {
+  setOutFromUnderTiming(1, 100);
+  // no dirt, cobblestone or deepslate carried (a haul of logs and ore): left open, and said
+  const bare = livePocket();
+  stairUp(bare, RING_2X3);
+  const logs: InventoryItem[] = [{ slot: 0, name: 'diamond_pickaxe', count: 1 }, { slot: 1, name: 'oak_log', count: 64 }, { slot: 2, name: 'raw_gold', count: 32 }, ...WORN.map(i => ({ ...i }))];
+  const none = ctxIn(bare, { items: logs });
+  t.regex(await outFromUnder.run(none.ctx), /; climbed to \(-524, 69, 2181\); nothing to fill the shaft at \(-524, 68, 2183\) with \(no dirt, cobblestone, cobbled_deepslate carried\): left open$/);
+  t.deepEqual(bare.placed, []);
+  t.false(none.tools.includes('place-block'));
+  // only cobblestone: that, then
+  const cobble = livePocket();
+  stairUp(cobble, RING_2X3);
+  t.regex(await outFromUnder.run(ctxIn(cobble, { items: [...logs, { slot: 3, name: 'cobblestone', count: 1 }] }).ctx),
+    /; filled the top of its shaft with cobblestone: \(-524, 67, 2183\); nothing more to fill it with$/);
+
+  // the shaft's top full of water (a spring broke into it): no block is placed in it or beside it
+  const wet = livePocket();
+  climbLeaves(wet, top => { wet.set({ ...top, y: top.y - 1 }, 'water[level=0]'); wet.set({ ...top, y: top.y - 2 }, 'water[level=1]'); });
+  t.regex(await outFromUnder.run(ctxIn(wet).ctx), /; climbed to \(-524, 69, 2182\); water in the top of its shaft at \(-524, 68, 2182\): left as it is$/);
+  t.deepEqual(wet.placed, []);
+
+  // someone else's build over it (the mod's zone round their cellar): not the bot's to fill
+  const theirs = livePocket();
+  stairUp(theirs, RING_2X3);
+  const w = ctxIn(theirs);
+  const call = w.ctx.call;
+  w.ctx.call = (async (method: string, p?: Record<string, unknown>, ms?: number) =>
+    (method === 'foreign.zones' ? { zones: [{ x1: -526, y1: 60, z1: 2180, x2: -522, y2: 70, z2: 2184, surface: true }] } : call(method, p, ms))) as GoalContext['call'];
+  t.regex(await outFromUnder.run(w.ctx), /; climbed to \(-524, 69, 2181\); the shaft at \(-524, 68, 2183\) is by someone else's build: left open$/);
+  t.deepEqual(theirs.placed, []);
 });
 
 test('out from under wants only under the yard: not in its own mine shaft past the margin, not in a cellar 8 under the lawn, not at home, not asleep', (t) => {

@@ -13,7 +13,7 @@ import { kit as kitGoal, stashKeep, stashList } from '../../src/client/brain/cho
 import { setMineLookMs } from '../../src/client/brain/deep.js';
 import { LADDER, SURFACE_STOCK, WORK_STOCK, deepShort, tierStep } from '../../src/client/brain/worktasks.js';
 import {
-  DRY_WAIT, EVENING_AT, MIN_WORK, PROBATION, TRIP_URGENCY, deepHold, dryBlocked, dryUntil, markDry, needMs, pick, releaseOldestDry, roundDue,
+  DRY_WAIT, EVENING_AT, MIN_WORK, PROBATION, TRIP_URGENCY, alongSide, deepHold, dryBlocked, dryUntil, markDry, needMs, outByGate, pick, releaseOldestDry, roundDue,
   shareHolds, skippedLine, workGoals, workLine, workOf, workTick, type Death, type WorkMemory, type WorkTask
 } from '../../src/client/brain/work.js';
 
@@ -1246,8 +1246,11 @@ test.serial('a trip has urgency 58; a yard task does not', async (t) => {
 interface State { pos: Pos; time: number; items: InventoryItem[]; death?: { at: Pos; time: number }; noDeaths?: string; walk?: 'held' | 'fails' }
 const atHome = (over: Partial<State> = {}): State => ({ pos: { ...HOME }, time: 1000, items: [], ...over });
 
-/** More for the stand-in game: tools, and bridge calls answered before its own (undefined: not this one). */
-interface Extra { actions?: ClientRuntime['actions']; call?: (method: string, params?: Record<string, unknown>) => unknown }
+/**
+ * More for the stand-in game: tools, and bridge calls answered before its own (undefined: not this one). `strict`: the
+ * status look goes through the bridge as tools.ts's does, refused to a run the brain has given up.
+ */
+interface Extra { actions?: ClientRuntime['actions']; call?: (method: string, params?: Record<string, unknown>) => unknown; strict?: true }
 
 /**
  * A bot in the world `seed:1` with its home at (0, 64, 0), and a brain over it whose clock the test moves (`tick`
@@ -1280,8 +1283,11 @@ function brainOf(state: State, tasks: WorkTask[], more: Goal[] = [], memoryFile?
       if (method === 'cancel') { release?.(); home?.(); return {}; }
       return {};
     }) as ClientRuntime['call'],
-    status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: state.pos, block: state.pos, timeOfDay: state.time, hashedSeed: '1',
-      dimension: 'overworld', sleeping: false, thundering: false, process: null, health: 20, food: 20 }),
+    status: async () => {
+      if (extra.strict && brainRun.getStore()?.signal.aborted) throw new Error('aborted: the brain gave this job up');
+      return { inWorld: true, username: 'Bot', screen: null, position: state.pos, block: state.pos, timeOfDay: state.time, hashedSeed: '1',
+        dimension: 'overworld', sleeping: false, thundering: false, process: null, health: 20, food: 20 };
+    },
     home: () => ({ ...HOME, dimension: 'overworld' }),
     lastDeath: () => { if (state.noDeaths) throw new Error(state.noDeaths); return state.death; },
     setManualHook: () => undefined,
@@ -1437,6 +1443,289 @@ test.serial('the run wrapper does not walk home from under the yard, where the w
   const high = await b.run(deep, emptyWorld(), {}, { x: 8, y: 94, z: 0 });
   t.is(high.text, '[iron] +5 things; back home');
   t.deepEqual(high.d.acts, ['go-home']);
+});
+
+test.serial('a trip down comes up where it went down before it walks home: Baritone\'s way home from down there runs under the yard', async (t) => {
+  // live on Nov 13 the walk home from (-505, -21, 2213) stopped 55 under the yard at (-530, 7, 2189), and a trip's walk
+  // home after its iron at (-529, 10, 2179). Home (0, 64, 0) with no yard known: the bridge's zone is the circle of 24
+  // round home and 6 past it, at any depth. The trip went down at the mine start (40, 64, 0) and ends 40 out, 54 down
+  const deep = stub('deep', 5, 'deep', [['iron', 0]], { run: async () => ({ gain: 5, text: '+5 raw_iron', upAt: { x: 40, y: 64, z: 0 } }) });
+  const b = bench([deep]);
+  /** the bot down there: Baritone's walk to a block gets there the way it came (`stuck`: it does not), and go-home from down there plans straight under the ground into the column */
+  const down = (at: Pos = { x: 40, y: 10, z: 0 }, stuck = false) => {
+    const world = emptyWorld();
+    const d = direct(b.look(), world, at);
+    const walks: string[] = [];
+    const said: string[] = [];
+    d.ctx.progress = l => { said.push(l); };
+    d.ctx.call = (async (method: string, p: Record<string, unknown> = {}) => {
+      if (method !== 'goto') return {};
+      walks.push(`goto ${p.x},${p.y},${p.z}${p.careful ? ' careful' : ''}${p.xz ? ' xz' : ''}`);
+      if (stuck) return { arrived: false };
+      d.pos = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+      return { arrived: true };
+    }) as GoalContext['call'];
+    d.ctx.act = async tool => {
+      d.acts.push(tool);
+      if (tool !== 'go-home') return { ok: true, text: 'ok' };
+      if (d.pos.y < HOME.y - 8) { d.pos = { x: 20, y: 10, z: 0 }; return { ok: false, text: 'Stopped 22 blocks from home after 1s' }; }
+      d.pos = { ...HOME };
+      return { ok: true, text: 'Home' };
+    };
+    return { d, walks, said, world };
+  };
+  const a = down();
+  t.is(await b.goal(deep).run(a.d.ctx), '[iron] +5 raw_iron; back home');
+  // up the way it came first, Baritone's own walk to the block it stood on (not walk-only, not "any height here"),
+  // then home over the surface: never under the yard
+  t.deepEqual(a.walks, ['goto 40,64,0']);
+  t.deepEqual(a.d.acts, ['go-home']);
+  t.deepEqual(a.d.pos, HOME);
+  t.deepEqual(a.said, ['up where it went down, (40, 64, 0), before the walk home']);
+  t.like(workOf(a.world).deep, { clean: 1 });
+  t.is(workOf(a.world).deep.away, undefined);
+  // up there already (the trip never got far from its shaft's top): straight home
+  const top = down({ x: 41, y: 64, z: 1 });
+  t.is(await b.goal(deep).run(top.d.ctx), '[iron] +5 raw_iron; back home');
+  t.deepEqual(top.walks, []);
+  // the way back not found (the start gone, a build in the way): go-home as before, which says where it stopped
+  const lost = down(undefined, true);
+  await t.throwsAsync(b.goal(deep).run(lost.d.ctx), { message: '[iron] +5 raw_iron, but could not get home: Stopped 22 blocks from home after 1s' });
+  t.deepEqual(lost.walks, ['goto 40,64,0']);
+  // the walk up cut short (the shelter at dusk): its marks are written, and the trip stays open until the bot is home
+  const cut = down();
+  cut.d.ctx.call = (async () => { cut.d.abort(); throw new Error('aborted'); }) as GoalContext['call'];
+  await t.throwsAsync(b.goal(deep).run(cut.d.ctx), { message: 'aborted' });
+  t.is(cut.said.at(-1), '[iron] +5 raw_iron; stopped on the walk home (its marks are written)');
+  t.deepEqual(cut.d.acts, []);
+  t.not(workOf(cut.world).deep.away, undefined);
+});
+
+test('out of the yard by a gate: careful to the block 2 inside it and the one 2 outside, each on its own floor; nothing to do from outside, or with no gate known', async (t) => {
+  // a yard 33 across round home (0, 64, 0), its ground at 63, the west gate at (-16, 64, 0); outside it the ground
+  // rises 3 (as outside the live yard's west gate)
+  const world = emptyWorld({ yard: { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 }, zones: { 'fence:gate': [{ x: -16, y: 64, z: 0 }] } });
+  const ground = (x: number) => (x < -16 ? 66 : 63);
+  const walk = (from: Pos) => {
+    const d = direct(snap(), world, from);
+    const gotos: Record<string, unknown>[] = [];
+    d.ctx.call = (async (method: string, p: Record<string, unknown> = {}) => {
+      if (method === 'world.region') return { blocks: Array.from({ length: Number(p.height) }, (_, i) => (Number(p.y) + i <= ground(Number(p.x)) ? 'stone' : 'air')) };
+      if (method === 'goto') { gotos.push(p); d.pos = { x: Number(p.x), y: Number(p.y), z: Number(p.z) }; return { arrived: true }; }
+      return {};
+    }) as GoalContext['call'];
+    return { d, gotos };
+  };
+  const a = walk(HOME);
+  t.deepEqual(await outByGate(a.d.ctx, { x: -60, z: 0 }), { gate: { x: -16, y: 64, z: 0 }, at: { x: -18, y: 67, z: 0 } });
+  // (to within 1 of each: a block on the ground still, and a bot on a path or in a plant there is there)
+  t.deepEqual(a.gotos.map(p => [p.x, p.y, p.z, p.range, p.careful, p.xz]), [[-14, 64, 0, 1, true, undefined], [-18, 67, 0, 1, true, undefined]]);
+  // already outside the fence, or on its way to somewhere inside it: no walk
+  const b = walk({ x: -30, y: 67, z: 0 });
+  t.deepEqual(await outByGate(b.d.ctx, { x: -60, z: 0 }), {});
+  const c = walk(HOME);
+  t.deepEqual(await outByGate(c.d.ctx, { x: 10, z: 10 }), {});
+  t.deepEqual([...b.gotos, ...c.gotos], []);
+  // no gate known: nothing it can do (the walk goes as it did)
+  const none = direct(snap(), emptyWorld({ yard: { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 } }));
+  t.deepEqual(await outByGate(none.ctx, { x: -60, z: 0 }), {});
+});
+
+test('out of the yard by a gate: left in the gateway is not out (the next gate); only the sides asked for; a path or a plant at a gate\'s cell is no shut gate', async (t) => {
+  // the yard round home (0, 64, 0), its ground at 63, gates west (-16, 64, 0) and north (0, 64, -16), flat ground
+  const gates = [{ x: -16, y: 64, z: 0 }, { x: 0, y: 64, z: -16 }];
+  const world = emptyWorld({ yard: { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 }, zones: { 'fence:gate': gates.map(g => ({ ...g })) } });
+  /**
+   * The bridge's goto over that ground (`floor` at 63, `plant` over it): Baritone walks there, and the bot's block is
+   * the one its feet are in, 64, or the path's own on a dirt path (its top is under a full block); arrived as
+   * Handlers.java says it (within `range` of the block, the block itself for range 0). `gateway`: the walk to the
+   * cell outside the west gate stops in the gateway.
+   */
+  const walk = (opts: { gateway?: boolean; floor?: string; plant?: string } = {}) => {
+    const d = direct(snap(), world, HOME);
+    const gotos: string[] = [];
+    const said: string[] = [];
+    d.ctx.progress = l => { said.push(l); };
+    const block = (y: number) => (y < 63 ? 'stone' : y === 63 ? opts.floor ?? 'grass_block' : y === 64 ? opts.plant ?? 'air' : 'air');
+    d.ctx.call = (async (method: string, p: Record<string, unknown> = {}) => {
+      if (method === 'world.region') return { blocks: Array.from({ length: Number(p.height) }, (_, i) => block(Number(p.y) + i)) };
+      if (method !== 'goto') return {};
+      const to = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+      gotos.push(`${to.x},${to.y},${to.z}`);
+      if (opts.gateway && to.x === -18) { d.pos = { x: -15.5, y: 64, z: 0.5 }; return { arrived: false }; }
+      d.pos = { ...to, y: opts.floor === 'dirt_path' ? 63 : 64 };
+      const away = Math.hypot(d.pos.x - to.x, d.pos.y - to.y, d.pos.z - to.z);
+      return { arrived: Number(p.range) <= 0 ? away === 0 : away <= Number(p.range) + 0.01 };
+    }) as GoalContext['call'];
+    return { d, gotos, said };
+  };
+  // the walk through the west gate got to the cell inside it and not on: the bot stands in the gateway, on the fence
+  // line. Not out: a walk to "any height" from there is the one the gate keeps it from. The next gate, the north
+  const a = walk({ gateway: true });
+  t.deepEqual(await outByGate(a.d.ctx, { x: -60, z: 0 }), { gate: { x: 0, y: 64, z: -16 }, at: { x: 0, y: 64, z: -18 } });
+  t.deepEqual(a.gotos, ['-14,64,0', '-18,64,0', '0,64,-14', '0,64,-18']);
+  t.deepEqual(a.said, ['out of the yard by its west gate (-16, 64, 0)', 'out of the yard by its north gate (0, 64, -16)']);
+  // only the west side's gate asked for (a side walk west): no other gate, and shut
+  const b = walk({ gateway: true });
+  t.deepEqual(await outByGate(b.d.ctx, { x: -60, z: 0 }, ['west']), { shut: 'no way out of the yard by the west gate (-16, 64, 0)' });
+  t.deepEqual(b.gotos, ['-14,64,0', '-18,64,0']);
+  // a side with no gate in its fence: shut, and no walk
+  const c = walk();
+  t.deepEqual(await outByGate(c.d.ctx, { x: 0, z: 60 }, ['south']), { shut: 'no gate in the yard\'s south fence' });
+  t.deepEqual(c.gotos, []);
+  // a dirt path laid up to the gates: the bot on it is a block under the cell over it, and there all the same
+  const path = walk({ floor: 'dirt_path' });
+  t.deepEqual(await outByGate(path.d.ctx, { x: -60, z: 0 }), { gate: { x: -16, y: 64, z: 0 }, at: { x: -18, y: 63, z: 0 } });
+  t.deepEqual(path.gotos, ['-14,64,0', '-18,64,0']);
+  // pink petals over the grass (floorAt does not know them for a plant): it takes them for the floor, and the cell
+  // over them is 1 above where the bot stands in them
+  const petals = walk({ plant: 'pink_petals[facing=north,flower_amount=4]' });
+  t.deepEqual(await outByGate(petals.d.ctx, { x: -60, z: 0 }), { gate: { x: -16, y: 64, z: 0 }, at: { x: -18, y: 64, z: 0 } });
+  t.deepEqual(petals.gotos, ['-14,65,0', '-18,65,0']);
+});
+
+test('a side whose stops all fall in the yard or its margin is looked along from the first place past the margin; with the yard and its margin out to the leash, from home alone', async (t) => {
+  // home (0, 64, 0); the yard's north fence `z1`, the bridge's margin 6 past it; no gate known (the walk goes straight)
+  const along = async (z1: number, leash = 96) => {
+    const world = emptyWorld({ leash, yard: { x1: -16, z1, x2: 16, z2: 16, y: 63 } });
+    const d = direct(snap(), world);
+    const gotos: string[] = [];
+    let looks = 0;
+    d.ctx.call = (async (method: string, p: Record<string, unknown> = {}) => {
+      if (method !== 'goto') return {};
+      gotos.push(`${p.x},${p.z}`);
+      d.pos = { x: Number(p.x), y: 64, z: Number(p.z) };
+      return { arrived: true };
+    }) as GoalContext['call'];
+    const r = await alongSide(d.ctx, 'north', 'wild cows', async () => { looks++; return undefined; });
+    return { r, gotos, looks };
+  };
+  // the yard's fence 64 out, as the live one: 32 and 64 out left out, 80 out (16 past) the stop, as ever
+  t.deepEqual((await along(-64)).gotos, ['0,-80']);
+  // the yard grown out to 76: 80 out is 4 past its fence, in the margin. Not written off from a look at home: the
+  // first place past the margin, 83 out, within the leash
+  const grown = await along(-76);
+  t.deepEqual(grown.r, { text: 'no wild cows north within the leash (96 from home)' });
+  t.deepEqual(grown.gotos, ['0,-83']);
+  t.is(grown.looks, 2);
+  // a shorter leash, 80: the last stop is 64 out, the fence itself; 71 out instead
+  t.deepEqual((await along(-64, 80)).gotos, ['0,-71']);
+  // the yard and its margin out past the leash that way: nothing wild that way within it, and no walk
+  const all = await along(-92);
+  t.deepEqual(all.r, { text: 'no wild cows north within the leash (96 from home)' });
+  t.deepEqual([all.gotos, all.looks], [[], 1]);
+});
+
+test.serial('a run cut short under the yard marks its variant and the queue goes another way next; one that ends there too; cut short anywhere else, none', async (t) => {
+  // live on Nov 13 the cows' north side went under the yard three times in 20 min: each run cut short there by out
+  // from under wrote "no mark", and the same side was chosen again at once. Home (0, 64, 0), no yard: the column of
+  // 24 and 6 round it, at any depth
+  const cows = stub('cows', 2, 'far', [['north', 96], ['east', 96]]);
+  const b = bench([cows]);
+  const run = async (world: WorldMemory, to: Pos, abort = true) => {
+    const d = direct(b.look(), world);
+    const said: string[] = [];
+    d.ctx.progress = l => { said.push(l); };
+    // the walk takes the bot there, and (abort) the brain gives the run up: its next call fails
+    cows.body = async () => { d.pos = { ...to }; if (abort) { d.abort(); throw new Error('aborted'); } };
+    const text = await b.goal(cows).run(d.ctx).catch((e: Error) => e.message);
+    return { text, said };
+  };
+  const world = emptyWorld();
+  const north = await run(world, { x: 13, y: 21, z: -28 });
+  t.is(north.text, 'aborted');
+  t.deepEqual(north.said, ['[north] stopped before its end, nothing brought in yet (under the yard: went under the yard on the way: a mark, another way next)']);
+  t.deepEqual(workOf(world).dry['cows:north'], { n: 1, at: T0 });
+  t.is(dryUntil(world, 'cows:north'), T0 + DRY_WAIT[0]);
+  t.is(workOf(world).next.cows, 1);
+  t.like(pick(cows, b.look(), world), { variant: 'east' });
+  // north again once its mark is up, and under the yard again: still a first mark's wait, not a longer one
+  b.at.now += DRY_WAIT[0] + MINUTE;
+  workOf(world).next.cows = 0;
+  await run(world, { x: 13, y: 21, z: -28 });
+  t.deepEqual(workOf(world).dry['cows:north'], { n: 1, at: b.at.now });
+  // a run that ends under the yard (it brought one in on the way) is marked as well: under there no walk home goes
+  const ended = emptyWorld();
+  cows.gains = [1];
+  const r = await run(ended, { x: 13, y: 21, z: -28 }, false);
+  t.is(r.text, '[north] +1 things; under the yard: out from under first');
+  t.deepEqual(workOf(ended).dry['cows:north'], { n: 1, at: b.at.now });
+  t.is(workOf(ended).next.cows, 1);
+  // cut short on the surface 30 out (a home round, the LLM, the shelter): nothing learnt, no mark, as ever
+  const surface = emptyWorld();
+  const s = await run(surface, { x: 30, y: 64, z: 0 });
+  t.deepEqual(s.said, ['[north] stopped before its end, nothing brought in yet (no mark written)']);
+  t.deepEqual(workOf(surface).dry, {});
+  t.false('cows' in workOf(surface).next);
+});
+
+test.serial('a run that goes under the yard leaves its mark\'s count as it was, and a try let go early that went under is not let go again', async (t) => {
+  // a run under the yard, cut short there by out from under (home (0, 64, 0), no yard: the column of 24 and 6 round it)
+  const under = async (b: ReturnType<typeof bench>, task: Stub, world: WorldMemory) => {
+    const d = direct(b.look(), world);
+    task.body = async () => { d.pos = { x: 13, y: 21, z: -28 }; d.abort(); throw new Error('aborted'); };
+    await t.throwsAsync(b.goal(task).run(d.ctx), { message: 'aborted' });
+  };
+  // a terrain side dry five times (it waited 320 min), tried once that was up, goes under: it waits its 320 min
+  // again, not a first mark's 20 (and its next dry run is the sixth)
+  const cows = stub('cows', 2, 'far', [['north', 96], ['east', 96]], { terrain: true });
+  const b = bench([cows]);
+  const world = emptyWorld();
+  workOf(world).dry['cows:north'] = { n: 5, at: T0 - 330 * MINUTE };
+  await under(b, cows, world);
+  t.deepEqual(workOf(world).dry['cows:north'], { n: 5, at: T0 });
+  t.is(dryUntil(world, 'cows:north', [cows]) - T0, 320 * MINUTE);
+  // a surface rung's mark let go early by the idle release; its try goes under: that wait is sat out in full, as
+  // after a try that came back dry (one early try per wait), not let go again after the next half minute
+  const coal = stub('surface', 4, 'near', [['coal', 20]]);
+  const c = bench([coal]);
+  const w2 = emptyWorld();
+  markDry(w2, 'surface:coal', T0 - 5 * MINUTE);
+  t.is(releaseOldestDry(w2, T0, c.look(), [coal]), 'surface:coal');
+  await under(c, coal, w2);
+  t.deepEqual(workOf(w2).dry['surface:coal'], { n: 1, at: T0, freed: true });
+  t.is(releaseOldestDry(w2, T0 + MINUTE, c.look({ now: T0 + MINUTE }), [coal]), undefined);
+  t.is(dryUntil(w2, 'surface:coal', [coal]), T0 + DRY_WAIT[0]);
+  // once that wait is up and it goes under again: a mark like any other, which may be let go early once
+  c.at.now = T0 + DRY_WAIT[0] + MINUTE;
+  await under(c, coal, w2);
+  t.deepEqual(workOf(w2).dry['surface:coal'], { n: 1, at: c.at.now });
+  t.is(releaseOldestDry(w2, c.at.now + MINUTE, c.look({ now: c.at.now + MINUTE }), [coal]), 'surface:coal');
+});
+
+test.serial('through the brain: out from under cuts the cows run under the yard, the cut is marked, and the next run goes east', async (t) => {
+  const want: Record<string, string> = {};
+  const state = atHome();
+  // out from under by its name and urgency: it wants under the yard (the column of 24 and 6 round home, 8 down), and
+  // its run brings the bot up past the margin
+  const under = (p: Pos) => Math.abs(p.x) <= 30 && Math.abs(p.z) <= 30 && p.y < HOME.y - 8;
+  const outFromUnder: Goal = {
+    name: 'out from under', priority: 93, wants: () => (under(state.pos) ? '43 under the yard\'s ground' : want['out from under'] ?? null),
+    run: async () => { state.pos = { x: 33, y: 64, z: 0 }; return 'climbed to (33, 64, 0)'; }, timeoutMs: 60_000, retryMs: 20_000
+  };
+  const cows = stub('cows', 2, 'far', [['north', 96], ['east', 96]]);
+  cows.body = async (ctx, variant) => {
+    // north: down a cave under the lawn on the walk out (live: (-536, 21, 2155)), and on walking down there
+    if (variant === 'north') { state.pos = { x: 13, y: 21, z: -28 }; await ctx.act('slow'); }
+  };
+  // (the look after the cut goes through the bridge, which refuses the given-up run's own calls)
+  const b = brainOf(state, [cows], [outFromUnder], undefined, { strict: true });
+  await b.tick(5000);
+  await b.tick(5000);
+  t.deepEqual(b.said().filter(l => /^(start|stopping|work: cows: \[)/.test(l)).slice(0, 4), [
+    'start work: cows: north: 96 blocks out',
+    'stopping work: cows: out from under is more urgent (43 under the yard\'s ground)',
+    'work: cows: [north] stopped before its end, nothing brought in yet (under the yard: went under the yard on the way: a mark, another way next)',
+    'start out from under: 43 under the yard\'s ground'
+  ]);
+  t.like(queue(b.brain).dry['cows:north'], { n: 1 });
+  // up and home again: the cows rung goes east, not north at once
+  state.pos = { ...HOME };
+  await b.tick(5000);
+  await b.tick(5000);
+  t.true(b.said().some(l => l.startsWith('start work: cows: east')), b.said().join('\n'));
+  t.deepEqual(cows.ran.map(r => r.variant), ['north', 'east']);
+  await b.off();
 });
 
 test.serial('out.work and out.trip are false again after a run that throws, is pre-empted or times out; none of them books a dry mark', async (t) => {

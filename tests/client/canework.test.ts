@@ -481,6 +481,34 @@ test('the cane rung: a remembered stand it cannot get to waits a dry mark and th
     { gain: 0, text: 'no wild cane seen south from home: the run\'s time ran out', mark: 'same' });
 });
 
+test('the cane rung looks along a side from outside the yard: out by its gate, no stop inside the fence; with its gate shut, no other gate, and a dry side', async (t) => {
+  const { land, patch } = wildLand();
+  const gates = [{ x: -549, y: 63, z: 2119 }, { x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 }];
+  const world = () => liveWorld({ zones: { cane: patch, 'fence:gate': gates.map(g => ({ ...g })) } });
+  // north: 32 out is inside the yard and 64 out the north gate: out through it (careful, to its cells), then 80 out
+  const b = botIn(land, world(), KIT);
+  const careful: boolean[] = [];
+  const call = b.ctx.call;
+  b.ctx.call = (async (method: string, p: Record<string, unknown> = {}, ms?: number) => {
+    if (method === 'goto') careful.push(!!p.careful && !p.xz);
+    return call(method, p, ms);
+  }) as GoalContext['call'];
+  t.deepEqual(await rung('cane').run(b.ctx, 'north', 6 * MINUTE, () => T0), { gain: 0, text: 'no wild cane north within the leash (96 from home)' });
+  t.deepEqual(b.me.gotos.map(g => `${g.x},${g.z}`), ['-549,2121', '-549,2117', '-549,2103']);
+  t.deepEqual(careful, [true, true, false]);
+  // every gate shut to it (a walk to the cell outside one stops inside): out by its own side's gate or not at all
+  // (from another side's, the walk to "any height" at the stop goes round the fence or back across the yard), and
+  // nothing looked at out there: a side with none for the wrapper's mark, not a held failure that comes back to it
+  const shut = botIn(land, world(), KIT);
+  const inner = shut.ctx.call;
+  shut.ctx.call = (async (method: string, p: Record<string, unknown> = {}, ms?: number) =>
+    (method === 'goto' && !p.xz && gates.some(g => Math.hypot(g.x - Number(p.x), g.z - Number(p.z)) <= 2.1 && (Number(p.x) < YARD.x1 || Number(p.x) > YARD.x2 || Number(p.z) < YARD.z1 || Number(p.z) > YARD.z2))
+      ? { arrived: false } : inner(method, p, ms))) as GoalContext['call'];
+  t.deepEqual(await rung('cane').run(shut.ctx, 'north', 6 * MINUTE, () => T0), { gain: 0, text: 'no wild cane looked for north: no way out of the yard by the north gate (-549, 63, 2119)' });
+  t.deepEqual(shut.me.gotos.map(g => `${g.x},${g.z}`), ['-549,2121']);
+  t.false(shut.me.gotos.some(g => g.z <= 2103));
+});
+
 test('the cane rung: wild cane by someone\'s build or past the leash is not the bot\'s; a side with none is a terrain mark that goes on doubling', async (t) => {
   const { land } = wildLand();
   // a friend's house 10 from the stand: it is theirs

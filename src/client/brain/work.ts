@@ -10,14 +10,15 @@
  * brain call.
  */
 import { fromGate, nearHome, nearHomeAt, no, outsideBy, YARD_EDGE, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
-import type { WorldMemory } from './memory.js';
+import type { Pos, WorldMemory } from './memory.js';
 import { NEAR_HOME, TRIP_STASH_RANGE, inYardOrNear, makeRoom, noRoom, out, room, type RoomKind } from './pockets.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
 import { deepTripKit, tripBudgetMs } from './mine.js';
 import { tripCheck } from './deep.js';
 import { clock } from './idlelog.js';
 import { LADDER, tierStep } from './worktasks.js';
-import { underYard } from './underyard.js';
+import { ZONE_MARGIN, underYard } from './underyard.js';
+import { brainRun } from '../tools.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -38,8 +39,10 @@ export type Reach = 'yard' | 'near' | 'far' | 'deep';
  * not come in), so a first mark whatever the count before, or the sides where cows graze would wait ever longer;
  * `same`, it was not looked at to its end (the run's time ran out, the pen had its pair after all), so the count
  * stays as it was; `forget`, the place is forgotten (a stand gone, or someone's), so its mark goes and none is written.
+ * `upAt`: a run down the mine that ends down there: the block it stood on at the surface where it went down, which
+ * the walk home comes up by first (walkUp).
  */
-export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget' }
+export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget'; upAt?: Pos }
 
 export interface WorkTask {
   name: string;
@@ -303,26 +306,140 @@ const SIDE_MARGIN = 16;
 /**
  * In the yard or within its edge, one of these: a walk between them is careful (walk only), as pens.ts walks to an
  * animal. Baritone's own walk climbs the fence and leaves its scaffold there (the stray cobblestone at the east fence),
- * and every side's first stop lies in the yard or across its fence (north 32 out is inside it, north 64 the gate).
+ * and the walk out of the yard to a side's first stop goes through a gate (outByGate).
  */
 export const byYard = (world: WorldMemory, ...ps: { x: number; z: number }[]): boolean =>
   !!world.yard && ps.some(p => outsideBy(world.yard!, p) <= YARD_EDGE);
+
+/**
+ * Strictly inside the yard's fence (the fence line itself is not inside: the gates stand on it). The walks into the
+ * yard (a fetch with its animal, pens.ts) and out of it (the side walks, the fetch's walk to an animal) go by this.
+ */
+export function inFence(world: WorldMemory, q: { x: number; z: number }): boolean {
+  const y = world.yard;
+  return !!y && Math.floor(q.x) > y.x1 && Math.floor(q.x) < y.x2 && Math.floor(q.z) > y.z1 && Math.floor(q.z) < y.z2;
+}
+
+/** A gate in the yard's fence as a walk through it goes: the side it is on, and the cells 2 inside and 2 outside it. */
+export interface YardGate { gate: Pos; side: HomeSide; inner: Pos; outer: Pos }
+
+const mid = (c: { x: number; z: number }) => ({ x: c.x + 0.5, z: c.z + 0.5 });
+
+/**
+ * The yard's gates (world memory's `fence:gate`), by the way each makes between a place inside the fence and one
+ * outside it, the shortest first: to its cell on the near side, through it, and on from its cell on the far side (the
+ * same either way round: a fetch walks in by it, a side walk out).
+ */
+export function gatesBetween(world: WorldMemory, inside: { x: number; z: number }, outside: { x: number; z: number }): YardGate[] {
+  const yard = world.yard;
+  if (!yard) return [];
+  const ways: { len: number; g: YardGate }[] = [];
+  for (const g of world.zones?.['fence:gate'] ?? []) {
+    const side: HomeSide | undefined = g.z === yard.z1 ? 'north' : g.z === yard.z2 ? 'south' : g.x === yard.x1 ? 'west' : g.x === yard.x2 ? 'east' : undefined;
+    if (!side) continue;
+    const [dx, dz] = SIDE_STEP[side];
+    const outer = { x: g.x + 2 * dx, y: g.y, z: g.z + 2 * dz }, inner = { x: g.x - 2 * dx, y: g.y, z: g.z - 2 * dz };
+    ways.push({ len: horiz(outside, mid(outer)) + 4 + horiz(mid(inner), inside), g: { gate: { x: g.x, y: g.y, z: g.z }, side, inner, outer } });
+  }
+  return ways.sort((a, b) => a.len - b.len).map(w => w.g);
+}
+
+/** What a body stands in and walks through: the air, and what grows on the ground or hangs on a wall. */
+const CLEAR = /^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|large_fern|dead_bush|bush|leaf_litter|dandelion|poppy|\w+_tulip|cornflower|oxeye_daisy|azure_bluet|allium|blue_orchid|lily_of_the_valley|snow|torch|wall_torch)(\[|$)/;
+const WET = /^(minecraft:)?(flowing_)?(water|lava)(\[|$)/;
+
+/**
+ * Where to stand at a cell by a gate: on its own floor within 3 of the gate's level, the nearest to that level first
+ * (the ground outside a gate is not always the yard's: outside the live yard's west gate it is 3 higher, outside its
+ * north gate a hill); the gate's level where the look fails or finds none.
+ */
+async function floorAt(ctx: GoalContext, cell: Pos): Promise<Pos> {
+  const box = { x: cell.x, y: cell.y - 4, z: cell.z, width: 1, height: 9, length: 1 };
+  const col = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box).catch(() => undefined))?.blocks;
+  if (!col || col.length < box.height) return cell;
+  const clear = (b: string | null | undefined) => !!b && CLEAR.test(b);
+  const floor = (b: string | null | undefined) => !!b && !CLEAR.test(b) && !WET.test(b);
+  for (const dy of [0, 1, -1, 2, -2, 3, -3]) {
+    const i = 4 + dy;
+    if (floor(col[i - 1]) && clear(col[i]) && clear(col[i + 1])) return { ...cell, y: cell.y + dy };
+  }
+  return cell;
+}
+
+/**
+ * Out of the yard by one of its gates, from strictly inside the fence toward `to` outside it: a careful walk (walk
+ * only) to the cell 2 inside the gate that makes the shortest way, then through it to the cell 2 outside, each on
+ * its own floor. Never "any height at this x and z" from in here: a cave under the yard answers that as
+ * well as the gate does. Live on Nov 13 the cows' walk from 32 out north (inside the yard) to 64 out (the north gate
+ * itself) went down three times in 20 min, 30 to 41 under the lawn: in front of the gate the way on foot was shut
+ * (cells Baritone keeps out of), and the gate's column was there to be had in the cave 30 under it, by the pit at the
+ * gap in the east fence. Out from under dug it out each time. `sides`: only the gates on these sides of the fence
+ * (a side walk's own: from another side's gate its walk on to "any height" at the stop goes round the fence, or back
+ * across the yard, by the same caves). Each walk is to within 1 of its cell: still a block on the ground, which no
+ * cave far below answers, and one a bot on a dirt path (its block is the path's own, under the cell) or in a plant
+ * floorAt took for a floor (pink petals, a sapling, a carpet) gets to; to the block itself it "did not arrive".
+ * `{}`: nothing to do (the bot not inside the fence, `to` not outside it, or no gate known); `shut`: no gate let it
+ * out (one gone or blocked: the next is tried), or none on those sides; `gate` and `at` once out.
+ */
+export async function outByGate(ctx: GoalContext, to: { x: number; z: number }, sides?: HomeSide[]): Promise<{ gate?: Pos; at?: Pos; shut?: string }> {
+  const me = (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
+  if (!inFence(ctx.world, me) || inFence(ctx.world, to)) return {};
+  const all = gatesBetween(ctx.world, me, to);
+  if (!all.length) return {};
+  const gates = sides ? all.filter(g => sides.includes(g.side)) : all;
+  if (!gates.length) return { shut: `no gate in the yard's ${sides!.join(' or ')} fence` };
+  const tried: string[] = [];
+  for (const g of gates) {
+    if (ctx.signal.aborted) throw new Error('aborted');
+    ctx.progress(`out of the yard by its ${g.side} gate (${g.gate.x}, ${g.gate.y}, ${g.gate.z})`);
+    let arrived = true;
+    for (const c of [g.inner, g.outer]) {
+      const at = await floorAt(ctx, c);
+      const r = await ctx.call<{ arrived?: boolean }>('goto', { ...at, range: 1, careful: true, timeoutMs: 90_000 }, 105_000).catch(() => ({ arrived: false }));
+      if (ctx.signal.aborted) throw new Error('aborted');
+      if (r?.arrived === false) { arrived = false; break; }
+    }
+    const now = (await ctx.status().catch(() => undefined))?.position;
+    // out: within the walk's 1 of the cell outside, or at it or past it however the walk ended; never in the gateway
+    // itself (the fence line is not inside, but a walk to "any height" from there is the one this way keeps from)
+    const [dx, dz] = SIDE_STEP[g.side];
+    const past = (p: { x: number; z: number }) => (Math.floor(p.x) - g.gate.x) * dx + (Math.floor(p.z) - g.gate.z) * dz;
+    if (now ? past(now) >= (arrived ? 1 : 2) : arrived) return { gate: g.gate, at: now ?? g.outer };
+    tried.push(`the ${g.side} gate (${g.gate.x}, ${g.gate.y}, ${g.gate.z})`);
+  }
+  return { shut: `no way out of the yard by ${tried.join(' or ')}` };
+}
 
 /**
  * Look along one side of home for something (wild cane, a wild cow), no further out than the leash: from where the
  * bot stands, then from stops 32 blocks apart along that side, the last 16 inside the leash, `look` at each. The
  * explore tool would not do: it looks 96 round the bot from the first step and stops at the first it sees (the
  * bot's own cane patch, a cow in its own pen, or one past the leash), and it goes as far out as told from wherever the
- * bot is. A stop not got to (water, a cliff) is looked round from where the walk ended, and the side goes no further.
- * Returns the first find, or why there was none (`what` names it: `no wild cane east within the leash ...`); `short`
- * when the run's time ran out before the side's end, so the side was not looked along to the leash.
+ * bot is. A stop in the yard or within the bridge's margin round it is left out: there is nothing wild to look for
+ * there (north 32 out is inside the yard, north 64 the gate itself); when that leaves none (a yard grown out that
+ * way, a shorter leash), the first place past the margin is the stop, if it is within the leash. From inside the
+ * fence the walk out goes by the gate on that side (outByGate). A stop not got to (water, a cliff) is looked round
+ * from where the walk ended, and the side goes no further. Returns the first find, or why there was none (`what`
+ * names it: `no wild cane east within the leash ...`, `no wild cane looked for north: no way out of the yard by the
+ * north gate ...`); `short` when the run's time ran out before the side's end, so the side was not looked along to
+ * the leash.
  */
 export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: string, look: () => Promise<T | undefined>,
   enough: () => boolean = () => false): Promise<{ found?: T; text: string; short?: true }> {
   const home = ctx.s.home!;
   const last = ctx.world.leash - SIDE_MARGIN;
-  const legs = [0, ...Array.from({ length: Math.floor(last / SIDE_LEG) }, (_, i) => (i + 1) * SIDE_LEG), last].filter((d, i, a) => d >= 0 && d <= last && a.indexOf(d) === i);
   const [dx, dz] = SIDE_STEP[side];
+  const stopAt = (d: number) => ({ x: Math.round(home.x + dx * d), y: home.y, z: Math.round(home.z + dz * d) });
+  const yard = ctx.world.yard;
+  const wild = (d: number) => !yard || outsideBy(yard, stopAt(d)) > ZONE_MARGIN;
+  const stops = [0, ...Array.from({ length: Math.floor(last / SIDE_LEG) }, (_, i) => (i + 1) * SIDE_LEG), last].filter((d, i, a) => d >= 0 && d <= last && a.indexOf(d) === i);
+  const legs = stops.filter(d => d === 0 || wild(d));
+  // (every stop out in the yard or its margin: a look from home alone would say "none within the leash" and write the
+  // side off for hours, never looked along. With the margin out past the leash that way, nothing wild is within it)
+  if (legs.length === 1 && stops.length > 1) {
+    const edge = Array.from({ length: ctx.world.leash }, (_, i) => i + 1).find(wild);
+    if (edge !== undefined) legs.push(edge);
+  }
   let out = 0;
   let me: { x: number; z: number } = ctx.s.position;
   for (const d of legs) {
@@ -331,7 +448,13 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: strin
       // (not "none within the leash": the rest of the side was never seen, and its mark must not say it was)
       if (enough()) return { text: `no ${what} seen ${side} ${out ? `as far as ${out} blocks out` : 'from home'}: the run's time ran out`, short: true };
       ctx.progress(`looking ${side} for ${what}, ${d} blocks out`);
-      const stop = { x: Math.round(home.x + dx * d), y: home.y, z: Math.round(home.z + dz * d) };
+      const stop = stopAt(d);
+      // out by this side's own gate, or not at all. Shut, the side gets the dry mark a side with none gets (the turn
+      // goes on to the next side, and a gate that stays shut waits the longer each time): as untried the same side
+      // came first again, and three of those held the whole rung to the morning
+      const gate = await outByGate(ctx, stop, [side]);
+      if (gate.shut) return { text: `no ${what} looked for ${side}: ${gate.shut}` };
+      if (gate.at) me = gate.at;
       const careful = byYard(ctx.world, me, stop);
       const r = await ctx.call<{ arrived?: boolean }>('goto', { ...stop, xz: true, range: 8, ...(careful ? { careful: true } : {}), timeoutMs: 90_000 }, 105_000)
         .catch(() => ({ arrived: false }));
@@ -556,6 +679,53 @@ export const ladderOf = (goals: Goal[]): WorkTask[] => goals.map(taskOf).filter(
 
 const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 
+/** What the line of a run cut short under the yard says of its mark. */
+const UNDER_MARK = 'went under the yard on the way: a mark, another way next';
+
+/** Under the yard now, by a look made outside the run (its own calls are refused once it has been given up, as its tidy-ups are). */
+async function underAfterCut(ctx: GoalContext, s: Snapshot): Promise<boolean> {
+  const st = await brainRun.exit(() => ctx.status()).catch(() => undefined);
+  return !!s.home && !!st?.position && (st.dimension ?? s.home.dimension) === s.home.dimension && underYard(st.position, s.home, ctx.world.yard);
+}
+
+/**
+ * A run that went under the yard (cut short there by out from under, or ended there): its variant waits its mark
+ * again from now whatever it brought in (20 min the first time), and the turn moves on, so the next run goes another
+ * way. Going under says nothing of the place, so the count stays as it was, neither more nor less (as the `same` mark
+ * keeps it): a side dry six times, tried once its half day was up, does not go back to 20 min. A mark the run itself
+ * wrote on the way (it saw the place empty) stands. One early try per wait, as markDry keeps it: a mark let go early
+ * whose try went under waits its whole time (else the idle release lets it go again after every half minute idle).
+ */
+function underMark(task: WorkTask, c: { index: number; first?: true }, world: WorldMemory, key: string, at: number, setOut: number): void {
+  const w = workOf(world);
+  const mark = w.dry[key];
+  if (!mark || mark.at < setOut) w.dry[key] = { n: Math.max(1, mark?.n ?? 0), at, ...(mark?.early ? { freed: true as const } : {}) };
+  if (!c.first) w.next[task.name] = c.index + 1;
+  writes++;
+}
+
+/** How long the walk up to where a trip went down may take: the time the trip's budget keeps back for the walk back (deep.ts WALK_BACK). */
+const WALK_UP_MS = 2 * MINUTE;
+/** Within this of where it went down, the bot is up there already. */
+const UP_NEAR = 3;
+
+/**
+ * A trip down the mine comes up where it went down (its WorkResult's `upAt`, the block it stood on at the mine start)
+ * before the walk home. From down there Baritone's way home runs straight under the ground toward home and into the
+ * home zone's column, where the bridge lets it break nothing: live on Nov 13 the walk home from (-505, -21, 2213)
+ * stopped 55 under the yard at (-530, 7, 2189), and a trip's walk home after its iron at (-529, 10, 2179). So back
+ * the way it came first (Baritone's own walk: out there, outside the column, it may dig), and home over the surface
+ * from the mine start, 56 out on the far side of the yard. A walk that does not get there leaves the rest to go-home,
+ * as before. Nothing when it stands there already. Adds the walk back to the start, less what it saves of the walk
+ * home: some 20 to 60 s on the live trips (the mine start is 22 s from home on foot), 2 min at most.
+ */
+export async function walkUp(ctx: GoalContext, upAt: Pos, from?: Pos): Promise<void> {
+  if (from && Math.hypot(from.x - upAt.x, from.y - upAt.y, from.z - upAt.z) <= UP_NEAR) return;
+  ctx.progress(`up where it went down, (${upAt.x}, ${upAt.y}, ${upAt.z}), before the walk home`);
+  await ctx.call('goto', { ...upAt, range: 1, timeoutMs: WALK_UP_MS }, WALK_UP_MS + 15_000).catch(() => undefined);
+  if (ctx.signal.aborted) throw new Error('aborted');
+}
+
 /**
  * One run of a task: room, the hour, the stamps, the task's own run, the marks, the walk home. The marks are written
  * before the walk (the storage house door sometimes holds the bot: what the run found must not be lost with it), and
@@ -600,8 +770,15 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
       r = await task.run({ ...ctx, s, gain: n => { told += n; ctx.gain(n); } }, variant, budgetMs, now);
     } catch (e) {
       // stopped at the work (a home round cuts into a run in the yard or near it): the run's own line is never
-      // logged, only "stopped ...: aborted", as if it had come to nothing. What it had brought in is said here once
-      if (ctx.signal.aborted) ctx.progress(`[${variant}] stopped before its end, ${told ? `${told} brought in` : 'nothing brought in yet'} (no mark written)`);
+      // logged, only "stopped ...: aborted", as if it had come to nothing. What it had brought in is said here once.
+      // Stopped under the yard (out from under cuts anything there), the way this variant went took the bot under the
+      // yard, and chosen again at once it went the same way: live on Nov 13 the cows' north side three times in 20
+      // min, each "no mark written". It is marked, and the next run goes another way
+      if (ctx.signal.aborted) {
+        const down = await underAfterCut(ctx, s);
+        if (down) underMark(task, c, ctx.world, key, now(), setOut);
+        ctx.progress(`[${variant}] stopped before its end, ${told ? `${told} brought in` : 'nothing brought in yet'} ${down ? `(under the yard: ${UNDER_MARK})` : '(no mark written)'}`);
+      }
       throw e;
     }
     // what the task counted at the end and had not told as it went still counts as brought in
@@ -611,6 +788,21 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // (a trip that never got to the work did not run its course: it never went down)
     ranItsCourse = !r.untried;
 
+    // the task stays where its work ended: the way home is the wrapper's, once, for every task. Home is on its level:
+    // down the mine under the yard's edge, 10 from home across the ground, is no end of the walk home. Looked at
+    // before the marks: a run that ended under the yard is marked as one cut short there is
+    let away = true;
+    let under = false;
+    let where: Pos | undefined;
+    try {
+      const st = await ctx.status();
+      if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) {
+        where = st.position;
+        away = !nearHomeAt(st.position, s.home, NEAR_HOME);
+        under = underYard(st.position, s.home, ctx.world.yard);
+      }
+    } catch { /* no look: the walk home is asked for, and says where the bot is */ }
+
     const w = workOf(ctx.world);
     const at = now();
     const mark = w.dry[key];
@@ -618,7 +810,8 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     const own = !!mark && mark.at >= setOut;
     // (one that never got to the work learnt nothing of the place: no mark, and it is tried first again)
     // (a place tried ahead of the turn leaves the turn where it was: its own mark keeps it waiting)
-    if (gain > 0) {
+    if (under) underMark(task, c, ctx.world, key, at, setOut);
+    else if (gain > 0) {
       if (mark && !own) delete w.dry[key];
       if (!c.first) w.next[task.name] = c.index;
     } else if (!r.untried) {
@@ -643,17 +836,6 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
       if (r.untried) throw new Error(said);
       return said;
     };
-    // the task stays where its work ended: the way home is the wrapper's, once, for every task. Home is on its level:
-    // down the mine under the yard's edge, 10 from home across the ground, is no end of the walk home
-    let away = true;
-    let under = false;
-    try {
-      const st = await ctx.status();
-      if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) {
-        away = !nearHomeAt(st.position, s.home, NEAR_HOME);
-        under = underYard(st.position, s.home, ctx.world.yard);
-      }
-    } catch { /* no look: the walk home is asked for, and says where the bot is */ }
     if (!away) return end(text);
     // under the yard Baritone may break nothing, and the walk home stops in a second (live: `Stopped 57 blocks from
     // home`): the survival goal digs out to the side first, and the trip stays open until the bot is seen home
@@ -664,6 +846,8 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     const cut = () => { ctx.progress(`${text}; stopped on the walk home (its marks are written)`); return new Error('aborted'); };
     let h: { ok: boolean; text: string };
     try {
+      // a trip down comes up where it went down before it walks home (walkUp)
+      if (r.upAt) await walkUp(ctx, r.upAt, where);
       h = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
     } catch (e) {
       throw ctx.signal.aborted ? cut() : e;

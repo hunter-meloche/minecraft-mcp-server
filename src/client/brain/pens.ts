@@ -9,7 +9,7 @@ import { prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { makeRoom, noRoom, out as afield, room } from './pockets.js';
-import { addSite, alongSide, byYard, dropSite, notePen, sitesOf, type HomeSide, type WorkResult } from './work.js';
+import { addSite, alongSide, byYard, dropSite, gatesBetween, inFence, notePen, outByGate, sitesOf, type HomeSide, type WorkResult } from './work.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -158,11 +158,16 @@ async function holdFor(ctx: GoalContext, kind: PenKind): Promise<{ hold?: Hold; 
   return { why: `${why}, and no ${PEN_FOOD[kind][0]} to lure one with` };
 }
 
-/** The walk to an animal, careful in and by the yard (the bot's own builds), Baritone's own way out in the wild. */
+/**
+ * The walk to an animal, careful in and by the yard (the bot's own builds), Baritone's own way out in the wild. From
+ * inside the fence to one outside it, out by a gate first (work.ts outByGate); with no gate that lets it out, the
+ * careful walk straight there as before (to the animal's own block: no cave under the yard ends that walk).
+ */
 async function walkTo(ctx: GoalContext, p: Pos, range: number): Promise<void> {
   const yard = ctx.world.yard;
-  const me = await here(ctx);
+  let me = await here(ctx);
   const homely = !!yard && [me, p].some(q => q.x >= yard.x1 - 8 && q.x < yard.x2 + 9 && q.z >= yard.z1 - 8 && q.z < yard.z2 + 9);
+  if (homely) me = (await outByGate(ctx, p)).at ?? me;
   // a walk that ends a few blocks short throws ("no path found ... 3.61 blocks away", the cow on a ledge): that
   // failed the whole fetch, though the lead or the wheat reaches it from there: the close-in judges that
   if (homely) await ctx.call('goto', { ...cell(p), range, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => undefined);
@@ -290,21 +295,14 @@ async function offLead(ctx: GoalContext, id: number): Promise<void> {
 
 /**
  * The way to the pen's gate from out there: through the yard's gate that makes the shortest way round (its cell 2
- * outside, then 2 inside), then to the pen's. A leg aimed at the pen through the fence had Baritone walk the fence
- * round to a gate in one go, out of the animal's reach. From inside the yard, or with no gate known, straight there.
+ * outside, then 2 inside: work.ts gatesBetween, which the walks out of the yard go by too), then to the pen's. A leg
+ * aimed at the pen through the fence had Baritone walk the fence round to a gate in one go, out of the animal's
+ * reach. From inside the yard, or with no gate known, straight there.
  */
 function routeFor(world: WorldMemory, from: Pos, way: Way): { points: Pos[]; gate?: Pos } {
-  const yard = world.yard;
-  if (!yard || passed(world, from) || !passed(world, way.outside)) return { points: [way.outside] };
-  let best: { len: number; points: Pos[]; gate: Pos } | undefined;
-  for (const g of world.zones?.['fence:gate'] ?? []) {
-    const n = g.z === yard.z1 ? [0, -1] : g.z === yard.z2 ? [0, 1] : g.x === yard.x1 ? [-1, 0] : g.x === yard.x2 ? [1, 0] : undefined;
-    if (!n) continue;
-    const outer = { x: g.x + 2 * n[0], y: g.y, z: g.z + 2 * n[1] }, inner = { x: g.x - 2 * n[0], y: g.y, z: g.z - 2 * n[1] };
-    const len = horiz(from, mid(outer)) + 4 + horiz(mid(inner), mid(way.outside));
-    if (!best || len < best.len) best = { len, points: [outer, inner, way.outside], gate: { x: g.x, y: g.y, z: g.z } };
-  }
-  return best ? { points: best.points, gate: best.gate } : { points: [way.outside] };
+  if (!world.yard || inFence(world, from) || !inFence(world, way.outside)) return { points: [way.outside] };
+  const best = gatesBetween(world, mid(way.outside), from)[0];
+  return best ? { points: [best.outer, best.inner, way.outside], gate: best.gate } : { points: [way.outside] };
 }
 
 /** One leg toward `w`: `leg` blocks at most, careful (walk only: Baritone's tool pick took the wheat out of hand mid-leg); the last one to the cell itself. */
@@ -462,7 +460,7 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, target
           last = e;
         }
         // through the yard's gate, and the animal too: shut it behind them
-        if (!yardShut && route.gate && last && passed(ctx.world, await here(ctx)) && passed(ctx.world, last.position)) {
+        if (!yardShut && route.gate && last && inFence(ctx.world, await here(ctx)) && inFence(ctx.world, last.position)) {
           yardShut = true;
           await shut(route.gate);
         }
@@ -523,12 +521,6 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, target
     // round that cut in there left the yard's gate open until the dusk sweep)
     if (afield.ledBy === ctx.signal) afield.ledBy = undefined;
   }
-}
-
-/** Past the yard's fence, inside it (the fence line itself is not past it). */
-function passed(world: WorldMemory, q: { x: number; z: number }): boolean {
-  const y = world.yard;
-  return !!y && Math.floor(q.x) > y.x1 && Math.floor(q.x) < y.x2 && Math.floor(q.z) > y.z1 && Math.floor(q.z) < y.z2;
 }
 
 /** Wild adults of a pen's kind in sight (not someone's), outside its pen and within the leash of home: the nearest first. */
@@ -647,9 +639,9 @@ export interface Fetched { gain: number; text: string; untried?: true; mark?: Wo
 /**
  * Where a wild one was seen (work.sites, the pens round's looks and the fetches'): one in sight from here first, then
  * the nearest place it was seen and the next, walked to and looked round. A place with none any more is forgotten.
- * `short`: the run's time ran out before a place was looked at.
+ * `short`: the run's time ran out before a place was looked at; `untried`: no gate let it out of the yard to one.
  */
-async function toSighting(ctx: GoalContext, kind: PenKind, p: Pen, home: Pos, enough: () => boolean): Promise<{ found?: Ent; text: string; short?: true }> {
+async function toSighting(ctx: GoalContext, kind: PenKind, p: Pen, home: Pos, enough: () => boolean): Promise<{ found?: Ent; text: string; short?: true; untried?: true }> {
   const first = (await wildOnes(ctx, kind, p, home))[0];
   if (first) return { found: first, text: '' };
   const seen = sitesOf(ctx.world, kind).filter(q => horiz(q, home) <= ctx.world.leash).sort((a, b) => horiz(a, home) - horiz(b, home)).slice(0, 2);
@@ -661,9 +653,15 @@ async function toSighting(ctx: GoalContext, kind: PenKind, p: Pen, home: Pos, en
       break;
     }
     ctx.progress(`to where a ${kind} was seen, (${q.x}, ${q.y}, ${q.z}), ${Math.round(horiz(q, home))} blocks from home`);
+    // out of the yard by a gate to one seen outside it, the gate that makes the shortest way. On from it, and in and
+    // by the yard, to the place at its own height, as walkTo goes to an animal: from another side's gate a walk to
+    // "any height at its x and z" goes round the fence or back across the yard, where a cave under it answers too
+    const gate = await outByGate(ctx, q);
+    if (gate.shut) return { text: `no wild ${kind} looked for where one was seen: ${gate.shut}`, untried: true };
+    const inside = inFence(ctx.world, q);
     // (careful in and by the yard, as every walk of the fetch: a cow loose in the yard is the bot's, and seen there)
-    const careful = byYard(ctx.world, await here(ctx), q);
-    await ctx.call('goto', { x: q.x, y: q.y, z: q.z, xz: true, range: 8, ...(careful ? { careful: true } : {}), timeoutMs: 90_000 }, 105_000).catch(() => undefined);
+    const careful = byYard(ctx.world, gate.at ?? await here(ctx), q);
+    await ctx.call('goto', { x: q.x, y: q.y, z: q.z, ...(inside || careful ? {} : { xz: true }), range: 8, ...(careful ? { careful: true } : {}), timeoutMs: 90_000 }, 105_000).catch(() => undefined);
     if (ctx.signal.aborted) throw new Error('aborted');
     const ones = await wildOnes(ctx, kind, p, home);
     sighted(ctx.world, kind, ones);
@@ -702,13 +700,13 @@ export async function fetchForPens(ctx: GoalContext, from: string, opts: { kind?
   if (adults !== undefined && adults >= PAIR) return { gain: 0, text: `the ${kind} pen has ${adults} already: none fetched`, mark: 'same' };
   const h = await holdFor(ctx, kind);
   if (!h.hold) return { gain: 0, text: `${kind}: ${h.why}` };
-  const found = from === IN_SIGHT ? await toSighting(ctx, kind, p, home, enough)
+  const found: { found?: Ent; text: string; short?: true; untried?: true } = from === IN_SIGHT ? await toSighting(ctx, kind, p, home, enough)
     : await alongSide(ctx, from as HomeSide, `wild ${kind}s`, async () => {
       const ones = await wildOnes(ctx, kind, p, home);
       sighted(ctx.world, kind, ones);
       return ones[0];
     }, enough);
-  if (!found.found) return { gain: 0, text: found.text, ...(found.short ? { mark: 'same' as const } : {}) };
+  if (!found.found) return { gain: 0, text: found.text, ...(found.short ? { mark: 'same' as const } : {}), ...(found.untried ? { untried: true as const } : {}) };
   const target = found.found;
   const seenAt = cell(target.position);
   addSite(ctx.world, kind, seenAt);

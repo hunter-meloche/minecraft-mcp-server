@@ -373,8 +373,8 @@ const CANE_SIGHT = 48;
 
 /**
  * Look along one side of home for wild cane, no further out than the leash (work.ts alongSide: stops 32 blocks apart,
- * the last 16 inside the leash), looking 48 round each stop. Returns the nearest cane that is the bot's to cut
- * (`wild`), or why none was found.
+ * the last 16 inside the leash, none in the yard), looking 48 round each stop. Returns the nearest cane that is the
+ * bot's to cut (`wild`), or why none was found.
  */
 export async function findWildCane(ctx: GoalContext, side: (typeof WOODS_DIRS)[number], wild: (p: Pos) => boolean, enough: () => boolean = () => false): Promise<{ at?: Pos; text: string; short?: true }> {
   const r = await alongSide(ctx, side, 'wild cane', async () => {

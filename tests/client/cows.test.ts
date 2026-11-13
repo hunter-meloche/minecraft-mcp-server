@@ -95,6 +95,8 @@ class Pasture {
   chests: Record<string, Record<string, number>>;
   /** the furthest the bot ever stood from home */
   farthest = 0;
+  /** where it stood under the yard, if a walk took it down there */
+  under?: Pos;
   private nextDrop = 900;
   private grazed = new Set<number>();
   private walkedTo = false;
@@ -110,6 +112,17 @@ class Pasture {
       abortOnOpen?: { gate: Pos; abort: () => void };
       /** the first walk on the lead that ends within `within` of home waits there for `until` (the test looks then); `at` says when it has */
       holdNear?: { within: number; until: Promise<void>; at?: () => void };
+      /**
+       * the caves under the yard: a walk to "any height at this x and z" (xz) from inside the fence to a place on or
+       * past it finds a way down one first and ends 41 under the lawn (live, Nov 13: the cows' walk from 32 out north
+       * to the north gate, to (-536, 21, 2155)); so does one from anywhere to a column the live cave reaches (x -549,
+       * z 2103 to 2151, Baritone's cache: the cave under the north gate runs on under the 80-out stop) unless it starts
+       * within 16 of it, where the way over the ground is the shorter; a walk to a block (GoalBlock, GoalNear) goes
+       * over the ground
+       */
+      caves?: boolean;
+      /** yard gates (x,z) that let nobody through (gone, or a block in the gateway): a walk to the cell outside one stops inside */
+      blocked?: string[];
     } = {}) {
     this.items = items.map(i => ({ ...i }));
     this.chests = structuredClone(world.chestItems ?? {});
@@ -274,6 +287,16 @@ class Pasture {
           this.careful.push(!!p.careful);
           const to = p.xz ? { x: Number(p.x) + 0.5, y: 63, z: Number(p.z) + 0.5 } : mid(at(p));
           this.log.push(`goto ${p.careful ? 'careful ' : ''}${Math.floor(to.x)},${Math.floor(to.z)}`);
+          const caveColumn = Math.floor(to.x) === -549 && Math.floor(to.z) >= 2103 && Math.floor(to.z) <= 2151 && horiz(this.me, to) > 16;
+          if (this.opts.caves && p.xz && ((this.pastYard(this.me) && !this.pastYard(to)) || caveColumn)) {
+            this.me = { x: -535.5, y: 21, z: 2155.5 };
+            this.under = { ...this.me };
+            this.log.push('down a cave under the yard');
+            return { arrived: false };
+          }
+          // a gate nobody gets through: the walk out through it stops at it, inside
+          const shut = YARD_GATES.find(g => this.opts.blocked?.includes(`${g.x},${g.z}`) && this.pastYard(this.me) && !this.pastYard(to) && horiz(mid(g), to) <= 3);
+          if (shut) { this.walk({ x: shut.x + 0.5 + (mid(HOME).x - shut.x - 0.5) * 2 / horiz(mid(shut), mid(HOME)), y: 63, z: shut.z + 0.5 + (mid(HOME).z - shut.z - 0.5) * 2 / horiz(mid(shut), mid(HOME)) }, 'goto careful'); return { arrived: false }; }
           if (p.xz && this.opts.stopShort === ++this.sideWalks) {
             // stopped 10 short (water, a cliff), and says so
             const d = horiz(this.me, to);
@@ -592,16 +615,17 @@ test('the fetch keeps to the leash: a cow seen 95 out that grazes on past it is 
 });
 
 test('the walks out along a side are careful in and by the yard, plain beyond it; one that stops short looks from there; a run out of time says how far it looked', async (t) => {
-  // north: 32 out is inside the yard, 64 out the north gate, and the walk from there to 80 starts on the fence
+  // north: 32 out is inside the yard and 64 out the north gate itself, nothing to look for there: out through the
+  // north gate (2 in, 2 out), and the walk from there to 80 starts by the fence
   const w1 = liveWorld();
   const p1 = new Pasture([], w1, KIT);
   t.deepEqual(await fetchForPens(p1.ctx(w1), 'north', { now: () => T0 }), { gain: 0, text: 'no wild cows north within the leash (96 from home)' });
-  t.deepEqual(p1.log.filter(l => l.startsWith('goto')), ['goto careful -549,2151', 'goto careful -549,2119', 'goto careful -549,2103']);
-  // east: out of the yard on the first leg, then plain
+  t.deepEqual(p1.log.filter(l => l.startsWith('goto')), ['goto careful -549,2121', 'goto careful -549,2117', 'goto careful -549,2103']);
+  // east: out through the east gate, then careful by the fence on the first leg, then plain
   const w2 = liveWorld();
   const p2 = new Pasture([], w2, KIT);
   await fetchForPens(p2.ctx(w2), 'east', { now: () => T0 });
-  t.deepEqual(p2.log.filter(l => l.startsWith('goto')), ['goto careful -517,2183', 'goto -485,2183', 'goto -469,2183']);
+  t.deepEqual(p2.log.filter(l => l.startsWith('goto')), ['goto careful -535,2183', 'goto careful -531,2183', 'goto careful -517,2183', 'goto -485,2183', 'goto -469,2183']);
   // the second walk out stops 10 short: looked round from there, and no further
   const w3 = liveWorld();
   const p3 = new Pasture([], w3, KIT, { stopShort: 2 });
@@ -616,6 +640,90 @@ test('the walks out along a side are careful in and by the yard, plain beyond it
   const p5 = new Pasture([], w5, KIT);
   t.deepEqual(await fetchForPens(p5.ctx(w5), 'in sight', { now: () => T0 }), { gain: 0, text: 'no wild cow where one was seen at (-540, 63, 2130): forgotten' });
   t.deepEqual(p5.log.filter(l => l.startsWith('goto')), ['goto careful -540,2130']);
+});
+
+test('the walks out of the yard go through a gate, careful and to its cells: none goes "any height" from inside the fence, where a cave under the yard answers it', async (t) => {
+  // live on Nov 13 the cows' walk from 32 out north (inside the yard) to 64 out (the north gate itself) went down to
+  // (-536, 21, 2155), 41 under the lawn. With the caves of that day under the stand-in yard: the north side out by its
+  // gate, every walk inside the fence careful, never a walk to "any height" from in there, and never under the yard
+  const w1 = liveWorld();
+  const p1 = new Pasture([], w1, KIT, { caves: true });
+  const said: string[] = [];
+  t.deepEqual(await fetchForPens(p1.ctx(w1, undefined, said), 'north', { now: () => T0 }), { gain: 0, text: 'no wild cows north within the leash (96 from home)' });
+  t.is(p1.under, undefined, p1.log.join('\n'));
+  t.deepEqual(p1.log.filter(l => l.startsWith('goto')), ['goto careful -549,2121', 'goto careful -549,2117', 'goto careful -549,2103']);
+  t.deepEqual(p1.careful, [true, true, true]);
+  t.true(said.includes('out of the yard by its north gate (-549, 63, 2119)'));
+  // a cow seen from home, out past the east fence: the walk to it goes out by the east gate too (the walk to an
+  // animal is to its own block: careful by the yard)
+  const w2 = liveWorld();
+  const herd = [cow(7, -510, 2190)];
+  const p2 = new Pasture(herd, w2, KIT, { caves: true });
+  t.deepEqual(await fetchForPens(p2.ctx(w2), 'north', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 40 out; led in' });
+  t.is(p2.under, undefined);
+  t.deepEqual(p2.log.filter(l => l.startsWith('goto')).slice(0, 3), ['goto careful -535,2183', 'goto careful -531,2183', 'goto careful -510,2190']);
+  t.true(penned(herd[0]));
+  // where one was seen outside the yard: out by the gate nearest the way there, then on
+  const w3 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -600, y: 63, z: 2183 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const p3 = new Pasture([], w3, KIT, { caves: true });
+  t.deepEqual(await fetchForPens(p3.ctx(w3), 'in sight', { now: () => T0 }), { gain: 0, text: 'no wild cow where one was seen at (-600, 63, 2183): forgotten' });
+  t.is(p3.under, undefined);
+  t.deepEqual(p3.log.filter(l => l.startsWith('goto')), ['goto careful -563,2183', 'goto careful -567,2183', 'goto careful -600,2183']);
+  // and from outside the yard already (a bed 16 out, a fetch that ended out there), straight on: no gate to go by
+  const w4 = liveWorld();
+  const p4 = new Pasture([], w4, KIT, { caves: true });
+  p4.me = { x: -520.5, y: 63, z: 2183.5 };
+  await fetchForPens(p4.ctx(w4), 'east', { now: () => T0 });
+  t.deepEqual(p4.log.filter(l => l.startsWith('goto')), ['goto careful -517,2183', 'goto -485,2183', 'goto -469,2183']);
+});
+
+test('a side whose gate lets nobody through is not walked by another gate (its walk to "any height" at the stop would find the cave), and gets a dry mark; a sighting goes by the next gate, to its own block', async (t) => {
+  // the north gate blocked (a block in the gateway; live, the cells in front of it Baritone keeps out of): no other
+  // gate, and no walk to 80 out north at all. Out by the west gate, the walk from there to "any height" at 80 out
+  // is 82 long, and the cave under the north gate runs on under that stop: down it went
+  const w1 = liveWorld();
+  const p1 = new Pasture([], w1, KIT, { caves: true, blocked: ['-549,2119'] });
+  const said: string[] = [];
+  t.deepEqual(await fetchForPens(p1.ctx(w1, undefined, said), 'north', { now: () => T0 }), { gain: 0, text: 'no wild cows looked for north: no way out of the yard by the north gate (-549, 63, 2119)' });
+  t.is(p1.under, undefined, p1.log.join('\n'));
+  t.deepEqual(said.filter(l => l.startsWith('out of the yard')), ['out of the yard by its north gate (-549, 63, 2119)']);
+  t.deepEqual(p1.log.filter(l => l.startsWith('goto')), ['goto careful -549,2121', 'goto careful -549,2117']);
+  t.false(p1.log.some(l => /^goto (careful )?-549,2103/.test(l)), p1.log.join('\n'));
+  t.true(p1.careful.every(c => c));
+  // through the wrapper: a dry mark like a side with none (it waits the longer each time the gate stays shut), and the
+  // turn goes on to the next side; not a held failure that comes back to north, three of which held the rung all day
+  const clock = { now: T0 };
+  const goal = goalOf(rung('cows'), clock);
+  const w2 = liveWorld();
+  const p2 = new Pasture([], w2, KIT, { caves: true, blocked: ['-549,2119'] });
+  t.is(await goal.run(p2.ctx(w2)), '[north] no wild cows looked for north: no way out of the yard by the north gate (-549, 63, 2119); back home');
+  t.deepEqual(workOf(w2).dry['cows:north'], { n: 1, at: T0 });
+  t.is(workOf(w2).next.cows, 1);
+  t.like(pick(rung('cows'), look(KIT), w2), { variant: 'east' });
+  // where one was seen north of the yard, over the cave: the north gate blocked, out by the next (the west), and on
+  // from there to the place's own block (careful by the yard), never to "any height" there
+  const w3 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -549, y: 66, z: 2110 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const p3 = new Pasture([], w3, KIT, { caves: true, blocked: ['-549,2119'] });
+  const xz: boolean[] = [];
+  const ctx3 = p3.ctx(w3);
+  const call = ctx3.call;
+  ctx3.call = (async (method: string, p: Record<string, unknown> = {}, ms?: number) => {
+    if (method === 'goto') xz.push(!!p.xz);
+    return call(method, p, ms);
+  }) as GoalContext['call'];
+  t.deepEqual(await fetchForPens(ctx3, 'in sight', { now: () => T0 }), { gain: 0, text: 'no wild cow where one was seen at (-549, 66, 2110): forgotten' });
+  t.is(p3.under, undefined, p3.log.join('\n'));
+  t.deepEqual(p3.log.filter(l => l.startsWith('goto')), ['goto careful -549,2121', 'goto careful -549,2117', 'goto careful -563,2183', 'goto careful -567,2183', 'goto careful -549,2110']);
+  t.deepEqual(xz, [false, false, false, false, false]);
+  // every gate blocked: no way out on foot to where it was seen, and nothing walked to out there (no mark: untried)
+  const w4 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -600, y: 63, z: 2183 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
+  const p4 = new Pasture([], w4, KIT, { caves: true, blocked: YARD_GATES.map(g => `${g.x},${g.z}`) });
+  const r4 = await fetchForPens(p4.ctx(w4), 'in sight', { now: () => T0 });
+  t.like(r4, { gain: 0, untried: true });
+  t.regex(r4.text, /^no wild cow looked for where one was seen: no way out of the yard by the west gate \(-565, 63, 2183\) or /);
+  t.is(p4.under, undefined);
+  t.false(p4.log.some(l => /^goto (careful )?-600,2183/.test(l)), p4.log.join('\n'));
+  t.true(p4.careful.every(c => c));
 });
 
 test('no lead and none to craft: the wheat lure, which also goes right across the pen; a lead crafted from string and a slime ball when none is stored', async (t) => {
@@ -837,6 +945,7 @@ test.serial('done work: cows, as brain.log says it', async (t) => {
     'start work: cows: east: 96 blocks out',
     'work: cows: skipped: cane patch (unneeded: no cane to plant)',
     'work: cows: looking east for wild cows, 32 blocks out',
+    'work: cows: out of the yard by its east gate (-533, 63, 2183)',
     'work: cows: fetching a cow for the pen: 48 blocks off, 81 from home',
     'done work: cows in 0s: [east] cow: on the lead from 81 out; led in; back home'
   ]);
