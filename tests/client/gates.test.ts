@@ -491,12 +491,19 @@ test('a gains goal with no gain is booked empty: the cane (a stalk cut; bare cel
   t.is(caneRound.gains, true);
   const round = (grown: boolean) => {
     const grid = new Map<string, string>(grown ? [['0,63,0', 'sugar_cane'], ['0,64,0', 'sugar_cane']] : []);
+    // the cell on a flat shore (grass at y 62, the water beside its ground to the south), read box by box; the round
+    // walks to the land beside it before it cuts
+    const at = (x: number, y: number, z: number) => grid.get(`${x},${y},${z}`) ?? (y > 62 ? 'air' : y < 62 ? 'dirt' : z >= 1 ? 'water[level=0]' : 'grass_block[snowy=false]');
     let cane = 0;
     return booked(caneRound, {
       ...quiet, s: snapOf([]), world: bareWorld({ zones: { cane: [{ x: 0, y: 63, z: 0 }] }, lastDone: {} }),
-      call: (async (method: string, a: { x: number; y: number; z: number }) => (method === 'inventory'
-        ? { items: cane ? [{ slot: 3, name: 'sugar_cane', count: cane }] : [] }
-        : { blocks: [0, 1, 2].map(dy => grid.get(`${a.x},${a.y + dy},${a.z}`) ?? 'air') })) as GoalContext['call'],
+      call: (async (method: string, a: Record<string, number>) => {
+        if (method === 'inventory') return { items: cane ? [{ slot: 3, name: 'sugar_cane', count: cane }] : [] };
+        if (method === 'goto') return { arrived: true };
+        const blocks: string[] = [];
+        for (let y = 0; y < a.height; y++) for (let z = 0; z < a.length; z++) for (let x = 0; x < a.width; x++) blocks.push(at(a.x + x, a.y + y, a.z + z));
+        return { blocks };
+      }) as GoalContext['call'],
       act: async (tool: string, a: Record<string, unknown> = {}) => {
         const k = `${a.x},${a.y},${a.z}`;
         if (tool !== 'dig-block' || !grid.has(k)) return { ok: false, text: `unexpected ${tool} at ${k}` };

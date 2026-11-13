@@ -7,6 +7,7 @@ import { toTheWoods, WOODS_DIRS } from './chores.js';
 import { makeRoom, noRoom, room } from './pockets.js';
 import { WILD_DISTANCE, YARD_FROM_BUILDS, nearestZone, type Zone } from './courtesy.js';
 import { alongSide } from './work.js';
+import { regionOf, standSpots, type Box } from '../structures/tidy.js';
 
 /**
  * Sugar cane on the lake shore (paper for books, books for the enchanting table and its shelves): a few stalks from
@@ -132,6 +133,92 @@ export async function dropDeadCells(ctx: Pick<GoalContext, 'call' | 'world' | 's
   return dead;
 }
 
+// ------------------------------------------------------------------------------------------------ stand cells
+
+/*
+ * Every walk to a cane cell is careful (walk only: Baritone places and breaks nothing on the way), to a cell on the
+ * land within reach, and the work is done only from there. Baritone's own walks (dig-block's into reach and to the
+ * drops, place-block's when out of reach) may place its throwaway cobblestone, and by the shore that is a bridge over
+ * the water: live 2026-11-13 the same cells of the patch held cobblestone (dirt under it, air above) round after
+ * round, "(6 cell(s) cleared of scaffold first)" each time, the scaffold back by the next.
+ */
+
+/**
+ * How far the point an act aims at may be from the eye over the middle of a stand cell: the bridge's place, and
+ * Baritone's dig, reach 4.5 from the real eye, and a careful walk ends once the bot is on the block, not in its middle
+ * (up to half a block off each way). Out of reach from where it really stands, place-block says "too far" and walks
+ * there by Baritone's way, the walk these stand cells are for keeping out of (the tidy round's 4.2 let in a stand 3.95
+ * from the aim, 4.5 and more from the far side of its block).
+ */
+const SURE = 4.5 - Math.SQRT1_2;
+const EYE = 1.62;
+const same = (a: Pos, b: Pos) => a.x === b.x && a.y === b.y && a.z === b.z;
+const blockOf = (p: { x: number; y: number; z: number }): Pos => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
+
+/** What a cane cell's stand cells are found in: the blocks round it, as far as standSpots looks (4 each way, 6 down, and 3 up for the cut above it). */
+export interface StandView { blocks: (string | null)[]; box: Box }
+
+async function standView(ctx: Pick<GoalContext, 'call'>, c: Pos): Promise<StandView> {
+  const box = { x: c.x - 4, y: c.y - 6, z: c.z - 4, width: 9, height: 10, length: 9 };
+  const blocks = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box).catch(() => undefined))?.blocks ?? [];
+  return { blocks, box };
+}
+
+/** Where the bridge's place clicks to put cane in a cell: the top of its ground (it reaches 4.5 from the eye to it). */
+const aimOf = (c: Pos) => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 });
+
+/**
+ * Where the bot stands to work on cane cell `c`: the tidy round's stand cells (structures/tidy.ts standSpots: a solid
+ * floor, never water, room for feet and head, the block within reach of the eye), less any in or over a cell of the
+ * patch (`cells`: in its cane, on scaffold in it, in a bare one still to plant), and within a block of the cell's
+ * level (a careful walk climbs a block at a time: from a stand down by the water two lower it might not walk out).
+ * For planting or digging the cell, the top of its ground within SURE (the cane goes in from there); for a `cut`,
+ * the middle of the stalk's second block. The cells beside the cell first (cane cut from there falls within the bot's
+ * reach), then the nearest the bot; for a cut, a stand higher than the cell after all the others (the cane falls onto
+ * the cell's ground, and the game picks up a drop only down to half a block under the feet).
+ */
+export function caneStands(view: StandView, c: Pos, from: Pos, cells: Pos[], cut = false): Pos[] {
+  const target = cut ? { ...c, y: c.y + 1 } : c;
+  const aim = cut ? { x: c.x + 0.5, y: c.y + 1.5, z: c.z + 0.5 } : aimOf(c);
+  const over = (p: Pos) => cells.some(q => q.x === p.x && q.z === p.z && p.y >= q.y && p.y <= q.y + 3);
+  const up = (p: Pos) => (cut && p.y > c.y ? 1 : 0);
+  return standSpots(view.blocks, view.box, target, from, new Set(), 81)
+    .filter(p => !over(p) && Math.abs(p.y - c.y) <= 1 && Math.hypot(p.x + 0.5 - aim.x, p.y + EYE - aim.y, p.z + 0.5 - aim.z) <= SURE)
+    .sort((a, b) => up(a) - up(b) || horiz(a, target) - horiz(b, target));
+}
+
+/** Where the bot stands now (its block), or `then` when there is no look. */
+async function standing(ctx: Pick<GoalContext, 'status'>, then: Pos): Promise<Pos> {
+  try {
+    const st = await ctx.status();
+    return st.block ? blockOf(st.block) : st.position ? blockOf(st.position) : then;
+  } catch {
+    return then;
+  }
+}
+
+/** A careful walk onto a stand cell: true once the bot stands on it. */
+async function walkTo(ctx: GoalContext, s: Pos, here: { at: Pos }): Promise<boolean> {
+  if (same(here.at, s)) return true;
+  const g = await ctx.call<{ arrived?: boolean; at?: Pos }>('goto', { ...s, range: 0, careful: true, timeoutMs: 30_000 }, 45_000)
+    .catch(() => ({ arrived: false, at: undefined }));
+  if (ctx.signal.aborted) throw new Error('aborted');
+  if (g.arrived) { here.at = { ...s }; return true; }
+  if (g.at) here.at = blockOf(g.at);
+  return false;
+}
+
+/**
+ * Onto a stand cell, on foot: where the bot stands if that is one (beside the cell `beside` and no higher, for a cut),
+ * else the first of them it gets to, three at most. Undefined: it got to none.
+ */
+async function toStand(ctx: GoalContext, stands: Pos[], here: { at: Pos }, beside?: Pos): Promise<Pos | undefined> {
+  const stay = stands.find(s => same(s, here.at) && (!beside || (horiz(s, beside) <= 1 && s.y <= beside.y)));
+  if (stay) return stay;
+  for (const s of stands.slice(0, 3)) if (await walkTo(ctx, s, here)) return s;
+  return undefined;
+}
+
 // ------------------------------------------------------------------------------------------------ planting
 
 /** How near the bot's own land may come to someone's build (as its yard): no cane is planted closer to one. */
@@ -225,15 +312,24 @@ export async function plantCane(ctx: GoalContext, max: number, enough: () => boo
   }
   if (!have) return { planted: [], refused: 0, lake, text: 'no cane to plant (none carried, none in the chests)' };
   const planted: Pos[] = [];
-  let refused = 0;
-  for (const c of cells.slice(0, have)) {
+  let refused = 0, unreached = 0;
+  // each cell planted from a stand cell on the land beside it, walked to carefully: place-block's own walk, for a
+  // cell out of reach, is Baritone's, and bridges along the shore (the stand cells keep out of the patch and of the
+  // cells still to plant)
+  const todo = cells.slice(0, have);
+  const keep = [...patch, ...todo];
+  const here = { at: await standing(ctx, blockOf(ctx.s.position)) };
+  for (const c of todo) {
     if (ctx.signal.aborted || enough()) break;
+    if (!await toStand(ctx, caneStands(await standView(ctx, c), c, here.at, keep), here)) { unreached++; continue; }
     const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
     if (/^Placed/.test(r.text)) { planted.push(c); addZone(ctx.world, 'cane', c); ctx.gain(1); } else refused++;
   }
   const where = lake ? ` by (${lake.x}, ${lake.y}, ${lake.z})` : '';
-  const text = planted.length ? `planted ${planted.length} cane on the shore${where}${refused ? `; ${refused} cell(s) would not take it` : ''}`
-    : refused ? `the cane would not go in (${refused} cell(s) tried${where})` : 'nothing planted (stopped before the first cell)';
+  const away = unreached ? `; ${unreached} cell(s) out of reach on foot` : '';
+  const text = planted.length ? `planted ${planted.length} cane on the shore${where}${refused ? `; ${refused} cell(s) would not take it` : ''}${away}`
+    : refused ? `the cane would not go in (${refused} cell(s) tried${where})${away}`
+      : unreached ? `no cell to plant in reach on foot (${unreached} tried${where})` : 'nothing planted (stopped before the first cell)';
   return { planted, refused, lake, text };
 }
 
@@ -394,6 +490,77 @@ export async function findWildCane(ctx: GoalContext, side: (typeof WOODS_DIRS)[n
  */
 const FILLER = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|netherrack)$/;
 
+const DAY = 24 * 60 * MINUTE;
+const dayOf = (t: number) => Math.floor(t / DAY);
+
+/** A cell whose filler the round did not get out today (UTC): left be until tomorrow (world.caneSkip). */
+export const skippedToday = (world: WorldMemory, c: Pos, now: number): boolean => {
+  const at = world.caneSkip?.[key(c)];
+  return at !== undefined && dayOf(at) === dayOf(now);
+};
+
+/** The marks of earlier days, and of cells no longer in the patch, go. */
+function forgetSkips(world: WorldMemory, cells: Pos[], now: number): void {
+  const marks = world.caneSkip;
+  if (!marks) return;
+  const inPatch = new Set(cells.map(key));
+  for (const [k, at] of Object.entries(marks)) if (!inPatch.has(k) || dayOf(at) !== dayOf(now)) delete marks[k];
+  if (!Object.keys(marks).length) delete world.caneSkip;
+}
+
+/** Water beside the cell itself (not beside its ground): the filler holds it back, and dug out the water runs in and over the shore. */
+const holdsWater = (view: StandView, c: Pos) => {
+  const { at } = regionOf(view.blocks, view.box);
+  return SIDES4.some(([dx, dz]) => wet(at({ x: c.x + dx, y: c.y, z: c.z + dz })));
+};
+
+/**
+ * Dig the filler out of a cane cell by hand: the bridge's dig.here (from where the bot stands: no walk, no Baritone,
+ * never someone's build or a portal's frame), from a stand cell walked to carefully, the next one if it cannot see
+ * the block from there, three at most. Baritone's dig (dig-block) never got it out: live 2026-11-13 the same cells
+ * (-527,63,2210 -523,63,2210 -524,63,2211 ...) each burnt its 60 s timeout every round, some 4 min a round. Returns
+ * why not, or ''.
+ */
+async function clearCell(ctx: GoalContext, c: Pos, stands: Pos[], here: { at: Pos }): Promise<string> {
+  const stay = stands.find(s => same(s, here.at));
+  let why = 'no stand cell in reach on foot';
+  for (const s of (stay ? [stay, ...stands.filter(o => o !== stay)] : stands).slice(0, 3)) {
+    if (!await walkTo(ctx, s, here)) { why = 'no way to a stand cell on foot'; continue; }
+    // the cell as it is after the walk: dig.here breaks whatever is there (bar someone's build it knows), and only the
+    // filler is the bot's to dig (gone since, the cane goes in; anything else put there since stays)
+    const inCell = name((await ctx.call<{ blocks?: (string | null)[] }>('world.region', { ...c, width: 1, height: 1, length: 1 })
+      .catch(() => undefined))?.blocks?.[0]);
+    if (AIRY.test(inCell)) return '';
+    if (!FILLER.test(inCell)) return `${inCell || 'a block not seen'} in it now`;
+    const r = await ctx.call<{ dug: boolean; reason?: string }>('dig.here', { ...c, timeoutMs: 15_000 }, 25_000)
+      .catch(e => ({ dug: false, reason: (e as Error).message }));
+    if (ctx.signal.aborted) throw new Error('aborted');
+    if (r.dug || r.reason === 'air') return '';
+    why = r.reason ?? 'not dug';
+    // (someone's build, a portal's frame, a dig that ran out of time: no other stand cell helps)
+    if (!/out of reach|out of sight/.test(why)) return why;
+  }
+  return why;
+}
+
+const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * The cut cane picked up before the bot walks on: it falls onto the cell's ground, beside the bot, and the game lets
+ * no one take a drop for its first half second, so a walk to the next cell started at once could leave it lying
+ * (dig-block's own pickup is a walk of Baritone's to each drop: not used). A second and a half at most; what still
+ * lies by the cell then is out of the bot's reach, and left.
+ */
+async function pickUpCut(ctx: GoalContext, c: Pos): Promise<void> {
+  for (let i = 0; i < 6; i++) {
+    const lying = (await ctx.call<{ entities?: { item?: string; position: Pos }[] }>('world.entities', { maxDistance: 8, type: 'item' })
+      .catch(() => undefined))?.entities ?? [];
+    if (!lying.some(e => e.item === 'sugar_cane' && horiz(e.position, { x: c.x + 0.5, z: c.z + 0.5 }) <= 1.5 && e.position.y >= c.y - 1 && e.position.y <= c.y + 3)) return;
+    if (ctx.signal.aborted) throw new Error('aborted');
+    await pause(250);
+  }
+}
+
 /** What the round does with one of its cells, from the cell's block and the one above: cut, replant, clear, or leave. */
 export function caneCellPlan(base: string, mid: string, haveCane: boolean): 'cut' | 'plant' | 'clear' | 'leave' {
   if (base === 'sugar_cane') return mid === 'sugar_cane' ? 'cut' : 'leave';
@@ -422,7 +589,10 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
 /**
  * Once a day: cut the cane down to its base (the stalk above the bottom block), and replant a missing base, in the
  * cells that can grow cane. A cell with no water beside its ground is left alone (nothing is walked to, taken from the
- * chests or planted for it: cane would not stay there) and written down, for the cane patch rung to drop.
+ * chests or planted for it: cane would not stay there) and written down, for the cane patch rung to drop. Each cell
+ * is seen to from a stand cell on the land within reach, walked to carefully (stand cells, above); filler in one is
+ * dug out by hand (clearCell), and a cell whose filler would not come out is left be for the rest of the day (one
+ * whose filler holds back water beside it, for good: it is dropped from the patch).
  */
 export const caneRound: Goal = {
   name: 'cane',
@@ -436,15 +606,17 @@ export const caneRound: Goal = {
   run: async ctx => {
     // room for the stalks first (home to the chests where the pockets are too full; the walk to the cane is the
     // round's own, as ever). Before the round is written down: one that could make no room has not been
-    await makeRoom(ctx, 'yard');
+    const s = await makeRoom(ctx, 'yard');
     const marked = ctx.world.lastDone?.cane;
-    (ctx.world.lastDone ??= {}).cane = ctx.s.now;
-    let cut = 0, replanted = 0, cleared = 0;
+    const now = ctx.s.now;
+    (ctx.world.lastDone ??= {}).cane = now;
+    let cut = 0, replanted = 0, cleared = 0, skipped = 0, unreached = 0;
     // a round stopped before it saw to a cell has not been done: the brain lets a goal stopped for something more
     // urgent go again as soon as it is wanted, and the mark above kept it off for the day. Live 2026-11-12: repair
     // cut in 5 s after each morning's start (the walk brings the bot near home), and the round ran on 1 day of 9
     try {
       const cells = ctx.world.zones!.cane;
+      forgetSkips(ctx.world, cells, now);
       const seen = new Map<Pos, CaneLook>();
       for (const c of cells) seen.set(c, await lookAtCell(ctx, c));
       // the cells that can grow cane: a dead one (no water beside it) is written down for the cane patch rung, and
@@ -456,30 +628,65 @@ export const caneRound: Goal = {
       // bases to put back, and too few carried: a few from the chests first. Live 2026-11-10: the stash had put every
       // stalk away (37 in the food chest), all five cells stood empty, and the round "cut 0 stalk(s) (0 cane)" every
       // 20 min for 9 hours with nothing to replant, while the enchanting room waited on 98 cane.
-      const bare = growing.map(c => seen.get(c)!).filter(({ base, mid }) => caneCellPlan(base, mid, true) !== 'leave' && base !== 'sugar_cane').length;
+      // (a cell whose filler would not come out today needs no cane: it is left be)
+      const bare = growing.filter(c => {
+        const { base, mid } = seen.get(c)!;
+        const plan = caneCellPlan(base, mid, true);
+        return plan === 'plant' || (plan === 'clear' && !skippedToday(ctx.world, c, now));
+      }).length;
       // (a chest out of reach is no reason to skip the cutting: live, stranded on a scaffold, "chest too far to open")
       if (bare && (await caneCount(ctx)) < bare) await takeFromChests(ctx, 'sugar_cane', bare - (await caneCount(ctx))).catch(() => 0);
       const before = await caneCount(ctx);
+      const here = { at: await standing(ctx, blockOf(s.position)) };
       for (const c of growing) {
         if (ctx.signal.aborted) break;
         const { base, mid } = seen.get(c)!;
         const plan = caneCellPlan(base, mid, base !== 'sugar_cane' && (await caneCount(ctx)) > 0);
+        if (plan === 'leave') continue;
+        if (plan === 'clear' && skippedToday(ctx.world, c, now)) { skipped++; continue; }
+        const view = await standView(ctx, c);
         if (plan === 'cut') {
-          // cutting the second block brings the rest down with it
-          const r = await ctx.act('dig-block', { x: c.x, y: c.y + 1, z: c.z, collect: true });
-          if (/^Dug/.test(r.text)) { cut++; ctx.gain(1); }
-        } else if (plan === 'plant' || plan === 'clear') {
-          if (plan === 'clear') {
-            const d = await ctx.act('dig-block', { ...c, collect: true }).catch(e => ({ ok: false, text: (e as Error).message }));
-            if (!/^Dug|^No block/.test(d.text)) { ctx.progress(`cane cell ${c.x},${c.y},${c.z}: ${base} would not come out: ${d.text.slice(0, 100)}`); continue; }
-            cleared++;
-          }
-          const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
-          if (/^Placed/.test(r.text)) { replanted++; ctx.gain(1); }
+          if (!await toStand(ctx, caneStands(view, c, here.at, cells, true), here, c)) { unreached++; continue; }
+          // cutting the second block brings the rest down with it, into the cell, and from beside it the bot picks it
+          // up as it falls (dig-block's own pickup walks to each drop with Baritone, the ones on the water as well)
+          const r = await ctx.act('dig-block', { ...c, y: c.y + 1, collect: false });
+          if (/^Dug/.test(r.text)) { cut++; ctx.gain(1); await pickUpCut(ctx, c); }
+          continue;
         }
+        // (from where the cane then goes in as well)
+        const stands = caneStands(view, c, here.at, cells);
+        // what the look saw may have changed: only filler comes out (gone since, the cane goes in; anything else put
+        // there since stays), and clearCell reads the cell once more after each walk, just before it digs
+        const inCell = name(regionOf(view.blocks, view.box).at(c));
+        if (plan === 'clear' && !FILLER.test(inCell) && !AIRY.test(inCell)) continue;
+        if (plan === 'clear' && FILLER.test(inCell)) {
+          if (holdsWater(view, c)) {
+            // the filler holds back water beside the cell itself: it stays (dug out, the water runs in and over the
+            // shore), and the cell is no use to cane. Out of the patch, then, as a dead cell is, so the cane patch rung
+            // plants another: left be a day at a time, it counted as a live cell for good and nothing took its place
+            // (its new cells pass it by while the filler stands in it: shoreCells wants air there)
+            ctx.world.zones!.cane = ctx.world.zones!.cane.filter(q => key(q) !== key(c));
+            skipped++;
+            ctx.progress(`cane cell ${c.x},${c.y},${c.z}: ${base} left in (water beside it would run in): dropped from the patch`);
+            continue;
+          }
+          const why = await clearCell(ctx, c, stands, here);
+          if (why) {
+            // once a day: the next round passes it by (live, the same cells cost a 60 s timeout each, every round)
+            (ctx.world.caneSkip ??= {})[key(c)] = now;
+            skipped++;
+            ctx.progress(`cane cell ${c.x},${c.y},${c.z}: ${base} not dug out (${why.slice(0, 100)}): left be for today`);
+            continue;
+          }
+          cleared++;
+        } else if (!await toStand(ctx, stands, here)) { unreached++; continue; }
+        const r = await ctx.act('place-block', { ...c, faceDirection: 'down', item: 'sugar_cane' });
+        if (/^Placed/.test(r.text)) { replanted++; ctx.gain(1); }
       }
       const got = (await caneCount(ctx)) - before + replanted;
-      return `cut ${cut} stalk(s) (${Math.max(0, got)} cane)${replanted ? `, replanted ${replanted}` : ''}${cleared ? ` (${cleared} cell(s) cleared of scaffold first)` : ''}` +
+      return `cut ${cut} stalk(s) (${Math.max(0, got)} cane)${replanted ? `, replanted ${replanted}` : ''}` +
+        (cleared || skipped ? `; cleared ${cleared} cell(s) of scaffold; ${skipped} skipped` : '') +
+        (unreached ? `; ${unreached} cell(s) out of reach on foot` : '') +
         (dead.length ? `; ${dead.length} cell(s) with no water beside them left alone` : '');
     } finally {
       if (ctx.signal.aborted && !cut && !replanted && !cleared) {

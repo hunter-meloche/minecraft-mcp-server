@@ -15,9 +15,9 @@ import { DRY_WAIT, dryUntil, pick, releaseOldestDry, sitesOf, workGoals, workOf,
  * The cane rungs (worktasks.ts `cane patch`, `cane`) and the cane round over a stand-in world that answers as the
  * client does: world.region box by box (x fastest, then z, then y; null where not loaded), world.findBlocks the
  * nearest first round the bot (open to the sky when asked), place-block that the server refuses where cane cannot
- * stand, dig-block that brings down the cane above and picks it up. Shaped like the live homestead on Nov 12: the
- * yard's ground at y 62, the lake sunk to y 56 east of it round (-508, 2199), the five old cells at y 63 with no
- * water beside them, the farm's water inside the yard.
+ * stand, dig-block that brings down the cane above (and picks it up, or leaves it lying with collect: false). Shaped
+ * like the live homestead on Nov 12: the yard's ground at y 62, the lake sunk to y 56 east of it round (-508, 2199),
+ * the five old cells at y 63 with no water beside them, the farm's water inside the yard.
  */
 
 const MINUTE = 60_000;
@@ -99,13 +99,31 @@ const look = (items: InventoryItem[], over: Partial<Snapshot> = {}): Snapshot =>
 });
 const KIT: InventoryItem[] = [{ slot: 0, name: 'iron_pickaxe', count: 1 }, { slot: 1, name: 'bread', count: 32 }];
 
+/** How far the eye at `feet` is from the nearest point of block `p` (the reach the game measures, 4.5 at most). */
+const reachOf = (feet: Pos, p: Pos) => {
+  const eye = { x: feet.x + 0.5, y: feet.y + 1.62, z: feet.z + 0.5 };
+  const near = (v: number, lo: number) => Math.max(lo, Math.min(lo + 1, v));
+  return Math.hypot(eye.x - near(eye.x, p.x), eye.y - near(eye.y, p.y), eye.z - near(eye.z, p.z));
+};
+
 /**
  * The bot in that world, as the client tools answer: where it stands, its pockets, one chest. `refuse`: cells where
  * the server will not take a block (a sheep standing there); `zones`: someone else's builds as the mod reports them;
- * `unreachable`: places move-to-position finds no path to (it throws, as the tool does).
+ * `unreachable`: places move-to-position finds no path to (it throws, as the tool does); `noWay`: blocks a walk does
+ * not get to (it stops short, where it was). Every walk is written down, careful or not (`walks`), and so is every
+ * dig-block or place-block out of the bot's reach (`baritone`): the tool then walks there by Baritone's own way, which
+ * may bridge and pillar with cobblestone; and so is every dig-block that picks up its own drops (collect, the tool's
+ * default: it walks onto each the same way). With collect: false the cut cane lies on the cell's ground (`lying`)
+ * until the bot looks for drops (world.entities: by then the game's half second has gone by) from within a block of
+ * it, on its level or up to two below (the game's pickup box): a walk away first leaves it there. dig.here digs from
+ * where the bot stands, within reach, as the bridge's does.
  */
-function botIn(land: Land, world: WorldMemory, items: InventoryItem[], opts: { refuse?: string[]; zones?: Zone[]; chest?: Record<string, number>; unreachable?: string[] } = {}) {
-  const me = { pos: { ...HOME }, items: items.map(i => ({ ...i })), acts: [] as string[], said: [] as string[], gain: 0, gotos: [] as Pos[], chest: { sugar_cane: 34, ...opts.chest } };
+function botIn(land: Land, world: WorldMemory, items: InventoryItem[], opts: { refuse?: string[]; zones?: Zone[]; chest?: Record<string, number>; unreachable?: string[]; noWay?: (p: Pos) => boolean } = {}) {
+  const me = {
+    pos: { ...HOME }, items: items.map(i => ({ ...i })), acts: [] as string[], said: [] as string[], gain: 0, gotos: [] as Pos[], chest: { sugar_cane: 34, ...opts.chest },
+    walks: [] as { to: string; careful: boolean; range?: number }[], baritone: [] as string[], digs: [] as string[],
+    lying: [] as { at: Pos; n: number }[]
+  };
   const ac = new AbortController();
   const count = (name: string) => me.items.filter(i => i.slot < 36 && i.name === name).reduce((a, i) => a + i.count, 0);
   const add = (name: string, n: number) => {
@@ -140,12 +158,39 @@ function botIn(land: Land, world: WorldMemory, items: InventoryItem[], opts: { r
       if (method === 'world.region') return { blocks: land.region(p as unknown as Box) };
       if (method === 'world.findBlocks') return { positions: land.find(String(p.block), me.pos, Number(p.maxDistance ?? 32), Number(p.count ?? 1), !!p.openAbove) };
       if (method === 'foreign.zones') return { zones: opts.zones ?? [] };
-      if (method === 'goto') { me.gotos.push(at(p)); me.pos = { x: Number(p.x), y: 63, z: Number(p.z) }; return { arrived: true }; }
+      if (method === 'world.entities') {
+        const reached = (d: Pos) => Math.abs(me.pos.x - d.x) <= 1 && Math.abs(me.pos.z - d.z) <= 1 && me.pos.y <= d.y && me.pos.y >= d.y - 2;
+        for (const d of me.lying.filter(l => reached(l.at))) add('sugar_cane', d.n);
+        me.lying = me.lying.filter(l => !reached(l.at));
+        return { entities: me.lying.map((l, i) => ({ id: i + 1, name: 'item', item: 'sugar_cane', count: l.n, position: { x: l.at.x + 0.5, y: l.at.y, z: l.at.z + 0.5 } })) };
+      }
+      if (method === 'goto') {
+        me.gotos.push(at(p));
+        const to = { x: Number(p.x), y: p.xz || p.y === undefined ? 63 : Number(p.y), z: Number(p.z) };
+        me.walks.push({ to: k(to), careful: !!p.careful, ...(p.range !== undefined ? { range: Number(p.range) } : {}) });
+        if (opts.noWay?.(to)) return { arrived: false, at: { ...me.pos } };
+        me.pos = to;
+        return { arrived: true };
+      }
+      if (method === 'dig.here') {
+        const q = at(p);
+        me.digs.push(k(q));
+        const b = land.name(q);
+        if (b === 'air') return { dug: false, reason: 'air' };
+        if (reachOf(me.pos, q) > 4.5) return { dug: false, reason: 'out of reach or out of sight', block: b };
+        land.set(q, 'air');
+        return { dug: true, block: b };
+      }
       return {};
     }) as GoalContext['call'],
     act: async (tool, a = {}) => {
       const p = at(a);
       me.acts.push(tool === 'take-from-chest' ? `${tool} ${a.count}` : ['go-home'].includes(tool) ? tool : `${tool} ${k(p)}`);
+      // out of reach the tool walks there first, by Baritone's own way (it may place and break on the way)
+      // (the bridge's place reaches 4.5 from the eye to the face it clicks: for cane, the top of the ground)
+      const aim = { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, eye = { x: me.pos.x + 0.5, y: me.pos.y + 1.62, z: me.pos.z + 0.5 };
+      const far = tool === 'dig-block' ? reachOf(me.pos, p) > 4.5 : tool === 'place-block' && Math.hypot(eye.x - aim.x, eye.y - aim.y, eye.z - aim.z) > 4.5;
+      if (far) me.baritone.push(`${tool} ${k(p)}`);
       if (tool === 'go-home') { me.pos = { ...HOME }; return { ok: true, text: 'Home' }; }
       if (tool === 'move-to-position') {
         if (opts.unreachable?.includes(k(p))) throw new Error(`Could not reach ${fmt(p)}: no path found`);
@@ -159,7 +204,7 @@ function botIn(land: Land, world: WorldMemory, items: InventoryItem[], opts: { r
         return { ok: true, text: `Took ${n} sugar_cane from the chest at ${fmt(CHEST)}. It holds: ${me.chest.sugar_cane ? `sugar_cane x${me.chest.sugar_cane}` : 'nothing'}.` };
       }
       if (tool === 'place-block') {
-        me.pos = { ...p };
+        if (far) me.pos = { ...p };
         if (!count(String(a.item))) return { ok: true, text: `No ${a.item} in inventory to place` };
         if (land.name(p) !== 'air') return { ok: true, text: `There's already a block (${land.name(p)}) at ${fmt(p)}` };
         if (opts.refuse?.includes(k(p)) || !holdsCane(p)) return { ok: true, text: `Failed to place block at ${fmt(p)}: the server did not accept it` };
@@ -168,14 +213,22 @@ function botIn(land: Land, world: WorldMemory, items: InventoryItem[], opts: { r
         return { ok: true, text: `Placed sugar_cane at ${fmt(p)} using down face` };
       }
       if (tool === 'dig-block') {
-        me.pos = { ...p };
+        if (far) me.pos = { ...p };
         const b = land.name(p);
         if (b === 'air') return { ok: true, text: `No block found at position ${fmt(p)}` };
-        // cane above a cut block has nothing to stand on: it comes down too, and the drops are picked up
+        // as live: Baritone's dig of the scaffold in a cane cell by the water never broke it, and the tool's 60 s ran
+        // out (2026-11-13, the same cells every round)
+        const under = { ...p, y: p.y - 1 };
+        if (b !== 'sugar_cane' && [p, under].some(q => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => land.name({ x: q.x + dx, y: q.y, z: q.z + dz }) === 'water'))) {
+          throw new Error(`Could not dig ${b} at ${fmt(p)} (timeout).`);
+        }
+        // cane above a cut block has nothing to stand on: it comes down too, onto the ground under the base
         let n = 0;
         for (let y = p.y; b === 'sugar_cane' && land.name({ ...p, y }) === 'sugar_cane'; y++) { land.set({ ...p, y }, 'air'); n++; }
         if (b !== 'sugar_cane') land.set(p, 'air');
-        if (n) add('sugar_cane', n);
+        if (n && a.collect === false) { me.lying.push({ at: { ...p, y: p.y - 1 }, n }); return { ok: true, text: `Dug ${b} at ${fmt(p)}` }; }
+        // (picked up by the tool, which walks onto the drops by Baritone's way)
+        if (n) { add('sugar_cane', n); me.baritone.push(`dig-block ${k(p)} (to the drops)`); }
         return { ok: true, text: `Dug ${b} at ${fmt(p)}${n ? `. Picked up sugar_cane x${n}` : ''}` };
       }
       return { ok: false, text: `no ${tool} here` };
@@ -402,6 +455,228 @@ test('the cane round leaves dead cells alone: it cuts what grows, replants a liv
   const again = liveWorld({ zones: { cane: [dead] }, caneDry: { [k(dead)]: T0 }, lastDone: {} });
   await caneRound.run({ ...botIn(land, again, KIT).ctx });
   t.is(again.caneDry, undefined);
+});
+
+/**
+ * The patch as brain.log had it on Nov 13: the six cells the round could not clear (cobblestone in each, dirt under
+ * it, air above: the scaffold of a walk along the shore), and two with their cane grown 2 tall, at y 63 on the ground
+ * by the yard's south-east corner, the water beside each cell's ground at y 62 (here: east of it).
+ */
+const FILLED: Pos[] = [{ x: -527, y: 63, z: 2210 }, { x: -523, y: 63, z: 2210 }, { x: -524, y: 63, z: 2211 }, { x: -522, y: 63, z: 2214 }, { x: -520, y: 63, z: 2212 }, { x: -519, y: 63, z: 2208 }];
+const GROWN: Pos[] = [{ x: -520, y: 63, z: 2204 }, { x: -518, y: 63, z: 2206 }];
+function filledLand(): Land {
+  const land = new Land(() => 62);
+  for (const c of [...FILLED, ...GROWN]) land.set({ x: c.x + 1, y: 62, z: c.z }, 'water[level=0]');
+  for (const c of FILLED) { land.set(c, 'cobblestone'); land.set({ ...c, y: 62 }, 'dirt'); }
+  for (const c of GROWN) stalk(land, c, 2);
+  return land;
+}
+/** a walk onto water, or into (or onto) a cell of the patch */
+const offLand = (land: Land, cells: Pos[], to: string) => {
+  const [x, y, z] = to.split(',').map(Number);
+  return land.name({ x, y: y - 1, z }) === 'water' || land.name({ x, y, z }) === 'water' || cells.some(c => c.x === x && c.z === z && y >= c.y && y <= c.y + 3);
+};
+
+test('the live filler cells: dug out by hand from a stand cell on the land beside them, never by Baritone\'s dig, and replanted', async (t) => {
+  // live Nov 13: "cane cell -523,63,2210: cobblestone would not come out: Could not dig cobblestone at (-523, 63, 2210)
+  // (timeout)", the same cells every round, 60 s each: some 4 min of a round's 6
+  const land = filledLand();
+  const cells = [...FILLED, ...GROWN];
+  const world = liveWorld({ zones: { cane: cells.map(c => ({ ...c })) }, lastDone: {} });
+  const b = botIn(land, world, [...KIT, { slot: 2, name: 'sugar_cane', count: 10 }]);
+  const text = await caneRound.run(b.ctx);
+  t.is(text, 'cut 2 stalk(s) (2 cane), replanted 6; cleared 6 cell(s) of scaffold; 0 skipped');
+  // the filler with the direct dig, each from where the bot stood within reach; Baritone's dig only for the cut
+  t.deepEqual(b.me.digs, FILLED.map(k));
+  t.deepEqual(b.me.acts.filter(a => a.startsWith('dig-block')), GROWN.map(c => `dig-block ${c.x},${c.y + 1},${c.z}`));
+  t.deepEqual(b.me.acts.filter(a => a.startsWith('place-block')), FILLED.map(c => `place-block ${k(c)}`));
+  t.deepEqual(b.me.baritone, [], 'nothing done out of reach: no walk of Baritone\'s own');
+  // the walks: careful, onto a stand cell on the land (never the water, never a cell of the patch)
+  t.true(b.me.walks.length > 0);
+  t.true(b.me.walks.every(w => w.careful && w.range === 0), JSON.stringify(b.me.walks));
+  t.deepEqual(b.me.walks.filter(w => offLand(land, cells, w.to)), []);
+  // only the filler came out: the cane in, its ground and the water as they were
+  for (const c of FILLED) {
+    t.is(land.name(c), 'sugar_cane', k(c));
+    t.is(land.name({ ...c, y: 62 }), 'dirt');
+    t.is(land.name({ x: c.x + 1, y: 62, z: c.z }), 'water');
+  }
+  for (const c of GROWN) t.is(land.name(c), 'sugar_cane', 'the base stays');
+});
+
+test('a cell whose filler cannot be got at on foot is left be for the rest of the day: said once, never dug by Baritone, and tried again the next day', async (t) => {
+  // one cell on a spit of land out in the water, no stand cell within reach of it; one whose stand cells no careful
+  // walk gets to (fenced off from the land side)
+  const land = filledLand();
+  const spit = { x: -520, y: 63, z: 2230 };
+  for (let x = spit.x - 5; x <= spit.x + 5; x++) for (let z = spit.z - 5; z <= spit.z + 5; z++) if (x !== spit.x || z !== spit.z) land.set({ x, y: 62, z }, 'water[level=0]');
+  land.set(spit, 'cobblestone');
+  land.set({ ...spit, y: 62 }, 'dirt');
+  const penned = FILLED[0];
+  const fenced = (p: Pos) => horiz(p, penned) <= 5;
+  const world = liveWorld({ zones: { cane: [{ ...spit }, { ...penned }] }, lastDone: {} });
+  const carry = [...KIT, { slot: 2, name: 'sugar_cane', count: 10 }];
+  const at = (now: number, opts: { noWay?: (p: Pos) => boolean } = {}) => {
+    const b = botIn(land, world, carry, opts);
+    return { b, ctx: { ...b.ctx, s: { ...b.ctx.s, now } } };
+  };
+  const first = at(T0, { noWay: fenced });
+  t.is(await caneRound.run(first.ctx), 'cut 0 stalk(s) (0 cane); cleared 0 cell(s) of scaffold; 2 skipped');
+  t.deepEqual(first.b.me.said, [
+    'cane cell -520,63,2230: cobblestone not dug out (no stand cell in reach on foot): left be for today',
+    'cane cell -527,63,2210: cobblestone not dug out (no way to a stand cell on foot): left be for today'
+  ]);
+  // no 60 s dig of Baritone's: three careful walks toward the fenced one, that got nowhere, and nothing more
+  t.false(first.b.me.acts.some(a => a.startsWith('dig-block')));
+  t.deepEqual(first.b.me.digs, []);
+  t.is(first.b.me.walks.length, 3);
+  t.true(first.b.me.walks.every(w => w.careful));
+  t.deepEqual(world.caneSkip, { [k(spit)]: T0, [k(penned)]: T0 });
+  // the next round the same day passes both by: no walk, no dig, no line
+  const again = at(T0 + 30 * MINUTE, { noWay: fenced });
+  t.is(await caneRound.run(again.ctx), 'cut 0 stalk(s) (0 cane); cleared 0 cell(s) of scaffold; 2 skipped');
+  t.deepEqual([again.b.me.said, again.b.me.walks, again.b.me.digs, again.b.me.acts], [[], [], [], []]);
+  t.deepEqual(world.caneSkip, { [k(spit)]: T0, [k(penned)]: T0 });
+  // the next day (UTC) both are tried again: the fence is open now, and the spit is still out of reach (and a mark
+  // for a cell no longer in the patch goes, today's or not)
+  const tomorrow = Date.UTC(2026, 10, 13, 0, 5, 0);
+  world.caneSkip![k({ x: -530, y: 63, z: 2212 })] = tomorrow;
+  const next = at(tomorrow);
+  t.is(await caneRound.run(next.ctx), 'cut 0 stalk(s) (0 cane), replanted 1; cleared 1 cell(s) of scaffold; 1 skipped');
+  t.deepEqual(next.b.me.said, ['cane cell -520,63,2230: cobblestone not dug out (no stand cell in reach on foot): left be for today']);
+  t.deepEqual(next.b.me.digs, [k(penned)]);
+  t.is(land.name(penned), 'sugar_cane');
+  t.deepEqual(world.caneSkip, { [k(spit)]: tomorrow });
+});
+
+test('the patch and the round walk the shore carefully, onto stand cells on the land, and plant and cut only from within reach', async (t) => {
+  // live Nov 13 the scaffold came back between rounds: place-block's and dig-block's own walks, for a cell out of
+  // reach, are Baritone's, which bridge along the shore
+  const land = liveLand();
+  const world = liveWorld();
+  const patch = botIn(land, world, [...KIT, { slot: 2, name: 'sugar_cane', count: 30 }]);
+  await goalOf(rung('cane patch'), { now: T0 }).run(patch.ctx);
+  const cells = world.zones!.cane!;
+  t.true(cells.length > 10, `${cells.length} cells`);
+  t.deepEqual(patch.me.baritone, []);
+  t.true(patch.me.walks.every(w => w.careful), JSON.stringify(patch.me.walks));
+  t.deepEqual(patch.me.walks.filter(w => w.range === 0 && offLand(land, cells, w.to)), []);
+  // grown: the round cuts every stalk, each from a stand cell beside its cell
+  for (const c of cells) stalk(land, { ...c, y: c.y + 1 }, 1);
+  const round = botIn(land, world, KIT);
+  const cuts: number[] = [];
+  const act = round.ctx.act;
+  round.ctx.act = async (tool, a = {}) => {
+    if (tool === 'dig-block') cuts.push(horiz(round.me.pos, { x: Number(a.x), z: Number(a.z) }));
+    return act(tool, a);
+  };
+  t.is(await caneRound.run(round.ctx), `cut ${cells.length} stalk(s) (${cells.length} cane)`);
+  t.deepEqual(round.me.baritone, []);
+  t.true(round.me.walks.every(w => w.careful && w.range === 0), JSON.stringify(round.me.walks));
+  t.deepEqual(round.me.walks.filter(w => offLand(land, cells, w.to)), []);
+  t.true(cuts.every(d => d <= 1), JSON.stringify(cuts));
+  t.true(cells.every(c => land.name(c) === 'sugar_cane'), 'the bases stay');
+});
+
+test('cane goes in only from where the bridge\'s place reaches it, wherever in its block the careful walk left the bot', async (t) => {
+  // the place reaches 4.5 from the real eye to the top of the ground, and a walk ends on the block, not in its middle:
+  // from the stand for the first cell, the second is 3.95 from the eye over that block's middle, 4.5 and more from
+  // its far side, where place-block says "too far" and walks the rest by Baritone's way
+  const land = new Land(() => 62);
+  const cells: Pos[] = [{ x: -520, y: 63, z: 2230 }, { x: -518, y: 63, z: 2232 }];
+  for (const c of cells) land.set({ x: c.x + 1, y: 62, z: c.z }, 'water[level=0]');
+  const world = liveWorld({ zones: { cane: cells.map(c => ({ ...c })) }, lastDone: {} });
+  const b = botIn(land, world, [...KIT, { slot: 2, name: 'sugar_cane', count: 10 }]);
+  const from: number[] = [];
+  const act = b.ctx.act;
+  b.ctx.act = async (tool, a = {}) => {
+    if (tool === 'place-block') from.push(Math.hypot(b.me.pos.x + 0.5 - (Number(a.x) + 0.5), b.me.pos.y + 1.62 - Number(a.y), b.me.pos.z + 0.5 - (Number(a.z) + 0.5)));
+    return act(tool, a);
+  };
+  t.is(await caneRound.run(b.ctx), 'cut 0 stalk(s) (0 cane), replanted 2');
+  t.is(from.length, 2);
+  t.true(from.every(d => d + Math.SQRT1_2 <= 4.5), JSON.stringify(from));
+  t.deepEqual(b.me.baritone, []);
+  t.is(b.me.walks.length, 2, 'a careful walk to each');
+  t.true(b.me.walks.every(w => w.careful));
+});
+
+test('a cut is made from beside the cell and no higher, and the cane picked up before the walk on', async (t) => {
+  // the cane falls onto the cell's ground, and the game picks up a drop only down to half a block under the feet:
+  // cut from the step above it, it lies there. Beside the cell the land is a block up on three sides (the water on
+  // the fourth): the corners, level with it, are where the cut is made from
+  const land = new Land(() => 62);
+  const c = { x: -520, y: 63, z: 2230 };
+  land.set({ x: c.x + 1, y: 62, z: c.z }, 'water[level=0]');
+  for (const [dx, dz] of [[-1, 0], [0, -1], [0, 1]]) land.set({ x: c.x + dx, y: 63, z: c.z + dz }, 'dirt');
+  stalk(land, c, 3);
+  const world = liveWorld({ zones: { cane: [{ ...c }] }, lastDone: {} });
+  const b = botIn(land, world, KIT);
+  t.is(await caneRound.run(b.ctx), 'cut 1 stalk(s) (2 cane)');
+  t.deepEqual(b.me.lying, [], 'none left lying');
+  t.is(b.me.walks.length, 1);
+  const [x, y, z] = b.me.walks[0].to.split(',').map(Number);
+  t.true(Math.abs(x - c.x) === 1 && Math.abs(z - c.z) === 1 && y === c.y, b.me.walks[0].to);
+  t.deepEqual(b.me.baritone, []);
+  // a stalk on a spit, the water 3 out all round it: the nearest land is 4 off, out of sure reach (and the cane would
+  // lie where it fell): not cut, and said
+  const spit = new Land(() => 62);
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) if (dx || dz) spit.set({ x: c.x + dx, y: 62, z: c.z + dz }, 'water[level=0]');
+  stalk(spit, c, 3);
+  const far = botIn(spit, liveWorld({ zones: { cane: [{ ...c }] }, lastDone: {} }), KIT);
+  t.is(await caneRound.run(far.ctx), 'cut 0 stalk(s) (0 cane); 1 cell(s) out of reach on foot');
+  t.deepEqual([far.me.walks, far.me.acts], [[], []]);
+  t.is(spit.name({ ...c, y: c.y + 2 }), 'sugar_cane');
+});
+
+test('only the filler comes out: a block put in a cell since the look, or while the bot walked to it, stays', async (t) => {
+  // dig.here breaks whatever is there (bar a build the mod knows as someone's): the cell is read once more after the
+  // walk, just before the dig
+  const land = filledLand();
+  const cells = [...FILLED, ...GROWN];
+  const world = liveWorld({ zones: { cane: cells.map(c => ({ ...c })) }, lastDone: {} });
+  const b = botIn(land, world, [...KIT, { slot: 2, name: 'sugar_cane', count: 10 }]);
+  const [walked, looked] = [FILLED[1], FILLED[2]];
+  let armed = false, swapped = false;
+  const call = b.ctx.call;
+  b.ctx.call = (async (method: string, p: Record<string, unknown> = {}, ms?: number) => {
+    const view = method === 'world.region' && p.width === 9;
+    // someone's planks in one cell after the round's first look, before its turn
+    if (view && p.x === looked.x - 4 && p.z === looked.z - 4) land.set(looked, 'oak_planks');
+    // and a chest in another while the bot walks to it
+    if (view) armed = p.x === walked.x - 4 && p.z === walked.z - 4;
+    if (method === 'dig.here') armed = false;
+    if (method === 'goto' && armed) { land.set(walked, 'chest[facing=north]'); armed = false; swapped = true; }
+    return call(method, p, ms);
+  }) as GoalContext['call'];
+  t.is(await caneRound.run(b.ctx), 'cut 2 stalk(s) (2 cane), replanted 4; cleared 4 cell(s) of scaffold; 1 skipped');
+  t.true(swapped, 'the bot walked to the cell');
+  t.deepEqual(b.me.said, [`cane cell ${k(walked)}: cobblestone not dug out (chest in it now): left be for today`]);
+  t.is(land.name(walked), 'chest');
+  t.is(land.name(looked), 'oak_planks');
+  t.false(b.me.digs.includes(k(walked)) || b.me.digs.includes(k(looked)), JSON.stringify(b.me.digs));
+  t.false(b.me.acts.some(a => a === `place-block ${k(walked)}` || a === `place-block ${k(looked)}`));
+  t.deepEqual(Object.keys(world.caneSkip ?? {}), [k(walked)]);
+});
+
+test('filler that holds back water beside the cell stays in, and the cell is dropped from the patch for the patch to plant another', async (t) => {
+  // dug out, the water beside it would run into the cell and on over the shore; and left be a day at a time, the cell
+  // counted as live for good, so the patch rung never planted one in its place
+  const land = filledLand();
+  const cells = [...FILLED, ...GROWN];
+  const c = FILLED[1];
+  const water = { x: c.x + 1, y: 63, z: c.z };
+  land.set(water, 'water[level=0]');
+  const world = liveWorld({ zones: { cane: cells.map(q => ({ ...q })) }, lastDone: {} });
+  const b = botIn(land, world, [...KIT, { slot: 2, name: 'sugar_cane', count: 10 }]);
+  t.is(await caneRound.run(b.ctx), 'cut 2 stalk(s) (2 cane), replanted 5; cleared 5 cell(s) of scaffold; 1 skipped');
+  t.deepEqual(b.me.said, [`cane cell ${k(c)}: cobblestone left in (water beside it would run in): dropped from the patch`]);
+  t.false(b.me.digs.includes(k(c)));
+  t.is(land.name(c), 'cobblestone');
+  t.is(land.name(water), 'water');
+  t.false(world.zones!.cane!.some(q => k(q) === k(c)));
+  t.is(liveCells(world).length, cells.length - 1, 'one cell fewer: the patch rung plants another');
+  t.is(world.caneSkip, undefined);
 });
 
 // ---- wild cane ----

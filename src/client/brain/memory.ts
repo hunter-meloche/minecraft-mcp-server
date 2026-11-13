@@ -100,6 +100,11 @@ export interface WorldMemory {
    */
   caneDry?: Record<string, number>;
   /**
+   * cane cells ("x,y,z" of `zones.cane`) whose filler (scaffold) the cane round could not dig out, and when: it leaves
+   * them be for the rest of that day (UTC), not trying them again each round (cane.ts)
+   */
+  caneSkip?: Record<string, number>;
+  /**
    * the cane patch's planting found its shore full (every cell where cane can stand is the patch's, or a gap beside
    * one) with this many live cells, and when: the patch rung waits till it has fewer, or a day (cane.ts, worktasks.ts)
    */
