@@ -2,7 +2,7 @@ import type { GoalContext } from './goals.js';
 import type { MilestoneState, Step, StepResult } from './progress.js';
 import { billCarry, billCarryCap, prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
-import { allItems, mostWood, progressOf, rawShort } from './progress.js';
+import { allItems, mostWood, progressOf, rawShort, reservedSites } from './progress.js';
 import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
 import { billLeft, billOf, type Blueprint } from './blueprints.js';
@@ -94,8 +94,11 @@ export function siteStep(kind: string, width: number, length: number): Step {
       const box = { x: yard.x1, y: yard.y - 1, z: yard.z1, width: yard.x2 - yard.x1 + 1, height: 6, length: yard.z2 - yard.z1 + 1 };
       const grid = occupancy(box, await readBox(ctx, box), yard.y);
       // not the fence: its zone is the ring round the whole yard (as a rectangle it left no room anywhere)
-      const avoid = Object.entries(ctx.world.zones ?? {}).filter(([k]) => !RINGS.has(k)).flatMap(([, zs]) => zs).filter(z => z.width && z.length)
-        .map(z => ({ x: z.x, z: z.z, width: z.width!, length: z.length! }));
+      // nor the sites of milestones set aside midway, chosen but not built yet: two siblings, the first held at its
+      // build step and set aside, the second chose the same spot and built there, and the first came back to its old
+      // site on top of it (this one's own site is not chosen yet, so only theirs are in the list)
+      const avoid = [...Object.entries(ctx.world.zones ?? {}).filter(([k]) => !RINGS.has(k)).flatMap(([, zs]) => zs), ...reservedSites(progressOf(ctx.world))]
+        .filter(z => z.width && z.length).map(z => ({ x: z.x, z: z.z, width: z.width!, length: z.length! }));
       const site = findSite(grid, width, length, { near: ctx.s.home, clearance: 2, avoidRect: avoid });
       if (site) {
         st.data.site = { ...site, y: yard.y };
@@ -106,8 +109,11 @@ export function siteStep(kind: string, width: number, length: number): Step {
   };
 }
 
-/** What a levelling fills with (fillShort counts cobbled deepslate as cobblestone). */
-const FILL_KINDS = ['dirt', 'cobblestone', 'cobbled_deepslate'] as const;
+/**
+ * What a levelling's fill is marked as, so the stash throws none of it away. Cobbled deepslate with it: carried during
+ * a fill it stays carried, though level-area places only dirt and plain cobblestone (fillShort counts no deepslate).
+ */
+export const FILL_KINDS = ['dirt', 'cobblestone', 'cobbled_deepslate'] as const;
 
 export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
   const m = 24;
@@ -176,14 +182,17 @@ export function fillOf(text: string): { dirt: number; cobblestone: number } | un
  * Get a levelling's fill into the pockets from the home chests; what's still short (raw materials, as progress.need)
  * the stock trips fetch. Empty when it's all carried.
  */
-async function fillShort(ctx: GoalContext, box: { x1: number; z1: number; x2: number; z2: number; level: number }): Promise<Record<string, number>> {
+export async function fillShort(ctx: GoalContext, box: { x1: number; z1: number; x2: number; z2: number; level: number }): Promise<Record<string, number>> {
   const dry = await ctx.act('level-area', { ...box, dryRun: true });
   const fill = fillOf(dry.text);
   if (!fill) return {};
   const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
   const has = (re: RegExp) => inv.items.filter(i => i.slot < 36 && re.test(i.name)).reduce((a, i) => a + i.count, 0);
   const short: Record<string, number> = {};
-  for (const [item, want, re] of [['dirt', fill.dirt, /^dirt$/], ['cobblestone', fill.cobblestone, /^(cobblestone|cobbled_deepslate)$/]] as const) {
+  // plain cobblestone only: level-area fills with it and counts it alone, so deepslate carried is no fill. Counted with
+  // it, 64 deepslate carried (a deep trip brings back that much) took none of the chests' cobblestone: the side placed
+  // nothing and waited, and so again every run while the pockets held the deepslate
+  for (const [item, want, re] of [['dirt', fill.dirt, /^dirt$/], ['cobblestone', fill.cobblestone, /^cobblestone$/]] as const) {
     let have = has(re);
     if (have < want) have += await takeFromChests(ctx, item, want - have);
     if (have < want) short[item] = want - have;

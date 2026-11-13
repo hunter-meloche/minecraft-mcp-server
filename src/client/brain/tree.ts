@@ -4,8 +4,9 @@ import { cropPlotMilestone, treeFarmMilestone } from './farming.js';
 import { penMilestone } from './pens.js';
 import { caneMilestone } from './cane.js';
 import { enchantingMilestone } from './enchant.js';
-import { buildStep, siteStep, yardOf } from './milestones.js';
-import type { Milestone, MilestoneState } from './progress.js';
+import { buildStep, FILL_KINDS, fillOf, fillShort, siteStep, yardOf } from './milestones.js';
+import { progressOf, type Milestone, type MilestoneState } from './progress.js';
+import { blocksWorked } from './project.js';
 import type { GoalContext } from './goals.js';
 import { homeMilestone } from './home.js';
 
@@ -152,6 +153,8 @@ const perimeter: Milestone = {
   ]
 };
 
+const MINUTE = 60_000;
+
 /** The yard box as a key: the band outside the fence is cleared for one box (it moves when the yard grows). */
 const boxKey = (y: Box2) => `${y.x1},${y.z1},${y.x2},${y.z2}`;
 
@@ -174,23 +177,60 @@ const fenceClear: Milestone = {
   title: 'clear ground outside the fence',
   prereqs: ['perimeter'],
   done: v => !!v.world.yard && v.world.fenceClearFor === boxKey(v.world.yard) && !v.world.fenceMove,
+  // the yard grown and its fence round it again: the band outside the new fence. Its done mark stayed for good: live
+  // 2026-11-13 the yard had grown four times since (z 2167..2199 to 2119..2215), the north gate opened on a hill 6
+  // high (creepers' way in over the fence), and every cow walk north came back "no way out of the yard by the north gate"
+  again: v => !!v.world.yard && !v.world.fenceMove && v.world.fenceClearFor !== boxKey(v.world.yard),
   steps: [{
     name: 'level 2 blocks outside the fence',
     run: async (ctx: GoalContext, st: MilestoneState) => {
       const yard = await yardOf(ctx);
       const strips = outerBand(yard);
-      const doneStrips = (st.data.strips as number[] | undefined) ?? [];
+      const key = boxKey(yard);
+      // the strips cleared are this yard's: set aside midway for a fence that moved out again (the yard grown while
+      // the band was under way), it comes back to the new band's strips, none of them cleared
+      const doneStrips = st.data.for === key ? ((st.data.strips as number[] | undefined) ?? []) : [];
+      st.data.for = key;
+      st.data.strips = doneStrips;
+      const p = progressOf(ctx.world);
       for (let i = 0; i < strips.length; i++) {
         if (doneStrips.includes(i)) continue;
         if (ctx.signal.aborted) return { status: 'progress', text: `${doneStrips.length} of 4 sides cleared` };
         const s = strips[i];
+        const box = { x1: s.x1, z1: s.z1, x2: s.x2, z2: s.z2, level: yard.y };
+        // the fill first, out of the chests: level-area fills from the pockets only, and a side short of it came back
+        // "still to do" every run with nothing sent for it, as plot1's growth did for hours (the grown yard's band is
+        // 97 long, with a crater by the east fence, and on Nov 13 the chests held no dirt). Marked the yard's while
+        // it waits to be placed, as a growth's is, so the stash throws none of it away; only then: the hill outside
+        // the north fence is hundreds of blocks of dirt and stone to cut, and marked they would all go in the chests
+        const fill = fillOf((await ctx.act('level-area', { ...box, dryRun: true })).text);
+        if (fill && (fill.dirt || fill.cobblestone)) {
+          p.fill = [...FILL_KINDS];
+          p.fillAt = ctx.s.now;
+          const short = await fillShort(ctx, box);
+          if (Object.keys(short).length) {
+            // for the stock trips; not as the step's `need`: the back-off's record is the room's (its leather), and
+            // the cow search goes by it
+            p.need = short;
+            return { status: 'blocked', text: `side ${i + 1}: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')} to fill it (the stock trips fetch it)`, retryMs: 10 * MINUTE };
+          }
+        }
+        if (p.need && Object.keys(p.need).every(k => k === 'dirt' || k === 'cobblestone')) p.need = undefined;
         ctx.progress(`clearing outside the fence (${s.x1}..${s.x2}, ${s.z1}..${s.z2})`);
-        const r = await ctx.act('level-area', { x1: s.x1, z1: s.z1, x2: s.x2, z2: s.z2, level: yard.y, fillWater: false, timeoutMs: 6 * 60_000 });
-        if (!/Now level|Already level/.test(r.text)) return { status: 'progress', text: `side ${i + 1}: ${r.text.split('\n').pop()?.slice(0, 100)}` };
+        const r = await ctx.act('level-area', { ...box, fillWater: false, timeoutMs: 6 * MINUTE });
+        const level = /Now level|Already level/.test(r.text);
+        // got somewhere: on with it next run, the fill still the band's
+        if (!level && blocksWorked('level-area', r.text) > 0) return { status: 'progress', text: `side ${i + 1}: ${r.text.split('\n').pop()?.slice(0, 100)}` };
+        // placed, or not to be placed for now: what it carries is plain dirt and stone again
+        p.fill = undefined;
+        p.fillAt = undefined;
+        // got nowhere (a block it cannot cut, the area not loaded, fill it could not place): it waits. A step that
+        // comes back at once is run again at once, and a project that wants to run goes ahead of every rung of the
+        // work queue, the cow search for the room's leather among them
+        if (!level) return { status: 'blocked', text: `side ${i + 1}: ${r.text.split('\n').pop()?.slice(0, 100)}`, retryMs: 30 * MINUTE };
         doneStrips.push(i);
-        st.data.strips = doneStrips;
       }
-      ctx.world.fenceClearFor = boxKey(yard);
+      ctx.world.fenceClearFor = key;
       return { status: 'done', text: 'the ground outside the fence is level with the yard' };
     }
   }]

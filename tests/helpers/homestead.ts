@@ -136,7 +136,10 @@ export function liveWorld(): WorldMemory {
     lavaCasting: true,
     storageFull: [],
     reserved: {},
-    fenceClearFor: '-565,2167,-533,2199',
+    // the band outside the fence as fence-clear leaves it round the yard as it stands. Live it still had the first
+    // yard's box (-565,2167,-533,2199), and that makes the band due again (tree.ts): the project would want it in
+    // every cell, where these homes are for the work queue with the room blocked on its leather, or free
+    fenceClearFor: '-565,2119,-533,2215',
     yardLevelFor: '-565,2167,-533,2199'
   } as WorldMemory;
 }

@@ -1,5 +1,5 @@
 import { fromGate, nearHome, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
-import type { Milestone, StepResult } from './progress.js';
+import { reservedSites, type Milestone, type StepResult } from './progress.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { addZone } from './milestones.js';
 import { key, takeFromChests } from './chests.js';
@@ -230,12 +230,14 @@ export const WATER_FROM_HOME = 64;
 /** How many places along the water are looked at in one go. */
 const SHORES = 4;
 
-/** the bot's own builds with a box (the plot, the pens, the storage house, the trees; not the fence, which is the whole yard) and the site the project keeps */
+/**
+ * the bot's own builds with a box (the plot, the pens, the storage house, the trees; not the fence, which is the whole
+ * yard) and the sites the project keeps (its current milestone's, and one set aside midway)
+ */
 function ownBoxes(world: WorldMemory): { x: number; z: number; width: number; length: number }[] {
   const boxes = Object.entries(world.zones ?? {}).filter(([k]) => k !== 'fence').flatMap(([, zs]) => zs)
     .flatMap(b => (b.width && b.length ? [{ x: b.x, z: b.z, width: b.width, length: b.length }] : []));
-  const site = world.progress?.current?.data?.site as { x: number; z: number; width?: number; length?: number } | undefined;
-  if (site?.width && site.length) boxes.push({ x: site.x, z: site.z, width: site.width, length: site.length });
+  for (const site of reservedSites(world.progress)) if (site.width && site.length) boxes.push({ x: site.x, z: site.z, width: site.width, length: site.length });
   return boxes;
 }
 const inBox = (p: { x: number; z: number }, b: { x: number; z: number; width: number; length: number }, margin: number) =>

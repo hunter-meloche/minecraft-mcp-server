@@ -16,6 +16,7 @@ import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
 import { fuelFor } from './project.js';
 import { daylightLeft } from './schedule.js';
+import { reservedSites, stepOf } from './progress.js';
 import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
 // (work.ts reaches this file through pockets.ts: its roundDue is asked inside the rounds' gates only)
@@ -60,8 +61,8 @@ function foods(): Set<string> {
  */
 export function castingAhead(world: WorldMemory): boolean {
   if (!world.lavaCasting || world.zones?.enchanting?.length) return false;
-  const cur = world.progress?.current;
-  return !(cur?.id === 'enchanting' && (cur.step ?? 0) > 0);
+  // the room's step also while it is set aside (the band outside the fence redone ahead of it)
+  return !(stepOf(world.progress, 'enchanting') > 0);
 }
 
 function projectCarry(world: WorldMemory): Set<string> {
@@ -702,8 +703,7 @@ export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world'
   const thing = zone === 'woods' ? 'tree' : kinds[0].replace(/_/g, ' ');
   // a tree, not a log of its own: none in the yard or on a site the yard's projects keep (the storage house is logs)
   const y = ctx.world.yard;
-  const sites = [...Object.values(ctx.world.zones ?? {}).flat().filter(b => b.width && b.length),
-    ...(ctx.world.progress?.current?.data?.site ? [ctx.world.progress.current.data.site as { x: number; z: number; width?: number; length?: number }] : [])];
+  const sites = [...Object.values(ctx.world.zones ?? {}).flat().filter(b => b.width && b.length), ...reservedSites(ctx.world.progress)];
   const ours = (p: Pos) => (y && p.x >= y.x1 - 1 && p.x <= y.x2 + 1 && p.z >= y.z1 - 1 && p.z <= y.z2 + 1) ||
     sites.some(b => p.x >= b.x - 1 && p.x <= b.x + b.width! && p.z >= b.z - 1 && p.z <= b.z + b.length!);
   const inSight = async () => {

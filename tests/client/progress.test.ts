@@ -1,9 +1,10 @@
 import test from 'ava';
 import {
-  backoffMs, mostWood, nextMilestone, progressOf, rawShort, recipeFor, stillShort, type Milestone, type Step, type StepResult
+  backoffMs, mostWood, nextMilestone, progressOf, rawShort, recipeFor, reservedSites, stillShort, type Milestone, type Step, type StepResult
 } from '../../src/client/brain/progress.js';
 import { inWood } from '../../src/client/brain/milestones.js';
 import { projectGoal, prepare, prepareBill } from '../../src/client/brain/project.js';
+import { keptSites } from '../../src/client/structures/site.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 
@@ -35,6 +36,137 @@ test('nextMilestone: the first not done whose prereqs are; done-in-the-world cou
   t.true(progressOf(w).done.includes('farm')); // checked against the world on the way
   progressOf(w).blockedUntil = { fence: 2e9 };
   t.is(nextMilestone(tree, snap(), w), undefined);
+});
+
+test('nextMilestone: a done milestone that is due again is next, and stays on the done list until the project works it', (t) => {
+  const w = world();
+  let again = false;
+  const fence: Milestone = { ...ms('fence-clear', []), again: () => again };
+  const tree = [fence, ms('room', ['fence-clear'])];
+  progressOf(w).done.push('fence-clear');
+  t.is(nextMilestone(tree, snap(), w)?.id, 'room');
+  // the yard grew: the band outside the new fence is to clear (its done mark used to stay for good)
+  again = true;
+  t.is(nextMilestone(tree, snap(), w)?.id, 'fence-clear');
+  // a look: the gates ask it every tick, and gates write nothing (the run takes it off the list)
+  t.deepEqual(progressOf(w).done, ['fence-clear']);
+  t.deepEqual(progressOf(w).journal, []);
+  // held: the next one goes ahead, with the band not counted done for the milestones after it
+  progressOf(w).blockedUntil = { 'fence-clear': 2e9 };
+  t.is(nextMilestone(tree, snap(), w), undefined);
+});
+
+test('the project goal sets a milestone aside midway for one that came back, and goes on from where it was', async (t) => {
+  const w = world();
+  let fenceDue = false;
+  const ran: string[] = [];
+  const tree: Milestone[] = [
+    { id: 'fence-clear', title: 'clear the band', prereqs: [], again: () => fenceDue, steps: [{ name: 'level', run: async () => { ran.push('level'); fenceDue = false; return { status: 'done', text: 'level' }; } }] },
+    {
+      id: 'room', title: 'the room', prereqs: ['fence-clear'], steps: [
+        { name: 'site', run: async (_c, st) => { ran.push('site'); st.data.site = { x: 5, z: 5, width: 7, length: 7 }; return { status: 'done', text: 'site' }; } },
+        { name: 'build', run: async (_c, st) => { ran.push(`build at ${(st.data.site as { x: number }).x}`); return { status: 'done', text: 'built' }; } }
+      ]
+    }
+  ];
+  progressOf(w).done.push('fence-clear');
+  const goal = projectGoal(tree);
+  t.is(await goal.run(ctxFor(w, snap())), 'the room - site: site');
+  t.deepEqual(progressOf(w).current, { id: 'room', step: 1, data: { site: { x: 5, z: 5, width: 7, length: 7 } } });
+  fenceDue = true;
+  t.is(await goal.run(ctxFor(w, snap())), 'clear the band complete');
+  // the room's site was kept while the band was cleared, and the room did not start over (it would choose again)
+  t.deepEqual(ran, ['site', 'level']);
+  t.is(await goal.run(ctxFor(w, snap())), 'the room complete');
+  t.deepEqual(ran, ['site', 'level', 'build at 5']);
+  t.deepEqual(progressOf(w).aside, {});
+  t.deepEqual(progressOf(w).journal.map(j => j.text).filter(x => !/ done \(/.test(x)),
+    ['started: the room', 'clear the band: due again', 'started: clear the band', 'done: clear the band', 'back to: the room', 'done: the room']);
+});
+
+/** The live tree's shape: the band outside the fence done long ago, the room after it, set aside or current. */
+function bandAndRoom(fenceDue: () => boolean) {
+  const tree: Milestone[] = [
+    { id: 'fence-clear', title: 'clear the band', prereqs: [], again: fenceDue, steps: [{ name: 'level', run: async () => ({ status: 'done', text: 'level' }) }] },
+    {
+      id: 'room', title: 'the room', prereqs: ['fence-clear'], steps: [
+        { name: 'obsidian', run: async () => ({ status: 'done', text: 'got it' }) },
+        { name: 'site', run: async () => ({ status: 'done', text: 'site' }) },
+        { name: 'build', run: async () => ({ status: 'blocked', text: 'short of 38 leather', need: { leather: 38 } }) }
+      ]
+    }
+  ];
+  return tree;
+}
+
+test('the project gate with a done milestone due again: wants it, and its looks say the same and write nothing', (t) => {
+  // live 2026-11-13: the band done for the old yard, the room at its build step, waiting on leather
+  const w = world();
+  const s = snap();
+  const p = progressOf(w);
+  p.done.push('fence-clear');
+  p.current = { id: 'room', step: 2, data: { site: { x: 5, z: 5, width: 7, length: 7 } } };
+  p.blocked = { id: 'room/2', n: 125, at: s.now - 60_000, need: { leather: 45 } };
+  p.blockedUntil = { room: s.now - 60_000 + backoffMs(125) };
+  const goal = projectGoal(bandAndRoom(() => true));
+  const before = JSON.stringify(w);
+  // the idle log's and brain-status' look: no "short of 45 leather" while the band can be worked
+  t.is(goal.declines!(s, w), null);
+  t.is(goal.wants(s, w), 'clear the band: level');
+  // the same at night, where only the tree is looked at: what the project would work on, not the room's leather
+  t.is(goal.wants(snap([], { timeOfDay: 9500 }), w), null);
+  t.notRegex(goal.declines!(snap([], { timeOfDay: 9500 }), w)?.text ?? '', /leather/);
+  // and the room's record, twice short and short still, does not hold the band behind the chores
+  t.is(goal.urgency!(s, w), 39);
+  t.is(JSON.stringify(w), before, 'gates only look');
+});
+
+test('a milestone set aside at a later step: the gate names that step, and short still it stays behind the chores', (t) => {
+  const w = world();
+  const s = snap();
+  const p = progressOf(w);
+  p.done.push('fence-clear');
+  // the band cleared round the new yard; the room set aside at its build step, its 24-min wait run out
+  p.aside = { room: { step: 2, data: { site: { x: 5, z: 5, width: 7, length: 7 } } } };
+  p.blocked = { id: 'room/2', n: 125, at: s.now - 30 * 60_000, need: { leather: 45 } };
+  p.blockedUntil = { room: s.now - 30 * 60_000 + backoffMs(125) };
+  const goal = projectGoal(bandAndRoom(() => false));
+  t.is(goal.wants(s, w), 'the room: build');
+  // short of the leather still, after 125 tries: the chores (the cow search) go first, as before it was set aside
+  t.is(goal.urgency!(s, w), 28);
+});
+
+test('the project goal: a current milestone found done in the world is not set aside', async (t) => {
+  const w = world();
+  let built = false;
+  const tree: Milestone[] = [
+    { id: 'room', title: 'the room', prereqs: [], done: () => built, steps: [ms('x', []).steps[0], ms('x', []).steps[0]] },
+    ms('pens', [])
+  ];
+  const p = progressOf(w);
+  p.current = { id: 'room', step: 1, data: { site: { x: 5, z: 5, width: 7, length: 7 } } };
+  // built by hand meanwhile (the LLM): done in the world, and the project goes on to the next
+  built = true;
+  t.is(await projectGoal(tree).run(ctxFor(w, snap())), 'pens complete');
+  t.true(p.done.includes('room'));
+  // nothing of it to come back to: its site is not kept reserved for good
+  t.is(p.aside?.room, undefined);
+});
+
+test('nextMilestone: a milestone set aside midway and found built in the world is done, and its site let go', (t) => {
+  const w = world();
+  const p = progressOf(w);
+  // the band done; the room set aside at its build step meanwhile, and built by hand (the LLM) before it came back
+  p.done.push('fence-clear');
+  p.aside = { room: { step: 2, data: { site: { x: 5, z: 5, width: 7, length: 7 } } } };
+  const tree = [ms('fence-clear', []), ms('room', ['fence-clear'], true), ms('pens', ['room'])];
+  t.is(nextMilestone(tree, snap(), w)?.id, 'pens');
+  t.true(p.done.includes('room'));
+  t.deepEqual(p.aside, {});
+  t.deepEqual(p.journal.map(j => j.text), ['room: already in place']);
+  // kept off by nothing any more: structure-site, the woods, the cane and the first chest may use the ground
+  t.deepEqual(reservedSites(p), []);
+  t.deepEqual(keptSites({ progress: p }), []);
 });
 
 const ctxFor = (w: WorldMemory, s: Snapshot, acts: string[] = [], inv: Map<string, number> = new Map()) => ({

@@ -51,6 +51,17 @@ test('rankSites: inside or outside the yard', (t) => {
   t.true(rankSites(area, b, 3, 3, { yard, where: 'outside' }).every(p => p.anchor.x + 2 < 3 || p.anchor.x > 9 || p.anchor.z > 5));
 });
 
+test('keptSites: a milestone set aside midway keeps its site reserved', (t) => {
+  // live 2026-11-13: the ground outside the grown fence came back ahead of the enchanting room at its step 2, site chosen
+  const mem = {
+    progress: {
+      current: { data: { strips: [0] } },
+      aside: { enchanting: { data: { site: { x: -547, z: 2206, width: 7, length: 7, rotated: false, y: 62 } } } }
+    }
+  };
+  t.deepEqual(keptSites(mem), [{ x: -547, z: 2206, width: 7, length: 7 }]);
+});
+
 test('keptSites: the milestone\'s reserved site is kept off, with the zones but not the fence', (t) => {
   // the enchanting room's 7x7 site, chosen by the brain but not yet built (the lookout's search ranked spots on it)
   const mem = {

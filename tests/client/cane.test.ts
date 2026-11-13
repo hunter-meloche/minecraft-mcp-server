@@ -1,6 +1,7 @@
 import test from 'ava';
-import { caneCellPlan, caneMilestone, caneRound, caneStands, shoreCells } from '../../src/client/brain/cane.js';
+import { caneCellPlan, caneMilestone, caneRound, caneStands, shoreCells, wildCane } from '../../src/client/brain/cane.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
+import type { WorldMemory } from '../../src/client/brain/memory.js';
 import { enchantingMilestone } from '../../src/client/brain/enchant.js';
 
 // 6 x 3 x 1: water at x 0..1, grass at x 2..5 on layer 0, air above
@@ -60,6 +61,19 @@ test('shoreCells: nothing where something stands on the shore', (t) => {
   const { box, b } = shore();
   b[6 + 2] = 'oak_fence';
   t.deepEqual(shoreCells(box, b, 10), []);
+});
+
+test('wildCane: not on the site the project keeps, the current milestone\'s or one set aside midway', (t) => {
+  const site = { x: 40, z: 40, width: 7, length: 7, y: 62 };
+  const on = { x: 43, y: 63, z: 43 }, off = { x: 60, y: 63, z: 43 };
+  const w = (progress: unknown) => ({ landmarks: { chests: [], farmland: [] }, leash: 96, progress }) as unknown as WorldMemory;
+  const current = wildCane(w({ done: [], journal: [], current: { id: 'enchanting', step: 2, data: { site } } }), { x: 0, z: 0 }, []);
+  t.false(current(on));
+  t.true(current(off));
+  // the room set aside while the band outside the grown yard's fence is cleared: its site is still its own
+  const aside = wildCane(w({ done: [], journal: [], current: { id: 'fence-clear', step: 0, data: {} }, aside: { enchanting: { step: 2, data: { site } } } }), { x: 0, z: 0 }, []);
+  t.false(aside(on));
+  t.true(aside(off));
 });
 
 test('enchanting is done once the room is there', (t) => {

@@ -1,5 +1,5 @@
 import test from 'ava';
-import { fillOf, growStep } from '../../src/client/brain/milestones.js';
+import { fillOf, growStep, siteStep } from '../../src/client/brain/milestones.js';
 import { stashList, stockShort } from '../../src/client/brain/chores.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -69,6 +69,32 @@ test('growing the yard with the fill carried: levels, grows, and the met need is
   // level: the fill is placed, and what is left of it is plain dirt and stone again
   t.is(world.progress?.fill, undefined);
   t.is(world.progress?.fillAt, undefined);
+});
+
+test('growing the yard with deepslate carried and no cobblestone: short of the cobblestone, as level-area fills with plain cobblestone only', async (t) => {
+  const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard: { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 } };
+  const { ctx, acts } = fakeCtx(world, [{ name: 'dirt', count: 64, slot: 3 }, { name: 'cobbled_deepslate', count: 64, slot: 4 }], 'Level ...: cut 0 block(s), fill 53 dirt + 22 cobblestone; left alone: 0.');
+  const r = await growStep(ctx, world.yard!, { width: 8, length: 8 }, 'plot');
+  t.is(r.status, 'blocked');
+  t.regex(r.text, /short of 22 cobblestone/);
+  t.deepEqual(world.progress?.need, { cobblestone: 22 });
+  t.false(acts.some(a => a.tool === 'level-area' && !a.args.dryRun), 'no levelling that could place none of it');
+});
+
+test('siteStep: not on the site of a milestone set aside midway, chosen but not built yet', async (t) => {
+  // two siblings: the tree farm chose its site and was set aside, held at its build step; the cow pen picks next
+  const pick = async (world: WorldMemory) => {
+    const st = { step: 0, data: {} as Record<string, unknown> };
+    t.like(await siteStep('cow pen', 7, 7).run(fakeCtx(world, [], '').ctx, st), { status: 'done' });
+    return st.data.site as { x: number; z: number; width: number; length: number };
+  };
+  const yard = { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 };
+  const first = await pick({ landmarks: { chests: [], farmland: [] }, leash: 96, yard });
+  const world: WorldMemory = { landmarks: { chests: [], farmland: [] }, leash: 96, yard };
+  world.progress = { done: [], journal: [], aside: { trees: { step: 1, data: { site: first } } } } as unknown as WorldMemory['progress'];
+  const site = await pick(world);
+  const apart = site.x >= first.x + first.width || first.x >= site.x + site.width || site.z >= first.z + first.length || first.z >= site.z + site.length;
+  t.true(apart, `(${site.x}, ${site.z}) on the set-aside site at (${first.x}, ${first.z})`);
 });
 
 test('a growth stopped while it takes its fill out of the chests: what it took is marked already, and the stash throws none of it away', async (t) => {

@@ -30,6 +30,12 @@ export interface Milestone {
   prereqs: string[];
   /** checked against the world and memory, so restarts and work done by hand count */
   done?: (view: StepView) => boolean;
+  /**
+   * Done once, and due again now (the ground outside the fence once the yard has grown): it comes off the done list
+   * when the project works it, and is worked as if it never was. Without it a milestone's done mark was for good,
+   * whatever `done` said after. A look: asked in the gates
+   */
+  again?: (view: StepView) => boolean;
   steps: Step[];
 }
 
@@ -45,6 +51,11 @@ export interface MilestoneState {
 export interface ProgressMemory {
   done: string[];
   current?: { id: string } & MilestoneState;
+  /**
+   * Milestones set aside midway for one earlier in the tree that came back (a yard grown, its fence and the ground
+   * outside it to redo): where each was, to go on from there once it is next again. Its site stays reserved meanwhile
+   */
+  aside?: Record<string, MilestoneState>;
   /** raw materials the current step is short of, for the stock trips */
   need?: Record<string, number>;
   /** items the current step builds with (and their logs): not put away by the stash */
@@ -80,6 +91,25 @@ export function progressOf(world: WorldMemory): ProgressMemory {
   return world.progress;
 }
 
+/** A site a milestone keeps in its data (`width` and `length` once it has a footprint). */
+export type KeptSite = { x: number; z: number; width?: number; length?: number };
+
+/** The sites the milestones keep for themselves: the current one's, and those of milestones set aside midway. */
+export function reservedSites(p: Pick<ProgressMemory, 'current' | 'aside'> | undefined): KeptSite[] {
+  return [p?.current, ...Object.values(p?.aside ?? {})].map(m => m?.data?.site as Partial<KeptSite> | undefined)
+    .filter((b): b is KeptSite => !!b && typeof b === 'object' && typeof b.x === 'number' && typeof b.z === 'number');
+}
+
+/**
+ * The step a milestone is at: the current one's, a set-aside one's where it was put down, else its first. The gate's
+ * want, the stuck check and the casting's buckets read it: a room set aside at its build step read as "mine 4
+ * obsidian", and the stash kept the casting's buckets for it again.
+ */
+export function stepOf(p: Pick<ProgressMemory, 'current' | 'aside'> | undefined, milestone: string): number {
+  const step = p?.current?.id === milestone ? p.current.step : p?.aside?.[milestone]?.step;
+  return typeof step === 'number' && Number.isFinite(step) && step > 0 ? step : 0;
+}
+
 export function journal(world: WorldMemory, now: number, text: string): void {
   const p = progressOf(world);
   p.journal.push({ at: now, text });
@@ -92,20 +122,29 @@ export function haveFn(s: Snapshot, world: WorldMemory): (item: string) => numbe
   return (item: string) => (s.counts.get(item) ?? 0) + (chest[item] ?? 0);
 }
 
-/** The milestone to work on: the first not done whose prereqs are done (and not blocked for now). */
+/** The milestone to work on: the first not done (or due again) whose prereqs are done (and not blocked for now). */
 export function nextMilestone(tree: Milestone[], s: Snapshot, world: WorldMemory): Milestone | undefined {
   const p = progressOf(world);
   const view = { s, world, have: haveFn(s, world) };
+  // one done but due again is worked as if it never was; it stays on the done list until the project works it (the
+  // gate asks this every tick, and gates only look)
+  const done = new Set(p.done);
   for (const m of tree) {
-    if (p.done.includes(m.id)) continue;
+    if (done.has(m.id)) {
+      if (!m.again?.(view)) continue;
+      done.delete(m.id);
+    }
     if (m.done?.(view)) {
+      done.add(m.id);
+      if (p.done.includes(m.id)) continue;
       p.done.push(m.id);
+      if (p.aside) delete p.aside[m.id];
       journal(world, s.now, `${m.title}: already in place`);
       // (and nothing of it waits for materials any more)
       if (typeof p.blocked?.id === 'string' && milestoneOf(p.blocked.id) === m.id) p.blocked = undefined;
       continue;
     }
-    if (!m.prereqs.every(r => p.done.includes(r))) continue;
+    if (!m.prereqs.every(r => done.has(r))) continue;
     if (heldUntil(s, world, m.id) > s.now) continue;
     return m;
   }

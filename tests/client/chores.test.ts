@@ -49,6 +49,12 @@ test('stash: past the enchanting room\'s obsidian step (or with it built) the ca
   // live: the table made, the room waiting on leather at step 2, five empties held the pockets at 33/36 all day
   t.deepEqual(buckets(world({ lavaCasting: true, progress: { current: { id: 'enchanting', step: 2, data: {} } } as never })), [{ name: 'bucket', count: 4 }]);
   t.deepEqual(buckets(world({ lavaCasting: true, zones: { enchanting: [{ x: 0, y: 64, z: 0 }] } })), [{ name: 'bucket', count: 4 }]);
+  // the room set aside at step 2 while the band outside the grown yard's fence is cleared: still past its obsidian
+  const aside = { current: { id: 'fence-clear', step: 0, data: {} }, aside: { enchanting: { step: 2, data: {} } } };
+  t.deepEqual(buckets(world({ lavaCasting: true, progress: aside as never })), [{ name: 'bucket', count: 4 }]);
+  // set aside at its obsidian step: casting still
+  const early = { current: { id: 'fence-clear', step: 0, data: {} }, aside: { enchanting: { step: 0, data: { obsidianTurn: 1 } } } };
+  t.deepEqual(buckets(world({ lavaCasting: true, progress: early as never })), []);
 });
 
 test('ready food counts cooked food and bread, not raw meat or poison', (t) => {
@@ -553,6 +559,24 @@ test('toTheWoods: a tree in sight is enough; else the remembered woods; else eac
   t.is(none.acts.filter(a => a.startsWith('explore')).length, 4);
 });
 
+test('toTheWoods: a log on the site of a milestone set aside midway is its own, not a tree', async t => {
+  // the enchanting room's site, chosen, the room set aside while the band outside the fence is cleared
+  const acts: string[] = [];
+  let looks = 0;
+  const w = {
+    zones: { woods: [{ x: 10, y: 70, z: 120 }] }, leash: 96,
+    progress: { done: [], journal: [], current: { id: 'fence-clear', step: 0, data: {} }, aside: { enchanting: { step: 2, data: { site: { x: 0, z: 0, width: 7, length: 7, y: 64 } } } } }
+  } as unknown as WorldMemory;
+  const ctx = {
+    world: w, progress: () => undefined,
+    // at home only a log on the site; at the woods a tree
+    call: (async () => ({ positions: [looks++ === 0 ? { x: 3, y: 65, z: 3 } : { x: 11, y: 70, z: 121 }] })) as GoalContext['call'],
+    act: async (tool: string) => { acts.push(tool); return { ok: true, text: 'ok' }; }
+  };
+  t.deepEqual(await toTheWoods(ctx, ['oak_log']), { ok: true, text: 'off to the woods at (10, 120)' }, 'the log at (3, 65, 3) is on the site');
+  t.deepEqual(acts, ['move-to-position']);
+});
+
 test('stash with no chest at home yet: wanted when full and a chest is carried; firstChest puts one beside home, off the sites', async t => {
   const junk = Array.from({ length: 22 }, (_, i) => ({ slot: 13 + i, name: 'granite', count: 64 }));
   const none = world({ landmarks: { chests: [], farmland: [] }, chestItems: {} });
@@ -578,6 +602,23 @@ test('stash with no chest at home yet: wanted when full and a chest is carried; 
   t.true(at!.x < 1, 'off the site');
   t.is(Math.max(Math.abs(at!.x), Math.abs(at!.z)), 2, 'close to home');
   t.like(placed[0], { tool: 'place-block', item: 'chest', y: 64 });
+});
+
+test('firstChest: off the site of a milestone set aside midway too', async t => {
+  // grass everywhere at y 63, air above; the storage house's site (x -4..4, z -4..-1) kept by a milestone set aside
+  const blocks = Array.from({ length: 243 }, (_, i) => (Math.floor(i / 81) === 0 ? 'grass_block' : 'air'));
+  const ctx = {
+    s: snap([...gear(), { slot: 35, name: 'chest', count: 8 }]), world: world({
+      landmarks: { chests: [], farmland: [] },
+      progress: { done: [], journal: [], current: { id: 'home', step: 0, data: {} }, aside: { storage: { step: 1, data: { site: { x: -4, z: -4, width: 9, length: 4, y: 63 } } } } }
+    } as Partial<WorldMemory>),
+    call: (async () => ({ blocks })) as GoalContext['call'],
+    act: async () => ({ ok: true, text: 'Placed chest at somewhere' })
+  };
+  const at = await firstChest(ctx);
+  t.truthy(at);
+  t.true(at!.z >= 0, `not on the set-aside site: (${at!.x}, ${at!.z})`);
+  t.is(Math.max(Math.abs(at!.x), Math.abs(at!.z)), 2, 'close to home');
 });
 
 test('stockShort: a project short of oak goes before the home keeping its 32 logs of any kind', t => {

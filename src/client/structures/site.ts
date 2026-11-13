@@ -38,12 +38,17 @@ type Rect = { x: number; z: number; width: number; length: number };
  * lookout's search (2026-11-10) ranked two spots on the enchanting room's 7x7 site 3rd and 4th: an improvement put
  * there would have taken the room's ground before it was built.
  */
-export function keptSites(mem?: { zones?: Record<string, { x: number; z: number; width?: number; length?: number }[]>; progress?: { current?: { data?: Record<string, unknown> } } }): Rect[] {
+export function keptSites(mem?: {
+  zones?: Record<string, { x: number; z: number; width?: number; length?: number }[]>;
+  progress?: { current?: { data?: Record<string, unknown> }; aside?: Record<string, { data?: Record<string, unknown> }> };
+}): Rect[] {
   const zones = Object.entries(mem?.zones ?? {}).filter(([k]) => k !== 'fence').flatMap(([, zs]) => zs)
     .filter(zz => zz.width && zz.length).map(zz => ({ x: zz.x, z: zz.z, width: zz.width!, length: zz.length! }));
-  const site = mem?.progress?.current?.data?.site as Partial<Rect> | undefined;
-  const reserved = site && typeof site.x === 'number' && typeof site.z === 'number' && site.width && site.length
-    ? [{ x: site.x, z: site.z, width: site.width, length: site.length }] : [];
+  // the current milestone's site, and those of milestones set aside midway (progress.aside: the enchanting room's,
+  // while the fence's band is redone after the yard grew)
+  const sites = [mem?.progress?.current, ...Object.values(mem?.progress?.aside ?? {})].map(m => m?.data?.site as Partial<Rect> | undefined);
+  const reserved = sites.filter((site): site is Rect => !!site && typeof site.x === 'number' && typeof site.z === 'number' && !!site.width && !!site.length)
+    .map(site => ({ x: site.x, z: site.z, width: site.width, length: site.length }));
   return [...zones, ...reserved];
 }
 

@@ -1,8 +1,8 @@
 import { fromGate, nearHome, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import {
-  allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, stepId, stillShort,
-  type Milestone
+  allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, stepId, stepOf,
+  stillShort, type Milestone
 } from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 import { clock } from './idlelog.js';
@@ -38,8 +38,8 @@ export function projectGoal(tree: Milestone[]): Goal {
     if (held) return waiting(tree, s, world) ?? held;
     const m = nextMilestone(tree, s, world);
     if (!m) return waiting(tree, s, world) ?? { cause: 'project', text: 'no milestone to work on' };
-    const cur = progressOf(world).current;
-    const step = m.steps[cur?.id === m.id ? cur.step : 0];
+    // (one set aside midway goes on where it was put down)
+    const step = m.steps[stepOf(progressOf(world), m.id)];
     return { want: `${m.title}: ${step?.name ?? 'finishing'}` };
   };
   return {
@@ -74,7 +74,24 @@ export function projectGoal(tree: Milestone[]): Goal {
       (ctx.world.lastDone ??= {}).project = ctx.s.now;
       const m = nextMilestone(tree, ctx.s, ctx.world);
       if (!m) return 'nothing left to do';
-      if (p.current?.id !== m.id) { p.current = { id: m.id, step: 0, data: {} }; journal(ctx.world, ctx.s.now, `started: ${m.title}`); }
+      // done once and due again (the band outside a fence that has moved out): off the done list now that it is
+      // worked, not when a gate looked
+      if (p.done.includes(m.id)) {
+        p.done = p.done.filter(id => id !== m.id);
+        journal(ctx.world, ctx.s.now, `${m.title}: due again`);
+      }
+      if (p.current?.id !== m.id) {
+        // one set aside midway (an earlier milestone came back: the yard grew) keeps its step and its data, the site it
+        // chose among them: starting it over would choose again, and the room's reserved ground could go to a build.
+        // Not one that is done (found in place meanwhile): nothing of it is to come back to, and its site would stay
+        // reserved for good
+        const was = p.current;
+        if (was && !p.done.includes(was.id) && (was.step || Object.keys(was.data ?? {}).length)) (p.aside ??= {})[was.id] = { step: was.step, data: was.data };
+        const back = p.aside?.[m.id];
+        if (back) delete p.aside![m.id];
+        p.current = { id: m.id, step: back?.step ?? 0, data: back?.data ?? {} };
+        journal(ctx.world, ctx.s.now, `${back ? 'back to' : 'started'}: ${m.title}`);
+      }
       const cur = p.current;
       const step = m.steps[cur.step];
       if (!step) return finish(ctx, m);
@@ -129,6 +146,7 @@ export function projectGoal(tree: Milestone[]): Goal {
 function finish(ctx: GoalContext, m: Milestone): string {
   const p = progressOf(ctx.world);
   if (!p.done.includes(m.id)) p.done.push(m.id);
+  if (p.aside) delete p.aside[m.id];
   p.current = undefined;
   p.need = undefined;
   settle(ctx.world, m.id);
@@ -167,7 +185,9 @@ function look(tree: Milestone[], s: Snapshot, world: WorldMemory): { next?: Mile
   const view = { s, world, have: haveFn(s, world) };
   const held: { m: Milestone; until: number }[] = [];
   for (const m of tree) {
-    if (done.has(m.id)) continue;
+    // (one due again as nextMilestone has it: worked as if it never was)
+    if (done.has(m.id) && !m.again?.(view)) continue;
+    done.delete(m.id);
     if (m.done?.(view)) { done.add(m.id); continue; }
     if (!m.prereqs.every(r => done.has(r))) continue;
     const until = heldUntil(s, world, m.id);
@@ -195,7 +215,7 @@ function stuck(tree: Milestone[], s: Snapshot, world: WorldMemory): boolean {
     // the milestone it would work on: the one that can be worked now, else the record's own while it waits
     const { next, held } = look(tree, s, world);
     const m = next ?? held.find(h => h.m.id === milestoneOf(b.id))?.m;
-    if (!m || stepId(m.id, p?.current?.id === m.id ? p.current.step : 0) !== b.id) return false;
+    if (!m || stepId(m.id, stepOf(p, m.id)) !== b.id) return false;
     return Object.keys(stillShort(b.need, allItems(s, world))).length > 0;
   } catch {
     return false;
