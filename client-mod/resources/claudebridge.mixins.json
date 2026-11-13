@@ -13,6 +13,7 @@
     "HudMixin",
     "TitleMixin",
     "DestroyToolMixin",
+    "MineTargetMixin",
     "DisconnectedScreenAccessor"
   ],
   "injectors": { "defaultRequire": 1 }

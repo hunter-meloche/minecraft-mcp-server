@@ -145,6 +145,58 @@ public final class Protection {
         return dx * dx + dz * dz <= (double) (zoneRadius + ZONE_MARGIN) * (zoneRadius + ZONE_MARGIN);
     }
 
+    /** Whether the miner has asked yet (the client log says so once), and when the log last told what it left out. */
+    private static volatile boolean mineAsked;
+    private static volatile long mineSaid;
+
+    /**
+     * Baritone's mine targets, less the ground and ore in the home zone's column (MineTargetMixin: before its miner sorts
+     * them and keeps the nearest 64). The rule above holds only while the bot stands in or near the zone, so from outside
+     * it the ore under the yard was a target like any other, and often the nearest: the miner tunnelled toward it, came
+     * into the margin, could break nothing there, and gave up ("Unable to find any path"). Live, 6 of 15 deep trips for
+     * iron ended so, every one at the same spot 13 under the yard. Off the list, it mines the ore outside the column; if
+     * all it knows lies in the column it explores for more (exploreForBlocks), which can take the whole round.
+     * What the zone lets be broken stays a target: what isn't ground or ore (the yard's trees), a narrow lift's kind, and
+     * everything while our own dig or build has the rule lifted.
+     */
+    public static List<BlockPos> mineTargets(List<BlockPos> locs) {
+        if (!mineAsked) { mineAsked = true; System.out.println("[claudebridge] mine: ground and ore in the home zone's column are no targets"); }
+        Minecraft mc = Minecraft.getInstance();
+        var level = mc == null ? null : mc.level;
+        if (level == null) return locs;
+        // (the miner prunes on its own thread too, and reads the world there as this does; a chunk not loaded is kept:
+        // the yard's chunks load long before the bot comes near it)
+        List<BlockPos> kept = mineTargets(locs, p -> level.isLoaded(p) ? level.getBlockState(p).getBlock() : null);
+        if (kept != locs && System.currentTimeMillis() - mineSaid > 60_000) {
+            mineSaid = System.currentTimeMillis();
+            System.out.println("[claudebridge] mine: " + (locs.size() - kept.size()) + " target(s) in the home zone's column left out");
+        }
+        return kept;
+    }
+
+    /** The same with the block at a place given (null: not known, kept). The list itself when nothing comes off. */
+    static List<BlockPos> mineTargets(List<BlockPos> locs, java.util.function.Function<BlockPos, Block> blockAt) {
+        if (!zoneSet || suspended > 0) return locs;
+        List<BlockPos> kept = null;
+        for (int i = 0; i < locs.size(); i++) {
+            BlockPos p = locs.get(i);
+            boolean off = nearZone(p) && zoneForbids(blockAt, p);
+            if (off && kept == null) kept = new ArrayList<>(locs.subList(0, i));
+            else if (!off && kept != null) kept.add(p);
+        }
+        return kept == null ? locs : kept;
+    }
+
+    private static boolean zoneForbids(java.util.function.Function<BlockPos, Block> blockAt, BlockPos p) {
+        try {
+            Block b = blockAt.apply(p);
+            return b != null && GROUND.contains(b) && !only.contains(b);
+        } catch (RuntimeException e) {
+            // (read off the main thread while the chunk or the narrow lift changed: kept, as Baritone would have it)
+            return false;
+        }
+    }
+
     private static int idleWhileSuspended = 0;
 
     /**
