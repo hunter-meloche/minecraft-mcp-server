@@ -179,8 +179,11 @@ export function noRoom(kind: RoomKind, who: string, s: Snapshot, world: WorldMem
   return no.pockets(s, who, { free: ROOM[kind], outOfReach: enough && !reach, loose: p.loose });
 }
 
-/** The bot as it is now (a run's snapshot is from when the run began): its pockets, where it stands, the hour. */
-async function look(ctx: GoalContext): Promise<Snapshot> {
+/**
+ * The bot as it is now (a run's snapshot is from when the run began): its pockets, where it stands, the hour. A home
+ * round that walked home first goes on from this (work.ts toRound).
+ */
+export async function look(ctx: GoalContext): Promise<Snapshot> {
   const st = await ctx.status().catch(() => undefined);
   const inv = await ctx.call<{ items?: InventoryItem[] }>('inventory').catch(() => undefined);
   const items = Array.isArray(inv?.items) ? inv.items : ctx.s.items;

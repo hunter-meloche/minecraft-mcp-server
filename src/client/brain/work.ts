@@ -9,9 +9,9 @@
  * and by `markDry` / `releaseOldestDry` / `addSite` / `dropSite` / `notePen`, which the tasks, the pens round and the
  * brain call.
  */
-import { fromGate, nearHome, nearHomeAt, no, outsideBy, YARD_EDGE, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, nearHomeAt, no, onHomeLevel, outsideBy, YARD_EDGE, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
-import { NEAR_HOME, TRIP_STASH_RANGE, inYardOrNear, makeRoom, noRoom, out, room, type RoomKind } from './pockets.js';
+import { NEAR_HOME, TRIP_STASH_RANGE, inYardOrNear, look, makeRoom, noRoom, out, room, type RoomKind } from './pockets.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
 import { deepTripKit, tripBudgetMs } from './mine.js';
 import { tripCheck } from './deep.js';
@@ -240,6 +240,51 @@ export function roundDue(s: Snapshot, world: WorldMemory, key: string, everyMs: 
   // (the half hour before sunrise is the morning's, not the evening's: the trips come first then)
   if ((tod >= EVENING_AT && tod < WORK_AT) || since > 2 * everyMs) return true;
   return !tasks.some(t => isTrip(t) && !heldNow(world, t, s.now) && 'variant' in pick(t, s, world));
+}
+
+/**
+ * Where a home round (lights, tidy, repair, signs, sort) may start from: anywhere in the yard on home's level, while
+ * home stands in it; with no such yard, within the round's own reach of home (`reach`, on its level), as ever. Live on
+ * Nov 13 the five wanted within 10 of home only (tidy 12, signs 24), and a day went: up at the bed (16 out), the tree
+ * round, a deep trip, home for the stash (which outranks them all), the farm (22 out, at the plot), `late` there, the
+ * bed. None of them ran for an hour, three times their time, the lights with them (mobs spawn in a dark yard), and the
+ * fence's mending in the repair round never once. Never under the yard (off home's level) nor out past the fence: the
+ * yard is where they start. From beyond its reach a round walks home first (toRound), and from out there it stops no
+ * running goal (its `cuts` says yes within its reach only): it waits for that one to end and takes over at the
+ * hand-over. Else every round due would cut the tree round at the far end of the yard, or the project at its site 23
+ * out, for a walk home.
+ */
+export function roundFrom(s: Snapshot, world: WorldMemory, reach: number): boolean {
+  if (!s.home || !Number.isFinite(s.distHome) || !onHomeLevel(s.position, s.home)) return false;
+  const yard = world.yard;
+  if (yard && s.position && outsideBy(yard, s.home) === 0) return outsideBy(yard, s.position) === 0;
+  return nearHome(s, reach);
+}
+
+/**
+ * How near home a round walks before its work: inside every round's reach (10 to 24), within 8 up or down (on home's
+ * level), and short of the storage house, so the walk goes through none of its doors (the one at (-549, 63, 2186) has
+ * held the bot before). The chests' own walks take it the rest of the way, as they always did.
+ */
+export const ROUND_WALK = 8;
+
+/**
+ * A home round started from out in the yard, beyond its own reach of home: the walk home comes first, on foot only (a
+ * careful goto: nothing placed or dug on the way, as the stash's walk home), and the round goes on with the bot as it
+ * is after it (pockets, place, hour) from where it would always have started. Within its reach nothing is walked, and
+ * the run's own look is the answer. Throws when the walk leaves the bot out there still: the round's work was never
+ * meant to start from there, nothing of it is written down, and the brain tries it again after the round's wait.
+ */
+export async function toRound(ctx: GoalContext, reach: number): Promise<Snapshot> {
+  const home = ctx.s.home;
+  if (!home || nearHome(ctx.s, reach)) return ctx.s;
+  const from = Math.round(ctx.s.distHome);
+  ctx.progress(`${from} blocks from home in the yard: home first, on foot`);
+  await ctx.call('goto', { x: home.x, y: home.y, z: home.z, range: ROUND_WALK, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => undefined);
+  if (ctx.signal.aborted) throw new Error('aborted');
+  const s = await look(ctx);
+  if (!nearHome(s, reach)) throw new Error(`the walk home from ${from} blocks out stopped ${Math.round(s.distHome)} out (the round works within ${reach} of home)`);
+  return s;
 }
 
 /** A death as the runtime tells it: where, and when (real ms; known only while this process lives). */

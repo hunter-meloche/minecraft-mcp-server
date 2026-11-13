@@ -5,7 +5,7 @@ import { chestAssignment } from './chores.js';
 import { categoryOfLabel, chestLabels, type Category } from './storage.js';
 import { prepare } from './project.js';
 import { allItems, mostWood } from './progress.js';
-import { roundDue } from './work.js';
+import { roundDue, roundFrom, toRound } from './work.js';
 
 /**
  * A sign over every home chest naming what goes in it ("food1", "tools1", "ore2", ...), like a person labels their
@@ -14,6 +14,8 @@ import { roundDue } from './work.js';
  */
 
 const MINUTE = 60_000;
+/** Near enough home to start the round where it is; from further out in the yard it walks home first (work.ts roundFrom). */
+const REACH = 24;
 /** a chest's sign is tried this often, then the chest is left without */
 const TRIES = 2;
 const SIDES: Record<string, Pos> = { north: { x: 0, y: 0, z: -1 }, south: { x: 0, y: 0, z: 1 }, west: { x: -1, y: 0, z: 0 }, east: { x: 1, y: 0, z: 0 } };
@@ -88,7 +90,7 @@ export const signsGoal: Goal = {
   timeoutMs: 8 * MINUTE,
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
-    if (s.activity !== 'work' || s.sleeping || !s.home || !nearHome(s, 24) || world.landmarks.chests.length < 3) return null;
+    if (s.activity !== 'work' || s.sleeping || !s.home || !roundFrom(s, world, REACH) || world.landmarks.chests.length < 3) return null;
     // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
     if (!roundDue(s, world, 'signs', 20 * MINUTE)) return null;
     // the assignment as it stands now (new chests in it), not as the stash last left it
@@ -98,7 +100,11 @@ export const signsGoal: Goal = {
       Object.keys(world.chestSigns ?? {}).filter(k => !keys.has(k)).length;
     return missing ? `${missing} chest(s) without the right sign` : null;
   },
-  run: async ctx => {
+  // within its reach it cuts in as ever; from out in the yard it waits for what runs to end
+  cuts: s => nearHome(s, REACH),
+  run: async run => {
+    // from out in the yard, home first (on foot); its walks up to the chests go from there, as they always did
+    const ctx: GoalContext = { ...run, s: await toRound(run, REACH) };
     (ctx.world.lastDone ??= {}).signs = ctx.s.now;
     const signs = (ctx.world.chestSigns ??= {});
     const tries = (ctx.world.signTries ??= {});

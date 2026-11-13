@@ -61,6 +61,16 @@ export const target = (family: DeepFamily, tierNow: number): number => WORK_STOC
 const targets = (tierNow: number) => DEEP.map(f => `${f} ${target(f, tierNow)}`).join(', ');
 
 /**
+ * What the deep rung keeps of the family a thing is of, at this tier: the family's items (raw and smelted, counted
+ * together as the rung counts them) and its target. None for what no rung mines (emeralds). The donate goal's floor
+ * (community.ts): stock given away below it is only mined again.
+ */
+export function workKeeps(item: string, tierNow: number): { items: readonly string[]; target: number } | undefined {
+  const family = DEEP.find(f => FAMILY[f].items.includes(item));
+  return family ? { items: FAMILY[family].items, target: target(family, tierNow) } : undefined;
+}
+
+/**
  * Every home chest looked into: what is in them counts only then (as spare time trusts them only then). A half-read
  * chest list looks like "nothing stored", and the rungs would go for what the chests already hold. The kit goal looks
  * into them first thing at home.

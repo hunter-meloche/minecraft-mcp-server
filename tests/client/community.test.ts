@@ -7,6 +7,7 @@ import { pens } from '../../src/client/brain/pens.js';
 import { StructureStore } from '../../src/client/structures/store.js';
 import type { Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
+import { KEPT, T0, WORN, liveWorld, lookAt } from '../helpers/homestead.js';
 
 const snap = (over: Partial<Snapshot> = {}): Snapshot => ({
   now: 10 * 60 * 60_000, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: { x: 0, y: 64, z: 0 }, dimension: 'overworld',
@@ -59,14 +60,23 @@ test("the community's diamonds don't count toward the bot's own diamond kit", (t
   t.true(diamondsWanted({ items }, w) > 0);
 });
 
-test('donations: only the surplus beyond what the bot keeps, a lot at a time; diamonds once its kit is done', (t) => {
-  t.deepEqual(donationPlan({ iron_ingot: 70, gold_ingot: 20, diamond: 20, emerald: 2 }, 0), { iron_ingot: 22, diamond: 12 });
-  t.deepEqual(donationPlan({ iron_ingot: 70, diamond: 20 }, 5), { iron_ingot: 22 });
-  t.deepEqual(donationPlan({ iron_ingot: 50, gold_ingot: 16 }, 0), {});
+test('donations: only the surplus beyond what the bot keeps and what the work queue keeps of its family, a lot at a time; diamonds once its kit is done', (t) => {
+  // at tier 0 the queue keeps 96 iron, 32 gold and 16 diamonds, over the bot's own 48 ingots, 16 ingots and 8: the
+  // old floors alone gave 70 iron, 20 gold and 20 diamonds of these
+  t.deepEqual(donationPlan({ iron_ingot: 118, gold_ingot: 36, diamond: 28, emerald: 2 }, 0, 0), { iron_ingot: 22, diamond: 12 });
+  t.deepEqual(donationPlan({ iron_ingot: 118, diamond: 28 }, 5, 0), { iron_ingot: 22 });
+  t.deepEqual(donationPlan({ iron_ingot: 98, gold_ingot: 32 }, 0, 0), {});
+  // the family counts raw and smelted together, as the queue does; the ingots the bot keeps stay kept all the same
+  t.deepEqual(donationPlan({ raw_gold: 30, gold_ingot: 26 }, 0, 0), { gold_ingot: 10 });
+  t.deepEqual(donationPlan({ raw_gold: 400, gold_ingot: 20, raw_iron: 1000, iron_ingot: 60 }, 0, 0), {});
+  t.deepEqual(donationPlan({ raw_iron: 20, iron_ingot: 100 }, 0, 0), { iron_ingot: 24 });
+  // emeralds no rung mines: what the bot keeps of them is all there is to it
+  t.deepEqual(donationPlan({ emerald: 4 }, 0, 4), { emerald: 4 });
 });
 
 test('the donation round: now and then, by day at home, with a community chest', (t) => {
-  const w = world({ chestItems: { '1,64,1': { iron_ingot: 80 } } });
+  // (the queue keeps 96 iron at tier 0: 32 over it)
+  const w = world({ chestItems: { '1,64,1': { iron_ingot: 128 } } });
   t.regex(donateGoal.wants(snap(), w) ?? '', /32 iron_ingot/);
   w.community!.lastDonation = snap().now - DONATE_EVERY / 2;
   t.is(donateGoal.wants(snap(), w), null);
@@ -98,4 +108,50 @@ test('missions rank with the build jobs: under them, over the stock trips, under
   t.true(missionGoal.priority < structureGoal(new StructureStore(), () => undefined, () => []).priority);
   t.true(missionGoal.priority < pens.priority);
   t.true(missionGoal.priority > 33);
+});
+
+/**
+ * The live chests at 01:35 EST on Nov 13 (brain.json): the deep rung at tier 4, its targets diamond 256, iron 1536, gold
+ * 512, redstone 1024, lapis 512, and the stock it mined for them in the ore chest. At 05:57Z the donate goal set out
+ * with `spare for the community: 230 diamond, 8 gold_ingot`: the floor of 8 diamonds and 16 gold ingots, and every
+ * diamond a trip brought home over it went up for the community.
+ */
+function tierFour(ores: Record<string, number> = {}): WorldMemory {
+  const w = liveWorld();
+  Object.assign(w.chestItems!['-547,63,2180'], { diamond: 238, raw_iron: 1179, raw_gold: 414, gold_ingot: 24, redstone: 1027, lapis_lazuli: 514 }, ores);
+  w.work = { dry: {}, next: {}, sites: {}, pen: {}, tier: 4, deep: { starts: [], clean: 3, deaths: [] } };
+  return w;
+}
+/** At home by day with the live kept kit, the diamond tools and armour (no diamond still wanted for the kit). */
+const atHome = () => lookAt([...KEPT.map(([name, count], slot) => ({ slot, name, count })), ...WORN.map(i => ({ ...i }))], 3000);
+
+test('the donate goal keeps what the work queue mined for the bot: at tier 4 with 238 diamonds stored nothing goes; over a target, the surplus still does', (t) => {
+  t.is(diamondsWanted(atHome(), tierFour()), 0, 'the diamond kit is whole: diamonds would go, by the old rule');
+  // the live morning: 238 of the 256 the queue keeps, 438 gold of 512, 1203 iron of 1536
+  t.is(donateGoal.wants(atHome(), tierFour()), null);
+  t.deepEqual(donateGoal.declines!(atHome(), tierFour()), { cause: 'unneeded', text: 'nothing spare to give' });
+  // over the targets: what is over goes, now and then as ever, and no more (the ingots the bot keeps stay too)
+  const over = tierFour({ diamond: 270, raw_gold: 500, gold_ingot: 40, iron_ingot: 400 });
+  t.is(donateGoal.wants(atHome(), over), 'spare for the community: 14 diamond, 24 gold_ingot, 43 iron_ingot');
+  // the tier steps up when every family is at its target: the floor only rises with it, so nothing over the old
+  // targets swings back out
+  over.work!.tier = 5;
+  t.is(donateGoal.wants(atHome(), over), null);
+  // and not again before its three hours
+  const soon = tierFour({ diamond: 270 });
+  soon.community!.lastDonation = T0 - DONATE_EVERY / 2;
+  t.is(donateGoal.wants(atHome(), soon), null);
+});
+
+test('missions are the user\'s asks, untouched by the floor: one owed is delivered and one short is gathered, below the work target or not', (t) => {
+  // 40 of 238 diamonds gathered for a mission: held apart, not the bot's, and none of its own over the 256 kept
+  const w = tierFour();
+  w.community!.missions.push({ id: 2, item: 'diamond', count: 64, chest: 'community1', gathered: 40, delivered: 0, status: 'active', createdAt: T0, updatedAt: T0 });
+  syncReserve(w);
+  t.is(donateGoal.wants(atHome(), w), null);
+  t.is(missionGoal.wants(atHome(), w), '#2: 40 diamond to take to community1');
+  // all of it delivered, 24 still to gather: the mission goes on gathering, the queue's 256 or not
+  w.community!.missions[1].delivered = 40;
+  syncReserve(w);
+  t.regex(missionGoal.wants(atHome(), w) ?? '', /^#2: 24 diamond still to gather for community1$/);
 });

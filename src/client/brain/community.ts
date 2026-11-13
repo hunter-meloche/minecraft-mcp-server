@@ -6,6 +6,9 @@ import { nearestZone, type Zone } from './courtesy.js';
 import { daylightLeft } from './schedule.js';
 import { fuelFor } from './project.js';
 import { tripDecline, diamondsWanted } from './deep.js';
+// (both come back to this file through their own imports: what they give is used inside functions only)
+import { tierOf } from './work.js';
+import { workKeeps } from './worktasks.js';
 
 /**
  * The community chests: chests on a shared server where players and bots leave surplus for each other (a friend put
@@ -153,12 +156,21 @@ export const DONATE_EVERY = 3 * 60 * MINUTE;
 /**
  * The surplus to give: per precious thing, what the bot has (carried and in its chests, its own share only) beyond
  * what it keeps, when that's at least a lot. Diamonds only once its own diamond kit is done (diamondsWanted 0).
+ *
+ * Nor below what the work queue keeps of its family at the tier the queue stands at (`tierNow`; worktasks.ts
+ * workKeeps: gold ingots with the raw gold, as the deep rung counts them): that stock is the bot's own, mined for its
+ * chests, and what went below it the rung mines again. Live on Nov 13, at tier 4 with 238 diamonds stored (the queue
+ * keeps 256), the floor of 8 put 230 of them up for the community: every diamond a trip brought home was given away,
+ * which is gathering for the community unasked (the user's rule: only when told, a mission). What is over the target
+ * still goes now and then.
  */
-export function donationPlan(have: Record<string, number>, diamondsStillWanted: number): Record<string, number> {
+export function donationPlan(have: Record<string, number>, diamondsStillWanted: number, tierNow: number): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [item, k] of Object.entries(KEEP)) {
     if (item === 'diamond' && diamondsStillWanted > 0) continue;
-    const spare = (have[item] ?? 0) - k.keep;
+    const work = workKeeps(item, tierNow);
+    const overWork = work ? work.items.reduce((n, i) => n + (have[i] ?? 0), 0) - work.target : Infinity;
+    const spare = Math.min((have[item] ?? 0) - k.keep, overWork);
     if (spare >= k.lot) out[item] = spare;
   }
   return out;
@@ -326,7 +338,7 @@ const donateGate = (s: Snapshot, world: WorldMemory): Gate => {
   const c = world.community;
   if (!c || !Object.keys(c.chests).length) return { cause: 'unneeded', text: 'no community chest known' };
   if (s.now - (c.lastDonation ?? 0) < DONATE_EVERY) return no.notDue('donate', s.now, c.lastDonation ?? 0, DONATE_EVERY);
-  const plan = donationPlan(ownTotals(s, world), diamondsWanted(s, world));
+  const plan = donationPlan(ownTotals(s, world), diamondsWanted(s, world), tierOf(world));
   if (!Object.keys(plan).length) return { cause: 'unneeded', text: 'nothing spare to give' };
   if (!nearHome(s, 16)) return no.away(s, 'donate', 16);
   return no.late(s, 'donate', 3000) ?? { want: `spare for the community: ${Object.entries(plan).map(([k, v]) => `${v} ${k}`).join(', ')}` };
@@ -344,7 +356,7 @@ export const donateGoal: Goal = {
     const c = community(ctx.world);
     c.lastDonation = ctx.s.now;
     const chest = Object.keys(c.chests)[0];
-    const plan = donationPlan(ownTotals(ctx.s, ctx.world), diamondsWanted(ctx.s, ctx.world));
+    const plan = donationPlan(ownTotals(ctx.s, ctx.world), diamondsWanted(ctx.s, ctx.world), tierOf(ctx.world));
     const items: Record<string, number> = {};
     for (const [item, n] of Object.entries(plan)) {
       const own = ownItems(ctx.s.items.filter(i => i.slot < 36 && i.name === item), ctx.world).reduce((a, i) => a + i.count, 0);

@@ -1,10 +1,10 @@
 import type { ClientRuntime } from '../tools.js';
 import { survey, type Cluster } from '../survey.js';
-import { nearHome, type Goal } from './goals.js';
+import { nearHome, type Goal, type GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { readBox, yardOf } from './milestones.js';
 import { digByHand } from '../structures/job.js';
-import { roundDue } from './work.js';
+import { roundDue, roundFrom, toRound } from './work.js';
 
 /**
  * Once a day: take away the stray blocks left standing on the lawn: an emergency wall-in, Baritone's scaffold, a
@@ -17,6 +17,8 @@ import { roundDue } from './work.js';
  */
 
 const MINUTE = 60_000;
+/** Near enough home to start the round where it is; from further out in the yard it walks home first (work.ts roundFrom). */
+const REACH = 12;
 const STRAY = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|netherrack)$/;
 const MAX_CLUSTER = 16;
 /** Tries at a stray before it's left be (out of reach on foot: high on a wall, over water). */
@@ -50,11 +52,15 @@ export function tidyGoal(rt: ClientRuntime): Goal {
     timeoutMs: 6 * MINUTE,
     retryMs: 30 * MINUTE,
     wants: (s, world) => {
-      if (s.activity !== 'work' || s.sleeping || !s.home || !nearHome(s, 12) || s.dimension !== 'overworld') return null;
+      if (s.activity !== 'work' || s.sleeping || !s.home || !roundFrom(s, world, REACH) || s.dimension !== 'overworld') return null;
       // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
       return roundDue(s, world, 'tidy', 20 * MINUTE) ? 'daily round: stray blocks on the lawn' : null;
     },
-    run: async ctx => {
+    // within its reach it cuts in as ever; from out in the yard it waits for what runs to end
+    cuts: s => nearHome(s, REACH),
+    run: async run => {
+      // from out in the yard, home first (on foot): its digs go from where the bot then stands, as they always did
+      const ctx: GoalContext = { ...run, s: await toRound(run, REACH) };
       done(ctx.world, 'tidy', ctx.s.now);
       const yard = await yardOf(ctx);
       const box = { x: yard.x1 - 2, y: yard.y - 3, z: yard.z1 - 2, width: yard.x2 - yard.x1 + 5, height: 14, length: yard.z2 - yard.z1 + 5 };

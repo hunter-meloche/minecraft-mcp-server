@@ -17,7 +17,7 @@ import { chestLabels, misplaced } from '../../src/client/brain/storage.js';
 import { spareTask } from '../../src/client/brain/spare.js';
 import { donationPlan } from '../../src/client/brain/community.js';
 import { diamondsWanted } from '../../src/client/brain/deep.js';
-import { addSite, dropSite, dryUntil, markDry, notePen, sitesOf, taskOf, workGoals, workOf, type WorkResult, type WorkTask } from '../../src/client/brain/work.js';
+import { addSite, dropSite, dryUntil, markDry, notePen, sitesOf, taskOf, tierOf, toRound, workGoals, workOf, type WorkResult, type WorkTask } from '../../src/client/brain/work.js';
 import { shoreCells } from '../../src/client/brain/cane.js';
 import { LADDER, deepShort } from '../../src/client/brain/worktasks.js';
 import { BED, HOME, KEPT, MINUTE, T0, WORN, ladderWith, laterRungs, liveWorld } from '../helpers/homestead.js';
@@ -512,17 +512,36 @@ function goalRuns({ game, rng }: Week): Record<string, (ctx: GoalContext) => Pro
         throw e;
       }
     },
-    lights: async ctx => { done(ctx.world, 'lights', ctx.s.now); await wait(rng.between(10, 30) * SECOND, ctx.signal); return 'the yard is lit; outside the fence: 0 torch(es)'; },
-    repair: async ctx => { done(ctx.world, 'repair', ctx.s.now); await wait(400, ctx.signal); return 'put back 0/4 missing block(s); 6 cell(s) hold another block now (left alone)'; },
-    tidy: async ctx => { done(ctx.world, 'tidy', ctx.s.now); await wait(rng.between(0.3, 3) * SECOND, ctx.signal); return '5 stray block(s) out of reach on foot: left be'; },
-    signs: async ctx => {
+    // the five home rounds start anywhere in the yard: from beyond their reach (10; tidy 12, signs 24) the real run
+    // walks home first (work.ts toRound), on this game's walk, and goes on from where that leaves the bot
+    lights: async run => {
+      const ctx = { ...run, s: await toRound(run, 10) };
+      done(ctx.world, 'lights', ctx.s.now);
+      await wait(rng.between(10, 30) * SECOND, ctx.signal);
+      return 'the yard is lit; outside the fence: 0 torch(es)';
+    },
+    repair: async run => {
+      const ctx = { ...run, s: await toRound(run, 10) };
+      done(ctx.world, 'repair', ctx.s.now);
+      await wait(400, ctx.signal);
+      return 'put back 0/4 missing block(s); 6 cell(s) hold another block now (left alone)';
+    },
+    tidy: async run => {
+      const ctx = { ...run, s: await toRound(run, 12) };
+      done(ctx.world, 'tidy', ctx.s.now);
+      await wait(rng.between(0.3, 3) * SECOND, ctx.signal);
+      return '5 stray block(s) out of reach on foot: left be';
+    },
+    signs: async run => {
+      const ctx = { ...run, s: await toRound(run, 24) };
       done(ctx.world, 'signs', ctx.s.now);
       await wait(12 * SECOND, ctx.signal);
       const labels = chestLabels(ctx.world.landmarks.chests, chestAssignment(ctx.world), ctx.world.chestSigns);
       ctx.world.chestSigns = { ...labels };
       return `${Object.keys(labels).length} sign(s) put up`;
     },
-    sort: async ctx => {
+    sort: async run => {
+      const ctx = { ...run, s: await toRound(run, 10) };
       done(ctx.world, 'sort', ctx.s.now);
       let moved = 0;
       for (const m of misplaced(chestAssignment(ctx.world), ctx.world.chestItems ?? {})) {
@@ -568,7 +587,7 @@ function goalRuns({ game, rng }: Week): Record<string, (ctx: GoalContext) => Pro
       c.lastDonation = ctx.s.now;
       const own: Record<string, number> = { ...freeChestTotals(ctx.world) };
       for (const i of game.items) own[i.name] = (own[i.name] ?? 0) + i.count;
-      const plan = donationPlan(own, diamondsWanted(ctx.s, ctx.world));
+      const plan = donationPlan(own, diamondsWanted(ctx.s, ctx.world), tierOf(ctx.world));
       for (const [item, n] of Object.entries(plan)) { const carried = game.take(item, n); if (carried < n) game.fromChests(item, n - carried) && game.take(item, n - carried); }
       await game.walk(c.chests.community1);
       await wait(10 * SECOND, ctx.signal);
@@ -958,24 +977,33 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   t.deepEqual(lines.filter(l => /^LOOP|^tick failed|^idle log: /.test(l.text)), [], account);
   // the real ladder (the step-5 rungs and step 4's), their runs the stand-ins above (the cow fetch at the 0 of 3 the
   // wheat had live). The cows rung goes where one was last seen first, then the sides in turn, a side with none
-  // waiting its doubling mark and one where a cow was found and lost a first mark's 20 min
+  // waiting its doubling mark and one where a cow was found and lost a first mark's 20 min. (Eleven trips: thirteen
+  // before the home rounds started from anywhere in the yard. The week starts at the bed with them 40 to 53 min
+  // overdue: the repair round walks the bot home at first light, smelt and the farm round take over there and the
+  // rounds run after the farm, all before the tree round, so every draw after falls differently. Over seeds 20261112
+  // to 20261151 the week's idle went from 19.0% to 20.0%, sd 5.5 (seed by seed 1.1 points more, give or take 0.9):
+  // within the seeds' own spread)
   const cows = step5Week(t, { lines, runs, game, world }, account);
-  t.deepEqual(cows, ['north', 'east', 'in sight', 'south', 'west', 'north', 'east', 'in sight', 'south', 'west', 'north', 'east', 'in sight'], account);
+  t.deepEqual(cows, ['north', 'east', 'in sight', 'south', 'west', 'in sight', 'north', 'east', 'south', 'west', 'north'], account);
   // the coal fills the afternoons while it is short of 128, its dry marks let go after 30 s of standing idle (the
   // full shore's never: it is written down, and the patch asks no more)
   t.true(lines.some(l => l.text.endsWith('on dry marks: let go of surface:coal')), account);
-  // what is left idle is the evening's and the probation's: with this seed day 2 has none, days 3 and 4 13.4% and
-  // 2.6% (late), days 5 and 6 16.3% and 14.4% (day 6 hold 53 s: the deep rung on probation, its two trips an hour
-  // spent), days 5 to 7 22.2% together, and day 7 36% (late 198 s: the evening's). Over seeds 20261112 to 20261122
-  // day 7 is 34 to 85% idle, all of it hold, late and away.
-  // The empty time is the cow fetch at its measured rate (456 s, all of it: a side where one was found and lost comes
-  // round again after 20 min), the tree and light rounds' empty rounds, and a deep trip that finds nothing (3 of 12)
+  // what is left idle is the evening's and the probation's: with this seed days 2 and 3 9.7% and 11.4% (late), day 4
+  // none, days 5 and 6 18.5% and 28.5% (late), days 5 to 7 39.4% together, and day 7 71.2% (late 227 s, the evening's;
+  // hold 154 s: the deep rung on probation, its two trips an hour spent; away 11 s: the walk back to the yard from the
+  // lake's cane, which the farm round cut). Before the rounds started from the yard: day 2 none, days 3 and 4 13.4% and
+  // 2.6%, days 5 to 7 22.2%, day 7 36% (late). Over seeds 20261112 to 20261151 days 5 to 7 are 14 to 61% idle together,
+  // 34.6% on average (19 to 60%, 33.5%, before), and day 7 11 to 97%, 51.6% on average (20 to 85%, 50.6%, before),
+  // all of it hold, late and away.
+  // The empty time is the cow fetch at its measured rate (401 s, all of it: a side where one was found and lost comes
+  // round again after 20 min), the tree and light rounds' empty rounds, and a deep trip that finds nothing (3 of 12:
+  // day 2's)
   t.true(days.slice(1, 4).every(d => share(d, d.idleMs) < 0.15), account);
   const held = days.slice(4, 7);
-  t.true(held.reduce((n, d) => n + d.idleMs, 0) / held.reduce((n, d) => n + d.workMs, 0) < 0.35, account);
+  t.true(held.reduce((n, d) => n + d.idleMs, 0) / held.reduce((n, d) => n + d.workMs, 0) < 0.40, account);
   const d7 = days[6];
-  t.deepEqual(CAUSES.filter(c => d7.by[c]), ['late'], account);
-  t.true(share(d7, d7.idleMs) < 0.60, account);
+  t.deepEqual(CAUSES.filter(c => d7.by[c]), ['away', 'hold', 'late'], account);
+  t.true(share(d7, d7.idleMs) < 0.75, account);
 });
 
 test.serial('seven days at the measured rates, with stand-ins for the rungs of step 6: the design\'s three criteria on day 7', async (t) => {
@@ -990,18 +1018,20 @@ test.serial('seven days at the measured rates, with stand-ins for the rungs of s
   t.deepEqual(lines.filter(l => /^LOOP|^tick failed|^idle log: /.test(l.text)), [], account);
   step5Week(t, { lines, runs, game, world }, account);
   const d7 = days[6];
-  // the largest cause neither stocked, unneeded nor nothing: met (late). Idle under 10% of the day: not met with
-  // this seed (18.6%, late 102 s: the evening); it was 9.1% with step 5's stand-ins, whose cane patch planted a few
-  // cells a run for days and whose wild cane walked out while the project was short (the real patch plants its 20
-  // cells in one run, and with 12 live no cane walk is wanted). Over seeds 20261112 to 20261122 day 7 is 11 to 27%
-  // idle, under 10% on none
+  // the largest cause neither stocked, unneeded nor nothing: met (late). Idle under 10% of the day: not met with this
+  // seed (17.4%, late 96 s: the evening; 18.6%, late 102 s, before the home rounds started from the yard); it was 9.1%
+  // with step 5's stand-ins, whose cane patch planted a few cells a run for days and whose wild cane walked out while
+  // the project was short (the real patch plants its 20 cells in one run, and with 12 live no cane walk is wanted).
+  // Over seeds 20261112 to 20261151 day 7 is 2 to 30% idle, 14.7% on average, under 10% on 8 (0 to 27%, 15.2%, under
+  // 10% on 5, before)
   t.false(['stocked', 'unneeded', 'nothing'].includes(leadOf(d7) ?? 'nothing'), account);
   t.true(share(d7, d7.idleMs) < 0.20, account);
-  // idle and empty together under 25%: not met (51.4% on day 7; 36 to 84% over those seeds; 32.7% with step 5's
-  // stand-ins). The empty time is the cow fetch that never brings one (0 of 3, a cow found about every other side:
-  // 312 s of the week) and the scouting (1 of 4: 315 s), and on other seeds a deep trip that finds nothing (3 of 12: a
-  // whole morning): the design's own rates, not a fault of the queue. Held at what is true
-  t.true(share(d7, d7.idleMs + d7.emptyMs) < 0.55, account);
+  // idle and empty together under 25%: not met (69.4% on day 7; 51.4% before the rounds started from the yard; over
+  // seeds 20261112 to 20261151 25 to 91%, 65.7% on average, 65.9% before; 32.7% with step 5's stand-ins). The empty
+  // time is the cow fetch that never brings one (0 of 3, a cow found about every other side: 425 s of the week) and
+  // the scouting (1 of 4: 299 s), and on other seeds a deep trip that finds nothing (3 of 12: a whole morning): the
+  // design's own rates, not a fault of the queue. Held at what is true
+  t.true(share(d7, d7.idleMs + d7.emptyMs) < 0.70, account);
 });
 
 /**
@@ -1096,11 +1126,22 @@ test.serial('a game day on the live homestead, the step-5 rungs and the cane rou
   t.true(said(/^(done work: cane patch in \d+s: |work: cane patch: )\[shore\]/).slice(1).every(l => /the shore round \(-512, 56, 2195\) is full/.test(l)));
   // the round: nothing grown at its first visit, all 20 cut at its next, never a walk to a dry cell
   t.deepEqual(said(/^done cane in /).map(l => l.replace(/ in \d+s/, '')), ['done cane: cut 0 stalk(s) (0 cane)', 'done cane: cut 20 stalk(s) (20 cane)']);
-  // the cows rung: each side walked to the leash less 16 and looked round, and none there; one lead taken for it
-  t.deepEqual(said(/^done work: cows/).map(l => l.replace(/ in \d+s/, '')), ['north', 'east', 'south'].map(side => `done work: cows: [${side}] no wild cows ${side} within the leash (96 from home); back home`));
+  // the cows rung: each side walked to the leash less 16 and looked round, and none there; one lead taken for it.
+  // South set out on the third morning by its gate and was cut short twice: by smelt (the second morning's deep trip
+  // brought raw gold home this time) and by the scene's end. The scene starts at the bed with the home rounds 40 to 53
+  // min overdue: the repair round walks the bot home at first light, smelt and the farm round take over there and the
+  // rounds run after the farm, all before the tree round (which came first before), and the days' draws fall
+  // differently; before, the south walk came back as well
+  t.deepEqual(said(/^done work: cows/).map(l => l.replace(/ in \d+s/, '')), ['north', 'east'].map(side => `done work: cows: [${side}] no wild cows ${side} within the leash (96 from home); back home`));
+  t.deepEqual(said(/^work: cows: (looking south|out of the yard by its south)/).slice(0, 2), ['work: cows: looking south for wild cows, 64 blocks out', 'work: cows: out of the yard by its south gate (-549, 63, 2215)']);
   // (north 32 out is inside the yard and 64 out the north gate itself: no stop there, out by that gate to 80)
   t.deepEqual(said(/^work: cows: (looking north|out of the yard by its north)/), ['work: cows: looking north for wild cows, 80 blocks out', 'work: cows: out of the yard by its north gate (-549, 63, 2119)']);
   t.is(game.count('lead'), 1);
   // and no walk for wild cane: the patch grows it
   t.deepEqual(said(/^start work: cane:/), []);
+  // the home rounds' stand-ins walk home first as their real runs do: once, at first light from the bed 16 out, where
+  // the furnace check takes over on arrival (no mark written) and the round runs again from home after the farm
+  t.deepEqual(said(/^\w+: \d+ blocks from home in the yard: home first, on foot$/), ['repair: 16 blocks from home in the yard: home first, on foot']);
+  t.deepEqual(said(/^(start|stopping|done) (repair|smelt|farm)\b/).slice(0, 8).map(l => l.replace(/:.*$/, '').replace(/ in \d+s$/, '')),
+    ['start repair', 'stopping repair', 'start smelt', 'done smelt', 'start farm', 'done farm', 'start repair', 'done repair']);
 });

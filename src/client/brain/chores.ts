@@ -19,7 +19,7 @@ import { daylightLeft } from './schedule.js';
 import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
 // (work.ts reaches this file through pockets.ts: its roundDue is asked inside the rounds' gates only)
-import { roundDue } from './work.js';
+import { roundDue, roundFrom, toRound } from './work.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -30,6 +30,11 @@ const MINUTE = 60_000;
 
 /** (on home's level: 55 under the yard's edge, 16 from home across the ground, the stash found every chest too far to open) */
 const awakeAtHome = (s: Snapshot) => !s.sleeping && s.dimension === 'overworld' && !!s.home && nearHome(s, NEAR_HOME);
+/**
+ * Where the lights and the sort round start from: anywhere in the yard on home's level (walking home first from beyond
+ * NEAR_HOME), not only within 10 of home, where after the morning's trips nothing brought the bot for an hour
+ */
+const awakeForRound = (s: Snapshot, world: WorldMemory) => !s.sleeping && s.dimension === 'overworld' && !!s.home && roundFrom(s, world, NEAR_HOME);
 /**
  * Junk is thrown 8 blocks out from the fence, which in a grown yard is past IN_YARD from home: by day only. In the
  * evening the shelter called the bot back from the dump walk each time, and stash and shelter took turns (a LOOP) till
@@ -403,13 +408,17 @@ export const sortStorage: Goal = {
   timeoutMs: 6 * MINUTE,
   retryMs: 20 * MINUTE,
   wants: (s, world) => {
-    if (s.activity !== 'work' || !awakeAtHome(s) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
+    if (s.activity !== 'work' || !awakeForRound(s, world) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
     // after 30 min, and then in the evening, or when no trip could go instead (or it has waited an hour)
     if (!roundDue(s, world, 'sort', 30 * MINUTE)) return null;
     const moves = misplaced(chestAssignment(world), world.chestItems ?? {});
     return moves.length ? `${moves.length} kind(s) of things in the wrong chest` : null;
   },
-  run: async ctx => {
+  // within 10 of home it cuts in as ever; from out in the yard it waits for what runs to end
+  cuts: s => nearHome(s, NEAR_HOME),
+  run: async run => {
+    // from out in the yard, home first (on foot); the chests' own walks take it from there, as they always did
+    const ctx: GoalContext = { ...run, s: await toRound(run, NEAR_HOME) };
     done(ctx.world, 'sort', ctx.s.now);
     await refreshChests(ctx, 0);
     let moved = 0;
@@ -911,13 +920,17 @@ export const lights: Goal = {
   timeoutMs: 12 * MINUTE,
   retryMs: 15 * MINUTE,
   wants: (s, world) => {
-    if (s.activity !== 'work' || !awakeAtHome(s) || (s.counts.get('torch') ?? 0) === 0) return null;
+    if (s.activity !== 'work' || !awakeForRound(s, world) || (s.counts.get('torch') ?? 0) === 0) return null;
     // after 20 min, and then in the evening, or when no trip could go instead (or it has waited 40): the morning is the trips'
     return roundDue(s, world, 'lights', 20 * MINUTE) ? 'daily round: dark spots in the yard' : null;
   },
+  // within 10 of home it cuts in as ever; from out in the yard it waits for what runs to end
+  cuts: s => nearHome(s, NEAR_HOME),
   // a round that finds the yard lit placed nothing: busy time to no gain
   gains: true,
-  run: async ctx => {
+  run: async run => {
+    // from out in the yard, home first (on foot): the round as it always started, from within 10 of home
+    const ctx: GoalContext = { ...run, s: await toRound(run, NEAR_HOME) };
     done(ctx.world, 'lights', ctx.s.now);
     const ignore = new Set(ctx.world.darkIgnore ?? []);
     const yard = ctx.world.yard;
