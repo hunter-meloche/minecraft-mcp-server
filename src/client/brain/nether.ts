@@ -511,7 +511,7 @@ export function netherKitDecline(s: Snapshot, who = 'nether'): Decline | null {
   const c = netherCheck(s);
   const kit = netherTripKit(c);
   if (kit.ok) return null;
-  if (c.health < NETHER_TRIP.health || c.food < NETHER_TRIP.food) return no.health(s, who, NETHER_TRIP.health, NETHER_TRIP.food);
+  if (c.health < NETHER_TRIP.health || c.food < NETHER_TRIP.foodLeast) return no.health(s, who, NETHER_TRIP.health, NETHER_TRIP.foodLeast);
   return { cause: 'kit', text: `${kit.why} (${who} needs the nether kit)` };
 }
 

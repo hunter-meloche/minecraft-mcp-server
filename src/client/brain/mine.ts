@@ -79,7 +79,12 @@ export function deepTripReady(s: TripCheck): { ok: boolean; why?: string } {
  * 64 blocks that stand a ghast's blast (cobblestone, cobbled deepslate, stone bricks: never netherrack, dirt or sand:
  * the bridge's cover and pillars there take nothing else), and 12 slots free (the pockets rule's `nether` room).
  */
-export const NETHER_TRIP = { health: 20, food: 20, foodPoints: 40, pickaxes: 2, flintAndSteel: 1, blocks: 64, slotsFree: 12 } as const;
+/**
+ * The Nether trip's kit. `food` is what it eats up to before the kit is fetched; `foodLeast` what it sets out with at
+ * the least: the walk to the dump spot and back while the room is made costs a point (live, Nov 14: "not setting out:
+ * food 19 < 20" after the meals and the room), and from 18 health still heals; the 40 food points go along.
+ */
+export const NETHER_TRIP = { health: 20, food: 20, foodLeast: 18, foodPoints: 40, pickaxes: 2, flintAndSteel: 1, blocks: 64, slotsFree: 12 } as const;
 /** The blocks a Nether trip's cover and pillars are made of: blast-proof, and no falling block (the bridge's rule there). */
 export const NETHER_BLOCKS: readonly string[] = ['cobblestone', 'cobbled_deepslate', 'stone_bricks'];
 
@@ -102,7 +107,7 @@ export interface NetherCheck {
 export function netherTripKit(c: NetherCheck): { ok: boolean; why?: string } {
   const why: string[] = [];
   if (c.health < NETHER_TRIP.health) why.push(`health ${c.health} < ${NETHER_TRIP.health}`);
-  if (c.food < NETHER_TRIP.food) why.push(`food ${c.food} < ${NETHER_TRIP.food}`);
+  if (c.food < NETHER_TRIP.foodLeast) why.push(`food ${c.food} < ${NETHER_TRIP.foodLeast}`);
   if (c.foodPoints < NETHER_TRIP.foodPoints) why.push(`ready food ${c.foodPoints} < ${NETHER_TRIP.foodPoints} points`);
   if (!c.goldenHelmet) why.push('no golden helmet');
   if (!c.shield) why.push('no shield');

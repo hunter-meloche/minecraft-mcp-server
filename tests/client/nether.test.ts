@@ -239,6 +239,10 @@ test('the Nether kit: whole and fed, 40 food points, the golden helmet, a shield
   const short = lookAt(items.filter(i => i.name !== 'golden_helmet' && i.name !== 'cobbled_deepslate' && i.name !== 'iron_pickaxe').concat({ slot: 7, name: 'netherrack', count: 64 }), 1000, { health: 19 });
   t.deepEqual(netherTripKit(netherCheck(short)), { ok: false, why: 'health 19 < 20; no golden helmet; 1 pickaxe(s) < 2 (one in use, a spare); 40 blast-proof blocks < 64' });
   t.is(ROOM.nether, NETHER_TRIP.slotsFree);
+  // a point of food gone on the walks while the room was made (live, Nov 14: "food 19 < 20") still sets out; 17 does not
+  t.deepEqual(netherTripKit(netherCheck(lookAt(items, 1000, { food: 19 }))), { ok: true });
+  t.deepEqual(netherTripKit(netherCheck(lookAt(items, 1000, { food: 18 }))), { ok: true });
+  t.deepEqual(netherTripKit(netherCheck(lookAt(items, 1000, { food: 17 }))), { ok: false, why: 'food 17 < 18' });
   // making room for one, the stash keeps no build's materials (as for a trip down the mine), and of the rest only the
   // Nether kit (F3: its own keep, not the home kit's)
   const w = liveWorld();
