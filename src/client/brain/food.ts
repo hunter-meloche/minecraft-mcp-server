@@ -29,6 +29,12 @@ export const COOKS_TO: Record<string, string> = {
 };
 /** Carry at least this many food points of ready food. */
 export const FOOD_TARGET = 20;
+/**
+ * From the home chests (cheap: a few steps) the food goal takes this much beyond the target, a few meals' worth. Taken
+ * to the target exactly (16 -> 24, one cooked_beef), the first meal down the mine put it under 20 again and the food
+ * goal called the deep trip home with nothing brought in (2026-11-14 21:41Z and again 21:48Z).
+ */
+export const CHEST_SPARE = 20;
 /** Fuel, best first (coal smelts 8, a log or planks 1.5). */
 const FUELS = ['coal', 'charcoal', 'coal_block', 'oak_log', 'birch_log', 'spruce_log', 'acacia_log', 'jungle_log', 'dark_oak_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
 /** Animals to hunt, preferred first (sheep last: they're the wool for beds). */
@@ -131,24 +137,30 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
   const { landmarks } = ctx.world;
   let have = await counts(ctx);
   const enough = () => readyFoodPoints(have) >= target;
+  // what the chests fill it to (CHEST_SPARE); the farm, the furnace and the hunt still stop at the target
+  const fill = target + CHEST_SPARE;
+  const filled = () => readyFoodPoints(have) >= fill;
   const refresh = async () => { have = await counts(ctx); };
   const foods = foodsFor26();
 
   // 1. the home chests
   for (const chest of useChests ? landmarks.chests : []) {
+    // no walk to another chest once at the target: the spare is taken from a chest it opens anyway
     if (enough()) break;
     const inside = await peekChest(ctx, chest).catch(() => ({} as Record<string, number>));
     const edible = Object.entries(inside)
       .filter(([n]) => foods[n] && !AVOID_UNLESS_ASKED.has(n))
       .sort(([a], [b]) => (COOKS_TO[a] ? 1 : 0) - (COOKS_TO[b] ? 1 : 0) || foods[b].foodPoints - foods[a].foodPoints);
     for (const [name, n] of edible) {
-      if (enough()) break;
+      if (filled()) break;
+      // the spare is ready food only: raw meat (sorted last) comes out for the cook just while short of the target
+      if (COOKS_TO[name] && enough()) break;
       // never past the stack of a kind the stash leaves carried (FOOD_CARRY): all the raw meat of a chest came out to
       // be cooked, and with more than a stack of it and a furnace that would not cook, the stash would put the rest
       // back and this take it out again, turn about
       const most = FOOD_CARRY - (have.get(name) ?? 0);
       if (most <= 0) continue;
-      const want = Math.min(most, COOKS_TO[name] ? n : Math.min(n, Math.ceil((target - readyFoodPoints(have)) / foods[name].foodPoints)));
+      const want = Math.min(most, COOKS_TO[name] ? n : Math.min(n, Math.ceil((fill - readyFoodPoints(have)) / foods[name].foodPoints)));
       const r = await ctx.act('take-from-chest', { ...chest, item: name, count: want });
       rememberReply(ctx.world, chest, r.text);
       if (r.ok) say(`took ${want} ${name}`);

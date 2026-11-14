@@ -190,3 +190,37 @@ test('gatherFood: a cook that leaves the meat raw and a farm with nothing ripe a
   t.true(acts.includes('smelt-item beef') && acts.includes('farm'), acts.join(', '));
   t.is(inv.get('beef'), 2);
 });
+
+test('gatherFood from the chests: takes a few meals past the target, so the first meal on a trip does not call it home', async t => {
+  // 2026-11-14 21:41Z: 16 points carried, it took one cooked_beef (24), ate one down the mine (16) and the food goal
+  // called the deep trip home with nothing brought in; again at 21:48Z
+  const inv = new Map<string, number>([['cooked_beef', 2]]);
+  const chest = { x: 1, y: 64, z: 0 };
+  const inside: Record<string, number> = { cooked_beef: 30, beef: 12 };
+  const world = { landmarks: { chests: [chest, { x: 2, y: 64, z: 0 }], farmland: [] }, leash: 96, zones: {}, chests: {} } as unknown as WorldMemory;
+  const s = { food: 16, home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, counts: inv, position: { x: 0, y: 64, z: 0 } } as unknown as Snapshot;
+  const opened: string[] = [];
+  const ctx = {
+    s, world, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ timeOfDay: 2000 }),
+    call: (async (m: string, a: Record<string, number> = {}) => {
+      if (m === 'inventory') return { items: [...inv].map(([name, count], slot) => ({ slot, name, count })) };
+      if (m === 'chest.open') { opened.push(`${a.x}`); return { items: { ...inside }, stacks: [], free: 10, slots: 27 }; }
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      if (tool === 'take-from-chest') {
+        const item = String(a.item), n = Number(a.count);
+        inv.set(item, (inv.get(item) ?? 0) + n);
+        inside[item] -= n;
+        return { ok: true, text: `took ${n} ${item}` };
+      }
+      return { ok: false, text: 'no' };
+    }
+  } as unknown as GoalContext;
+  const text = await gatherFood(ctx, 20, true);
+  // 16 + 3 x 8 = 40: the target and a spare of 20
+  t.is(inv.get('cooked_beef'), 5, text);
+  t.false(inv.has('beef'), 'no raw meat taken once past the target');
+  t.deepEqual(opened, ['1'], 'one chest opened: no walk to the next one');
+});
