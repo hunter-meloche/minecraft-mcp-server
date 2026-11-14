@@ -24,7 +24,8 @@ import java.util.Set;
  * Blocks the bot built (sent by the MCP server). Baritone has no per-position protection, and it walked through a
  * cabin wall rather than use the door; so once a second this sets Baritone's blocksToDisallowBreaking to the types of
  * the protected blocks within RADIUS of the bot. Our own dig and build processes lift the rule while they run, since
- * they break blocks on purpose. It also keeps Baritone's paths from placing blocks by the yard fence (fenceScaffold).
+ * they break blocks on purpose. It also keeps Baritone's paths from placing blocks by the yard fence and the pens'
+ * fences (fenceScaffold).
  */
 public final class Protection {
     private static final int RADIUS = 24;
@@ -201,7 +202,7 @@ public final class Protection {
 
     /** Baritone's cost of what can't be done (ActionCosts.COST_INF). */
     public static final double COST_INF = 1_000_000;
-    /** How far across the ground from the yard's fence ring, inside or outside, Baritone's paths place nothing. */
+    /** How far across the ground from the yard's fence ring (or a pen's), inside or outside, Baritone's paths place nothing. */
     private static final int FENCE_BAND = 2;
     /** and up to how far over the fence (its posts): the scaffold found east of the north gate went up to 4 over it */
     private static final int FENCE_OVER = 4;
@@ -212,7 +213,7 @@ public final class Protection {
      */
     private static final int FENCE_SHARE = 4;
 
-    /** The fence's band: x1..x2, z1..z2 the ring (the zone's rectangle), y1..y2 the heights (the yard's ground and up). */
+    /** A fence's band: x1..x2, z1..z2 the ring (the zone's rectangle, a pen's), y1..y2 the heights (its ground and up). */
     record Band(int x1, int z1, int x2, int z2, int y1, int y2) {
         boolean has(int x, int y, int z) {
             if (y < y1 || y > y2 || x < x1 - FENCE_BAND || x > x2 + FENCE_BAND || z < z1 - FENCE_BAND || z > z2 + FENCE_BAND) return false;
@@ -227,6 +228,14 @@ public final class Protection {
 
     /** null: no ring known (no rectangle, or nothing of the bot's on its line yet). Read on Baritone's path thread. */
     private static volatile Band band;
+    /**
+     * The pens' fence rings as Node sends them with the zone (world memory's `pen:<kind>`: x1, z1, x2, z2 each), and
+     * the band round each that has the bot's fence on it: the same 2 either side and the same heights as the yard's.
+     * Baritone's way out of the cow pen was over its fence on a block or two, not through its gate two blocks off: live
+     * the walk home from inside it pressed the bot into the pen's west fence five times in four minutes.
+     */
+    private static List<int[]> penRings = List.of();
+    private static volatile List<Band> penBands = List.of();
     private static volatile boolean scaffoldAsked;
     /** places refused since the client log last said how many */
     private static final java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
@@ -241,20 +250,26 @@ public final class Protection {
 
     /** Where a block Baritone weighs placing while it paths would go (FenceScaffoldMixin, as the cost starts). */
     public static void placingAt(int x, int y, int z) {
-        Band b = band;
-        BY_THE_FENCE.get()[0] = b != null && b.has(x, y, z);
+        BY_THE_FENCE.get()[0] = byAFence(band, penBands, x, y, z);
+    }
+
+    /** In the yard fence's band or a pen's. */
+    static boolean byAFence(Band yard, List<Band> pens, int x, int y, int z) {
+        if (yard != null && yard.has(x, y, z)) return true;
+        for (Band b : pens) if (b.has(x, y, z)) return true;
+        return false;
     }
 
     /**
-     * Whether that block (a pillar, a bridge, a step up) is ruled out: one in the yard fence's band. Climbing over the
-     * fence on cobblestone was cheaper than the walk round to a gate, so the bot left stairs over the gates and pillars
-     * along the fence. `cost` is what Baritone made of it: never stays never, and 0 is the builder's own block (what
+     * Whether that block (a pillar, a bridge, a step up) is ruled out: one in the yard fence's band, or a pen fence's.
+     * Climbing over the fence on cobblestone was cheaper than the walk round to a gate, so the bot left stairs over the
+     * gates and pillars along the fence. `cost` is what Baritone made of it: never stays never, and 0 is the builder's own block (what
      * its schematic wants there, and the bot carries; a plain path never costs a block 0), which it still places.
      * Called for every place a path search weighs: on Baritone's path thread, and on the client's as it checks the path
      * it walks.
      */
     public static boolean fenceScaffold(double cost) {
-        if (!scaffoldAsked) { scaffoldAsked = true; System.out.println("[claudebridge] path: no throwaway blocks within " + FENCE_BAND + " of the yard fence"); }
+        if (!scaffoldAsked) { scaffoldAsked = true; System.out.println("[claudebridge] path: no throwaway blocks within " + FENCE_BAND + " of the yard fence or a pen's"); }
         boolean[] by = BY_THE_FENCE.get();
         if (!by[0]) return false;
         by[0] = false;
@@ -285,19 +300,47 @@ public final class Protection {
         return new Band(x1, z1, x2, z2, fence - 1, fence + FENCE_OVER);
     }
 
-    /** The band again after the zone or the bot's blocks changed (the client log says when it moves). */
+    /** The pens' bands: each ring's (bandOf, as the yard's), those with the bot's fence on them. */
+    static List<Band> penBandsOf(List<int[]> rings, java.util.Collection<Long> positions) {
+        List<Band> out = new ArrayList<>();
+        for (int[] r : rings) {
+            Band b = bandOf(true, r[0], r[1], r[2], r[3], positions);
+            if (b != null) out.add(b);
+        }
+        return List.copyOf(out);
+    }
+
+    /** The bands again after the zone, the pens or the bot's blocks changed (the client log says when they move). */
     private static void bandAgain() {
         Band b = zoneSet ? bandOf(zoneRect, zoneX1, zoneZ1, zoneX2, zoneZ2, POSITIONS) : null;
-        if (java.util.Objects.equals(b, band)) return;
+        List<Band> pens = penBandsOf(penRings, POSITIONS);
+        if (java.util.Objects.equals(b, band) && pens.equals(penBands)) return;
         band = b;
-        System.out.println("[claudebridge] path: " + (b == null ? "no yard fence known: paths may place anywhere again" : "paths place nothing by the yard fence: " + b));
+        penBands = pens;
+        String yard = b == null ? "no yard fence known" : "paths place nothing by the yard fence: " + b;
+        StringBuilder pen = new StringBuilder();
+        for (Band q : pens) pen.append(pen.length() == 0 ? "; nor by the pens' fences: " : "; ").append(q);
+        System.out.println("[claudebridge] path: " + (b == null && pens.isEmpty() ? "no yard fence known: paths may place anywhere again" : yard + pen));
+    }
+
+    /** The pens' rings in a protect.zone call (`pens`: [{x1, z1, x2, z2}]); none when it has none. */
+    static List<int[]> ringsOf(JsonObject p) {
+        JsonElement list = p.get("pens");
+        if (list == null || !list.isJsonArray()) return List.of();
+        List<int[]> out = new ArrayList<>();
+        for (JsonElement e : list.getAsJsonArray()) {
+            if (!e.isJsonObject()) continue;
+            JsonObject o = e.getAsJsonObject();
+            out.add(new int[]{ intParam(o, "x1", 0), intParam(o, "z1", 0), intParam(o, "x2", 0), intParam(o, "z2", 0) });
+        }
+        return List.copyOf(out);
     }
 
     /** Once a minute at most, how many places by the fence the path searches had refused (each search weighs many). */
     private static void sayRefused() {
         if (refused.get() == 0 || System.currentTimeMillis() - refusedSaid < 60_000) return;
         refusedSaid = System.currentTimeMillis();
-        System.out.println("[claudebridge] path: " + refused.getAndSet(0) + " place(s) by the yard fence refused in path searches");
+        System.out.println("[claudebridge] path: " + refused.getAndSet(0) + " place(s) by the yard fence or a pen's refused in path searches");
     }
 
     private static int idleWhileSuspended = 0;
@@ -376,8 +419,10 @@ public final class Protection {
         });
         // the home zone: {x, z, radius}; radius 0 clears it
         s.register("protect.zone", true, (p, c) -> {
-            // {x, z, radius} a circle (radius 0 clears it), or {x1, z1, x2, z2} a rectangle
+            // {x, z, radius} a circle (radius 0 clears it), or {x1, z1, x2, z2} a rectangle; with either, `pens`: the
+            // pens' fence rings (none sent, none kept)
             zoneSynced = true;
+            penRings = ringsOf(p);
             zoneRect = p.has("x1");
             if (zoneRect) {
                 zoneX1 = intParam(p, "x1", 0); zoneZ1 = intParam(p, "z1", 0); zoneX2 = intParam(p, "x2", 0); zoneZ2 = intParam(p, "z2", 0);
@@ -399,6 +444,9 @@ public final class Protection {
             r.addProperty("suspended", suspended);
             Band fence = band;
             r.addProperty("fenceBand", fence == null ? null : fence.toString());
+            JsonArray pens = new JsonArray();
+            for (Band q : penBands) pens.add(q.toString());
+            r.add("penBands", pens);
             JsonArray types = new JsonArray();
             for (Block b : BaritoneAPI.getSettings().blocksToDisallowBreaking.value) {
                 types.add(Names.strip(b.builtInRegistryHolder().getRegisteredName()));

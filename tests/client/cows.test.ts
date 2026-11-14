@@ -4,7 +4,9 @@ import os from 'os';
 import path from 'path';
 import { Brain } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime, type InventoryItem } from '../../src/client/tools.js';
-import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
+import { shelterGoal, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
+import { goHome } from '../../src/client/brain/homeward.js';
+import { leaveYard } from '../../src/client/brain/yardgates.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import sinon from 'sinon';
 import { fetchForPens, pens, penWay, standsClear } from '../../src/client/brain/pens.js';
@@ -1780,6 +1782,136 @@ test('live, Nov 13: a cull in the cow pen\'s corner by its corner post, the drop
   // out by the gate, shut behind
   t.false(pa.isOpen(GATE));
   t.true(outOfPen(pa.me));
+});
+
+// ---- walks that set out from inside a pen
+
+/** Where the shelter's walk home set out from at night on Nov 13: in the cow pen, by its west fence. */
+const IN_PEN: Pos = { x: -557, y: 63, z: 2170 };
+/** what a walk out of the pen did, in order: the walks, the clicks on the gate, Baritone's own way through it, the closer */
+const exitLog = (pa: Pasture) => pa.log.filter(l => /^(goto|use-item-on-block|useOn|baritone opens|the closer|go-home|move-to-position)/.test(l));
+const PEN_WAY_OUT = ['goto careful -555,2169', `use-item-on-block ${k(GATE)}`, 'goto careful -555,2172', `use-item-on-block ${k(GATE)}`];
+
+test('live, Nov 13: the shelter at night from inside the cow pen walks out by the pen\'s gate, carefully, the gate shut behind, then home to bed; and the brain sends the pens\' rings with the yard\'s', async (t) => {
+  // live the walk home from (-557, 63, 2170) was go-home's own way, over the pen's west fence: wedged in it five times
+  // in four minutes ("shelter is wedged in the oak_fence at -558,63,2170: stepping out")
+  const bed = { x: -537, y: 63, z: 2193 };
+  const world = liveWorld({ landmarks: { ...liveWorld().landmarks, bed } });
+  const pa = new Pasture([cow(1, -554, 2167), cow(2, -556, 2167)], world, KIT);
+  pa.me = mid(IN_PEN);
+  const ctx = pa.ctx(world);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cows-'));
+  const file = path.join(dir, 'brain.json');
+  const logFile = path.join(dir, 'brain.log');
+  fs.writeFileSync(file, JSON.stringify({ 'seed:1': world }));
+  const reply = (r: { ok: boolean; text: string }) => ({ content: [{ type: 'text' as const, text: r.text }], ...(r.ok ? {} : { isError: true }) });
+  const actions = Object.fromEntries(['go-home', 'move-to-position', 'use-item-on-block'].map(tool => [tool, async (a: Record<string, unknown>) => reply(await ctx.act(tool, a))]));
+  const zones: unknown[][] = [];
+  const rt = {
+    actions,
+    call: (async (method: string, p?: Record<string, unknown>) => (method === 'bed.sleep' ? { sleeping: true } : ctx.call(method, p))) as ClientRuntime['call'],
+    status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...pa.me }, block: { x: Math.floor(pa.me.x), y: 63, z: Math.floor(pa.me.z) }, timeOfDay: 13_000,
+      hashedSeed: '1', dimension: 'overworld', sleeping: false, thundering: false, process: null, health: 20, food: 20 }),
+    home: () => ({ ...HOME, dimension: 'overworld' }),
+    lastDeath: () => undefined, setManualHook: () => undefined, builtNear: () => [], setHomeZone: (...a: unknown[]) => { zones.push(a); },
+    restoreBlock: async () => undefined, adoptStates: () => undefined, protectBuilt: () => undefined
+  } as unknown as ClientRuntime;
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => T0, goals: [shelterGoal()], logFile, memoryFile: file });
+  brain.setEnabled(true);
+  await brain.tick();
+  for (let i = 0; i < 10; i++) await settle();
+  brain.setEnabled(false);
+  const said = fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map(l => l.slice(25)).filter(l => !/^(autonomy|landmarks:|idle )/.test(l));
+  t.deepEqual(said, [
+    'start shelter: night: get home',
+    'shelter: out of the cow pen by its gate (-555, 63, 2171)',
+    'done shelter in 0s: walked home, asleep in the bed at (-537, 63, 2193)'
+  ]);
+  // to the cell 2 in from the gate, the gate opened, through to the cell outside, the gate shut; then go-home from there
+  t.deepEqual(exitLog(pa).slice(0, 5), [...PEN_WAY_OUT, 'go-home']);
+  t.false(pa.log.some(l => l === `baritone opens ${k(GATE)}`), pa.log.join('\n'));
+  t.false(pa.isOpen(GATE));
+  t.true(pa.careful.every(c => c));
+  t.true(pa.cows.every(penned));
+  t.true(horiz(pa.me, mid(HOME)) < 1);
+  // the yard's rectangle, and the pen's ring with it: the client mod's band round both
+  t.deepEqual(zones.at(-1), [{ x1: YARD.x1, z1: YARD.z1, x2: YARD.x2, z2: YARD.z2 }, [{ x1: -558, z1: 2165, x2: -552, z2: 2171 }]]);
+});
+
+test('a walk out of the yard from inside a pen leaves the pen by its gate first, shut behind; then the yard by the gate toward where it goes (the east one for the mine start), not the one nearest the pen', async (t) => {
+  const world = liveWorld();
+  const pa = new Pasture([cow(1, -554, 2167)], world, KIT);
+  pa.me = mid(IN_PEN);
+  const said: string[] = [];
+  const out = await leaveYard(pa.ctx(world, undefined, said), { x: -493, z: 2183 });
+  t.like(out, { gate: YARD_GATES[1] });
+  t.deepEqual(said, ['out of the cow pen by its gate (-555, 63, 2171)', 'out of the yard by its east gate (-533, 63, 2183)']);
+  // (from the pen's gate the west gate is the nearer: 14 to its cell inside, the east 22)
+  t.deepEqual(exitLog(pa).slice(0, 6), [...PEN_WAY_OUT, 'goto careful -535,2183', 'goto careful -531,2183']);
+  t.false(pa.isOpen(GATE));
+  t.true(pa.cows.every(penned));
+  // the trips' walk home between their legs, from inside the pen: the same way out, then go-home
+  const pb = new Pasture([cow(1, -554, 2167)], world, KIT);
+  pb.me = mid(IN_PEN);
+  t.deepEqual(await goHome(pb.ctx(world), 300_000), { ok: true, text: 'Home' });
+  t.deepEqual(exitLog(pb), [...PEN_WAY_OUT, 'go-home']);
+  t.false(pb.isOpen(GATE));
+});
+
+test('only from inside a pen\'s fence: pressed against a post from inside it walks out by the gate; pressed against one from outside, at home, or in the gateway on its far side, no pen walk and no look at the gate; the sheep pen by its own gate', async (t) => {
+  const world = liveWorld();
+  const from = async (at: Pos, w = world) => {
+    const pa = new Pasture([], w, KIT);
+    pa.me = { ...at };
+    const said: string[] = [];
+    await goHome(pa.ctx(w, undefined, said), 300_000);
+    return { said, log: exitLog(pa), pa };
+  };
+  // the bot's middle 0.075 into the west fence's cell (its box 0.6 wide, the post 0.25), from inside and from outside
+  t.deepEqual((await from({ x: -557.075, y: 63, z: 2168.5 })).log, [...PEN_WAY_OUT, 'go-home']);
+  for (const at of [{ x: -557.925, y: 63, z: 2168.5 }, { ...mid(HOME) }, { x: -554.5, y: 63, z: 2171.8 }]) {
+    const r = await from(at);
+    t.deepEqual(r.said, [], JSON.stringify(at));
+    t.false(r.log.some(l => l.startsWith('use-item-on-block') || l.startsWith('goto careful')), JSON.stringify(at));
+  }
+  // the sheep pen, its gate north: in by 2 from it, out to the cell north of it
+  const sheep = liveWorld({ zones: { ...liveWorld().zones, 'pen:sheep': [{ x: -542, y: 62, z: 2196, width: 7, length: 7 }], 'pen:sheep:gate': [{ x: -539, y: 63, z: 2196 }] } });
+  const r = await from({ x: -540.5, y: 63, z: 2200.5 }, sheep);
+  t.deepEqual(r.said, ['out of the sheep pen by its gate (-539, 63, 2196)']);
+  t.deepEqual(r.log, ['goto careful -539,2198', 'use-item-on-block -539,63,2196', 'goto careful -539,2195', 'use-item-on-block -539,63,2196', 'go-home']);
+});
+
+test('a pen whose gateway a cow stands in: one try out, the gate shut behind from where the bot stands, said, and the walk home goes on as it would have; given up on the way out, the gate is clicked shut and nothing walks on', async (t) => {
+  const world = liveWorld();
+  const pa = new Pasture([cow(1, -554, 2167), cow(2, -555, 2171)], world, KIT);
+  pa.me = mid(IN_PEN);
+  const base = pa.ctx(world);
+  const said: string[] = [];
+  const ctx: GoalContext = {
+    ...pa.ctx(world, undefined, said),
+    // (the cow in the gateway: the walk through it gets nowhere)
+    call: (async (method: string, p: Record<string, unknown> = {}) => (method === 'goto' && p.x === OUTSIDE_GATE.x && p.z === OUTSIDE_GATE.z ? { arrived: false } : base.call(method, p))) as GoalContext['call']
+  };
+  t.deepEqual(await goHome(ctx, 300_000), { ok: true, text: 'Home' });
+  t.deepEqual(said, ['out of the cow pen by its gate (-555, 63, 2171)', 'no way out of the cow pen by its gate (-555, 63, 2171), shut behind: on by Baritone\'s own way']);
+  // opened, the walk out got nowhere (the stand-in's walk is not made), shut again from the cell inside (in reach), and
+  // go-home once: Baritone's own way (the stand-in's opens the gate, and the closer shuts it behind the bot)
+  t.deepEqual(exitLog(pa).slice(0, 4), [PEN_WAY_OUT[0], PEN_WAY_OUT[1], PEN_WAY_OUT[3], 'go-home']);
+  t.is(pa.log.filter(l => l === 'go-home').length, 1);
+  t.is(pa.log.filter(l => l === PEN_WAY_OUT[0]).length, 1);
+  t.false(pa.isOpen(GATE));
+  // given up as the gate opens to go out (the brain's stop): the click shut from where the bot stands, outside the
+  // run, and no go-home
+  const ac = new AbortController();
+  const pb = new Pasture([cow(1, -554, 2167)], world, KIT, { abortOnOpen: { gate: GATE, abort: () => ac.abort() } });
+  pb.me = mid(IN_PEN);
+  const cut = pb.ctx(world, ac.signal);
+  const r = await brainRun.run({ signal: ac.signal }, () => goHome(cut, 300_000).then(x => ({ x }), (e: Error) => ({ error: e.message })));
+  t.deepEqual(r, { error: 'aborted' });
+  t.false(pb.isOpen(GATE), pb.log.join('\n'));
+  t.true(pb.log.includes(`useOn ${k(GATE)}`));
+  t.false(pb.log.includes('go-home'));
+  t.true(pb.cows.every(penned));
 });
 
 // ---- the rung

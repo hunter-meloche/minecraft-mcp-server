@@ -903,6 +903,35 @@ test('off the server: tools say why and whether it comes back by itself; rejoin-
   t.deepEqual(left, [{ rejoin: false }, { rejoin: true }]);
 });
 
+test('the pens\' fence rings go to the client mod with the yard\'s rectangle (its band round each, where Baritone places nothing), and again when they change', async t => {
+  // live, Nov 13: the walk home from inside the cow pen went over the pen's fence, not through its gate: the band was
+  // round the yard's ring only
+  const zones: Record<string, unknown>[] = [];
+  const { run, rt } = setup({
+    status: () => ({ ...STATUS, hashedSeed: '7' }),
+    'foreign.zones': { zones: [] },
+    'protect.zone': (p: Record<string, unknown>) => { zones.push(p); return { set: true }; }
+  });
+  await run('set-home', { force: true });
+  const yard = { x1: -565, z1: 2119, x2: -533, z2: 2215 };
+  const cowPen = { x1: -558, z1: 2165, x2: -552, z2: 2171 }, sheepPen = { x1: -542, z1: 2196, x2: -536, z2: 2202 };
+  rt.setHomeZone(yard, [cowPen, sheepPen]);
+  await run('get-position');
+  t.deepEqual(zones.at(-1), { ...yard, pens: [cowPen, sheepPen] });
+  // the same again: nothing resent
+  const sent = zones.length;
+  rt.setHomeZone(yard, [cowPen, sheepPen]);
+  await run('get-position');
+  t.is(zones.length, sent);
+  // a pen gone (or none built yet): the yard's rectangle as it always went, and the mod drops the pens' bands
+  rt.setHomeZone(yard, [cowPen]);
+  await run('get-position');
+  t.deepEqual(zones.at(-1), { ...yard, pens: [cowPen] });
+  rt.setHomeZone(yard);
+  await run('get-position');
+  t.deepEqual(zones.at(-1), { ...yard });
+});
+
 test('a new server with no home and nothing built: the mod still hears both (its build scanner waits for them)', async t => {
   const sent: string[] = [];
   let synced = { protectSynced: false, zoneSynced: false };

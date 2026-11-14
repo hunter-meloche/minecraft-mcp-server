@@ -4,7 +4,7 @@ import type { Pos } from './memory.js';
 import { activityAt } from './schedule.js';
 import { boxMeetsZone, type Zone } from './courtesy.js';
 import { UNDER_BY, columnAbove, fillShaft, homeColumn, inColumn, underYard, type Column } from './underyard.js';
-import { inByGate, type WalkContext } from './yardgates.js';
+import { inByGate, outOfPen, type WalkContext } from './yardgates.js';
 
 /**
  * Home from wherever the bot is. go-home is Baritone's walk in legs toward home "at any height": from down a mine it
@@ -155,13 +155,16 @@ async function climbOut(ctx: GoalContext, feet: Pos, above: Above, home: Pos, co
  * cheapest (the stair Baritone left over the north gate, the scaffold along the east fence). `timeoutMs` is the whole
  * walk's: the gate takes what it needs of it, go-home the rest (HOME_MIN_MS at least). With no gate known, or none
  * that lets it in (said in the run's progress), go-home as it was. Every walk home goes by this: walkHome below, and
- * the trips' own go-home between their legs.
+ * the trips' own go-home between their legs. From inside one of the bot's pens, before anything else, out by the
+ * pen's gate, the gate shut behind (yardgates.ts outOfPen): go-home's own way out of the cow pen was over its fence,
+ * and at night it pressed the bot into the pen's west fence five times in four minutes.
  */
 export async function goHome(ctx: WalkContext & Pick<GoalContext, 'act'>, timeoutMs: number): Promise<{ ok: boolean; text: string }> {
   const began = Date.now();
-  const gate = await inByGate(ctx, timeoutMs - HOME_MIN_MS);
+  const pen = await outOfPen(ctx);
+  const gate = await inByGate(ctx, timeoutMs - (Date.now() - began) - HOME_MIN_MS);
   if (gate.shut) ctx.progress(`${gate.shut}: home by go-home's own way`);
-  const walked = !!(gate.gate || gate.shut);
+  const walked = !!(pen.pen || gate.gate || gate.shut);
   return ctx.act('go-home', { name: 'home', timeoutMs: walked ? Math.max(HOME_MIN_MS, timeoutMs - (Date.now() - began)) : timeoutMs });
 }
 

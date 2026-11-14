@@ -226,8 +226,11 @@ export interface ClientRuntime {
    * there when it was built, when that is known (positions protected before states were kept have none).
    */
   builtNear: (center: Pos, radius: number) => { at: Pos; state?: string }[];
-  /** widen the home zone to cover a grown yard (never below HOME_ZONE) */
-  setHomeZone: (yard: { x1: number; z1: number; x2: number; z2: number } | undefined) => void;
+  /**
+   * widen the home zone to cover a grown yard (never below HOME_ZONE); `pens`: the fence rings of the bot's pens in
+   * it, sent with the yard's (the client mod keeps Baritone's paths from placing blocks by them, as by the yard's)
+   */
+  setHomeZone: (yard: { x1: number; z1: number; x2: number; z2: number } | undefined, pens?: { x1: number; z1: number; x2: number; z2: number }[]) => void;
   /**
    * Put `item` back at `at` (selecting it, clearing a wrong block, stepping out of the cell or closer as needed),
    * turned to `facing` (the way the bot looks while placing: see placerFacing) when given. Resolves to why it could
@@ -284,6 +287,11 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   let zoneSent = 'none'; // a client starts without one
   /** the home zone's radius: grows with the yard (the brain sets it) */
   let zoneRect: { x1: number; z1: number; x2: number; z2: number } | undefined;
+  /**
+   * the pens' fence rings, sent with the yard's rectangle: the client mod's band round each, where Baritone's paths
+   * place nothing (Protection.java). Live its way out of the cow pen was over the pen's fence, not through its gate
+   */
+  let zonePens: { x1: number; z1: number; x2: number; z2: number }[] = [];
   /** How far outside the home zone a point is (negative inside): from the yard's rectangle once it's known (the
    * brain sets it), else from the circle of HOME_ZONE round home. A circle as wide as a long yard's farthest corner
    * took in seven times the yard, and from anywhere in it Baritone wasn't allowed to dig, so it found no path to ore. */
@@ -310,11 +318,12 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     // the home zone, for the home in the dimension the bot is in (resent when it changes or the client is new)
     const world = worldIdFromSeed(s.hashedSeed ?? undefined);
     const home = world ? readHomes()[world]?.home : undefined;
-    const zone = home && home.dimension === (s.dimension ?? 'overworld') ? (zoneRect ? `${zoneRect.x1},${zoneRect.z1},${zoneRect.x2},${zoneRect.z2}` : `${home.x},${home.z}`) : 'none';
+    const pensKey = zonePens.map(p => `${p.x1},${p.z1},${p.x2},${p.z2}`).join(';');
+    const zone = home && home.dimension === (s.dimension ?? 'overworld') ? (zoneRect ? `${zoneRect.x1},${zoneRect.z1},${zoneRect.x2},${zoneRect.z2}${pensKey ? ` pens ${pensKey}` : ''}` : `${home.x},${home.z}`) : 'none';
     // no home yet is an answer too: the mod's build scanner waits for one (a new server: nearby-builds, set-home)
     if (zone !== zoneSent || s.zoneSynced === false || (relaunched && zone !== 'none')) {
       const [x, z] = zone === 'none' ? [0, 0] : zone.split(',').map(Number);
-      const params = zone === 'none' ? { x, z, radius: 0 } : zoneRect ? { ...zoneRect } : { x, z, radius: HOME_ZONE };
+      const params = zone === 'none' ? { x, z, radius: 0 } : zoneRect ? { ...zoneRect, ...(zonePens.length ? { pens: zonePens.map(p => ({ ...p })) } : {}) } : { x, z, radius: HOME_ZONE };
       await call('protect.zone', params).then(() => { zoneSent = zone; }).catch(() => undefined);
     }
     return s;
@@ -1760,7 +1769,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     },
     lastDeath: () => lastDeath,
     setManualHook: fn => { manualHook = fn; },
-    setHomeZone: yard => { zoneRect = yard ? { x1: yard.x1, z1: yard.z1, x2: yard.x2, z2: yard.z2 } : undefined; },
+    setHomeZone: (yard, pens = []) => {
+      zoneRect = yard ? { x1: yard.x1, z1: yard.z1, x2: yard.x2, z2: yard.z2 } : undefined;
+      zonePens = yard ? pens.map(p => ({ x1: p.x1, z1: p.z1, x2: p.x2, z2: p.z2 })) : [];
+    },
     builtNear: (center, radius) => protection.entries(lastDimension).filter(({ at }) =>
       Math.hypot(at.x - center.x, at.z - center.z) <= radius && Math.abs(at.y - center.y) <= radius),
     restoreBlock: async (at, item, facing) => {

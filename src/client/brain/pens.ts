@@ -10,6 +10,7 @@ import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { makeRoom, noRoom, out as afield, room } from './pockets.js';
 import { addSite, alongSide, byYard, CLEAR, dropSite, gatesBetween, inFence, notePen, outByGate, sitesOf, type Bound, type HomeSide, type WorkResult } from './work.js';
+import { penGateWay, throughPenGate, type PenWay } from './yardgates.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -212,18 +213,12 @@ async function cullIn(ctx: GoalContext, inside: Inside, id: number): Promise<{ o
   return { ...r, left };
 }
 
-/** The pen's gate, the cells just outside it and two in, and the last row in before the far fence (`deep`). */
-export function gateOf(gate: { x: number; y: number; z: number } | undefined, p: Pen) {
-  if (!gate) return undefined;
-  const side: Side = gate.z === p.z1 ? 'north' : gate.z === p.z2 ? 'south' : gate.x === p.x1 ? 'west' : 'east';
-  const o = OUT[side];
-  const depth = (side === 'north' || side === 'south' ? p.z2 - p.z1 : p.x2 - p.x1) - 1;
-  return {
-    gate, side, outside: { x: gate.x + o.x, y: gate.y, z: gate.z + o.z }, inside: { x: gate.x - 2 * o.x, y: gate.y, z: gate.z - 2 * o.z },
-    deep: { x: gate.x - depth * o.x, y: gate.y, z: gate.z - depth * o.z }
-  };
-}
-type Way = NonNullable<ReturnType<typeof gateOf>>;
+/**
+ * The pen's gate, the cells just outside it and two in, and the last row in before the far fence (`deep`): the same
+ * cells the walks that set out from inside a pen leave by (yardgates.ts outOfPen).
+ */
+export const gateOf = (gate: { x: number; y: number; z: number } | undefined, p: Pen): Way | undefined => penGateWay(gate, p);
+type Way = PenWay;
 
 /** A pen of the bot's as world memory has it, and its gate when it has one. */
 function penOf(world: WorldMemory, kind: PenKind): { p: Pen; way?: Way } | undefined {
@@ -1156,13 +1151,8 @@ function penVisit(ctx: GoalContext, p: Pen, way: Way) {
      */
     leave: async (): Promise<void> => {
       try {
-        if (inside && !ctx.signal.aborted) {
-          await sword();
-          await ctx.call('goto', { ...way.inside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
-          if (!(await gateOpen(ctx, way.gate).catch(() => true))) await toggle(ctx, way.gate).catch(() => undefined);
-          await ctx.call('goto', { ...way.outside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
-          await shutGate();
-        }
+        // (the way out every walk that sets out from inside a pen takes: yardgates.ts)
+        if (inside && !ctx.signal.aborted) await throughPenGate(ctx, way);
       } finally {
         inside = false;
         if (gatesOff) {

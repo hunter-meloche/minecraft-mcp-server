@@ -13,7 +13,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * (a stair over the north gate, pillars along the fence east of it up to 4 over it): placing a few blocks was cheaper.
  * Every block a path places (a pillar, a bridge, a step up) is first costed by the path's context, its
  * costOfPlacingAt; here that cost becomes "never" for a block in the fence's band (Protection.fenceScaffold), so the
- * path goes by a gate or not at all. Baritone's settings can only turn placing off everywhere (allowPlace).
+ * path goes by a gate or not at all. The pens' fences have the same band: its way out of the cow pen was over the
+ * pen's fence too. Baritone's settings can only turn placing off everywhere (allowPlace).
  *
  * Two contexts cost it: the plain one (`baritone.ca`: walks, the miner, the farm, fights, retreats) and the builder's
  * (`baritone.dt$a`: build jobs, level-area, the dig call), which overrides it without calling it. The builder's own

@@ -37,6 +37,7 @@ import { clearOut, dryBlocked, ladderOf, pick, releaseOldestDry, shareHolds, ski
 import { NEAR_HOME, out as afield } from './pockets.js';
 import { statusAnswer } from './chatstatus.js';
 import { getOut, wedgedOut } from './wedge.js';
+import { penFences } from './yardgates.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -255,10 +256,11 @@ export class Brain {
       await this.discover(s, world);
       this.countDay(s);
       this.walked(s, world);
-      // the home zone is the yard as it grows (its rectangle; the game client keeps a margin round it)
+      // the home zone is the yard as it grows (its rectangle; the game client keeps a margin round it), with the pens'
+      // fence rings: Baritone's paths place nothing by those either (the client mod's band, Protection.java)
       if (world.yard && s.home) {
         const y = world.yard;
-        this.rt.setHomeZone?.({ x1: y.x1, z1: y.z1, x2: y.x2, z2: y.z2 });
+        this.rt.setHomeZone?.({ x1: y.x1, z1: y.z1, x2: y.x2, z2: y.z2 }, penFences(world).map(({ x1, z1, x2, z2 }) => ({ x1, z1, x2, z2 })));
       }
       this.idleTrack(s);
       this.workQueue(s, world);

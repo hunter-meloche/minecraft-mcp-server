@@ -12,9 +12,13 @@
  * or no way at all; this keeps the walks on the gates' cells in the first place, and off "any height at this x and
  * z" by the yard, which the caves under it answer too.
  *
+ * The pens' fences the same way (outOfPen): a walk that sets out from inside a pen leaves by the pen's gate first.
+ *
  * (Here, not in work.ts: homeward.ts's walk home comes in by a gate, and work.ts imports homeward.ts. Nothing from
- * goals.ts is used at this module's top level: goals.ts imports homeward.ts, which imports this.)
+ * goals.ts is used at this module's top level: goals.ts imports homeward.ts, which imports this. Nor is pens.ts
+ * imported: it imports this, through work.ts, and builds its goal at its top level.)
  */
+import { brainRun } from '../tools.js';
 import { BELOW_HOME, outsideBy, YARD_EDGE, type GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 
@@ -22,8 +26,11 @@ import type { Pos, WorldMemory } from './memory.js';
 export type HomeSide = 'north' | 'east' | 'south' | 'west';
 export const SIDE_STEP: Record<HomeSide, [number, number]> = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
 
-/** What the walks through a gate use of a goal's context (a trip's helpers are handed no more than this). */
-export type WalkContext = Pick<GoalContext, 's' | 'world' | 'signal' | 'call' | 'status' | 'progress'>;
+/**
+ * What the walks through a gate use of a goal's context (a trip's helpers are handed no more than this): `act` for
+ * the click on a pen's gate (outOfPen).
+ */
+export type WalkContext = Pick<GoalContext, 's' | 'world' | 'signal' | 'call' | 'status' | 'progress' | 'act'>;
 
 const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
@@ -106,10 +113,14 @@ async function floorAt(ctx: WalkContext, cell: Pos): Promise<Pos> {
  * across the yard, by the same caves). Each walk is to within 1 of its cell: still a block on the ground, which no
  * cave far below answers, and one a bot on a dirt path (its block is the path's own, under the cell) or in a plant
  * floorAt took for a floor (pink petals, a sapling, a carpet) gets to; to the block itself it "did not arrive".
- * `{}`: nothing to do (the bot not inside the fence, `to` not outside it, or no gate known); `shut`: no gate let it
- * out (one gone or blocked: the next is tried), or none on those sides; `gate` and `at` once out.
+ * From inside one of the bot's pens it goes out by the pen's gate first, the gate shut behind (outOfPen), whatever
+ * comes after. `{}`: nothing to do (the bot not inside the fence, `to` not outside it, or no gate known); `shut`: no
+ * gate let it out (one gone or blocked: the next is tried), or none on those sides; `gate` and `at` once out.
  */
 export async function outByGate(ctx: WalkContext, toward: { x: number; z: number } | HomeSide | undefined, sides?: HomeSide[]): Promise<{ gate?: Pos; at?: Pos; shut?: string }> {
+  // out of a pen by its gate first, where a round given up left the bot (outOfPen): the yard's gate is then the one
+  // that makes the shortest way from the pen's gate
+  await outOfPen(ctx);
   // (no yard or no gate known: nothing to do, and no look needed to say so)
   if (!yardGates(ctx.world).length) return {};
   const me = (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
@@ -263,4 +274,108 @@ export async function inByGate(ctx: WalkContext, budgetMs: number): Promise<{ ga
     if (now ? inFence(world, now) : through) return { gate: g.gate, at: now ?? g.inner };
   }
   return tried.length ? { shut: `no way into the yard by ${tried.join(' or ')}` } : {};
+}
+
+// ------------------------------------------------------------------------------------------------ the pens' fences
+
+/**
+ * A pen's gate as the walks through it go: the side of the pen it is on, the cell just outside it, the cell two in,
+ * and the last row in before the far fence (`deep`).
+ */
+export interface PenWay { gate: Pos; side: HomeSide; outside: Pos; inside: Pos; deep: Pos }
+
+/** The way through a pen's gate (`gate`, on the pen's fence ring x1..x2, z1..z2), or undefined with no gate. */
+export function penGateWay(gate: { x: number; y: number; z: number } | undefined, p: { x1: number; z1: number; x2: number; z2: number }): PenWay | undefined {
+  if (!gate) return undefined;
+  const side: HomeSide = gate.z === p.z1 ? 'north' : gate.z === p.z2 ? 'south' : gate.x === p.x1 ? 'west' : 'east';
+  const [ox, oz] = SIDE_STEP[side];
+  const depth = (side === 'north' || side === 'south' ? p.z2 - p.z1 : p.x2 - p.x1) - 1;
+  return {
+    gate, side, outside: { x: gate.x + ox, y: gate.y, z: gate.z + oz }, inside: { x: gate.x - 2 * ox, y: gate.y, z: gate.z - 2 * oz },
+    deep: { x: gate.x - depth * ox, y: gate.y, z: gate.z - depth * oz }
+  };
+}
+
+/** A pen of the bot's (world memory's `pen:<kind>`): its fence ring, and the way through its gate when one is known. */
+export interface PenFence { kind: string; x1: number; z1: number; x2: number; z2: number; way?: PenWay }
+
+/** The bot's pens, in the order memory keeps them. */
+export function penFences(world: WorldMemory): PenFence[] {
+  return Object.entries(world.zones ?? {}).flatMap(([key, zs]) => {
+    const m = /^pen:([a-z]+)$/.exec(key);
+    const z = zs?.[0];
+    if (!m || !z?.width || !z.length) return [];
+    const ring = { x1: z.x, z1: z.z, x2: z.x + z.width - 1, z2: z.z + z.length - 1 };
+    const way = penGateWay(world.zones?.[`pen:${m[1]}:gate`]?.[0], ring);
+    return [{ kind: m[1], ...ring, ...(way ? { way } : {}) }];
+  });
+}
+
+/**
+ * Inside a pen's fence: between the middles of its posts, at its gate's level (a block either way). Pressed against
+ * the fence from inside, the bot's middle lies in the post's own cell (wedge.ts), and it is inside all the same; one
+ * pressed against it from outside is not. In the gateway, on the pen's side of the gate's middle, it is in.
+ */
+export function inPenFence(f: PenFence & { way: PenWay }, q: Pos): boolean {
+  return q.x > f.x1 + 0.5 && q.x < f.x2 + 0.5 && q.z > f.z1 + 0.5 && q.z < f.z2 + 0.5 && Math.abs(Math.floor(q.y) - f.way.gate.y) <= 1;
+}
+
+const gateIsOpen = async (ctx: WalkContext, g: Pos): Promise<boolean> =>
+  /open=true/.test((await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...g, width: 1, height: 1, length: 1 })).blocks[0] ?? '');
+const clickGate = (ctx: WalkContext, g: Pos) => ctx.act('use-item-on-block', { ...g, face: 'up', toggle: true });
+
+/**
+ * Out of a pen through its gate, the gate shut behind: pens.ts penVisit's way out, and every walk's that sets out
+ * from inside a pen (outOfPen). A sword in hand first (the wheat put away: the herd stays in, and does not follow the
+ * bot out); a careful walk (walk only) to the cell two in from the gate, the gate opened if it is shut, a careful
+ * walk to the cell just outside it, and the gate clicked shut. A step that fails (a walk that ends short, a look at
+ * the gate that does not answer) is let go and the next tried: the click shut comes from wherever the bot stands.
+ */
+export async function throughPenGate(ctx: WalkContext, way: PenWay): Promise<void> {
+  const weapon = ctx.s.items.find(i => /_sword$/.test(i.name))?.name;
+  if (weapon) await ctx.call('item.select', { name: weapon }).catch(() => undefined);
+  await ctx.call('goto', { ...way.inside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+  if (!(await gateIsOpen(ctx, way.gate).catch(() => true))) await clickGate(ctx, way.gate).catch(() => undefined);
+  await ctx.call('goto', { ...way.outside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+  if (await gateIsOpen(ctx, way.gate).catch(() => false)) await clickGate(ctx, way.gate).catch(() => undefined);
+}
+
+/**
+ * Out of the pen the bot stands in by its gate, the gate shut behind (throughPenGate), before a walk that sets out
+ * from there: the walk home (homeward.ts goHome), and out of the yard (outByGate, leaveYard). A pens round given up
+ * mid-visit (the shelter at dusk, survival) leaves the bot in the pen by design, and the next goal's walk set out
+ * from there. Baritone's own way out of a pen was over its fence: live on Nov 13 the shelter's walk home from
+ * (-557, 63, 2170) in the cow pen pressed the bot into the pen's west fence five times in four minutes, each a wedge
+ * stop, while the gate stood two blocks off. One try: a gate it does not get out by (a cow in the gateway) is shut
+ * from where the bot stands, said, and the walk goes on from there as it would have (Baritone may place nothing by a
+ * pen's fence either: Protection.java). A run given up on the way clicks the gate shut from where the bot stands
+ * (outside the run: its own calls fail from then on), and throws. `{}`: not in a pen with a gate (or no look at where
+ * it stands: a stale snapshot must never walk it into a pen; another dimension); `pen` and `out` once it tried.
+ */
+export async function outOfPen(ctx: WalkContext): Promise<{ pen?: string; out?: boolean }> {
+  // (no pen with a gate known: nothing to do, and no look needed to say so)
+  const pens = penFences(ctx.world).filter((f): f is PenFence & { way: PenWay } => !!f.way);
+  if (!pens.length) return {};
+  const st = await ctx.status().catch(() => undefined);
+  if (ctx.signal.aborted) throw new Error('aborted');
+  const me = st?.position;
+  // (the pens stand in home's dimension)
+  const there = !st?.dimension || !ctx.s.home || st.dimension === ctx.s.home.dimension;
+  const f = me && there ? pens.find(q => inPenFence(q, me)) : undefined;
+  if (!f) return {};
+  const { way } = f;
+  ctx.progress(`out of the ${f.kind} pen by its gate ${fmt(way.gate)}`);
+  try {
+    await throughPenGate(ctx, way);
+  } finally {
+    // (the bridge's own click, within reach or not at all: it walks nowhere)
+    if (ctx.signal.aborted) {
+      await brainRun.exit(async () => { if (await gateIsOpen(ctx, way.gate)) await ctx.call('useOn', { ...way.gate, face: 'up', toggle: true }); }).catch(() => undefined);
+    }
+  }
+  if (ctx.signal.aborted) throw new Error('aborted');
+  const now = (await ctx.status().catch(() => undefined))?.position;
+  const out = !now || !inPenFence(f, now);
+  if (!out) ctx.progress(`no way out of the ${f.kind} pen by its gate ${fmt(way.gate)}, shut behind: on by Baritone's own way`);
+  return { pen: f.kind, out };
 }
