@@ -15,6 +15,9 @@
     "DestroyToolMixin",
     "MineTargetMixin",
     "FenceScaffoldMixin",
+    "HazardUseMixin",
+    "ShieldUseMixin",
+    "ClientLevelAccessor",
     "DisconnectedScreenAccessor"
   ],
   "injectors": { "defaultRequire": 1 }

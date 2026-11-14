@@ -726,6 +726,30 @@ test('use-item-on-block with toggle tells the client to only open or close, neve
   t.like(request.getCalls().find(c => c.args[0] === 'useOn')!.args[1], { x: 1, y: 64, z: 2, face: 'up', toggle: true });
 });
 
+test('use-item-on-block reports what the server did with a bucket, never the client\'s guess', async (t) => {
+  // the live miss: the client showed the bucket filled, the server kept its source and the empty bucket
+  let reply: Record<string, unknown> = {
+    used: true, before: 'water', after: 'water', changed: false, properties: { level: '0' }, held: 'bucket', answered: true,
+    bucket: 'nothing happened (the server did not fill the bucket; the client had guessed water_bucket)', heldAfter: 'bucket'
+  };
+  const { run } = setup({ 'item.select': { held: 'bucket' }, useOn: () => reply });
+  t.is((await run('use-item-on-block', { x: -600, y: 62, z: 2100, item: 'bucket' })).text,
+    'Used bucket on water at (-600, 62, 2100): nothing happened (the server did not fill the bucket; the client had guessed water_bucket)');
+  // a pour clicks the floor block's face: the block clicked is unchanged, the water is where the server put it
+  reply = { used: true, before: 'stone', after: 'stone', changed: false, properties: {}, held: 'water_bucket', answered: true, bucket: 'poured at (-542, 62, 2161)', heldAfter: 'bucket' };
+  t.is((await run('use-item-on-block', { x: -541, y: 62, z: 2161, item: 'water_bucket', face: 'west' })).text, 'Used water_bucket on stone at (-541, 62, 2161): poured at (-542, 62, 2161)');
+  reply = { used: true, before: 'water', after: 'air', changed: true, properties: {}, held: 'bucket', answered: true, bucket: 'filled (the water at (-600, 62, 2100))', heldAfter: 'water_bucket' };
+  t.is((await run('use-item-on-block', { x: -600, y: 62, z: 2100, item: 'bucket' })).text, 'Used bucket on water at (-600, 62, 2100): filled (the water at (-600, 62, 2100))');
+});
+
+test('use-item-on-block says so when the server never answered the use', async (t) => {
+  const { run } = setup({
+    'item.select': { held: 'stone_hoe' },
+    useOn: { used: true, before: 'dirt', after: 'farmland', changed: true, properties: { moisture: '0' }, held: 'stone_hoe', answered: false }
+  });
+  t.is((await run('use-item-on-block', { x: 1, y: 64, z: 2, item: 'stone_hoe' })).text, 'Used stone_hoe on dirt at (1, 64, 2): it became farmland[moisture=0] (no word from the server within 2 s)');
+});
+
 test('use-item-on-block clears grass on top before tilling again', async (t) => {
   let tills = 0;
   const { run, request } = setup({
@@ -1015,4 +1039,39 @@ test('a new server with no home and nothing built: the mod still hears both (its
   synced = { protectSynced: false, zoneSynced: false }; // the client was relaunched
   await run('get-position');
   t.deepEqual(sent.slice(2), ['set []', 'zone {"x":0,"z":0,"radius":0}']);
+});
+
+test('use-item-on-block too far with a full bucket: a harmless item in hand for the walk closer, the bucket back for the use', async (t) => {
+  let held = 'lava_bucket';
+  const order: string[] = [];
+  let uses = 0;
+  const { run } = setup({
+    'item.select': (p: Record<string, unknown>) => { held = String(p.name); order.push(`select ${held}`); return { held: 0 }; },
+    inventory: () => ({ items: [{ slot: 0, name: 'lava_bucket', count: 1 }, { slot: 1, name: 'diamond_sword', count: 1 }], selectedSlot: 0, held: { name: held, count: 1 } }),
+    goto: () => { order.push(`goto with ${held}`); return { arrived: true, reason: 'done', seconds: 1, baritone: [] }; },
+    useOn: () => {
+      order.push(`useOn with ${held}`);
+      return uses++ === 0 ? { used: false, reason: 'too far' } : { used: true, before: 'stone', after: 'stone', changed: false, held: 'lava_bucket', answered: true, bucket: 'poured at (3, 63, 2)', heldAfter: 'bucket' };
+    }
+  });
+  t.is((await run('use-item-on-block', { x: 4, y: 63, z: 2, item: 'lava_bucket', face: 'west' })).text, 'Used lava_bucket on stone at (4, 63, 2): poured at (3, 63, 2)');
+  t.deepEqual(order, ['select lava_bucket', 'useOn with lava_bucket', 'select diamond_sword', 'goto with diamond_sword', 'select lava_bucket', 'useOn with lava_bucket']);
+});
+
+test('use-item-on-block too far with no item named: the hand the bridge reports is the one put away for the walk, and back for the use', async (t) => {
+  // a call with whatever is in hand (a person's, or a toggle): the bridge's "too far" names the hand, a water bucket
+  let held = 'water_bucket';
+  const order: string[] = [];
+  let uses = 0;
+  const { run } = setup({
+    'item.select': (p: Record<string, unknown>) => { held = String(p.name); order.push(`select ${held}`); return { held: 0 }; },
+    inventory: () => ({ items: [{ slot: 0, name: 'water_bucket', count: 1 }, { slot: 1, name: 'iron_pickaxe', count: 1 }], selectedSlot: 0, held: { name: held, count: 1 } }),
+    goto: () => { order.push(`goto with ${held}`); return { arrived: true, reason: 'done', seconds: 1, baritone: [] }; },
+    useOn: () => {
+      order.push(`useOn with ${held}`);
+      return uses++ === 0 ? { used: false, reason: 'too far', distance: 9.2, held } : { used: true, before: 'stone', after: 'stone', changed: false, held, answered: true, bucket: 'poured at (3, 63, 2)', heldAfter: 'bucket' };
+    }
+  });
+  t.is((await run('use-item-on-block', { x: 4, y: 63, z: 2, face: 'west' })).text, 'Used water_bucket on stone at (4, 63, 2): poured at (3, 63, 2)');
+  t.deepEqual(order, ['useOn with water_bucket', 'select iron_pickaxe', 'goto with iron_pickaxe', 'select water_bucket', 'useOn with water_bucket']);
 });

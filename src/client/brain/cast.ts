@@ -2,7 +2,7 @@ import type { GoalContext } from './goals.js';
 import { readBox } from './milestones.js';
 import { prepare } from './project.js';
 import { chestTotals, takeFromChests } from './chests.js';
-import { fillAt, sourcesInSight } from './fluidpick.js';
+import { fillAt, holdHarmless, lakeSources, sourcesInSight } from './fluidpick.js';
 
 /**
  * Obsidian cast at home from lava and water, when there's none to mine away from a lit portal (natural obsidian is
@@ -114,9 +114,8 @@ export async function fetchLava(ctx: GoalContext, want: number): Promise<number>
 /** Water buckets (up to `n`) from still water open to the sky outside the yard (the lake), the same safe way. */
 async function fetchWater(ctx: GoalContext, n: number): Promise<boolean> {
   if ((await countOf(ctx, 'water_bucket')) >= n) return true;
-  const y = ctx.world.yard;
-  const outside = (p: P) => !y || p.x < y.x1 - 2 || p.x > y.x2 + 2 || p.z < y.z1 - 2 || p.z > y.z2 + 2;
-  const sources = (await sourcesInSight(ctx, 'water', y?.y, 16)).filter(v => !v.why && outside(v.at));
+  // (never the cane patch's water: lakeSources)
+  const sources = (await lakeSources(ctx, 16)).filter(v => !v.why);
   for (const v of sources.slice(0, 6)) {
     if (ctx.signal.aborted || (await countOf(ctx, 'water_bucket')) >= n || !(await countOf(ctx, 'bucket'))) break;
     const r = await fillAt(ctx, v, 'water');
@@ -165,6 +164,9 @@ export async function castObsidian(ctx: GoalContext, want: number): Promise<{ ha
   const wallLow = { x: c.x + 1, y: c.y - 1, z: c.z }, wallHigh = { x: c.x + 1, y: c.y, z: c.z };
   const stand = { x: c.x - 1, y: c.y + 1, z: c.z };
   const goStand = async () => {
+    // the lava and water buckets out of the hand for the walk: they come out of the chests into the hotbar (often the
+    // slot in hand), and a pour or a scoop leaves a full one in it; a door or a gate on the way is a right click
+    await holdHarmless(ctx);
     const g = await ctx.call<{ arrived: boolean }>('goto', { ...stand, range: 0, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
     return g.arrived;
   };
@@ -236,6 +238,9 @@ export async function castObsidian(ctx: GoalContext, want: number): Promise<{ ha
   for (const [p, wall] of (left ? [] : [[pit, wallLow], [top, wallHigh]]) as [P, P][]) {
     if (/^(air|cave_air|water)/.test(await blockAt(ctx, p)) && (await countOf(ctx, 'dirt'))) await use(wall, 'dirt', 'west').catch(() => undefined);
   }
+  // whatever walks next (the stash, the walk home) goes with a harmless hand: a stray lava scooped back, or the water
+  // taken up again, is a full bucket in it, and with no dirt to fill the pit nothing else took its place
+  await holdHarmless(ctx);
   return { have, text: `cast ${casts} obsidian at (${c.x}, ${c.y}, ${c.z})${notes.length ? `; ${notes.join('; ')}` : ''}` };
 }
 

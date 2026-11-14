@@ -1,5 +1,5 @@
 import test from 'ava';
-import { chestTotals, peekChest, remember, rememberReply, sameStack, storedStacks, takeSlot } from '../../src/client/brain/chests.js';
+import { chestTotals, peekChest, remember, rememberReply, sameStack, storedStacks, takeFromChests, takeSlot } from '../../src/client/brain/chests.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
 import type { ChestStack } from '../../src/client/tools.js';
@@ -164,4 +164,29 @@ test('takeSlot: nothing remembered in that slot takes nothing and opens nothing;
   t.deepEqual(storedStacks(old.world, () => true), []);
   t.deepEqual(old.world.chestItems!['1,64,0'], { enchanted_book: 2 });
   t.is(old.calls.at(-1)!.m, 'container.close');
+});
+
+test('F1: takeFromChests puts a full bucket out of the hand after each take (a chest\'s shift-click fills the hotbar, the slot in hand often); other things it leaves be', async (t) => {
+  const run = async (item: string) => {
+    const calls: string[] = [];
+    let held = 'diamond_pickaxe';
+    const chests = [{ x: 1, y: 63, z: 0 }, { x: 2, y: 63, z: 0 }];
+    const world = { landmarks: { chests, farmland: [] }, leash: 96, chestItems: { '1,63,0': { [item]: 2 }, '2,63,0': { [item]: 1 } } } as unknown as WorldMemory;
+    const ctx = {
+      world, signal: new AbortController().signal,
+      call: async (m: string, p: Record<string, unknown> = {}) => {
+        calls.push(m === 'item.select' ? `select ${String(p.name)}` : m);
+        if (m === 'inventory') return { items: [{ slot: 0, name: 'diamond_sword', count: 1 }, { slot: 8, name: item, count: 1 }], held: { name: held, count: 1 } };
+        if (m === 'item.select') { held = String(p.name); return {}; }
+        throw new Error(`unexpected ${m}`);
+      },
+      act: async (tool: string, a: Record<string, unknown>) => { calls.push(`${tool} ${a.x}`); held = item; return { ok: true, text: `Took ${item === 'lava_bucket' ? (a.x === 1 ? 2 : 1) : 1} ${item}` }; }
+    } as unknown as GoalContext;
+    return { got: await takeFromChests(ctx, item, 3), calls };
+  };
+  const lava = await run('lava_bucket');
+  t.is(lava.got, 3);
+  // out of the hand before the walk to the next chest, and after the last
+  t.deepEqual(lava.calls, ['take-from-chest 1', 'inventory', 'select diamond_sword', 'take-from-chest 2', 'inventory', 'select diamond_sword']);
+  t.deepEqual((await run('bread')).calls, ['take-from-chest 1', 'take-from-chest 2']);
 });

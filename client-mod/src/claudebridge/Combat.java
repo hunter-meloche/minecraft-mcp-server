@@ -233,14 +233,27 @@ public final class Combat {
         return !off.isEmpty() && Names.item(off).equals("shield");
     }
 
+    /**
+     * The use key is down for the shield (shieldUp, until shieldDown): the key then raises only the off hand's shield
+     * (ShieldUseMixin), never the main hand's item. The fight's back-off and the Guardian's shield guard hold it up
+     * while Baritone walks or the bot turns to the threat, and the main hand may hold anything.
+     */
+    private static volatile boolean shieldKey;
+
+    public static boolean shieldKey() {
+        return shieldKey;
+    }
+
     static void shieldUp() {
         Minecraft mc = Minecraft.getInstance();
+        shieldKey = true;
         mc.options.keyUse.setDown(true);
         if (!mc.player.isUsingItem()) mc.gameMode.useItem(mc.player, InteractionHand.OFF_HAND);
     }
 
     static void shieldDown() {
         Minecraft mc = Minecraft.getInstance();
+        shieldKey = false;
         mc.options.keyUse.setDown(false);
         if (mc.player.isUsingItem()) mc.gameMode.releaseUsingItem(mc.player);
     }

@@ -486,6 +486,41 @@ test('sort: things in the wrong chest go to their own', async (t) => {
   t.is(sortStorage.wants(snap(gear()), w), null);
 });
 
+test('sort: a lava bucket in the wrong chest is carried to its own with a harmless item in hand, not the bucket', async (t) => {
+  // the withdraw's shift-click put the bucket in the selected slot (the hotbar fills from its far end)
+  const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
+  const contents: Record<string, Record<string, number>> = { '1,64,0': { bread: 30, lava_bucket: 1 }, '2,64,0': { stone_pickaxe: 1 }, '3,64,0': {} };
+  const w = world({ landmarks: { chests, farmland: [] }, chestItems: contents, chestAssign: { '1,64,0': 'food', '2,64,0': 'gear', '3,64,0': 'ores' } });
+  let held = 'nothing';
+  const items = [{ slot: 0, name: 'diamond_sword', count: 1 }];
+  const acts: string[] = [];
+  const reply = (k: string) => `It holds: ${Object.entries(contents[k]).filter(([, v]) => v > 0).map(([n, v]) => `${n} x${v}`).join(', ') || 'nothing'}.`;
+  const ctx = {
+    s: snap(gear()), world: w, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    call: (async (m: string, p: Record<string, unknown>) => {
+      if (m === 'chest.open') return { items: contents[`${p.x},${p.y},${p.z}`] };
+      if (m === 'inventory') return { items, held: held === 'nothing' ? null : { name: held, count: 1 } };
+      if (m === 'item.select') { held = String(p.name); return {}; }
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      const k = `${a.x},${a.y},${a.z}`, item = String(a.item), n = Number(a.count);
+      acts.push(`${tool} ${k} ${item} with ${held}`);
+      if (tool === 'take-from-chest') {
+        contents[k][item] -= n;
+        items.push({ slot: 8, name: item, count: n });
+        held = item;
+        return { ok: true, text: `Took ${n} ${item} from the chest. ${reply(k)}` };
+      }
+      contents[k][item] = (contents[k][item] ?? 0) + n;
+      return { ok: true, text: `Stored ${n} ${item} in the chest. ${reply(k)}` };
+    }
+  } as unknown as GoalContext;
+  t.is(await sortStorage.run(ctx), 'moved 1 kind(s) of things to their own chest');
+  t.deepEqual(acts, ['take-from-chest 1,64,0 lava_bucket with nothing', 'store-in-chest 2,64,0 lava_bucket with diamond_sword']);
+});
+
 test('outsideBy: 0 inside the yard, else how far past its edge', (t) => {
   const yard = { x1: 0, z1: 0, x2: 10, z2: 20 };
   t.is(outsideBy(yard, { x: 5, z: 5 }), 0);

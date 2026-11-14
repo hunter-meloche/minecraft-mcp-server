@@ -7,7 +7,7 @@ import { addZone, readBox, siteStep } from './milestones.js';
 import { takeFromChests } from './chests.js';
 import { makeRoom, noRoom, room } from './pockets.js';
 import { digByHand } from '../structures/job.js';
-import { holdHarmless } from './fluidpick.js';
+import { fillAt, holdHarmless, lakeSources } from './fluidpick.js';
 
 /**
  * Farm v2: a 9 x 9 crop plot with a water source in the middle (one source keeps 4 blocks each way wet), tilled and
@@ -33,43 +33,59 @@ async function inv(ctx: GoalContext): Promise<Map<string, number>> {
   return m;
 }
 
-/** A water bucket in hand: crafted from 3 iron (from the chests, or what the stock trips bring), filled at still water. */
+/**
+ * A water bucket carried: from the chests, else an empty one (crafted from 3 iron: from the chests, or what the stock
+ * trips bring) filled at the lake. Its hand is a harmless one on every way out (fluidpick.ts holdHarmless): the next
+ * step walks with the bucket, and a door on the way is a right click.
+ *
+ * The lake the safe way, as the casting's water (fluidpick.ts lakeSources, fillAt): still water open to the sky outside
+ * the yard (not the cane's), a careful walk to a spot beside it, the bucket used from there. It used to click the water
+ * with use-item-on-block and leave the walk to the tool: with the doors walled off by spilled water every walk failed,
+ * the tool said "too far" six times, and the step said "no still water to fill the bucket at within 64 blocks" (live,
+ * Nov 14). Now it says what failed: no water in sight, none with a safe spot, or the walks there (and why).
+ */
 export const waterBucketStep: Step = {
   name: 'get a water bucket',
   run: async ctx => {
+    const done = async (text: string) => { await holdHarmless(ctx); return ok(text); };
     let have = await inv(ctx);
-    if (have.get('water_bucket')) return ok('a water bucket in hand');
+    if (have.get('water_bucket')) return done('a water bucket in hand');
     if (!have.get('bucket')) await takeFromChests(ctx, 'water_bucket', 1);
     have = await inv(ctx);
-    if (have.get('water_bucket')) return ok('a water bucket from the chest');
+    if (have.get('water_bucket')) return done('a water bucket from the chest');
     if (!have.get('bucket')) {
       const short = await prepareBill(ctx, { bucket: 1 });
       // (short of materials: with `need` the project waits longer each time, until all of it is there)
       if (Object.keys(short).length) return { ...blocked(`gathering for a bucket: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`, 3 * MINUTE), need: short };
     }
-    // the nearest still water open to the sky (the lake: the yard's pond is filled in)
-    const found = await ctx.call<{ positions: Site[] }>('world.findBlocks', { block: 'water', maxDistance: 64, count: 256, openAbove: true });
-    // real open water: not in the yard, and sky above it (a pocket under the storage house had air right above it)
-    const yard = ctx.world.yard;
-    const outside = found.positions.filter(w => !yard || w.x < yard.x1 - 2 || w.x > yard.x2 + 2 || w.z < yard.z1 - 2 || w.z > yard.z2 + 2);
-    let tried = 0;
-    for (const w of outside) {
-      if (tried >= 6) break;
-      if (!/^water(\[level=0\])?$/.test(await block(ctx, w))) continue;
-      const { blocks: col } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { x: w.x, y: w.y + 1, z: w.z, width: 1, height: 16, length: 1 });
-      if (col.some(b => b && !/^(minecraft:)?(air|cave_air|void_air)$/.test(b))) continue;
-      tried++;
-      const r = await ctx.act('use-item-on-block', { ...w, item: 'bucket', face: 'up' });
-      if ((await inv(ctx)).get('water_bucket')) {
-        // never walked with the full bucket in hand (fluidpick.ts holdHarmless)
-        await holdHarmless(ctx);
-        return ok(`filled a bucket at (${w.x}, ${w.y}, ${w.z})`);
-      }
-      ctx.progress(`bucket at (${w.x}, ${w.y}, ${w.z}): ${r.text.slice(0, 80)}`);
-    }
-    return blocked('no still water to fill the bucket at within 64 blocks', 20 * MINUTE);
+    return fillFromLake(ctx);
   }
 };
+
+/** An empty bucket carried: filled at the lake, or blocked saying what really failed. */
+async function fillFromLake(ctx: GoalContext): Promise<StepResult> {
+  const all = await lakeSources(ctx);
+  const good = all.filter(v => !v.why);
+  if (!all.length) return blocked('no still water open to the sky in sight outside the yard', 20 * MINUTE);
+  if (!good.length) {
+    const whys = [...new Set(all.map(v => v.why))].slice(0, 3).join('; ');
+    return blocked(`no still water in sight with a safe spot to fill a bucket at (${all.length} looked at: ${whys})`, 20 * MINUTE);
+  }
+  const tries: string[] = [];
+  let reached = 0;
+  for (const v of good.slice(0, 4)) {
+    if (ctx.signal.aborted) break;
+    const r = await fillAt(ctx, v, 'water');
+    if (r.ok) return ok(r.text); // (fillAt put a harmless item in hand)
+    reached += r.reached ?? 0;
+    tries.push(`(${v.at.x}, ${v.at.y}, ${v.at.z}): ${r.text}`);
+    ctx.progress(`bucket at (${v.at.x}, ${v.at.y}, ${v.at.z}): ${r.text.slice(0, 120)}`);
+  }
+  if (ctx.signal.aborted) return { status: 'progress', text: 'stopped on the way to the water' };
+  // the water is there: the walks to it failed (a door walled off by spilled water, a fence), or the bucket did nothing
+  const head = reached ? 'the water is in sight, but no bucket filled' : 'the walk to the water failed';
+  return blocked(`${head}: ${tries.join('; ').slice(0, 300)}`, 10 * MINUTE);
+}
 
 /** Level the plot, dig out the middle and pour the water in. */
 export const waterStep: Step = {
@@ -79,6 +95,8 @@ export const waterStep: Step = {
     const c = centreOf(site);
     if (/^water/.test(await block(ctx, c))) return ok('the water is in');
     if (!(await inv(ctx)).get('water_bucket')) { st.step--; return going('the water bucket is gone: getting another'); }
+    // the level and the dig walk with the bucket carried: not in hand (fluidpick.ts holdHarmless)
+    await holdHarmless(ctx);
     if (!st.data.levelled) {
       const r = await ctx.act('level-area', { x1: site.x, z1: site.z, x2: site.x + SIZE - 1, z2: site.z + SIZE - 1, level: site.y, timeoutMs: 6 * MINUTE });
       if (!/Now level|Already level/.test(r.text)) return going(`leveling the plot: ${r.text.split('\n').pop()?.slice(0, 100)}`);
@@ -86,7 +104,10 @@ export const waterStep: Step = {
     }
     if (!/^air$/.test(await block(ctx, c))) await ctx.act('dig-block', { ...c, collect: true });
     const r = await ctx.act('use-item-on-block', { ...c, y: c.y - 1, item: 'water_bucket', face: 'up' });
-    if (/^water/.test(await block(ctx, c))) return ok(`water at (${c.x}, ${c.y}, ${c.z})`);
+    // the bucket emptied is not walked on with either (its use along the look takes up the first source it meets)
+    if (/^water/.test(await block(ctx, c))) { await holdHarmless(ctx); return ok(`water at (${c.x}, ${c.y}, ${c.z})`); }
+    // a pour that did not take leaves the full bucket in hand for whatever runs next
+    await holdHarmless(ctx);
     return going(`pouring the water: ${r.text.slice(0, 100)}`);
   }
 };

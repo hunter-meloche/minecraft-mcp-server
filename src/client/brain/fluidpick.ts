@@ -124,9 +124,16 @@ export async function judgeSource(ctx: Pick<GoalContext, 'call'>, t: P, fluid: '
 }
 
 /**
- * Fill one empty bucket at a source from a safe spot: walk there carefully, check the arrival and the cells round
- * the feet again, use the bucket through useOn (never walking closer). True when the inventory gained the filled bucket.
+ * What a stray right-click must never use: a full bucket (water, lava, powder snow, a mob in water; not milk, which is
+ * drunk) or a fire starter. The bridge's own rule (client-mod Hazards.isHazard), which refuses such a use it did not
+ * arm itself; the brain keeps them out of the hand on its walks all the same (an older jar has no guard).
  */
+export function isHazard(item: string | null | undefined): boolean {
+  if (!item) return false;
+  const n = item.replace(/^minecraft:/, '');
+  return n === 'flint_and_steel' || n === 'fire_charge' || (n.endsWith('_bucket') && n !== 'milk_bucket');
+}
+
 /**
  * What the hand holds once a bucket is full: a sword or a pickaxe (nothing a stray right-click uses on a block), never
  * the full bucket. A walk's right-clicks (Baritone opening a door or a gate, the Guardian raising the shield) use the
@@ -134,29 +141,68 @@ export async function judgeSource(ctx: Pick<GoalContext, 'call'>, t: P, fluid: '
  * blocks in front of the workshop's door and of the storage house's, twice each, and the running water walled both
  * doors off for Baritone (it never paths through flowing water; live, Nov 14). A lava bucket held so is a fire.
  */
-export const HARMLESS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
-  'netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'golden_pickaxe', 'wooden_pickaxe'];
+export const HARMLESS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'copper_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
+  'netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'copper_pickaxe', 'stone_pickaxe', 'golden_pickaxe', 'wooden_pickaxe'];
+/**
+ * With no sword or pickaxe carried: something a use does nothing with (no block to place, nothing eaten or poured).
+ * Not string: it is the tripwire's block item (26.3 Items.STRING), so a click that missed a door would place one.
+ */
+const INERT = /^(stick|bone|feather|leather|flint|coal|charcoal|diamond|emerald|lapis_lazuli|quartz|paper|book|[a-z_]+_ingot|[a-z_]+_nugget|raw_(iron|gold|copper))$/;
+/** Not to walk with in hand: a hazard, or the empty bucket (its use along the look takes up the first source it meets). */
+export const unsafeInHand = (item: string | null | undefined) => isHazard(item) || item === 'bucket';
 
+/**
+ * Before a walk with a full bucket carried (and after one is filled): a harmless item in hand (HARMLESS, else INERT).
+ * What the hand holds already is kept when the bridge says it is no bucket or fire starter (`held`; a reply without
+ * it is read as unknown, and the hand is changed). Returns what it holds then, or undefined with nothing to hold.
+ */
 export async function holdHarmless(ctx: Pick<GoalContext, 'call'>): Promise<string | undefined> {
-  const inv = await ctx.call<{ items: { name: string; slot: number }[] }>('inventory').catch(() => ({ items: [] as { name: string; slot: number }[] }));
-  const name = HARMLESS.find(n => inv.items.some(i => i.slot < 36 && i.name === n));
+  type Inv = { items: { name: string; slot: number }[]; held?: { name: string } | null };
+  const inv = await ctx.call<Inv>('inventory').catch((): Inv => ({ items: [] }));
+  if (inv.held !== undefined && !unsafeInHand(inv.held?.name)) return inv.held?.name;
+  const carried = (n: string) => inv.items.some(i => i.slot < 36 && i.name === n);
+  const name = HARMLESS.find(carried) ?? inv.items.find(i => i.slot < 36 && INERT.test(i.name))?.name;
   if (name) await ctx.call('item.select', { name }).catch(() => undefined);
   return name;
 }
 
-export async function fillAt(ctx: GoalContext, v: SourceVerdict, fluid: 'lava' | 'water'): Promise<{ ok: boolean; text: string }> {
+/** Why a careful walk did not end on the spot, from goto's reply (Baritone's own words when it has them). */
+function walkWhy(g: { arrived: boolean; reason?: string; seconds?: number; distance?: number; baritone?: string[] }, thrown?: string): string {
+  if (thrown) return thrown;
+  if (g.arrived) return 'not on the spot';
+  const said = (g.baritone ?? []).find(m => /no path|path/i.test(m));
+  const why = g.reason === 'timeout' ? `timed out after ${g.seconds ?? '?'}s` : 'no path';
+  return `${why}${typeof g.distance === 'number' ? `, ${g.distance} blocks short` : ''}${said ? ` (${said.slice(0, 60)})` : ''}`;
+}
+
+/**
+ * Fill one empty bucket at a source from a safe spot: walk there carefully (a harmless item in hand: a full bucket may
+ * be carried), check the arrival and the cells round the feet again, use the bucket through useOn (never walking
+ * closer). ok when the bridge says the server filled it (`bucket`: its word) and the inventory gained the filled bucket
+ * (an older jar says nothing: the count alone); `reached`: how many of the spots it got to (none: every walk to the
+ * source failed).
+ */
+export async function fillAt(ctx: GoalContext, v: SourceVerdict, fluid: 'lava' | 'water'): Promise<{ ok: boolean; text: string; reached?: number }> {
   const filled = `${fluid}_bucket`;
   const count = async (n: string) => (await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory')).items
     .filter(i => i.slot < 36 && i.name === n).reduce((a, i) => a + i.count, 0);
   const before = await count(filled);
   if (!(await count('bucket'))) return { ok: false, text: 'no empty bucket' };
   const whys: string[] = [];
-  for (const s of v.spots.slice(0, 3)) {
+  let reached = 0;
+  for (const [n, s] of v.spots.slice(0, 3).entries()) {
     if (ctx.signal.aborted) break;
-    const g = await ctx.call<{ arrived: boolean; at?: P }>('goto', { ...s, range: 0, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false, at: undefined }));
+    // (no empty bucket left to try with: its select would throw)
+    if (n && !(await count('bucket'))) break;
+    await holdHarmless(ctx);
+    type Walk = { arrived: boolean; at?: P; reason?: string; seconds?: number; distance?: number; baritone?: string[] };
+    let thrown: string | undefined;
+    const g = await ctx.call<Walk>('goto', { ...s, range: 0, careful: true, timeoutMs: 60_000 }, 75_000)
+      .catch((e: unknown): Walk => { thrown = e instanceof Error ? e.message : String(e); return { arrived: false }; });
     const st = await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P });
     const feet = st.position ? { x: Math.floor(st.position.x), y: Math.floor(st.position.y), z: Math.floor(st.position.z) } : undefined;
-    if (!g.arrived || !feet || feet.x !== s.x || feet.y !== s.y || feet.z !== s.z) { whys.push(`couldn't get to (${s.x}, ${s.y}, ${s.z})`); continue; }
+    if (!g.arrived || !feet || feet.x !== s.x || feet.y !== s.y || feet.z !== s.z) { whys.push(`couldn't get to (${s.x}, ${s.y}, ${s.z}): ${walkWhy(g, thrown)}`); continue; }
+    reached++;
     // the cells round the feet once more, as they are now (lava flows)
     const box = aroundBox(v.at);
     const again = standSpots(await region(ctx, box), box, v.at, feet, fluid === 'lava' ? 2 : 1);
@@ -169,22 +215,33 @@ export async function fillAt(ctx: GoalContext, v: SourceVerdict, fluid: 'lava' |
     };
     for (const pl of sightLine(look, s, v.at) ?? []) await ctx.call('dig.here', { ...pl, timeoutMs: 5_000 }, 10_000).catch(() => undefined);
     await ctx.call('item.select', { name: 'bucket' });
-    const r = await ctx.call<{ used: boolean; reason?: string }>('useOn', { ...v.at, face: 'up' }, 15_000).catch(e => ({ used: false, reason: (e as Error).message }));
-    if ((await count(filled)) > before) {
+    // `bucket`: the server's word on the use (filled, nothing happened, no word at all), not the client's guess
+    type Used = { used: boolean; reason?: string; bucket?: string };
+    const r = await ctx.call<Used>('useOn', { ...v.at, face: 'up' }, 15_000).catch((e: unknown): Used => ({ used: false, reason: e instanceof Error ? e.message : String(e) }));
+    // the server's word decides: with none (no ack within 2 s, or no word on the hand) the inventory holds only the
+    // client's guess, the ghost water bucket of the live misses that the next pour found gone
+    const gained = (await count(filled)) > before;
+    if (r.bucket === undefined ? gained : gained && /^filled/.test(r.bucket)) {
       await holdHarmless(ctx);
-      return { ok: true, text: `filled a ${filled} at (${v.at.x}, ${v.at.y}, ${v.at.z}) from (${s.x}, ${s.y}, ${s.z})` };
+      return { ok: true, text: `filled a ${filled} at (${v.at.x}, ${v.at.y}, ${v.at.z}) from (${s.x}, ${s.y}, ${s.z})`, reached };
     }
-    whys.push(`from (${s.x}, ${s.y}, ${s.z}): ${r.used ? 'nothing filled' : r.reason}`);
+    whys.push(`from (${s.x}, ${s.y}, ${s.z}): ${r.used ? r.bucket ?? 'nothing filled' : r.reason}`);
+    // the client's hand is a guess now: another spot would try with a bucket that may be full on the client only. And
+    // no room for a full one: the server dropped it, and another fill would drop another
+    if (/^nothing confirmed|no room for the full bucket/.test(r.bucket ?? '')) break;
   }
-  return { ok: false, text: whys.join('; ') || 'no spot to stand at' };
+  // the empty bucket was in hand for the last try: off it for whatever walks next
+  if (reached) await holdHarmless(ctx);
+  return { ok: false, text: whys.join('; ') || 'no spot to stand at', reached };
 }
 
-/** Sources of a fluid in sight, judged, nearest first (read-only). */
-export async function sourcesInSight(ctx: Pick<GoalContext, 'call' | 's'>, fluid: 'lava' | 'water', groundY: number | undefined, most = 12): Promise<SourceVerdict[]> {
+/** Sources of a fluid in sight, judged, nearest first (read-only); `keep` leaves some out before any is judged. */
+export async function sourcesInSight(ctx: Pick<GoalContext, 'call' | 's'>, fluid: 'lava' | 'water', groundY: number | undefined, most = 12,
+  keep: (p: P) => boolean = () => true): Promise<SourceVerdict[]> {
   const reach = fluid === 'lava' ? 4 : 3;
   // asked of the mod by height too (the nearest 256 were a cave's, and the surface ones never came back at all)
   const yBand = groundY === undefined ? {} : { yMin: groundY - reach, yMax: groundY + reach };
-  const found = await ctx.call<{ positions: P[] }>('world.findBlocks', { block: fluid, maxDistance: 96, count: 256, ...yBand }).catch(() => ({ positions: [] as P[] }));
+  const found = await ctx.call<{ positions?: P[] }>('world.findBlocks', { block: fluid, maxDistance: 96, count: 256, ...yBand }).catch(() => ({ positions: [] as P[] }));
   const here = (await ctx.call<{ position?: P }>('status').catch(() => ({}) as { position?: P })).position ?? ctx.s.position;
   const from = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
   // lava near the ground level only, before any is judged: an underground lake's hundreds of sources were all nearer
@@ -192,7 +249,7 @@ export async function sourcesInSight(ctx: Pick<GoalContext, 'call' | 's'>, fluid
   // water too, nearer still (the cave water under the yard crowded out the pond by the fence): it's surface water
   // that's wanted
   const band = (p: P) => groundY === undefined || Math.abs(p.y - groundY) <= reach;
-  const near = found.positions.filter(band).sort((a, b) => Math.hypot(a.x - from.x, a.y - from.y, a.z - from.z) - Math.hypot(b.x - from.x, b.y - from.y, b.z - from.z));
+  const near = (found.positions ?? []).filter(p => band(p) && keep(p)).sort((a, b) => Math.hypot(a.x - from.x, a.y - from.y, a.z - from.z) - Math.hypot(b.x - from.x, b.y - from.y, b.z - from.z));
   // judged until `most` good ones (the nearest dozen were all cave water under the yard, the lake past them), at
   // most 60 looked at; the refused ones come along too (lava-sources shows why), good ones first
   const good: SourceVerdict[] = [], bad: SourceVerdict[] = [];
@@ -202,4 +259,18 @@ export async function sourcesInSight(ctx: Pick<GoalContext, 'call' | 's'>, fluid
     (v.why ? bad : good).push(v);
   }
   return [...good, ...bad];
+}
+
+/**
+ * Still water open to the sky outside the yard (the lake), judged as sourcesInSight does: never the yard's own water
+ * (the plot's, the workshop's), nor the cane patch's: a source beside the ground a cane stands on. Live (Nov 14) the
+ * buckets were filled at (-526, 62, 2208), beside the cane at (-527, 63, 2208); a lone cell taken from beside the cane
+ * dries it (the patch had lost its water once already).
+ */
+export async function lakeSources(ctx: Pick<GoalContext, 'call' | 's' | 'world'>, most = 16): Promise<SourceVerdict[]> {
+  const y = ctx.world.yard;
+  const outside = (p: P) => !y || p.x < y.x1 - 2 || p.x > y.x2 + 2 || p.z < y.z1 - 2 || p.z > y.z2 + 2;
+  const cane = ctx.world.zones?.cane ?? [];
+  const canes = (p: P) => cane.some(c => c.y - 1 === p.y && Math.abs(c.x - p.x) + Math.abs(c.z - p.z) === 1);
+  return sourcesInSight(ctx, 'water', y?.y, most, p => outside(p) && !canes(p));
 }

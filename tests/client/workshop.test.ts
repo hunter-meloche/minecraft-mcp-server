@@ -311,9 +311,10 @@ test('the live homestead: a site in the yard, the build with its door toward hom
   t.is(block(z['workshop:water'][0]), 'water[level=0]');
   t.false(Object.keys(z).some(k => /^workshop:chest/.test(k)));
   // into the room on foot to the cell beside the hole, the floor block dug from there, the water poured at the inner
-  // face of the floor block across it
+  // face of the floor block across it, and the bucket emptied out of hand
   const water = z['workshop:water'][0];
-  const [walk, dig, pour] = did.slice(-3);
+  const [walk, dig, pour, after] = did.slice(-4);
+  t.is(after, 'call item.select');
   const at = /^goto \((-?\d+), 63, (-?\d+)\) range 0 careful$/.exec(walk);
   t.truthy(at, walk);
   t.is(Math.abs(Number(at![1]) - water.x) + Math.abs(Number(at![2]) - water.z), 1, 'beside the hole');
@@ -425,7 +426,8 @@ test('the water: in the yard, a pickaxe in hand for the walk, on foot to the cel
   t.deepEqual(await fillWaterStep.run(ctx, SITE_ST()), { status: 'done', text: 'water in the workshop\'s floor at (-559, 62, 2134)' });
   // the cell beside the hole nearest the middle (-557, 63, 2133)
   // aimed at the inner face of the floor block across the hole
-  t.deepEqual(did, ['call item.select', 'goto (-558, 63, 2134) range 0 careful', 'dig.here (-559, 62, 2134)', 'use-item-on-block water_bucket on (-560, 62, 2134) face east']);
+  // and the emptied bucket out of hand after it (F1: its use along the look takes up the first source it meets)
+  t.deepEqual(did, ['call item.select', 'goto (-558, 63, 2134) range 0 careful', 'dig.here (-559, 62, 2134)', 'use-item-on-block water_bucket on (-560, 62, 2134) face east', 'call item.select']);
   t.is(fw.get(WATER.x, WATER.y, WATER.z), 'minecraft:water[level=0]');
   // and once it is in, the step is done with nothing walked or poured
   const again = runCtx(bare(), lookAt(inv, 1000), fw, { inv });
@@ -518,4 +520,13 @@ test('the water: no bucket anywhere, it waits for the iron for one as the crop p
   const dry = runCtx(bare(), lookAt(inv(), 1000), fw, { inv: inv(), pours: false });
   t.like(await fillWaterStep.run(dry.ctx, SITE_ST()), { status: 'blocked', retryMs: 10 * 60_000 });
   t.regex((await fillWaterStep.run(dry.ctx, SITE_ST()) as { text: string }).text, /^pouring the water at \(-559, 62, 2134\): Used water_bucket/);
+});
+
+test('F1: a pour that did not take leaves no full bucket in hand for what runs next (the stash took one into the storage house)', async (t) => {
+  const fw = fakeWorld();
+  const inv = slot([['water_bucket', 1], ['diamond_pickaxe', 1]], 0);
+  const { ctx, did } = runCtx(bare(), lookAt(inv, 1000), fw, { inv, pours: false });
+  t.like(await fillWaterStep.run(ctx, SITE_ST()), { status: 'blocked' });
+  // a harmless item before the walk in, and again after the pour that did not take
+  t.deepEqual(did, ['call item.select', 'goto (-558, 63, 2134) range 0 careful', 'dig.here (-559, 62, 2134)', 'use-item-on-block water_bucket on (-560, 62, 2134) face east', 'call item.select']);
 });

@@ -1,6 +1,7 @@
 import type { ChestContents, ChestStack } from '../tools.js';
 import type { GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
+import { holdHarmless, isHazard } from './fluidpick.js';
 
 /** The home chests as the brain last saw them (every open updates its memory). */
 
@@ -222,6 +223,8 @@ export function reservedCount(world: WorldMemory, item: string, except?: number 
 /**
  * Take an item from whichever home chests hold it; returns how many it got. What a build job has secured there is
  * left alone, unless `forJob` is that job (its materials stay its own: the kit, the cook and the fuel take the rest).
+ * A full bucket or a fire starter taken is put out of the hand before anything walks on (holdHarmless): a chest's
+ * shift-click fills the hotbar first, from its far end, often the slot in hand.
  */
 export async function takeFromChests(ctx: GoalContext, item: string, count: number, opts: { forJob?: number | string } = {}): Promise<number> {
   const held = reservedCount(ctx.world, item, opts.forJob);
@@ -234,6 +237,7 @@ export async function takeFromChests(ctx: GoalContext, item: string, count: numb
     rememberReply(ctx.world, c, r.text);
     const m = /^Took (\d+)/.exec(r.text);
     if (m) got += Number(m[1]);
+    if (m && Number(m[1]) > 0 && isHazard(item)) await holdHarmless(ctx);
   }
   return got;
 }

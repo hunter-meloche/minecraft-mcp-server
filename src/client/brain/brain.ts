@@ -39,6 +39,7 @@ import { NEAR_HOME, out as afield } from './pockets.js';
 import { statusAnswer } from './chatstatus.js';
 import { getOut, wedgedOut } from './wedge.js';
 import { penFences } from './yardgates.js';
+import { holdHarmless, unsafeInHand } from './fluidpick.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -576,7 +577,7 @@ export class Brain {
     const st = await this.rt.status().catch(() => undefined);
     if (!st?.inWorld || !st.position) return undefined;
     this.worldId = worldIdFromSeed(st.hashedSeed ?? undefined) ?? undefined;
-    const inv = await this.rt.call<{ items: InventoryItem[] }>('inventory');
+    const inv = await this.rt.call<{ items: InventoryItem[]; held?: { name: string } | null }>('inventory');
     const counts = new Map<string, number>();
     for (const it of inv.items) counts.set(it.name, (counts.get(it.name) ?? 0) + it.count);
     const home = this.rt.home(st);
@@ -604,7 +605,8 @@ export class Brain {
       // what the bot has drunk and whether it burns (the Nether's lava work and the potions read them); an older
       // jar sends neither: no effects, not burning
       effects: Array.isArray(st.effects) ? st.effects.filter(e => typeof e?.name === 'string') : [],
-      onFire: !!st.onFire
+      onFire: !!st.onFire,
+      ...(inv.held !== undefined ? { held: inv.held?.name ?? '' } : {})
     };
     this.last = s;
     return s;
@@ -704,7 +706,13 @@ export class Brain {
     this.stillAt = '';
     const started = this.now();
     const run = this.loops.begin(goal.name, reason, started);
-    const done = brainRun.run({ signal: abort.signal }, () => goal.run(ctx))
+    // no run starts with a full bucket or a fire starter in hand (the bridge's guard refuses a stray use of one, and
+    // the brain keeps it out of the hand anyway): a run cut short leaves in hand whatever it held, the casting's lava
+    // bucket or the plot's water one, and the next goal's walk to a door is a right click with it (live, Nov 14: the
+    // stash walked into the storage house with a water bucket and poured it in front of the door). Nor the empty
+    // bucket, which the guard lets through: its use along the look takes up the first source it meets
+    const body = unsafeInHand(s.held) ? () => holdHarmless(ctx).then(() => goal.run(ctx)) : () => goal.run(ctx);
+    const done = brainRun.run({ signal: abort.signal }, body)
       .then(text => {
         this.retryAt.delete(goal.name);
         this.holdWhy.delete(goal.name);

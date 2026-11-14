@@ -17,6 +17,7 @@ import { tripCheck } from './deep.js';
 import { nearestZone, type Zone } from './courtesy.js';
 import { bucketsFor, castObsidian, fetchLava, LAVA_POOL } from './cast.js';
 import { walkHome } from './homeward.js';
+import { holdHarmless } from './fluidpick.js';
 import { leaveYard } from './yardgates.js';
 import { ROOM } from './pockets.js';
 
@@ -128,6 +129,9 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
           st.data.obsidianTurn = turn + 1;
           const [dx, dz] = dirs[turn];
           const lavaEnough = async () => !noBuckets && got + (await countOf(ctx, 'lava_bucket')) >= 4;
+          // out with the water bucket carried (and lava taken from the chests), home with the lava: never in hand on the
+          // walks (fluidpick.ts holdHarmless; a lava bucket a door's right click poured on the way would be a fire)
+          await holdHarmless(ctx);
           // a pool that gave lava before: straight there first
           const pool = ctx.world.zones?.[LAVA_POOL]?.[0];
           if (pool && !noBuckets) {
@@ -148,6 +152,7 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
             if (await lavaEnough()) break;
           }
           // (the obsidian and the lava pools it found may be down in a cave: from there it climbs out first)
+          await holdHarmless(ctx);
           await walkHome(ctx, { timeoutMs: 300_000 }).catch(() => undefined);
           if (got < 4) await cast();
           if (got >= 4) return ok(`${got} obsidian`);

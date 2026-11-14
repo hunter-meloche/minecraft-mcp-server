@@ -103,3 +103,27 @@ test('an obsidian trip needs only a few free slots, not a deep trip\'s ten', asy
   t.is(r.status, 'done', r.text);
   t.true(calls.includes('goto'));
 });
+
+test('the obsidian trip: out and home with a harmless item in hand, not the water bucket it carries (a door\'s right click with it pours)', async (t) => {
+  // the cast's water bucket in hand (a cast cut short left it there); the bridge reports the hand
+  const items = [...kitted, { slot: 4, name: 'water_bucket', count: 1 }];
+  const { ctx, calls } = fake(items, wild(-160));
+  let held = 'water_bucket';
+  const hands: string[] = [];
+  const call = ctx.call;
+  const act = ctx.act;
+  ctx.call = (async (method: string, p?: Record<string, unknown>) => {
+    if (method === 'item.select') { held = String(p?.name); calls.push(`select ${held}`); return {}; }
+    if (method === 'goto') hands.push(`goto with ${held}`);
+    const r = await call(method, p);
+    return method === 'inventory' ? { ...(r as object), held: { name: held, count: 1 } } : r;
+  }) as GoalContext['call'];
+  ctx.act = (async (tool: string, a?: Record<string, unknown>) => {
+    if (tool === 'go-home') hands.push(`go-home with ${held}`);
+    return act(tool, a);
+  }) as GoalContext['act'];
+  const r = await step.run(ctx, { step: 0, data: {} });
+  t.is(r.status, 'done', r.text);
+  t.true(hands.some(h => h.startsWith('goto')) && hands.some(h => h.startsWith('go-home')), hands.join(' | '));
+  t.true(hands.every(h => h.endsWith('with diamond_pickaxe')), `${hands.join(' | ')} || ${calls.join(' | ')}`);
+});

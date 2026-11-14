@@ -44,6 +44,8 @@ export interface Snapshot {
   effects?: StatusEffect[];
   /** burning: fire resistance stops the hurt, not the flames */
   onFire?: boolean;
+  /** what the main hand holds, by name ('' for nothing); undefined where it was not read (a fake, an older reply) */
+  held?: string;
 }
 
 export interface GoalContext {

@@ -59,11 +59,13 @@ public final class Tools {
             if (speed > bestSpeed || (speed == bestSpeed && t < bestTier)) { best = i; bestSpeed = speed; bestTier = t; }
         }
         if (best >= 0) return best;
-        // no tool for it: the hand, or anything that doesn't wear out
+        // no tool for it: the hand, or anything that doesn't wear out; but not a full bucket or a fire starter (Hazards):
+        // a bucket wears no more than a fist, so grass dug on the way would keep the water bucket in hand, or take one
+        // up, for the walk that follows (the walks with a full bucket in hand are what poured it at the doors)
         int sel = inv.getSelectedSlot();
-        if (!inv.getItem(sel).isDamageableItem()) return sel;
+        if (!inv.getItem(sel).isDamageableItem() && !Hazards.isHazard(Names.item(inv.getItem(sel)))) return sel;
         for (int i = 0; i < 9; i++) if (inv.getItem(i).isEmpty()) return i;
-        for (int i = 0; i < 9; i++) if (!inv.getItem(i).isDamageableItem()) return i;
+        for (int i = 0; i < 9; i++) if (!inv.getItem(i).isDamageableItem() && !Hazards.isHazard(Names.item(inv.getItem(i)))) return i;
         return -1;
     }
 

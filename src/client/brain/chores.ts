@@ -22,6 +22,7 @@ import type { Box } from '../survey.js';
 // (work.ts reaches this file through pockets.ts: its roundDue is asked inside the rounds' gates only)
 import { roundDue, roundFrom, toRound } from './work.js';
 import { goHome, walkHome } from './homeward.js';
+import { holdHarmless, isHazard } from './fluidpick.js';
 import { EXPLORE_MIN, exploreReach, leaveYard } from './yardgates.js';
 
 /**
@@ -339,6 +340,9 @@ export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = 
  */
 export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions): Promise<{ stored: number; dropped: number; note?: string }> {
   const world = ctx.world;
+  // the casting's lava and water buckets stay carried (stashKeep): never in hand on the walk to the chests, through
+  // the storage house's door (a water bucket held so poured itself in front of it, Nov 14)
+  if (s.items.some(i => i.slot < 36 && isHazard(i.name))) await holdHarmless(ctx);
   const sorts = world.landmarks.chests.length >= 3;
   const work = stashWork(s, world, keep, sorts ? chestAssignment(world) : undefined);
   let stored = 0;
@@ -433,6 +437,9 @@ export const sortStorage: Goal = {
       const t = await ctx.act('take-from-chest', { x: fx, y: fy, z: fz, item: m.name, count: m.count });
       rememberReply(ctx.world, { x: fx, y: fy, z: fz }, t.text);
       if (!/^Took/.test(t.text)) continue;
+      // a full bucket taken may land in the slot in hand (a chest's shift-click fills the hotbar from its far end):
+      // out of it before the walk to the other chest (chests.ts takeFromChests does the same)
+      if (isHazard(m.name)) await holdHarmless(ctx);
       const r = await ctx.act('store-in-chest', { x: tx, y: ty, z: tz, item: m.name, count: m.count });
       rememberReply(ctx.world, { x: tx, y: ty, z: tz }, r.text);
       if (/^Stored/.test(r.text)) moved++;

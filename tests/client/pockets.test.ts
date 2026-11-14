@@ -578,6 +578,25 @@ test('the food cap brings the kept kit to 20 slots: the live inventory of 28', a
   t.is(m.inv.filter(i => i.name === 'iron_pickaxe').length, 2, 'the spare pickaxe and its twin, which cannot be told apart');
 });
 
+test('the stash walks to the chests with a harmless item in hand, never the casting\'s lava bucket it keeps (a water bucket held so poured itself in front of the storage house\'s door, Nov 14)', async t => {
+  const s = snap([...kit(), { slot: 9, name: 'lava_bucket', count: 1 }, ...stacks('oak_log', 2, 10)]);
+  const w = world({ lavaCasting: true });
+  const { m, ctx } = live(s, w);
+  // the lava bucket in hand, as a cast cut short left it; the bridge reports the hand
+  let held = 'lava_bucket';
+  const call = ctx.call;
+  ctx.call = (async (method: string, p?: Record<string, unknown>) => {
+    if (method === 'inventory') return { items: m.inv.map(i => ({ ...i })), held: { name: held, count: 1 } };
+    if (method === 'item.select') { held = String(p?.name); return {}; }
+    return call(method, p);
+  }) as GoalContext['call'];
+  const hands: string[] = [];
+  m.after = tool => { if (tool === 'store-in-chest') hands.push(held); };
+  t.deepEqual(await putAway(ctx, s, stashKeep(w)), { stored: 128, dropped: 0 });
+  t.deepEqual(hands, ['stone_sword']);
+  t.is(m.count('lava_bucket'), 1, 'the casting\'s bucket stays carried');
+});
+
 test('room says stash only when the stash then frees the slots', async t => {
   const three = [CHEST, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
   const fixtures: { name: string; items: InventoryItem[]; w: () => WorldMemory; over?: Partial<Snapshot>; frees: number }[] = [

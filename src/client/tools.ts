@@ -15,6 +15,7 @@ import { worldIdFromSeed, type ProtectionStore } from '../build-protection.js';
 import { breakKinds, checkBuild, keepExisting, LEAVE, layoutSpec, missingCells, parseState, placerFacing, secondHalf, splitDirectional, writeSchematic, type Schematic, type StructureSpec } from './schematic.js';
 import { itemOf } from './brain/blueprints.js';
 import { freeLid } from './brain/chests.js';
+import { holdHarmless, isHazard } from './brain/fluidpick.js';
 import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
@@ -1211,13 +1212,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (item) {
         try { await call('item.select', { name: item }); } catch { return factory.createErrorResponse(`No ${item} in inventory`); }
       }
-      type Used = { used: boolean; reason?: string; before?: string; after?: string; changed?: boolean; properties?: Record<string, string>; held?: string; result?: string };
+      // bucket: the server's word on a bucket's use (filled, poured at, nothing happened), never the client's guess;
+      // answered: the server acked the use within 2 s (else `after` may be only what the client predicted)
+      type Used = { used: boolean; reason?: string; before?: string; after?: string; changed?: boolean; properties?: Record<string, string>; held?: string; result?: string; bucket?: string; answered?: boolean };
       // toggle: a water bucket in hand once poured outside the door it was shutting (the game client checks doors too)
       const how = toggle ? { face, toggle: true } : { face };
       let r = await call<Used>('useOn', { ...at, ...how });
       if (!r.used && r.reason === 'too far') {
+        // a full bucket (or flint and steel) is not walked with in hand: Baritone's walk opens doors with right clicks
+        // (brain/fluidpick.ts holdHarmless); it is taken back in hand for the use
+        const hazard = isHazard(item ?? r.held) ? item ?? r.held : undefined;
+        if (hazard) await holdHarmless({ call });
         await goNear(at, 3);
-        if (item) await call('item.select', { name: item });
+        if (item ?? hazard) await call('item.select', { name: item ?? hazard });
         r = await call<Used>('useOn', { ...at, ...how });
       }
       if (!r.used) return factory.createErrorResponse(`Could not use ${item ?? 'the held item'} on ${fmt(at)}: ${r.reason}`);
@@ -1231,16 +1238,21 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
           r = await call<Used>('useOn', { ...at, face });
         }
       }
+      // a bucket: what the server did with it. Live the client showed buckets filled that the server never filled, and
+      // the reply said only "nothing changed" about the block clicked
+      if (r.bucket) return factory.createResponse(`Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: ${r.bucket}`);
       const props = Object.entries(r.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
       const after = `${r.after}${props ? `[${props}]` : ''}`;
       const unchanged = r.changed === undefined ? r.before === r.after : !r.changed;
       // the game's answer only helps when nothing happened (Pass / Fail), not the long Success[...] record
       const answer = r.result && !/^Success/.test(r.result) ? `: ${r.result}` : '';
+      // with no ack from the server the block read may be only the client's own prediction
+      const word = r.answered === false ? ' (no word from the server within 2 s)' : '';
       return factory.createResponse(unchanged
-        ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; nothing changed, it is ${after}${answer}`
+        ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}; nothing changed, it is ${after}${answer}${word}`
         : r.before === r.after
-          ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it is now ${after}`
-        : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}`);
+          ? `Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it is now ${after}${word}`
+        : `Used ${item ?? 'the held item'} on ${r.before} at ${fmt(at)}: it became ${after}${word}`);
     }
   );
 

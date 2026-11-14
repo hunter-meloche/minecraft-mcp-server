@@ -1092,3 +1092,51 @@ test('idle watchdog: the time a goal was at work is not idle time, however still
   t.is(calls.filter(c => c === 'slow').length, 1);
   brain.setEnabled(false);
 });
+
+test('F1: no run starts with a full bucket in hand: a run cut short left the lava bucket in it, the next goal\'s first walk is with a sword', async (t) => {
+  const calls: string[] = [];
+  let held = 'lava_bucket';
+  const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  const call = rt.call;
+  rt.call = (async (method: string, p: Record<string, unknown> = {}) => {
+    if (method === 'inventory') return { items: [{ slot: 0, name: 'lava_bucket', count: 1 }, { slot: 1, name: 'diamond_sword', count: 1 }], held: { name: held, count: 1 } };
+    if (method === 'item.select') { held = String(p.name); calls.push(`select ${held}`); return {}; }
+    return call(method, p);
+  }) as ClientRuntime['call'];
+  const walk: Goal = {
+    name: 'walk', priority: 50, timeoutMs: 1000, retryMs: 1000, wants: () => 'to the storage house',
+    run: async () => { calls.push(`walk with ${held}`); return 'walked'; }
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [walk] });
+  brain.setEnabled(true);
+  await brain.tick();
+  await settle();
+  t.deepEqual(calls, ['select diamond_sword', 'walk with diamond_sword']);
+  // a harmless hand: nothing asked of the hand at all
+  calls.length = 0;
+  await brain.tick();
+  await settle();
+  t.deepEqual(calls, ['walk with diamond_sword']);
+});
+
+test('F1: nor with the empty bucket in hand: a pour that took left it there, the next goal\'s first walk is with a sword', async (t) => {
+  const calls: string[] = [];
+  let held = 'bucket';
+  const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  const call = rt.call;
+  rt.call = (async (method: string, p: Record<string, unknown> = {}) => {
+    if (method === 'inventory') return { items: [{ slot: 0, name: 'bucket', count: 1 }, { slot: 1, name: 'diamond_sword', count: 1 }], held: { name: held, count: 1 } };
+    if (method === 'item.select') { held = String(p.name); calls.push(`select ${held}`); return {}; }
+    return call(method, p);
+  }) as ClientRuntime['call'];
+  const walk: Goal = {
+    name: 'walk', priority: 50, timeoutMs: 1000, retryMs: 1000, wants: () => 'to the storage house',
+    run: async () => { calls.push(`walk with ${held}`); return 'walked'; }
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [walk] });
+  brain.setEnabled(true);
+  await brain.tick();
+  await settle();
+  t.deepEqual(calls, ['select diamond_sword', 'walk with diamond_sword']);
+  brain.setEnabled(false);
+});

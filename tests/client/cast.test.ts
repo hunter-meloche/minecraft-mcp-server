@@ -197,3 +197,51 @@ test('buckets for a cast: full lava buckets in the chests count as carried ones 
   t.is((await run({ lava_bucket: 2 }, ['water_bucket'])).said, 'buckets: short of 6 iron_ingot');
   t.is((await run({}, ['water_bucket'])).said, 'buckets: short of 12 iron_ingot');
 });
+
+test.serial('F1: the cast never walks with a full bucket in hand: the lava out of the chest lands in it, the pours and the scoop leave one in it; it ends harmless', async (t) => {
+  const { world, read } = lawn();
+  // the stash had put the two lava buckets away (a chest's shift-click fills the hotbar: one lands in the hand)
+  const inv = new Map<string, number>([['lava_bucket', 0], ['water_bucket', 1], ['bucket', 0], ['diamond_pickaxe', 1], ['diamond_sword', 1], ['dirt', 10]]);
+  let held = 'dirt';
+  const site = { x: 4, y: 62, z: 4 };
+  const chest = { x: 10, y: 63, z: 12 };
+  const w: WorldMemory = {
+    landmarks: { chests: [chest], farmland: [] }, leash: 96, yard: { x1: 0, z1: 0, x2: 19, z2: 19, y: 62 }, zones: { 'obsidian:cast': [site] }, lavaCasting: true,
+    chestItems: { [k(chest)]: { lava_bucket: 2 } }
+  };
+  const set = (p: P, b: string) => world.set(k(p), `minecraft:${b}`);
+  const get = (p: P) => (world.get(k(p)) ?? 'minecraft:air').replace('minecraft:', '');
+  const walks: string[] = [];
+  const turn = (from: string, to: string) => { inv.set(from, inv.get(from)! - 1); inv.set(to, inv.get(to)! + 1); held = to; };
+  const ctx = {
+    s: { position: { x: 10, y: 63, z: 10 }, home: { x: 10, y: 63, z: 10, dimension: 'overworld' } } as unknown as Snapshot, world: w,
+    signal: new AbortController().signal, progress: () => undefined, status: async () => ({}) as never,
+    call: async <T>(method: string, p: Record<string, unknown> = {}): Promise<T> => {
+      const q = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+      if (method === 'inventory') return { items: [...inv].filter(([, n]) => n > 0).map(([name, count], slot) => ({ name, count, slot })), held: { name: held, count: 1 } } as T;
+      if (method === 'world.region') return { blocks: read({ ...q, width: Number(p.width), height: Number(p.height), length: Number(p.length) }) } as T;
+      if (method === 'goto') { walks.push(held); return { arrived: true } as T; }
+      if (method === 'item.select') { held = String(p.name); return {} as T; }
+      if (method === 'dig.here') { const b = get(q); if (b === 'obsidian') inv.set('obsidian', (inv.get('obsidian') ?? 0) + 1); set(q, 'air'); return { dug: true } as T; }
+      throw new Error(`unexpected ${method}`);
+    },
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      if (tool === 'take-from-chest') { const n = Math.min(2, Number(a.count)); inv.set('lava_bucket', n); held = 'lava_bucket'; w.chestItems![k(chest)] = {}; return { ok: true, text: `Took ${n} lava_bucket from the chest` }; }
+      if (tool === 'collect-items') return { ok: true, text: 'nothing' };
+      if (tool !== 'use-item-on-block') return { ok: true, text: 'ok' };
+      held = String(a.item);
+      const q = { x: Number(a.x), y: Number(a.y), z: Number(a.z) };
+      const into = a.face === 'west' ? { ...q, x: q.x - 1 } : q;
+      if (held === 'lava_bucket') { set(into, 'lava[level=0]'); turn('lava_bucket', 'bucket'); }
+      else if (held === 'water_bucket') { set(into, 'water[level=0]'); turn('water_bucket', 'bucket'); if (/^lava/.test(get({ ...into, y: into.y - 1 }))) set({ ...into, y: into.y - 1 }, 'obsidian'); }
+      else if (held === 'bucket' && /^(water|lava)/.test(get(q))) { const f = get(q).startsWith('water') ? 'water_bucket' : 'lava_bucket'; set(q, 'air'); turn('bucket', f); }
+      else if (held === 'dirt') { set(into, 'dirt'); inv.set('dirt', inv.get('dirt')! - 1); }
+      return { ok: true, text: 'Used' };
+    }
+  } as unknown as GoalContext;
+  const r = await castObsidian(ctx, 4);
+  t.is(r.have, 2, r.text);
+  t.true(walks.length >= 2, walks.join(' | '));
+  t.deepEqual(walks.filter(h => /_bucket$/.test(h)), [], `the hand at each walk: ${walks.join(', ')}`);
+  t.false(/_bucket$/.test(held), `in hand at the end: ${held}`);
+});

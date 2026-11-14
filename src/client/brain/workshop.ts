@@ -174,7 +174,12 @@ export const fillWaterStep: Step = {
     // from beside the hole, at the far side's inner face (see besideHole); else from the middle at the opening (above)
     const far = beside && await farWall(ctx, cell, beside);
     const r = await ctx.act('use-item-on-block', far ? { ...far.at, item: 'water_bucket', face: far.face } : { ...cell, item: 'water_bucket', face: 'up' });
-    if (SOURCE.test(await blockAt(ctx, cell))) return ok(`water in the workshop's floor at ${fmt(cell)}`);
+    if (SOURCE.test(await blockAt(ctx, cell))) {
+      // the bucket emptied is no hand to walk on with either: its use along the look takes up the first source it
+      // meets, and the next goal's walk to a door is a right click
+      await holdHarmless(ctx);
+      return ok(`water in the workshop's floor at ${fmt(cell)}`);
+    }
     // a pour onto the floor over the hole floods the room: that source plugged with a block and dug out again (a
     // block placed is clicked on a face: the server takes it where the bridge says, not along its own look)
     const over = { ...cell, y: cell.y + 1 };
@@ -184,6 +189,9 @@ export const fillWaterStep: Step = {
       if (placed?.ok && /^Placed/.test(placed.text)) await ctx.act('dig-block', { ...over });
       ctx.progress(`workshop water: poured onto the floor over the hole; ${placed?.ok && /^Placed/.test(placed.text) ? `plugged with ${fill} and dug out` : 'not plugged (no block to plug it with)'}`);
     }
+    // a pour that did not take leaves the full bucket in hand: off it for whatever walks next (the stash took one
+    // into the storage house and poured it in front of the door)
+    await holdHarmless(ctx);
     // a wait, not at once again: a step that comes back at once is run again at once
     return blocked(`pouring the water at ${fmt(cell)}: ${r.text.slice(0, 100)}`);
   }

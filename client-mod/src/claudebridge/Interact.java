@@ -176,8 +176,11 @@ public final class Interact {
     public static int select(String name, int want) {
         LocalPlayer p = player();
         Inventory inv = p.getInventory();
-        int i = pick(k -> nameOf(inv.getItem(k)), 36, name.replace("minecraft:", ""), want);
+        String q = name.replace("minecraft:", "");
+        int i = pick(k -> nameOf(inv.getItem(k)), 36, q, want);
         if (i < 0) i = find(inv, name); // a name in part ("log"), or one only worn
+        // but a bucket or a fire starter only by its own name: "bucket" with no empty one carried took the lava_bucket
+        if (i >= 0 && Hazards.byNameOnly(q, Names.item(inv.getItem(i)))) i = -1;
         if (i < 0) throw new IllegalArgumentException("no " + name + " in inventory");
         if (i < 9) { inv.setSelectedSlot(i); return i; } // in slot 0 or 8 it is Baritone's own pick: it stays there
         if (i > 35) throw new IllegalArgumentException(name + " is worn; take it off first");
@@ -387,7 +390,8 @@ public final class Interact {
             Direction face = Direction.byName(strParam(p, "face", "up"));
             if (face == null) face = Direction.UP;
             Vec3 hit = faceCenter(at, face);
-            if (pl.getEyePosition().distanceTo(hit) > 4.5) return obj("used", false, "reason", "too far", "distance", round(pl.getEyePosition().distanceTo(hit)));
+            // with the hand in it: the tool walks closer, and a full bucket in hand is put away for that walk (tools.ts)
+            if (pl.getEyePosition().distanceTo(hit) > 4.5) return obj("used", false, "reason", "too far", "distance", round(pl.getEyePosition().distanceTo(hit)), "held", Names.item(pl.getMainHandItem()));
             pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);
             String before = Names.block(mc.level.getBlockState(at));
             final net.minecraft.world.level.block.state.BlockState beforeState = mc.level.getBlockState(at);
@@ -395,8 +399,14 @@ public final class Interact {
             // a shield in the off-hand stops a hoe, axe or shovel from working the block unless the player sneaks
             // (26.x: "blocking item use intent"): with the kit's shield, tilling the plot did nothing
             String inHand = Names.item(pl.getMainHandItem());
-            // buckets too: with the shield on, "use" failed at every lake and lava pool (use: Fail[]), and sneaking
-            // also keeps the bot from stepping off the edge it stands at
+            // not for a bucket. It once sneaked for one too ("use: Fail" at every lake and lava pool with the shield on),
+            // but that Fail was the aim hitting the shore (an empty bucket's use fails on a block it can't fill from), not
+            // the shield: a bucket acts through use(), and nothing on that path looks at the off hand (26.3 jar:
+            // BucketItem.use, ItemStack.use, ServerPlayerGameMode.useItem). And the crouch moved the server's eye: the
+            // server traces a bucket's use from the eye of the pose its own last tick gave the bot (Player.tick:
+            // updatePlayerPose), which for a crouch pressed two ticks before the use was still the standing eye, 0.35
+            // above the crouched one the client aimed from. A pour aimed at a hole's opening from 2 off stood the water
+            // on the floor over the hole, and three pickups the client saw filled were never filled on the server
             // a door, trapdoor, gate, lever or button is only ever toggled: no sneak (it skips the block's own use) and
             // no "use" with what is held. Shutting the storage-house door with a water bucket in hand and the shield on
             // poured the water outside it at head height, and the flowing sheet kept Baritone from the bed for hours
@@ -405,47 +415,126 @@ public final class Interact {
                 || kind instanceof net.minecraft.world.level.block.TrapDoorBlock || kind instanceof net.minecraft.world.level.block.FenceGateBlock
                 || kind instanceof net.minecraft.world.level.block.LeverBlock || kind instanceof net.minecraft.world.level.block.ButtonBlock;
             boolean sneak = !toggle && pl.getOffhandItem().has(net.minecraft.core.component.DataComponents.BLOCKS_ATTACKS)
-                && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel") || inHand.endsWith("bucket"));
+                && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel"));
             if (sneak) mc.options.keyShift.setDown(true);
             Ticker.add(new Ticker.Task() {
-                int wait = 5;
-                String result = "", held = "", aimed = "";
+                int age = 0, steady = 0, usedAt = -1, sequence, answeredAt = -1, askedAt = -1, slot, fullBefore;
+                String result = "", held = "", aimed = "", guessed;
+                ItemStack heldStack = ItemStack.EMPTY;
+                boolean bucket;
+                long syncs;
+                net.minecraft.client.multiplayer.ClientLevel level;
+                BlockPos lo, hi;
+                Map<Long, String> fluidsBefore = Map.of();
+                Vec3 aimAt = hit;
+
                 @Override public boolean tick(Minecraft m) {
-                    wait--;
-                    if (wait == 0 && sneak) m.options.keyShift.setDown(false);
-                    if (wait == 3) {
-                        // after the rotation is sent; buckets (and other aimed items) act through "use", along the look
-                        // direction at the same point, when the block click does nothing
-                        held = m.player.getMainHandItem().isEmpty() ? "nothing" : Names.item(m.player.getMainHandItem());
+                    age++;
+                    if (m.player == null || m.level == null) { if (sneak) m.options.keyShift.setDown(false); c.fail("not in a world"); return true; }
+                    if (usedAt < 0) {
+                        // after the rotation is sent; and a bucket only once the bot has stood unchanged for 3 ticks (a
+                        // crouch someone else held, let go, reaches the server's pose a tick or two after the client's),
+                        // so the eye the server traces from is the eye aimed from
+                        boolean isBucket = !toggle && Hazards.isBucket(Names.item(m.player.getMainHandItem()));
+                        boolean crouched = m.options.keyShift.isDown() || m.player.isShiftKeyDown() || m.player.isCrouching();
+                        steady = isBucket && crouched ? 0 : steady + 1;
+                        if (age < 2 || (isBucket && steady < 3 && age < 20)) return false;
+                        use(m, isBucket);
+                        return false;
+                    }
+                    if (sneak && age == usedAt + 3) m.options.keyShift.setDown(false);
+                    // the server's word: its ack of the use (the block changes it made come just before it), within 2 s
+                    if (answeredAt < 0 && ServerWord.acked(level, sequence)) answeredAt = age;
+                    if (answeredAt < 0 && age - usedAt < 40) return false;
+                    if (age - usedAt < 3) return false; // never sooner than it always replied
+                    if (bucket && !handKnown(m)) return false;
+                    if (sneak) m.options.keyShift.setDown(false);
+                    reply(m);
+                    return true;
+                }
+
+                void use(Minecraft m, boolean isBucket) {
+                    LocalPlayer me = m.player;
+                    slot = me.getInventory().getSelectedSlot();
+                    heldStack = me.getMainHandItem().copy();
+                    held = heldStack.isEmpty() ? "nothing" : Names.item(heldStack);
+                    bucket = isBucket;
+                    // buckets (and other aimed items) act through "use", along the look direction at the same point,
+                    // when the block click does nothing
+                    if (bucket) {
                         // a bucket aims along the look, which something (Baritone's look, the guardian) may have turned
                         // since: look again now, at the fluid itself. Every fill at the lake was "use: Fail": the aim hit
                         // the grass
-                        if (held.endsWith("bucket") && !toggle) {
-                            // an empty bucket: at the fluid just under its surface (a source fills to 8/9 of the cell):
-                            // aimed at the middle, the line from the shore clipped the shore block's corner ("aim: BLOCK
-                            // ... grass_block"); the point the brain's sight-line check (fluidpick.ts) looks at too. A full
-                            // one pours next to the face clicked: aimed at that face (aimed into the block, the line hit
-                            // the pit's upper wall and the lava went in a cell too high)
-                            m.player.lookAt(EntityAnchorArgument.Anchor.EYES, held.equals("bucket")
-                                ? new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5) : hit);
-                            // what the bucket's aim hits, the way BucketItem traces it (sources only), for the reply
-                            Vec3 eye = m.player.getEyePosition(), end = eye.add(m.player.getViewVector(1f).scale(m.player.blockInteractionRange()));
-                            var pov = m.level.clip(new net.minecraft.world.level.ClipContext(eye, end, net.minecraft.world.level.ClipContext.Block.OUTLINE,
-                                net.minecraft.world.level.ClipContext.Fluid.SOURCE_ONLY, m.player));
-                            aimed = pov.getType() + " " + pov.getBlockPos().toShortString() + " " + Names.block(m.level.getBlockState(pov.getBlockPos()))
-                                + " offhand=" + Names.item(m.player.getOffhandItem()) + " sneaking=" + m.player.isShiftKeyDown() + " using=" + m.player.isUsingItem();
-                        }
-                        var r = m.gameMode.useItemOn(m.player, InteractionHand.MAIN_HAND, click);
-                        result = r.toString();
-                        if (!r.consumesAction() && !toggle) result += " / use: " + m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
+                        // an empty bucket: at the fluid just under its surface (a source fills to 8/9 of the cell):
+                        // aimed at the middle, the line from the shore clipped the shore block's corner ("aim: BLOCK
+                        // ... grass_block"); the point the brain's sight-line check (fluidpick.ts) looks at too. A full
+                        // one pours next to the face clicked: aimed at that face (aimed into the block, the line hit
+                        // the pit's upper wall and the lava went in a cell too high)
+                        aimAt = held.equals("bucket") ? new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5) : hit;
+                        me.lookAt(EntityAnchorArgument.Anchor.EYES, aimAt);
+                        // what the bucket's aim hits, the way BucketItem traces it (sources only), for the reply
+                        Vec3 eye = me.getEyePosition(), end = eye.add(me.getViewVector(1f).scale(me.blockInteractionRange()));
+                        var pov = m.level.clip(new net.minecraft.world.level.ClipContext(eye, end, net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                            net.minecraft.world.level.ClipContext.Fluid.SOURCE_ONLY, me));
+                        aimed = pov.getType() + " " + pov.getBlockPos().toShortString() + " " + Names.block(m.level.getBlockState(pov.getBlockPos()))
+                            + " offhand=" + Names.item(me.getOffhandItem()) + " sneaking=" + me.isShiftKeyDown() + " using=" + me.isUsingItem();
+                        // the sources the trace could reach and the cells beside them (a pour lands beside the face it
+                        // hits), to tell where the server put the fluid or took it from
+                        lo = BlockPos.containing(Math.min(eye.x, end.x) - 1, Math.min(eye.y, end.y) - 1, Math.min(eye.z, end.z) - 1);
+                        hi = BlockPos.containing(Math.max(eye.x, end.x) + 1, Math.max(eye.y, end.y) + 1, Math.max(eye.z, end.z) + 1);
+                        fluidsBefore = ServerWord.fluids(m.level, lo, hi);
                     }
-                    if (wait > 0) return false;
+                    // (a fill from a stack of empties puts the full bucket in another slot: counted over the whole inventory)
+                    if (bucket) fullBefore = ServerWord.fullBuckets(me.getInventory());
+                    level = m.level;
+                    syncs = ServerWord.handSyncs();
+                    int sent = ServerWord.sequence(level);
+                    // the bridge's own use, so the guard lets a full bucket or a fire starter through (Hazards); only for
+                    // these calls. A toggle never arms: it must never pour, whatever the click lands on
+                    if (!toggle) Hazards.arm(held, 2);
+                    try {
+                        var r = m.gameMode.useItemOn(me, InteractionHand.MAIN_HAND, click);
+                        result = r.toString();
+                        if (!r.consumesAction() && !toggle) result += " / use: " + m.gameMode.useItem(me, InteractionHand.MAIN_HAND);
+                    } finally {
+                        Hazards.disarm();
+                    }
+                    sequence = ServerWord.sequence(level);
+                    if (sequence == sent) answeredAt = age; // nothing went out (refused, or outside the world): nothing to wait for
+                    ItemStack guess = me.getInventory().getItem(slot);
+                    guessed = guess.isEmpty() ? "nothing" : Names.item(guess);
+                    usedAt = age;
+                }
+
+                /** The hand as the server has it: it said so, or nothing changed (nothing to say), or it was asked. */
+                boolean handKnown(Minecraft m) {
+                    if (answeredAt < 0) return true; // no word at all: the reply says so
+                    // a change while the server has the bot using an item (the shield up) comes in its tick just after the ack
+                    if (age - answeredAt < 2) return false;
+                    if (ServerWord.handSyncs() > syncs || ItemStack.matches(m.player.getInventory().getItem(slot), heldStack)) return true;
+                    // the hand changed with no word from the server: the client's guess. Ask the server for its inventory
+                    if (askedAt < 0) { askedAt = age; return !ServerWord.resync(m.player); }
+                    return age - askedAt >= 40;
+                }
+
+                void reply(Minecraft m) {
                     var now = m.level.getBlockState(at);
                     JsonObject props = new JsonObject();
                     for (var prop : now.getProperties()) props.addProperty(prop.getName(), Handlers.valueName(now, prop));
-                    c.ok(obj("used", true, "before", before, "after", Names.block(now), "changed", !now.equals(beforeState), "properties", props, "held", held, "result", result + (aimed.isEmpty() ? "" : " [aim: " + aimed + "]"),
-                        "sneaking", m.player.isShiftKeyDown()));
-                    return true;
+                    JsonObject r = obj("used", true, "before", before, "after", Names.block(now), "changed", !now.equals(beforeState), "properties", props, "held", held, "result", result + (aimed.isEmpty() ? "" : " [aim: " + aimed + "]"),
+                        "sneaking", m.player.isShiftKeyDown(), "answered", answeredAt >= 0);
+                    if (bucket) {
+                        // what the server did with the bucket: filled, poured at, or nothing (never the client's guess)
+                        ItemStack hand = m.player.getInventory().getItem(slot);
+                        String after = hand.isEmpty() ? "nothing" : Names.item(hand);
+                        boolean known = ServerWord.handSyncs() > syncs || ItemStack.matches(hand, heldStack);
+                        var ch = m.level == level ? ServerWord.diff(fluidsBefore, ServerWord.fluids(m.level, lo, hi), aimAt.x, aimAt.y, aimAt.z)
+                            : new ServerWord.Changes(List.of(), List.of());
+                        r.addProperty("bucket", ServerWord.verdict(held, after, guessed, ch, answeredAt >= 0, known,
+                            heldStack.getCount(), hand.getCount(), ServerWord.fullBuckets(m.player.getInventory()) - fullBefore));
+                        r.addProperty("heldAfter", after);
+                    }
+                    c.ok(r);
                 }
             });
             return BridgeServer.LATER;
@@ -568,16 +657,27 @@ public final class Interact {
             int foodBefore = pl.getFoodData().getFoodLevel();
             float healthBefore = pl.getHealth();
             using = true;
-            mc.gameMode.useItem(pl, InteractionHand.MAIN_HAND);
-            mc.options.keyUse.setDown(true); // the client stops using an item as soon as the use key is up
+            ItemStack inHand = pl.getMainHandItem();
+            // the key is held only for an item used over time (food, a potion, a bow): held down after an item used at
+            // once (a bucket, flint and steel, a snowball), the key uses it again every 4 ticks (Minecraft.startUseItem):
+            // a water bucket poured, then filled again from its own water, and so on
+            boolean overTime = inHand.getUseDuration(pl) > 0;
+            // the bridge's own use, so the guard lets a full bucket or a fire starter through (Hazards): this call only
+            Hazards.arm(Names.item(inHand), 2);
+            try {
+                mc.gameMode.useItem(pl, InteractionHand.MAIN_HAND);
+            } finally {
+                Hazards.disarm();
+            }
+            if (overTime) mc.options.keyUse.setDown(true); // the client stops using an item as soon as the use key is up
             Ticker.add(new Ticker.Task() {
                 int age = 0;
                 boolean started = false;
                 @Override public boolean tick(Minecraft m) {
                     age++;
                     if (m.player.isUsingItem()) started = true;
-                    if (!(started && !m.player.isUsingItem()) && age < 80) return false;
-                    m.options.keyUse.setDown(false);
+                    if (!(started && !m.player.isUsingItem()) && age < (overTime ? 80 : 5)) return false;
+                    if (overTime) m.options.keyUse.setDown(false);
                     if (m.player.isUsingItem()) m.gameMode.releaseUsingItem(m.player);
                     using = false;
                     c.ok(obj("finished", started, "food", m.player.getFoodData().getFoodLevel(), "foodBefore", foodBefore,
