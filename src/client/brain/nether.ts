@@ -16,6 +16,7 @@ import { out as afield } from './pockets.js';
 import { homePortal, ownPortals, tripsOn } from './portal.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit, type NetherCheck } from './mine.js';
 import { readyFoodPoints } from './food.js';
+import { storedStacks } from './chests.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -38,14 +39,38 @@ export interface PortalShape { x: number; y: number; z: number; axis: string; wi
 /** A death in the Nether: when (real ms) and where (Nether coordinates). */
 export interface NetherDeath { at: number; where: Pos }
 
+/**
+ * Where the setup trip (P2b, nethersetup.ts) builds the bot's own Nether-side portal: the portal's inside, its lowest
+ * corner (as portal.list gives a portal), the axis it spans along, the side of its plane the hut's front room is on
+ * (+1 or -1 across the axis) and which of the inside's two columns the hut's door is in front of (0 or 1). Kept for
+ * a trip cut short (`world.nether.setupSpot`), with `obsidian`: what of its frame is still to place there.
+ */
+export interface SetupSpot { x: number; y: number; z: number; axis: 'x' | 'z'; side: 1 | -1; door: 0 | 1; obsidian?: number }
+
+/**
+ * How a Nether trip ended, as the work wrapper saw it: home through a portal with the two sides linked and no death
+ * (`clean`: it counts for the stages), home through a portal but not linked, not got home through a portal
+ * (`stranded`: the leave nether goal took over), a death on it, or stopped before its end.
+ */
+export type TripEnd = 'clean' | 'not linked' | 'stranded' | 'a death' | 'cut short';
+
 /** Kept in brain.json per world (`world.nether`). */
 export interface NetherMemory {
   /** the nether-trips switch: anything that goes through a portal waits for it (off, undefined, as it ships) */
   trips?: boolean;
-  /** the stage the trips have reached (P2b's ramp opens the nether rung's variants by it): 0 to start */
+  /** the stage the trips have reached (the ramp, NETHER_STAGES: the nether rung's work opens by it): 0 to start */
   stage: number;
-  /** Nether trips in a row that ended with no death */
+  /**
+   * clean trips counted for the stages (NETHER_STAGES): home through a portal, the two sides linked, no death on it.
+   * Never less than the stage's own count: a death in the Nether drops the stage and puts this back to that stage's
+   */
+  stageTrips: number;
+  /** Nether trips in a row that ended with no death (the probation's) */
   cleanTrips: number;
+  /** the last Nether trip that went (one that never set out is not one): when it ended, its line, how (brain-status) */
+  lastTrip?: { at: number; text: string; end: TripEnd };
+  /** the death in the Nether (its time) the regear has seen to: the spare set is put on once a death (regear.ts) */
+  regearedFor?: number;
   /** deaths in the Nether, the last 3 days: the holds read them (a death 1 h, two in 24 h a day, three in 3 days off) */
   deaths: NetherDeath[];
   /** real times the Nether trips set out, the last 24 h: the probation's hour */
@@ -56,6 +81,13 @@ export interface NetherMemory {
   portal?: Pos;
   /** the home portal and the Nether-side one lead to each other (P2b checks it both ways) */
   linked?: boolean;
+  /**
+   * the setup trip waits until `until` (real ms), and why: it came out in someone's build with no way out on foot,
+   * found no spot for its own portal, or its own portal led back elsewhere. A day: the lead looks in between
+   */
+  setupHold?: { until: number; why: string };
+  /** the spot the setup trip chose for its own portal and hut, kept until the portal stands: a trip cut short goes on there */
+  setupSpot?: SetupSpot;
   /** where the bot stood at its first look in the Nether this time in, and when: the way home with no portal of its own */
   arrival?: Pos;
   enteredAt?: number;
@@ -73,6 +105,36 @@ const STARTS = 64;
 const SEEN = 16;
 const SITES = 16;
 
+// ------------------------------------------------------------------------------------------------ the stages
+
+/** Potions of fire resistance in stock for the last stage: one drunk for a fortress or a bastion, one more for the way back. */
+export const FIRE_POTIONS = 2;
+
+/**
+ * The stage ramp (P2b of the progression plan). Stage 0 is the setup (its own Nether-side portal, linked) and then a
+ * short look from its hut; each stage after it opens once the clean trips reach its count: 1 after 2 (P3a: barter,
+ * quartz), 2 after 4 (P3b/c: debris, scout), 3 after 6 with potions of fire resistance in stock too (P3c/P6: fortress,
+ * bastion, each fought with one drunk). The nether rung's work says its own stage (worktasks.ts NETHER_WORK).
+ */
+export const NETHER_STAGES: readonly { stage: number; trips: number; potions?: number }[] = [
+  { stage: 1, trips: 2 }, { stage: 2, trips: 4 }, { stage: 3, trips: 6, potions: FIRE_POTIONS }
+];
+
+/** The clean trips a stage stands at (0 for stage 0): where a death in the Nether puts the count back to. */
+export const tripsForStage = (stage: number): number => (stage <= 0 ? 0 : NETHER_STAGES[Math.min(stage, NETHER_STAGES.length) - 1].trips);
+
+/** A drinkable potion of fire resistance, by its contents (never by its name: every potion is `potion`). */
+const isFirePotion = (i: { name: string; potion?: string }) => i.name === 'potion' && /(^|_)fire_resistance$/.test(i.potion ?? '');
+
+/** Potions of fire resistance carried and in the home chests (by their stacks, as last seen). */
+export function firePotions(items: { name: string; count: number; potion?: string }[], world: WorldMemory): number {
+  return items.filter(isFirePotion).reduce((a, i) => a + i.count, 0) + storedStacks(world, isFirePotion).reduce((a, f) => a + f.stack.count, 0);
+}
+
+/** The longest line kept of the last trip. */
+const TRIP_TEXT = 200;
+const ENDS: readonly string[] = ['clean', 'not linked', 'stranded', 'a death', 'cut short'];
+
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const posOf = (v: unknown): Pos | undefined => (isObj(v) && fin(v.x) && fin(v.y) && fin(v.z) ? { x: v.x, y: v.y, z: v.z } : undefined);
@@ -84,8 +146,11 @@ const shapeOf = (v: unknown): PortalShape | undefined => {
 /** A Nether memory as it must be, from whatever brain.json held (nothing, P2a's first `{ trips }`, or something half written). */
 function clean(raw: unknown): NetherMemory {
   const r = isObj(raw) ? raw : {};
+  const stage = fin(r.stage) && r.stage > 0 ? Math.min(Math.floor(r.stage), NETHER_STAGES.length) : 0;
   const m: NetherMemory = {
-    stage: fin(r.stage) && r.stage > 0 ? Math.floor(r.stage) : 0,
+    stage,
+    // (a stage with fewer clean trips than its own count, from a file before the ramp or a hand's edit: its count)
+    stageTrips: Math.max(tripsForStage(stage), fin(r.stageTrips) && r.stageTrips > 0 ? Math.floor(r.stageTrips) : 0),
     cleanTrips: fin(r.cleanTrips) && r.cleanTrips > 0 ? Math.floor(r.cleanTrips) : 0,
     deaths: (Array.isArray(r.deaths) ? r.deaths : []).flatMap(d => {
       const where = isObj(d) ? posOf(d.where) : undefined;
@@ -101,6 +166,19 @@ function clean(raw: unknown): NetherMemory {
   const portal = posOf(r.portal);
   if (portal) m.portal = portal;
   if (typeof r.linked === 'boolean') m.linked = r.linked;
+  const hold = r.setupHold;
+  if (isObj(hold) && fin(hold.until)) m.setupHold = { until: hold.until, why: typeof hold.why === 'string' ? hold.why : '' };
+  const spot = r.setupSpot;
+  if (isObj(spot) && posOf(spot) && (spot.axis === 'x' || spot.axis === 'z') && (spot.side === 1 || spot.side === -1) && (spot.door === 0 || spot.door === 1)) {
+    m.setupSpot = { ...posOf(spot)!, axis: spot.axis, side: spot.side, door: spot.door };
+    // (a frame's 10 at most)
+    if (fin(spot.obsidian) && Number.isInteger(spot.obsidian) && spot.obsidian >= 0 && spot.obsidian <= 10) m.setupSpot.obsidian = spot.obsidian;
+  }
+  const last = r.lastTrip;
+  if (isObj(last) && fin(last.at) && typeof last.text === 'string' && typeof last.end === 'string' && ENDS.includes(last.end)) {
+    m.lastTrip = { at: last.at, text: last.text.slice(0, TRIP_TEXT), end: last.end as TripEnd };
+  }
+  if (fin(r.regearedFor)) m.regearedFor = r.regearedFor;
   const arrival = posOf(r.arrival);
   if (arrival) m.arrival = arrival;
   if (fin(r.enteredAt)) m.enteredAt = r.enteredAt;
@@ -324,6 +402,20 @@ export function notePortals(world: WorldMemory, dimension: string, portals: Port
   (netherOf(world).seen ??= {})[dimension] = next;
 }
 
+/** A place found down there: a natural `fortress` or `bastion`, someone's `build`, a `lava` lake, the `exit` of its hut. */
+export interface NetherSite { kind: string; x: number; y: number; z: number }
+
+/**
+ * Places found down there into `world.nether.sites` (the look from its hut now; P3c's scouting later), to the block:
+ * the newest first, each in place of one of its kind within 8 of it (the same place seen again), SITES kept.
+ */
+export function noteSites(world: WorldMemory, found: NetherSite[], at: number): void {
+  const n = netherOf(world);
+  const fresh = found.map(f => ({ kind: f.kind, x: Math.floor(f.x), y: Math.floor(f.y), z: Math.floor(f.z), at }));
+  const again = (o: NetherSite) => fresh.some(f => f.kind === o.kind && Math.hypot(f.x - o.x, f.y - o.y, f.z - o.z) <= 8);
+  n.sites = [...fresh, ...n.sites.filter(o => !again(o))].slice(0, SITES);
+}
+
 // ------------------------------------------------------------------------------------------------ holds
 
 /** The death holds: a death in the Nether holds the trips an hour, two in 24 h a day, three in 3 days switch them off. */
@@ -408,14 +500,51 @@ export function netherKitDecline(s: Snapshot, who = 'nether'): Decline | null {
 
 // ------------------------------------------------------------------------------------------------ the tick
 
+/** The next stage's count in words: `1/2 clean trips to stage 1`, and the potions the last one wants; at the top, so. */
+function toNext(n: Pick<NetherMemory, 'stage' | 'stageTrips'>): string {
+  const next = NETHER_STAGES[n.stage];
+  if (!next) return 'the top stage';
+  return `${n.stageTrips}/${next.trips} clean trips to stage ${next.stage}${next.potions ? ` (and ${next.potions} potions of fire resistance in stock)` : ''}`;
+}
+
+/**
+ * A death in the Nether drops the stage by one, never below 1 once the two sides are linked (the setup is not undone:
+ * its portal stands), and the clean trips go back to that stage's own count: the next stage is earned again. Gear
+ * lost down there is not gone after (the regear wears the spare set). The line, or undefined when nothing changed.
+ */
+function dropStage(n: NetherMemory): string | undefined {
+  const from = n.stage, had = n.stageTrips;
+  const to = Math.max(n.linked === true && from >= 1 ? 1 : 0, from - 1);
+  n.stage = to;
+  n.stageTrips = tripsForStage(to);
+  if (to === from && n.stageTrips === had) return undefined;
+  return `nether: ${to === from ? `stage ${to} kept` : `stage ${from} -> ${to}`} after the death: ${toNext(n)}`;
+}
+
+/**
+ * The stage up as its clean trips (and for the last, the potions of fire resistance in stock) allow, one line a stage:
+ * only with the two sides linked (stage 0 is the setup's). `potions` is asked only when the last stage is next.
+ */
+function raiseStage(n: NetherMemory, potions: () => number): string[] {
+  const lines: string[] = [];
+  for (let next = NETHER_STAGES[n.stage]; next && n.linked === true && n.stageTrips >= next.trips; next = NETHER_STAGES[n.stage]) {
+    const have = next.potions ? potions() : 0;
+    if (next.potions && have < next.potions) break;
+    n.stage = next.stage;
+    lines.push(`nether: stage ${next.stage} after ${n.stageTrips} clean trips${next.potions ? `, ${have} potions of fire resistance in stock` : ''}`);
+  }
+  return lines;
+}
+
 /** A death as the runtime tells it: where, when (real ms), and in which dimension (an older jar: none said). */
 export interface DeathSeen { at?: { x: number; y?: number; z: number }; time: number; dimension?: string }
 
 /**
  * The Nether's housekeeping, once a tick before the brain decides (work.ts workTick calls it): a death in the Nether
- * is stamped (the holds read the stamps, a run of clean trips starts again), three in 3 days switch the trips off;
- * the first look in the Nether is where the bot came in (the way home with no portal of its own); old stamps go, and
- * the day's count with its day. Lines for the log.
+ * is stamped (the holds read the stamps, a run of clean trips starts again) and drops the stage by one, three in 3
+ * days switch the trips off; the stage goes up as its clean trips (and stock) allow; the first look in the Nether is
+ * where the bot came in (the way home with no portal of its own); old stamps go, and the day's count with its day.
+ * Lines for the log.
  */
 export function netherTick(s: Snapshot, world: WorldMemory, d: DeathSeen | undefined): string[] {
   const lines: string[] = [];
@@ -435,7 +564,10 @@ export function netherTick(s: Snapshot, world: WorldMemory, d: DeathSeen | undef
     n.cleanTrips = 0;
     fresh = true;
     lines.push(`nether: a death at nether ${fmt(where)}: no trips until ${clock(d.time + NETHER_HOLDS.afterDeathMs)}`);
+    const dropped = dropStage(n);
+    if (dropped) lines.push(dropped);
   }
+  lines.push(...raiseStage(n, () => firePotions(s.items, world)));
   const deaths = n.deaths.filter(x => s.now - x.at < NETHER_HOLDS.offWithinMs);
   if (deaths.length !== n.deaths.length) n.deaths = deaths;
   // as the third in 3 days comes, and only then: turned on again after it (the lead's call), the switch stays on
@@ -465,14 +597,41 @@ export function netherStart(world: WorldMemory, now: number): void {
 }
 
 /**
+ * A start taken back (work.ts runTask): the run never went through the portal (its kit fell short at home, the home
+ * portal not listed, no way to it on foot). The setup and the look fetch their kit inside the run, after the stamp:
+ * such a run left the yard no more than P2a's gate, which read the kit carried, let it, and costs neither the
+ * probation's hour nor one of the day's two trips.
+ */
+export function netherUnstart(world: WorldMemory, setOut: number): void {
+  const n = netherOf(world);
+  const i = n.starts.lastIndexOf(setOut);
+  if (i >= 0) n.starts.splice(i, 1);
+  const day = gameDay(world);
+  if (n.tripsToday?.day === day) {
+    if (n.tripsToday.n > 1) n.tripsToday = { day, n: n.tripsToday.n - 1 };
+    else delete n.tripsToday;
+  }
+}
+
+/** How a trip that went ended, as the wrapper saw it: when, its line, and whether it came home through a portal itself. */
+export interface TripSeen { at: number; text: string; cameBack: boolean }
+
+/**
  * A Nether trip is over: a death since it set out (in any dimension: the way to the portal is the trip's too) puts the
  * run of clean trips back to none; one that ran its course without a death counts towards the probation's three; one
- * cut short before then changes nothing.
+ * cut short before then changes nothing. With `end` (a trip that went: one that never set out has none) it is the
+ * last trip, and a clean one (home through a portal, its own run's or netherHome's; no death; the two sides linked
+ * at its end) counts for the stages: the setup that links them is the first, the look after it the second.
  */
-export function netherEnd(world: WorldMemory, startedAt: number, death: DeathSeen | undefined, ranItsCourse: boolean): void {
+export function netherEnd(world: WorldMemory, startedAt: number, death: DeathSeen | undefined, ranItsCourse: boolean, end?: TripSeen): void {
   const n = netherOf(world);
-  if (death && fin(death.time) && death.time >= startedAt) n.cleanTrips = 0;
+  const died = !!death && fin(death.time) && death.time >= startedAt;
+  if (died) n.cleanTrips = 0;
   else if (ranItsCourse) n.cleanTrips += 1;
+  if (!end) return;
+  const how: TripEnd = died ? 'a death' : !ranItsCourse ? 'cut short' : !end.cameBack ? 'stranded' : n.linked !== true ? 'not linked' : 'clean';
+  if (how === 'clean') n.stageTrips += 1;
+  n.lastTrip = { at: end.at, text: end.text.length > TRIP_TEXT ? `${end.text.slice(0, TRIP_TEXT - 3)}...` : end.text, end: how };
 }
 
 // ------------------------------------------------------------------------------------------------ home from there
@@ -601,15 +760,22 @@ export function leaveNetherGoal(): Goal {
 // ------------------------------------------------------------------------------------------------ brain-status
 
 /**
- * brain-status, `Nether:`: the switch, the stage, the clean trips, the deaths in 3 days, and the portals it knows (the
- * home portal, its own Nether side and whether the two lead to each other, the others seen). A look only.
+ * brain-status, `Nether:`: the switch; the stage and the clean trips to the next one (the probation while it lasts),
+ * the deaths in 3 days; the portals it knows (the home portal, its own Nether side and whether the two are linked),
+ * the setup's hold while it holds, the others' portals seen, the sites known; and the last trip, how it ended and its
+ * line. A look only.
  */
 export function netherLine(world: WorldMemory, now: number): string {
   const n = peekNether(world);
   const deaths = n.deaths.filter(d => now - d.at < NETHER_HOLDS.offWithinMs).length;
   const home = homePortal(world);
   const seen = Object.entries(n.seen ?? {}).map(([dim, l]) => `${l.length} in ${dim === NETHER ? 'the nether' : dim}`).join(', ');
-  return `Nether: trips ${tripsOn(world) ? 'on' : 'off'}; stage ${n.stage}, ${n.cleanTrips} clean trip(s), ${deaths} death(s) in 3 days; ` +
+  const probation = n.cleanTrips < NETHER_PROBATION.clean ? `, on probation ${n.cleanTrips}/${NETHER_PROBATION.clean}` : '';
+  const hold = n.setupHold && now < n.setupHold.until ? `; setup held until ${clock(n.setupHold.until)}: ${n.setupHold.why}` : '';
+  const t = n.lastTrip;
+  const last = t ? `; last trip ${Math.max(0, Math.round((now - t.at) / MINUTE))} min ago (${t.end}): ${t.text.replace(/(?<!\.)\.$/, '')}` : '';
+  return `Nether: trips ${tripsOn(world) ? 'on' : 'off'}; stage ${n.stage}, ${toNext(n)}${probation}, ${deaths} death(s) in 3 days; ` +
     `home portal ${home ? `overworld ${fmt(home)}` : 'none'}, nether side ${n.portal ? `nether ${fmt(n.portal)}` : 'none'}` +
-    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${seen ? `; others' portals seen: ${seen}` : ''}.`;
+    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${seen ? `; others' portals seen: ${seen}` : ''}` +
+    `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${last}.`;
 }

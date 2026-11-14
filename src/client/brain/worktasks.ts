@@ -10,7 +10,7 @@
  * this file and chores.ts, deep.ts, pens.ts and work.ts import each other.
  */
 import type { InventoryItem } from '../tools.js';
-import { nearHome, type Decline, type Snapshot } from './goals.js';
+import { nearHome, type Decline, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { freeChestTotals, key } from './chests.js';
 import { DEEP_TRIP, deepTripKit, type KitCheck } from './mine.js';
@@ -28,6 +28,8 @@ import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult
 import { leaveYard } from './yardgates.js';
 import { homePortal, tripsOn } from './portal.js';
 import { netherKitDecline, peekNether } from './nether.js';
+import { setupOpen, setupReady, setupRun } from './nethersetup.js';
+import { lookOpen, lookReady, lookRun } from './netherlook.js';
 
 const MINUTE = 60_000;
 
@@ -423,10 +425,46 @@ const tripKit: WorkTask = {
 // ------------------------------------------------------------------------------------------------ nether
 
 /**
- * The Nether rung's work, each open from a stage of the trips (`world.nether.stage`, which P2b's ramp raises): none
- * yet. P2b adds `setup` (the bot's own Nether-side portal), P3 the barter, the quartz and the rest.
+ * One kind of work down there: open from a stage of the trips (`world.nether.stage`, which P2b's ramp raises) and
+ * while `open` says so, ready as a rung's variant is (reads only), and its run (the trip itself: the wrapper takes
+ * the bot home after it).
  */
-export const NETHER_WORK: readonly { id: string; stage: number }[] = [];
+export interface NetherWork {
+  id: string;
+  stage: number;
+  open?(world: WorldMemory): boolean;
+  ready(s: Snapshot, world: WorldMemory): Decline | null;
+  run(ctx: GoalContext, budgetMs: number, now: () => number): Promise<WorkResult>;
+}
+
+/**
+ * `setup` (P2b, nethersetup.ts): the bot's own Nether-side portal, built and checked both ways, from stage 0 until the
+ * two sides are linked. Its functions are reached at the call: this module and nethersetup.ts import each other's
+ * neighbours, and nothing of theirs is read as the modules load.
+ */
+const setupWork: NetherWork = {
+  id: 'setup',
+  stage: 0,
+  open: world => setupOpen(world),
+  ready: (s, world) => setupReady(s, world),
+  run: (ctx, budgetMs, now) => setupRun(ctx, budgetMs, now)
+};
+
+/**
+ * `look` (P2b, netherlook.ts): stage 0's second trip, once the two sides are linked: through to its own hut, a look at
+ * the Nether round it (the sites), back. The setup's clean trip and the look's make the 2 that open stage 1 (nether.ts
+ * NETHER_STAGES), and the look closes with it.
+ */
+const lookWork: NetherWork = {
+  id: 'look',
+  stage: 0,
+  open: world => lookOpen(world),
+  ready: (s, world) => lookReady(s, world),
+  run: (ctx, budgetMs, now) => lookRun(ctx, budgetMs, now)
+};
+
+/** The Nether rung's work: stage 0's setup and look now; P3 adds the barter, the quartz and the rest at their stages. */
+export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork];
 
 /** The home portal is lit and the bot's own: the portal milestone is done and the portal known. */
 const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).includes('nether-portal') && !!homePortal(world);
@@ -435,8 +473,9 @@ const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).include
  * Rung 4.5 (fractional: the unblockers' rule and the order of the others are as they were). Through the home portal
  * into the Nether, for the work its stage opens (NETHER_WORK), with the Nether kit (mine.ts NETHER_TRIP) and twelve
  * slots free, home by dusk (nether.ts netherBudgetMs), held after deaths down there, on probation until three trips
- * end well, two a game day at most (work.ts). Never while the switch is off or the home portal not lit. P2a ships it
- * with no work at all: it says `nether trips are off` while the switch is off, and `no nether work yet` while on.
+ * end well, two a game day at most (work.ts). Never while the switch is off or the home portal not lit: then it says
+ * `nether trips are off`, or `no nether work yet` while no work is open (linked, and the look done or no portal of
+ * its own known; past stage 0, until P3 adds the work of the stages).
  */
 const nether: WorkTask = {
   name: 'nether',
@@ -448,15 +487,23 @@ const nether: WorkTask = {
   variants: (_s, world) => {
     if (!tripsOn(world) || !portalReady(world)) return [];
     const stage = peekNether(world).stage;
-    return NETHER_WORK.filter(v => v.stage <= stage).map(v => ({ id: v.id, dist: 0 }));
+    return NETHER_WORK.filter(v => v.stage <= stage && (v.open?.(world) ?? true)).map(v => ({ id: v.id, dist: 0 }));
   },
   none: (_s, world) => ({
     cause: 'unneeded',
     text: !tripsOn(world) ? 'nether trips are off' : portalReady(world) ? 'no nether work yet' : 'no nether work yet: the home portal is not lit'
   }),
-  ready: s => netherKitDecline(s),
-  // (no work is open yet: a run that got here never went through)
-  run: async () => ({ gain: 0, text: 'no nether work yet', untried: true })
+  // each work's own (the setup and the look fetch what the chests hold of the kit: their ready says what they do not),
+  // else the kit carried
+  ready: (s, world, variant) => {
+    const work = NETHER_WORK.find(v => v.id === variant);
+    return work ? work.ready(s, world) : netherKitDecline(s);
+  },
+  run: async (ctx, variant, budgetMs, now) => {
+    const work = NETHER_WORK.find(v => v.id === variant);
+    // (a run that got here with no such work never went through)
+    return work ? work.run(ctx, budgetMs, now) : { gain: 0, text: `no nether work ${variant}`, untried: true };
+  }
 };
 
 // ------------------------------------------------------------------------------------------------ deep

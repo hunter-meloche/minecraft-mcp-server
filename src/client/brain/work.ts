@@ -21,7 +21,7 @@ import { ZONE_MARGIN, underYard } from './underyard.js';
 import { walkHome } from './homeward.js';
 import { SIDE_STEP, outByGate, type HomeSide } from './yardgates.js';
 import { brainRun } from '../tools.js';
-import { NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, tripHold } from './nether.js';
+import { NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, netherUnstart, tripHold } from './nether.js';
 
 // (the yard's gates and the walks through them live in yardgates.ts: the walk home comes in by a gate too)
 export { CLEAR, gatesBetween, inFence, outByGate, type HomeSide, type YardGate } from './yardgates.js';
@@ -49,9 +49,12 @@ export type Reach = 'yard' | 'near' | 'far' | 'deep' | 'nether';
  * `same`, it was not looked at to its end (the run's time ran out, the pen had its pair after all), so the count
  * stays as it was; `forget`, the place is forgotten (a stand gone, or someone's), so its mark goes and none is written.
  * `upAt`: a run down the mine that ends down there: the block it stood on at the surface where it went down, which
- * the walk home comes up by first when it is near (homeward.ts walkHome).
+ * the walk home comes up by first when it is near (homeward.ts walkHome). `cameBack`: a Nether trip's run that came
+ * back into the overworld through a portal itself (the setup's check of the link, the look's way back): home through
+ * a portal as the wrapper's netherHome is, which a clean trip asks for (a death down there wakes the bot in the
+ * overworld too, and is none).
  */
-export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget'; upAt?: Pos }
+export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget'; upAt?: Pos; cameBack?: true }
 
 export interface WorkTask {
   name: string;
@@ -723,6 +726,8 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
   let deepOut = false;
   let netherOut = false;
   let ranItsCourse = false;
+  /** a Nether trip's end as the wrapper saw it (none for one that never went: an untried run is no trip) */
+  const trip: { variant?: string; text?: string; cameBack: boolean; untried: boolean } = { cameBack: false, untried: false };
   /** the bot was seen home (or walked there) at the run's end */
   let home = false;
   current = { task, token };
@@ -732,6 +737,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     const c = pick(task, ctx.s, ctx.world);
     if ('decline' in c) return `nothing to do after all (${c.decline.cause}: ${c.decline.text})`;
     const { variant, dist } = c;
+    trip.variant = variant;
     const key = `${task.name}:${variant}`;
     // the put-away may have taken minutes and changed what is carried: from here on it is the fresh look that counts
     const s = await makeRoom(ctx, task.room);
@@ -777,6 +783,8 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     if (ctx.signal.aborted) throw new Error('aborted');
     // (a trip that never got to the work did not run its course: it never went down)
     ranItsCourse = !r.untried;
+    trip.text = `[${variant}] ${r.text}`;
+    trip.untried = !!r.untried;
 
     // the task stays where its work ended: the way home is the wrapper's, once, for every task. Home is on its level:
     // down the mine under the yard's edge, 10 from home across the ground, is no end of the walk home. Looked at
@@ -788,6 +796,12 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     try {
       const st = await ctx.status();
       inNether = (st.dimension ?? s.home?.dimension) === NETHER;
+      // (back through a portal by its own run, and seen out of the Nether: a death wakes it at home with no portal)
+      trip.cameBack = !!r.cameBack && !inNether;
+      // a Nether run that never went through (its kit fetched at home fell short, the home portal not listed): seen
+      // in the overworld, its start is taken back. Stamped before the run, it held the next for the probation's hour
+      // and took one of the day's two, though the bot never left the yard
+      if (netherOut && r.untried && !inNether) { netherUnstart(ctx.world, setOut); writes++; }
       if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) {
         away = !nearHomeAt(st.position, s.home, NEAR_HOME);
         under = underYard(st.position, s.home, ctx.world.yard);
@@ -846,7 +860,11 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
         throw ctx.signal.aborted ? cut() : e;
       }
       if (ctx.signal.aborted) throw cut();
-      if (!back.ok) throw new Error(`${text}, but could not get home: ${back.text}`);
+      if (!back.ok) {
+        trip.text = `${text}, but could not get home: ${back.text}`;
+        throw new Error(trip.text);
+      }
+      trip.cameBack = true;
     }
     let h: { ok: boolean; text: string };
     try {
@@ -868,8 +886,15 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // Cut short out there (retreat, shelter), the trip stays open until the bot is seen home: the death that follows
     // a few seconds on the walk up is the trip's too (workTick)
     if (deepOut) { try { deepEnd(ctx.world, startedAt, lastDeath(), ranItsCourse, home ? undefined : now()); } catch { /* the flags below matter more */ } }
-    // a Nether trip the same way: a death since it set out (down there or on the way) ends its run of clean trips
-    if (netherOut) { try { netherEnd(ctx.world, startedAt, lastDeath(), ranItsCourse); writes++; } catch { /* the flags below matter more */ } }
+    // a Nether trip the same way: a death since it set out (down there or on the way) ends its run of clean trips; one
+    // that went is the last trip, and home through a portal, linked, with no death, it counts for the stages
+    if (netherOut) {
+      try {
+        const end = trip.untried ? undefined : { at: now(), text: trip.text ?? `[${trip.variant ?? task.name}] stopped before its end`, cameBack: trip.cameBack };
+        netherEnd(ctx.world, startedAt, lastDeath(), ranItsCourse, end);
+        writes++;
+      } catch { /* the flags below matter more */ }
+    }
     if (current?.token === token) clearOut();
   }
 }

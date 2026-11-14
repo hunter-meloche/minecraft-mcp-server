@@ -249,9 +249,9 @@ test('the Nether kit: whole and fed, 40 food points, the golden helmet, a shield
 
 // ------------------------------------------------------------------------------------------------ the rung
 
-test('the nether rung: 4.5 between the trip kit and the deep rung, with no work yet; it says the switch is off, or that there is no work, and never wants', (t) => {
+test('the nether rung: 4.5 between the trip kit and the deep rung, its work the setup and the look (P2b); it says the switch is off, what the setup\'s kit is short of, or that there is no work once linked, and never wants', (t) => {
   t.deepEqual(LADDER.map(r => `${r.name} ${r.rank}`), ['cane patch 1', 'cows 2', 'cane 3', 'trip kit 4', 'nether 4.5', 'deep 5', 'surface 6']);
-  t.deepEqual(NETHER_WORK, []);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0']);
   const goals = workGoals(() => undefined, LADDER, () => T0);
   const rung = goals.find(g => g.name === 'work: nether')!;
   // the others keep their places (the deep rung 14, the unblockers 17 and 16)
@@ -262,8 +262,12 @@ test('the nether rung: 4.5 between the trip kit and the deep rung, with no work 
   const half = portalWorld(true);
   half.progress!.done = half.progress!.done.filter(d => d !== 'nether-portal');
   t.deepEqual(rung.declines!(s, half), { cause: 'unneeded', text: 'no nether work yet: the home portal is not lit' });
-  t.deepEqual(rung.declines!(s, portalWorld(true)), { cause: 'unneeded', text: 'no nether work yet' });
-  for (const w of [liveWorld(), portalWorld(false), half, portalWorld(true)]) t.is(rung.wants(s, w), null);
+  // the setup's kit: none of the golden helmet, the flint and steel or the frame's obsidian in these chests
+  t.deepEqual(rung.declines!(s, portalWorld(true)), { cause: 'kit', text: 'setup: short of a golden helmet, flint and steel, 10 obsidian (carried or in the chests)' });
+  const linked = portalWorld(true);
+  netherOf(linked).linked = true;
+  t.deepEqual(rung.declines!(s, linked), { cause: 'unneeded', text: 'no nether work yet' });
+  for (const w of [liveWorld(), portalWorld(false), half, portalWorld(true), linked]) t.is(rung.wants(s, w), null);
 });
 
 // ------------------------------------------------------------------------------------------------ the run wrapper
@@ -584,19 +588,19 @@ test('its own portals: the home portal and its Nether side, for portal.own; othe
   t.like(netherOf(old), { trips: true, stage: 0, cleanTrips: 0, deaths: [], starts: [], sites: [] });
 });
 
-test('brain-status\'s Nether line: the switch, stage, clean trips, deaths in 3 days, the portals and whether they are linked', (t) => {
+test('brain-status\'s Nether line: the switch, the stage and the clean trips to the next (the probation while it lasts), deaths in 3 days, the portals and whether they are linked', (t) => {
   const world = portalWorld();
-  t.is(netherLine(world, T0), 'Nether: trips off; stage 0, 0 clean trip(s), 0 death(s) in 3 days; home portal overworld (-562, 63, 2191), nether side none.');
+  t.is(netherLine(world, T0), 'Nether: trips off; stage 0, 0/2 clean trips to stage 1, on probation 0/3, 0 death(s) in 3 days; home portal overworld (-562, 63, 2191), nether side none.');
   const n = netherOf(world);
   n.trips = true;
   n.cleanTrips = 2;
   n.deaths.push({ at: T0 - DAY, where: { ...DOWN } }, { at: T0 - 4 * DAY, where: { ...DOWN } });
   n.portal = { x: -71, y: 63, z: 273 };
   n.seen = { [NETHER]: [COMMUNITY_NETHER] };
-  t.is(netherLine(world, T0), 'Nether: trips on; stage 0, 2 clean trip(s), 1 death(s) in 3 days; home portal overworld (-562, 63, 2191), nether side nether (-71, 63, 273) (not linked); others\' portals seen: 1 in the nether.');
+  t.is(netherLine(world, T0), 'Nether: trips on; stage 0, 0/2 clean trips to stage 1, on probation 2/3, 1 death(s) in 3 days; home portal overworld (-562, 63, 2191), nether side nether (-71, 63, 273) (not linked); others\' portals seen: 1 in the nether.');
   n.linked = true;
   t.regex(netherLine(world, T0), /nether side nether \(-71, 63, 273\) \(linked\)/);
-  t.is(netherLine(liveWorld(), T0), 'Nether: trips off; stage 0, 0 clean trip(s), 0 death(s) in 3 days; home portal none, nether side none.');
+  t.is(netherLine(liveWorld(), T0), 'Nether: trips off; stage 0, 0/2 clean trips to stage 1, on probation 0/3, 0 death(s) in 3 days; home portal none, nether side none.');
 });
 
 test('the nether-trips switch on the brain: said in the log with who turned it, kept in the world\'s memory, shown in brain-status', async (t) => {
