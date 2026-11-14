@@ -176,11 +176,14 @@ export const enchantGoal: Goal = {
     await ctx.act('move-to-position', { ...table, range: 2, timeoutMs: 60_000 });
     try {
       await ctx.call('enchant.open', { ...table });
-      await ctx.call('enchant.put', { name: piece.name });
-      await ctx.call('enchant.put', { name: 'lapis_lazuli' });
-      const st = await ctx.call<{ offers: { slot: number; cost: number; enchant: string | null }[]; level?: number }>('enchant.status');
+      // one put: the piece (from its own slot: with two pickaxes, the first by name may be the enchanted one) and the
+      // lapis with it. A second put of 'lapis_lazuli' took the piece back out and set one lapis in the item slot: 27
+      // tries in a day, "no offer for the diamond_sword" every time, and it ping-ponged with signs and sort
+      const st = await ctx.call<{ offers: { slot: number; cost: number; enchant: string | null }[]; enchantable?: boolean; put?: string }>(
+        'enchant.put', { name: piece.name, slot: piece.slot, lapis: 3 });
       const offer = [...st.offers].filter(o => o.cost > 0 && o.cost <= (ctx.s.xpLevel ?? 0)).sort((a, b) => b.cost - a.cost)[0];
-      if (!offer) return `no offer for the ${piece.name} (are the shelves in place?)`;
+      // a failure, not a done: it holds for retryMs instead of coming back every few seconds
+      if (!offer) throw new Error(`no offer for the ${st.put ?? piece.name}${st.enchantable === false ? ' (not enchantable)' : ''}`);
       const r = await ctx.call<{ ok: boolean; enchantments?: { name: string; level: number }[]; reason?: string }>('enchant.choose', { slot: offer.slot }, 15_000);
       if (!r.ok) throw new Error(r.reason ?? 'not enchanted');
       return `enchanted the ${piece.name}: ${(r.enchantments ?? []).map(e => `${e.name} ${e.level}`).join(', ')}`;

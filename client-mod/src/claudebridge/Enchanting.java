@@ -108,7 +108,9 @@ public final class Enchanting {
             return BridgeServer.LATER;
         });
 
-        // put an item (one) into the table and top the lapis slot up (to `lapis`, default 3), then read the offers
+        // put an item (one; from inventory index `slot` if given and it holds that item) into the table and top the
+        // lapis slot up (to `lapis`, default 3), then read the offers. Lapis goes in here: a second put of lapis_lazuli
+        // would clear the item slot and set lapis in it
         s.register("enchant.put", true, (p, c) -> {
             LocalPlayer pl = player();
             EnchantmentMenu menu = menu();
@@ -121,6 +123,10 @@ public final class Enchanting {
             if (!menu.getSlot(ITEM).getItem().isEmpty()) click(menu, ITEM, 0, ContainerInput.QUICK_MOVE);
             if (!menu.getSlot(ITEM).getItem().isEmpty()) throw new IllegalStateException("could not clear the item slot (inventory full?)");
             i = Interact.find(pl.getInventory(), name); // the slot may have moved if it was the one just taken out
+            // `slot` (inventory index 0-35) picks one of several by the same name: the first diamond_pickaxe by name
+            // may be the one already enchanted, which gets no offers
+            int want = intParam(p, "slot", -1);
+            if (want >= 0 && want < 36 && Names.item(pl.getInventory().getItem(want)).equals(name)) i = want;
             if (i < 0 || i > 35) throw new IllegalArgumentException("no " + name + " in inventory");
             String put = Names.item(pl.getInventory().getItem(i));
             int source = Interact.containerMenuSlot(OWN_SLOTS, i);
