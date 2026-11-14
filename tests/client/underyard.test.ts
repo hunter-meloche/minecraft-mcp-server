@@ -1,7 +1,9 @@
 import test from 'ava';
 import { Brain, decide } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime, type InventoryItem } from '../../src/client/tools.js';
-import { ABOVE_HOME, BELOW_HOME, breakOut, nearHome, nearHomeAt, no, onHomeLevel, resetBreakOut, shelterGoal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
+import { ABOVE_HOME, BELOW_HOME, breakOut, nearHome, nearHomeAt, no, onHomeLevel, resetBreakOut, returnIdle, shelterGoal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
+import { retreat } from '../../src/client/brain/food.js';
+import { walkHome } from '../../src/client/brain/homeward.js';
 import { bedGoal } from '../../src/client/brain/home.js';
 import { signsGoal } from '../../src/client/brain/signs.js';
 import { repairGoal } from '../../src/client/brain/repair.js';
@@ -942,8 +944,11 @@ test.serial('a night walled in under the yard: once out from under has dug it ou
   const shelter = shelterGoal();
   const night = () => lookAt(HAUL, 15_000, { position: rock.centre(), distHome: across(rock.bot) });
   t.is(shelter.wants(night(), world), 'night: get home');
-  // while out from under waits out its hold: the walk home stops in a second down here, and the night is spent in a box
-  t.is(await shelter.run(ctxIn(rock, { timeOfDay: 15_000, activity: 'rest' }).ctx), 'could not get home at night (Stopped 57 blocks from home after 1s); Walled in at (-534, 8, 2182)');
+  // while out from under waits out its hold: no walk home sets out from down here (go-home stops in a second under
+  // the yard: homeward.ts leaves it to out from under), and the night is spent in a box
+  const held = ctxIn(rock, { timeOfDay: 15_000, activity: 'rest' });
+  t.is(await shelter.run(held.ctx), 'could not get home at night (under the yard at (-534, 8, 2182): out from under digs out to the side first); Walled in at (-534, 8, 2182)');
+  t.deepEqual(held.tools, ['wall-in']);
   t.is(shelter.wants(night(), world), null, 'holed up where it walled in');
   // out from under digs through that wall by night as well, and comes up 9 past the fence
   t.regex(await outFromUnder.run(ctxIn(rock, { timeOfDay: 15_000, activity: 'rest' }).ctx), /climbed to \(-524, 69, 2182\)$/);
@@ -951,4 +956,287 @@ test.serial('a night walled in under the yard: once out from under has dug it ou
   t.is(shelter.wants(night(), world), 'night: get home');
   // by day the box is forgotten as before
   t.is(shelter.wants(lookAt(HAUL, 3000, { position: rock.centre(), distHome: across(rock.bot) }), world), null);
+});
+
+// ------------------------------------------------------------------------------------------------ the walk home from deep down
+
+/**
+ * Nov 13, 21:28Z: a deep trip for gold was cut short by break out at (-517, -45, 2089), 96 out and 113 under the hill
+ * east of the yard; the walk back to the yard (`idle`) set out from there with go-home, and at 21:30 the bot stood 53
+ * under the yard at (-536, 9, 2179): out from under again. The fakes are the rock above (its hill at 68 past the
+ * margin) with go-home as Baritone walked it that day: from more than 8 below home's level its legs "at any height"
+ * run under the ground straight for home into the yard's column (the live end of that walk, 'Stopped 57 blocks'),
+ * from the surface it gets home; Baritone's own goto (not careful) gets to the block asked for, or as `lost` says not.
+ */
+const FAR: Pos = { x: -517, y: -45, z: 2089 };
+/** The mine start the live trips set out from, east of the yard. */
+const MINE: Pos = { x: -493, y: 63, z: 2183 };
+const deepWorld = (): WorldMemory => { const w = liveWorld(); w.zones = { ...w.zones, mine: [{ ...MINE }] }; return w; };
+/** The bot in a cell 2 high in the rock (the pocket a wall-in left, dug open). */
+const deepAt = (p: Pos): Rock => { const r = new Rock(p); r.set(p, 'air'); r.set({ ...p, y: p.y + 1 }, 'air'); return r; };
+
+function walkingHome(rock: Rock, over: Partial<Snapshot> = {}, world: WorldMemory = deepWorld(), opts: { lost?: boolean; zones?: unknown[] | 'fail' } = {}) {
+  const r = ctxIn(rock, over, world);
+  /** every place the bot stood after each step it took */
+  const stood: Pos[] = [];
+  const walks: string[] = [];
+  const act = r.ctx.act, call = r.ctx.call;
+  r.ctx.act = async (tool, a = {}) => {
+    if (tool !== 'go-home') {
+      try { return await act(tool, a); } finally { stood.push({ ...rock.bot }); }
+    }
+    r.tools.push(tool);
+    const down = rock.bot.y < HOME.y - BELOW_HOME;
+    rock.bot = down ? { x: -536, y: 9, z: 2179 } : { ...HOME };
+    stood.push({ ...rock.bot });
+    return down ? { ok: false, text: 'Stopped 57 blocks from home after 1s' } : { ok: true, text: 'Home' };
+  };
+  r.ctx.call = (async (method: string, p: Record<string, unknown> = {}) => {
+    if (method === 'foreign.zones') {
+      if (opts.zones === 'fail') throw new Error('timeout');
+      return { zones: opts.zones ?? [] };
+    }
+    if (method !== 'goto' || p.careful) return call(method, p);
+    walks.push(`goto ${p.x},${p.y},${p.z} range ${p.range}`);
+    if (opts.lost) return { arrived: false };
+    rock.bot = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+    stood.push({ ...rock.bot });
+    return { arrived: true };
+  }) as GoalContext['call'];
+  return { ...r, stood, walks };
+}
+const underIt = (ps: Pos[], world: WorldMemory) => ps.filter(p => underYard(p, HOME, world.yard));
+
+test.serial('the walk back to the yard from deep under ground climbs out where it stands first, and never goes under the yard (live: cut short at (-517, -45, 2089), it walked to 53 under the yard)', async (t) => {
+  const world = deepWorld();
+  t.is(returnIdle.wants(lookIn(deepAt(FAR)), world), 'nothing to do out here: back to the yard');
+  // as it was: go-home from down there ends 53 under the yard
+  const before = walkingHome(deepAt(FAR), {}, world);
+  await before.ctx.act('go-home');
+  t.deepEqual(underIt(before.stood, world), [{ x: -536, y: 9, z: 2179 }]);
+  // now: up through the hill where it stands (past the margin, where Baritone may dig), then home over the surface.
+  // The mine start is 97 off across the ground: straight up, not the walk back to it
+  const rock = deepAt(FAR);
+  const r = walkingHome(rock, {}, world);
+  t.is(await returnIdle.run(r.ctx), 'back home');
+  t.deepEqual(r.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(rock.climbed, [{ x: -517, y: 69, z: 2089 }]);
+  t.deepEqual(r.said, ['113 under the ground at (-517, -45, 2089): up to the surface at (-517, 69, 2089) before the walk home', 'climbed to (-517, 69, 2089)']);
+  t.deepEqual(r.walks, []);
+  t.deepEqual(r.stood, [{ x: -517, y: 69, z: 2089 }, { ...HOME }]);
+  t.deepEqual(underIt(r.stood, world), []);
+  // the retreat's walk home (hurt, the same place) climbs out the same way
+  const hurt = deepAt(FAR);
+  const h = walkingHome(hurt, { health: 8 }, world);
+  t.is(await retreat.run(h.ctx), 'home to heal');
+  t.deepEqual(h.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(underIt(h.stood, world), []);
+  // and the shelter's evening walk, from where the climb comes up before dark (20 under the hill: some 20 s up, by
+  // time of day 11 920; from 113 under it would come up after dark: the next test)
+  const dusk = deepAt({ x: -517, y: 48, z: 2089 });
+  const e = walkingHome(dusk, { timeOfDay: 11_500, activity: 'return' }, world);
+  t.deepEqual(await walkHome(e.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.deepEqual(e.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(dusk.climbed, [{ x: -517, y: 69, z: 2089 }]);
+});
+
+test.serial('the climb out comes up before dark or is not made: from 113 under at dusk the shelter walls in down there; a run that ends at its budget still climbs; the hour is the one where the climb starts', async (t) => {
+  const world = deepWorld();
+  // the shelter at 11 000, from the live spot: some 2 minutes up would come out at 13 280, at night, 96 out with the
+  // walk home over the surface still to come. Walled in down there instead (thrown, three tries would hold the shelter
+  // until the morning and the bot would stand in the open cave all night)
+  const evening = walkingHome(deepAt(FAR), { timeOfDay: 11_000, activity: 'return' }, world);
+  t.is(await shelterGoal().run(evening.ctx), 'could not get home before dark (113 under the ground at (-517, -45, 2089): no climb to the surface this late (it would come up after dark: the walk home climbs out by day)); Walled in at (-517, -45, 2089)');
+  t.deepEqual(evening.tools, ['wall-in']);
+  // late in the afternoon the walk back to the yard does not set out either (the shelter has it at 11 000)
+  const late = walkingHome(deepAt(FAR), { timeOfDay: 10_500 }, world);
+  await t.throwsAsync(returnIdle.run(late.ctx), { message: /: no climb to the surface this late/ });
+  t.deepEqual(late.tools, []);
+  // a work run that mined to its budget ends at 8 600: up by 10 880, and home
+  const budget = walkingHome(deepAt(FAR), { timeOfDay: 8600 }, world);
+  t.deepEqual(await walkHome(budget.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } }), { ok: true, text: 'Home' });
+  t.deepEqual(budget.tools, ['move-to-position', 'go-home']);
+  // the way back that did not get there took the rest of the afternoon (9 000 when it set out, 11 400 after): the
+  // climb from where it stands would come up at 13 180, and is not made
+  const lost = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), { timeOfDay: 9000 }, world, { lost: true });
+  const status = lost.ctx.status;
+  lost.ctx.status = async () => ({ ...(await status()), timeOfDay: lost.walks.length ? 11_400 : 9000 });
+  t.like(await walkHome(lost.ctx, { timeoutMs: 600_000 }), { ok: false, night: true });
+  t.deepEqual(lost.walks, ['goto -493,69,2183 range 1']);
+  t.deepEqual(lost.tools, []);
+});
+
+test.serial('on the surface the walk home is go-home as it always was, and so it is a little under it', async (t) => {
+  const world = deepWorld();
+  // out on the hill east of the yard, on the lawn, and in a hollow 5 under the hill on home's level
+  for (const at of [{ x: -460, y: 69, z: 2183 }, { x: -540, y: 63, z: 2150 }, { x: -460, y: 63, z: 2183 }]) {
+    const r = walkingHome(deepAt(at), {}, world);
+    t.deepEqual(await walkHome(r.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' }, `${at.x}, ${at.y}, ${at.z}`);
+    t.deepEqual(r.tools, ['go-home']);
+    t.deepEqual(r.said, []);
+    t.deepEqual(r.walks, []);
+  }
+  // 9 under the hill's top, though on home's level, is under ground: up where it stands (73 from the mine start)
+  const under = walkingHome(deepAt({ x: -420, y: 59, z: 2183 }), {}, world);
+  await walkHome(under.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(under.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(under.said[0], '9 under the ground at (-420, 59, 2183): up to the surface at (-420, 69, 2183) before the walk home');
+});
+
+test.serial('within 64 of where it went down, the way back is the way it came: to the mine start, or the block the trip stood on there; never across the yard\'s column', async (t) => {
+  // 24 from the mine start across the ground, 88 under the hill: up the way it came, the block over the ground there
+  const world = deepWorld();
+  const near = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), {}, world);
+  t.deepEqual(await walkHome(near.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.deepEqual(near.walks, ['goto -493,69,2183 range 1']);
+  t.deepEqual(near.said, ['back to the mine start (-493, 69, 2183) before the walk home']);
+  t.deepEqual(near.tools, ['go-home']);
+  // the trip's own `upAt` when the run knows it, within 64
+  const trip = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), {}, world);
+  await walkHome(trip.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } });
+  t.deepEqual(trip.walks, ['goto -492,69,2184 range 1']);
+  t.deepEqual(trip.said, ['up where it went down, (-492, 69, 2184), before the walk home']);
+  // further than 64 (the live case's 97): straight up where it stands, the trip's `upAt` or not
+  const far = walkingHome(deepAt(FAR), {}, world);
+  await walkHome(far.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } });
+  t.deepEqual(far.walks, []);
+  t.deepEqual(far.tools, ['move-to-position', 'go-home']);
+  // and where no climb can be made (water over its head), toward where the trip went down all the same, as every walk
+  // home after a trip did, before go-home's walk; never across the yard's column (a way down west of the yard, 80 off)
+  const wet = deepAt(FAR);
+  wet.set({ x: FAR.x, y: 64, z: FAR.z }, 'water');
+  const toward = walkingHome(wet, {}, world);
+  t.deepEqual(await walkHome(toward.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } }), { ok: true, text: 'Home' });
+  t.deepEqual(toward.walks, ['goto -492,69,2184 range 1']);
+  t.deepEqual(toward.tools, ['go-home']);
+  t.deepEqual(toward.said, ['no climb from (-517, -45, 2089): water over its head at (-517, 64, 2089); the walk home as it goes', 'up where it went down, (-492, 69, 2184), before the walk home']);
+  t.deepEqual(underIt(toward.stood, world), []);
+  const east = deepAt({ x: -520, y: -20, z: 2160 });
+  east.set({ x: -520, y: 64, z: 2160 }, 'water');
+  const over = walkingHome(east, {}, world);
+  await walkHome(over.ctx, { timeoutMs: 600_000, upAt: { x: -600, y: 63, z: 2160 } });
+  t.deepEqual(over.walks, []);
+  t.deepEqual(over.tools, ['go-home']);
+  // the mine start's own column dug open from the sky down to y 10 (a trip cut short never came back up its shaft):
+  // the shaft's floor is no surface to walk home from (go-home from there runs under the ground into the column). Up
+  // where the bot stands instead
+  const shaft = deepAt({ x: -500, y: -20, z: 2160 });
+  for (let y = 10; y <= 70; y++) shaft.set({ x: MINE.x, y, z: MINE.z }, 'air');
+  const pit = walkingHome(shaft, {}, world);
+  t.deepEqual(await walkHome(pit.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.deepEqual(pit.walks, []);
+  t.deepEqual(pit.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(underIt(pit.stood, world), []);
+  // the way back not found: up from where it stands
+  const lost = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), {}, world, { lost: true });
+  t.deepEqual(await walkHome(lost.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.deepEqual(lost.walks, ['goto -493,69,2183 range 1']);
+  t.deepEqual(lost.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(underIt(lost.stood, world), []);
+  // a mine start whose straight way runs under the yard (west of it, the bot 7 past its east margin): straight up
+  const west = deepWorld();
+  west.zones!.mine = [{ x: -578, y: 63, z: 2160 }];
+  const across = walkingHome(deepAt({ x: -520, y: -20, z: 2160 }), {}, west);
+  await walkHome(across.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(across.walks, []);
+  t.deepEqual(across.tools, ['move-to-position', 'go-home']);
+  t.deepEqual(underIt(across.stood, west), []);
+});
+
+test.serial('the climb out is never made into danger: not at night (the shelter walls in down there), not with lava or water over its head, not in them, not under someone\'s build; and under the yard it is out from under\'s', async (t) => {
+  const world = deepWorld();
+  // night: no climb and no walk, and the shelter spends the night walled in where the bot stands
+  const night = walkingHome(deepAt(FAR), { timeOfDay: 15_000, activity: 'rest' }, world);
+  t.is(await shelterGoal().run(night.ctx), 'could not get home at night (113 under the ground at (-517, -45, 2089): no climb to the surface at night (the walk home climbs out by day)); Walled in at (-517, -45, 2089)');
+  t.deepEqual(night.tools, ['wall-in']);
+  // night as the bot sees it now, whatever the run's look from the morning said (a thunderstorm counts as night too)
+  for (const look of [{ timeOfDay: 13_500 }, { timeOfDay: 3000, thundering: true }]) {
+    const late = walkingHome(deepAt(FAR), {}, world);
+    const status = late.ctx.status;
+    late.ctx.status = async () => ({ ...(await status()), ...look });
+    t.like(await walkHome(late.ctx, { timeoutMs: 600_000 }), { ok: false });
+    t.deepEqual(late.tools, []);
+  }
+  // lava or water over its head: no climb up into it, and the walk home as before (which out here is go-home's way)
+  for (const [liquid, y] of [['lava', 30], ['water', 64]] as const) {
+    const rock = deepAt(FAR);
+    rock.set({ x: FAR.x, y, z: FAR.z }, liquid);
+    const r = walkingHome(rock, {}, world);
+    await walkHome(r.ctx, { timeoutMs: 600_000 });
+    t.deepEqual(r.tools, ['go-home'], liquid);
+    t.deepEqual(rock.climbed, []);
+    t.deepEqual(r.said, [`no climb from (-517, -45, 2089): ${liquid} over its head at (-517, ${y}, 2089); the walk home as it goes`]);
+  }
+  // in water or lava: getting out of it is the walk's (as it was)
+  for (const st of [{ underWater: true }, { inLava: true }]) {
+    const r = walkingHome(deepAt(FAR), {}, world);
+    const status = r.ctx.status;
+    r.ctx.status = async () => ({ ...(await status()), ...st });
+    await walkHome(r.ctx, { timeoutMs: 600_000 });
+    t.deepEqual(r.tools, ['go-home']);
+    t.regex(r.said[0], /^113 under the ground at \(-517, -45, 2089\), in (water|lava): no climb from there, the walk home as it goes$/);
+    // at night too: walled in where it floats, the bot would stay in it (the wall-in leaves its own cells as they
+    // are, and roofs it over). go-home first, and a wall-in only where that stopped, as before
+    const dark = walkingHome(deepAt(FAR), { timeOfDay: 15_000, activity: 'rest' }, world);
+    const look = dark.ctx.status;
+    dark.ctx.status = async () => ({ ...(await look()), timeOfDay: 15_000, ...st });
+    t.is(await shelterGoal().run(dark.ctx), 'could not get home at night (Stopped 57 blocks from home after 1s); Walled in at (-536, 9, 2179)');
+    t.deepEqual(dark.tools, ['go-home', 'wall-in']);
+  }
+  // someone else's house on the hill over it: no climb up under it; 20 off, the climb as ever
+  const house = { x1: -521, y1: 68, z1: 2086, x2: -512, y2: 74, z2: 2094, surface: true, sample: 'oak_planks' };
+  const theirs = walkingHome(deepAt(FAR), {}, world, { zones: [house] });
+  await walkHome(theirs.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(theirs.tools, ['go-home']);
+  t.deepEqual(theirs.said, ['no climb from (-517, -45, 2089): someone else\'s build over it (oak_planks); the walk home as it goes']);
+  const off = walkingHome(deepAt(FAR), {}, world, { zones: [{ ...house, x1: -497, x2: -490 }] });
+  await walkHome(off.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(off.tools, ['move-to-position', 'go-home']);
+  // someone's cellar under ground (or an old mineshaft they dug out): only where the climb's column, or 1 round it,
+  // goes through it. 2 off, the climb goes by it; the same 2 off on the surface is too near
+  const cellar = { x1: -518, y1: 0, z1: 2088, x2: -516, y2: 10, z2: 2090, surface: false, sample: 'oak_planks' };
+  const down = walkingHome(deepAt(FAR), {}, world, { zones: [cellar] });
+  await walkHome(down.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(down.tools, ['go-home']);
+  t.deepEqual(down.said, ['no climb from (-517, -45, 2089): someone else\'s build over it (oak_planks); the walk home as it goes']);
+  const beside = walkingHome(deepAt(FAR), {}, world, { zones: [{ ...cellar, x1: -515, x2: -513 }] });
+  await walkHome(beside.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(beside.tools, ['move-to-position', 'go-home']);
+  const besideUp = walkingHome(deepAt(FAR), {}, world, { zones: [{ ...cellar, x1: -515, y1: 68, x2: -513, y2: 74, surface: true }] });
+  await walkHome(besideUp.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(besideUp.tools, ['go-home']);
+  // no look at anyone's builds: no climb (it might be up under one), and the walk home as it goes
+  const blind = walkingHome(deepAt(FAR), {}, world, { zones: 'fail' });
+  await walkHome(blind.ctx, { timeoutMs: 600_000 });
+  t.deepEqual(blind.tools, ['go-home']);
+  t.deepEqual(blind.said, ['no climb from (-517, -45, 2089): could not look for anyone\'s build over it; the walk home as it goes']);
+  // under the yard: no walk at all, and no climb (up through the lawn): out from under digs out to the side
+  const pocket = walkingHome(livePocket(), {}, world);
+  t.deepEqual(await walkHome(pocket.ctx, { timeoutMs: 600_000 }), { ok: false, text: 'under the yard at (-534, 8, 2182): out from under digs out to the side first' });
+  t.deepEqual(pocket.tools, []);
+});
+
+test.serial('by the yard the climb out fills the top of the stair it came up by, as out from under does; further out it is left (a fill there would be what the bot built, and Baritone would break no dirt round it)', async (t) => {
+  const world = deepWorld();
+  // 1 past the east margin (7 from the fence), on the walks' way to the east gate, 71 from the mine start: straight
+  // up by a stair, whose top steps lead down from the hill's ground (68) to where the bot was
+  const by = deepAt({ x: -526, y: -20, z: 2120 });
+  const stair = stairUp(by, RING_2X3);
+  const r = walkingHome(by, {}, world);
+  t.deepEqual(await walkHome(r.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.true(stair.before.length > 0);
+  // (in the margin, x -527 and on, the ground is the lawn's at 62: the hill's 68 is open air there)
+  t.deepEqual(waysDown(by, { x: -526, z: 2120 }, 68).filter(p => !by.inZone(p)), []);
+  t.true(by.placed.length > 0 && by.placed.every(p => !by.inZone(p.at) && p.item === 'dirt'));
+  t.is(r.said.at(-1), 'filled the top of its shaft with dirt: (-525, 67, 2120), (-525, 68, 2120), (-525, 67, 2119), (-525, 68, 2119)');
+  t.deepEqual(r.tools, ['move-to-position', ...by.placed.map(() => 'place-block'), 'go-home']);
+  // the live spot, 10 past the margin: the same stair is left as it is, nothing placed and nothing said of it
+  const far = deepAt(FAR);
+  const left = stairUp(far, RING_2X3);
+  const f = walkingHome(far, {}, world);
+  t.deepEqual(await walkHome(f.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.true(left.before.length > 0);
+  t.deepEqual(far.placed, []);
+  t.deepEqual(f.tools, ['move-to-position', 'go-home']);
+  t.is(f.said.length, 2);
 });

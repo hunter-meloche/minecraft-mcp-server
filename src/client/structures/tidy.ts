@@ -19,9 +19,9 @@ export const THROWAWAY = /^(minecraft:)?(cobblestone|cobbled_deepslate|netherrac
 const NATURAL = /^(minecraft:)?(andesite|diorite|granite|tuff)$/;
 const AIR = /^(minecraft:)?(air|cave_air|void_air)$/;
 /** hung on the side of a block */
-const SIDE_ATTACHED = /(wall_torch|wall_sign|wall_hanging_sign|wall_banner|ladder|_button|lever|tripwire_hook)/;
+export const SIDE_ATTACHED = /(wall_torch|wall_sign|wall_hanging_sign|wall_banner|ladder|_button|lever|tripwire_hook)/;
 /** hanging under a block */
-const HANGS = /(lantern|chain|vine|hanging_sign|pointed_dripstone|spore_blossom|hanging_roots)/;
+export const HANGS = /(lantern|chain|vine|hanging_sign|pointed_dripstone|spore_blossom|hanging_roots)/;
 
 /** How far round the structure's box it looks: Baritone's pillars and bridges stand round the site, not only in it. */
 export const TIDY_MARGIN = 6;

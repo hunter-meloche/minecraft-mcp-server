@@ -5,6 +5,8 @@ import type { Pos, WorldMemory } from './memory.js';
 import type { IdleCause } from './idlelog.js';
 // (underyard.ts takes BELOW_HOME from here: each uses the other's exports inside functions only)
 import { underNow } from './underyard.js';
+// (homeward.ts takes BELOW_HOME from here too, and the walk home is used inside the runs only)
+import { walkHome } from './homeward.js';
 
 /** What the brain knows at one moment: read fresh each tick. */
 export interface Snapshot {
@@ -406,11 +408,14 @@ export function shelterGoal(): Goal {
     run: async ctx => {
       const did: string[] = [];
       if (!nearHome(ctx.s, AT_HOME)) {
-        const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
+        // up out of a mine first, by day and in the evening; deep down at night it does not climb (walkHome), nor in
+        // the evening when the climb would come up after dark (`night`), and the night is spent walled in down there
+        // (thrown in the evening, three tries 20 s apart would hold the shelter until the morning, and no wall-in)
+        const r = await walkHome(ctx, { timeoutMs: 600_000 });
         if (!r.ok) {
-          if (ctx.s.activity !== 'rest') throw new Error(r.text);
+          if (ctx.s.activity !== 'rest' && !r.night) throw new Error(r.text);
           const w = await wallIn(ctx);
-          return `could not get home at night (${r.text}); ${w.text}`;
+          return `could not get home ${ctx.s.activity === 'rest' ? 'at night' : 'before dark'} (${r.text}); ${w.text}`;
         }
         did.push('walked home');
       }
@@ -516,7 +521,9 @@ export const returnIdle: Goal = {
     return off ? 'nothing to do out here: back to the yard' : null;
   },
   run: async ctx => {
-    const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
+    // from down a mine it climbs out first: go-home from there plans its way under the ground into the yard's column
+    // (live on Nov 13: from 96 out at y -45 to 53 under the yard in 70 s)
+    const r = await walkHome(ctx, { timeoutMs: 600_000 });
     if (!r.ok) throw new Error(r.text);
     return 'back home';
   }

@@ -10,8 +10,9 @@ import { ownItems } from './community.js';
 import { nearestZone, type Zone } from './courtesy.js';
 // (work.ts takes tripCheck from here, chores.ts the deep trip's gate: all three use the others' exports inside functions only)
 import { mineDrops } from './chores.js';
-import { deathNow, deepEnd, deepHold, deepStart, markDry, walkUp, type WorkResult } from './work.js';
+import { deathNow, deepEnd, deepHold, deepStart, markDry, type WorkResult } from './work.js';
 import { underYard } from './underyard.js';
+import { walkHome } from './homeward.js';
 import type { InventoryItem } from '../tools.js';
 
 /**
@@ -204,9 +205,9 @@ async function trip(ctx: GoalContext): Promise<string> {
     // under the yard the walk home stops in a second: the survival goal digs out first, and the trip stays open
     // until the bot is seen home
     if (r.text.endsWith(UNDER_YARD)) return r.text.slice(0, 160);
-    // up where it went down first: from down there the way home runs under the yard (work.ts walkUp)
-    if (r.upAt) await walkUp(ctx, r.upAt, (await ctx.status().catch(() => undefined))?.position);
-    const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+    // up where it went down first when that is near, else straight up: from down there the way home runs under the
+    // yard (homeward.ts walkHome)
+    const back = await walkHome(ctx, { timeoutMs: 300_000, upAt: r.upAt });
     if (!back.ok) throw new Error(`${r.text.slice(0, 120)}, but could not get home: ${back.text.slice(0, 120)}`);
     home = true;
     return `${r.text.slice(0, 120)}; back home`;
@@ -256,7 +257,8 @@ const countsOf = (items: InventoryItem[]) => {
  * as it goes. A trip that brought nothing and never mined (the walk out stopped short, a build by the mine start, hurt
  * or hungry from the start, every ore refused) or never got below the start (Baritone found no way to any of it) is
  * `untried`. It does not walk home: the caller does, and from a trip that went down it comes up first where it went
- * down (`upAt`, the block it stood on at the mine start: work.ts walkUp), not by Baritone's way home under the ground.
+ * down (`upAt`, the block it stood on at the mine start: homeward.ts walkHome), not by Baritone's way home under the
+ * ground.
  *
  * The mine tool counts what the inventory holds of the ore's own drop (Baritone's mine process counts the stacks its
  * block filter takes for the block's loot table drops, here diamond, raw_iron, raw_gold, redstone, lapis_lazuli,

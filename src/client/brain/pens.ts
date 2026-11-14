@@ -188,9 +188,10 @@ const MATE_NEAR = 8;
 type Hold = { lead: true } | { food: string };
 
 /**
- * Leads to walk the animal home by: two kept on hand, carried, else from the chests, else made from 4 string and a
- * slime ball (two leads), the way the kit and the shears are made (project.ts prepareBill); one carried will do when
- * no second is to be had. With none, its food in hand, as before: `why` says so. Neither: no hold, and why.
+ * Leads to walk the animal home by: two kept on hand, carried, else from the chests, else made from 5 string (two
+ * leads, at the home table: the recipe is 3x3), the way the kit and the shears are made (project.ts prepareBill); one
+ * carried will do when no second is to be had. With none, its food in hand, as before: `why` says so. Neither: no
+ * hold, and why.
  */
 async function holdFor(ctx: GoalContext, kind: PenKind): Promise<{ hold?: Hold; why: string }> {
   if ((await carried(ctx, 'lead')) >= LEADS) return { hold: { lead: true }, why: '' };

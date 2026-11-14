@@ -21,6 +21,7 @@ import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
 // (work.ts reaches this file through pockets.ts: its roundDue is asked inside the rounds' gates only)
 import { roundDue, roundFrom, toRound } from './work.js';
+import { walkHome } from './homeward.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -819,7 +820,8 @@ export const stock: Goal = {
     const need = ctx.world.progress?.need;
     if (need && t.name in need) { delete need[t.name]; if (!Object.keys(need).length) ctx.world.progress!.need = undefined; }
     for (const j of activeJobs(ctx.world)) if (j.need && t.name in j.need) { delete j.need[t.name]; if (!Object.keys(j.need).length) j.need = undefined; }
-    const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+    // Baritone's mine follows the ore down into the caves: from down there it climbs out first (homeward.ts)
+    const back = await walkHome(ctx, { timeoutMs: 300_000 });
     if (!back.ok) throw new Error(`mined, but could not get home: ${back.text}`);
     if (!r.ok) throw new Error(r.text);
     return `${r.text.slice(0, 120)}; back home`;

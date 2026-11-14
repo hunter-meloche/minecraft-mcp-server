@@ -1131,13 +1131,23 @@ test.serial('a game day on the live homestead, the step-5 rungs and the cane rou
   t.true(said(/^(done work: cane patch in \d+s: |work: cane patch: )\[shore\]/).slice(1).every(l => /the shore round \(-512, 56, 2195\) is full/.test(l)));
   // the round: nothing grown at its first visit, all 20 cut at its next, never a walk to a dry cell
   t.deepEqual(said(/^done cane in /).map(l => l.replace(/ in \d+s/, '')), ['done cane: cut 0 stalk(s) (0 cane)', 'done cane: cut 20 stalk(s) (20 cane)']);
+  // the first morning's deep trip ends 102 under the ground north of the yard with no way back known (the stand-in
+  // leaves no `upAt`): its walk home climbs out where it stands first (homeward.ts), and smelt cuts the walk over the
+  // surface as it comes near home with the raw gold it brought; its line is said all the same
+  t.deepEqual(said(/^work: deep: (\d+ under|climbed|\[)/), [
+    'work: deep: 102 under the ground at (-549, -40, 2079): up to the surface at (-549, 63, 2079) before the walk home',
+    'work: deep: climbed to (-549, 63, 2079)',
+    'work: deep: [gold] +6 raw_gold; stopped on the walk home (its marks are written)'
+  ]);
   // the cows rung: each side walked to the cow range less 16 (240: past the leash) and looked round, and none there;
-  // two leads taken for it (two kept on hand). East set out on the second morning by its gate and smelt cut it on its
-  // walk home (the first morning's deep trip brought raw gold home); its line is said all the same. With the sides to
-  // the leash only, north and east came back, and south set out on the third morning
+  // two leads taken for it (two kept on hand). East set out on the second morning by its gate and came home (the gold
+  // was smelted the evening before: with the climb, smelt now ends before the shelter's night, where before the
+  // climb the night cut it and the gold was left to cut east's walk home); south set out on the third morning, and
+  // the end of the run (autonomy off) stopped it at its work
   t.deepEqual(said(/^(done work: cows|work: cows: \[)/).map(l => l.replace(/ in \d+s/, '')), [
     'done work: cows: [north] no wild cows north within the cow range (256 from home); back home',
-    'work: cows: [east] no wild cows east within the cow range (256 from home); stopped on the walk home (its marks are written)'
+    'done work: cows: [east] no wild cows east within the cow range (256 from home); back home',
+    'work: cows: [south] stopped before its end, nothing brought in yet (no mark written)'
   ]);
   t.deepEqual(said(/^work: cows: (looking east|out of the yard by its east)/).slice(0, 2), ['work: cows: looking east for wild cows, 32 blocks out', 'work: cows: out of the yard by its east gate (-533, 63, 2183)']);
   // (north 32 out is inside the yard and 64 out the north gate itself: no stop there, out by that gate to 96, and on

@@ -230,8 +230,10 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   furnace: { makes: 1, from: { cobblestone: 8 } },
   bucket: { makes: 1, from: { iron_ingot: 3 } },
   shears: { makes: 1, from: { iron_ingot: 2 } },
-  // the cows are walked home to the pen on a lead (pens.ts): two from four string and a slime ball
-  lead: { makes: 2, from: { string: 4, slime_ball: 1 } },
+  // the cows are walked home to the pen on a lead (pens.ts): two from five string, on the table's 3x3 grid. The game
+  // dropped the slime ball from it (26.3's data/minecraft/recipe/lead.json): with the old recipe here the bot took 4
+  // string and a slime ball out and the game, a string short, crafted none ("none would craft", live 2026-11-13)
+  lead: { makes: 2, from: { string: 5 } },
   paper: { makes: 3, from: { sugar_cane: 3 } },
   book: { makes: 1, from: { paper: 3, leather: 1 } },
   bookshelf: { makes: 1, from: { planks: 6, book: 3 } },

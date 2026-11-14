@@ -71,7 +71,7 @@ export function homeColumn(home: Pos, yard?: WorldMemory['yard']): Column {
 }
 
 /** In the column, by the block the bot stands in (the bridge goes by it). */
-const inColumn = (c: Column, p: { x: number; z: number }) => {
+export const inColumn = (c: Column, p: { x: number; z: number }) => {
   const x = Math.floor(p.x), z = Math.floor(p.z);
   return x >= c.x1 && x <= c.x2 && z >= c.z1 && z <= c.z2;
 };
@@ -115,29 +115,36 @@ const NOT_GROUND = /^(minecraft:)?(air|cave_air|void_air|\w+_leaves|\w+_log|\w+_
 const OPEN = /^(minecraft:)?(air|cave_air|void_air|torch|wall_torch|short_grass|tall_grass|fern|vine)(\[|$)/;
 
 type Region = { x: number; y: number; z: number; width: number; height: number; length: number };
-/** The blocks of a box; undefined when the look failed or came back short (that is no "nothing there": a way into lava would count as clear). */
+/**
+ * The blocks of a box; undefined when the look failed or came back short (that is no "nothing there": a way into lava
+ * would count as clear). Its own cells only: a reply longer than the box says nothing more of it (read on, a column's
+ * ground came out 2900 up).
+ */
 async function region(ctx: GoalContext, box: Region): Promise<(string | null)[] | undefined> {
   const blocks = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box).catch(() => undefined))?.blocks;
-  return blocks && blocks.length >= box.width * box.height * box.length ? blocks : undefined;
+  const size = box.width * box.height * box.length;
+  return blocks && blocks.length >= size ? blocks.slice(0, size) : undefined;
 }
 const cellOf = (box: Region, i: number): Pos =>
   ({ x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length });
 
 /**
  * The column above a place, from 2 over its feet to the top: the ground in it (the highest block that is not air or
- * what stands on the ground; undefined where nothing of it is loaded), and the first lava in it. `unseen`: the look failed.
+ * what stands on the ground; undefined where nothing of it is loaded), and the first lava and the first water in it.
+ * `unseen`: the look failed. (The walk home from deep under ground reads it too: homeward.ts)
  */
-async function columnAbove(ctx: GoalContext, at: Pos): Promise<{ ground?: number; lava?: Pos; unseen?: true }> {
+export async function columnAbove(ctx: GoalContext, at: Pos): Promise<{ ground?: number; lava?: Pos; water?: Pos; unseen?: true }> {
   const up = { x: at.x, y: at.y + 2, z: at.z, width: 1, height: TOP - (at.y + 2) + 1, length: 1 };
   const column = await region(ctx, up);
   if (!column) return { unseen: true };
   const lava = column.findIndex(b => !!b && LAVA.test(b));
+  const water = column.findIndex(b => !!b && LIQUID.test(b) && !LAVA.test(b));
   let ground: number | undefined;
   for (let i = column.length - 1; i >= 0 && ground === undefined; i--) {
     const b = column[i];
     if (b && !NOT_GROUND.test(b)) ground = up.y + i;
   }
-  return { ...(ground !== undefined ? { ground } : {}), ...(lava >= 0 ? { lava: cellOf(up, lava) } : {}) };
+  return { ...(ground !== undefined ? { ground } : {}), ...(lava >= 0 ? { lava: cellOf(up, lava) } : {}), ...(water >= 0 ? { water: cellOf(up, water) } : {}) };
 }
 
 /**
@@ -456,9 +463,10 @@ async function outFrom(ctx: GoalContext): Promise<string> {
  * is shut. Never inside the
  * margin (the lawn, the paths, the doorways), never in water or lava, never in someone else's build, never where the
  * bot stands (its feet and head are above the ground's level). Undefined when there is nothing open to fill; the
- * words otherwise (what it filled, or why not: nothing to fill with is said too).
+ * words otherwise (what it filled, or why not: nothing to fill with is said too). (The walk home from deep under
+ * ground fills its own climb's by the yard the same way: homeward.ts)
  */
-async function fillShaft(ctx: GoalContext, col: Column, climb: Pos, top: Pos): Promise<string | undefined> {
+export async function fillShaft(ctx: GoalContext, col: Column, climb: Pos, top: Pos): Promise<string | undefined> {
   const ground = top.y - 1;
   const box = { x: climb.x - 1, y: ground - 1, z: climb.z - 1, width: 3, height: 2, length: 3 };
   const cells = await region(ctx, box);

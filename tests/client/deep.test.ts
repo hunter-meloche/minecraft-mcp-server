@@ -646,7 +646,9 @@ test.serial('the old deep trip goal comes up where it went down before it walks 
   // goes down at the mine start (0, 64, -56) and its round ends 54 below it; from there Baritone's way home runs under
   // the ground into the column, where it may break nothing (live: (-530, 7, 2189), 55 under the yard)
   const carried = [...KIT, item(5, 'diamond', 5)];
-  const m = mineBot(carried, [{ add: { diamond: 4 }, ms: 10 * MIN, y: 10 }], { tod: 1000, world: home(), y: 64 });
+  // (the round takes the rest of the morning's budget and ends at time of day 9400, by day: down there at night the
+  // walk home does not climb, homeward.ts)
+  const m = mineBot(carried, [{ add: { diamond: 4 }, ms: 7 * MIN, y: 10 }], { tod: 1000, world: home(), y: 64 });
   const walks: string[] = [];
   const ctx = {
     ...m.ctx,

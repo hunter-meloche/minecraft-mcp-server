@@ -9,6 +9,7 @@ import { DEEP_TRIP, deepTripReady, pickMineStart } from './mine.js';
 import { tripCheck } from './deep.js';
 import { nearestZone, type Zone } from './courtesy.js';
 import { bucketsFor, castObsidian, fetchLava, LAVA_POOL } from './cast.js';
+import { walkHome } from './homeward.js';
 
 /**
  * Enchanting: obsidian (mined with a diamond pickaxe), then a 7 x 7 room with the table in the middle and 15 shelves
@@ -133,7 +134,8 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
             if (got < 4 && !noBuckets) await fetchLava(ctx, 4 - got);
             if (await lavaEnough()) break;
           }
-          await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+          // (the obsidian and the lava pools it found may be down in a cave: from there it climbs out first)
+          await walkHome(ctx, { timeoutMs: 300_000 }).catch(() => undefined);
           if (got < 4) await cast();
           if (got >= 4) return ok(`${got} obsidian`);
           return blocked(`short of obsidian (${got}/4): none in sight, and not enough lava, on a trip ${['north', 'east', 'south', 'west'][turn]} from the mine`, 20 * MINUTE);

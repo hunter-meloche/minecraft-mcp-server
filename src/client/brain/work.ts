@@ -18,6 +18,7 @@ import { tripCheck } from './deep.js';
 import { clock } from './idlelog.js';
 import { LADDER, tierStep } from './worktasks.js';
 import { ZONE_MARGIN, underYard } from './underyard.js';
+import { walkHome } from './homeward.js';
 import { brainRun } from '../tools.js';
 
 const MINUTE = 60_000;
@@ -40,7 +41,7 @@ export type Reach = 'yard' | 'near' | 'far' | 'deep';
  * `same`, it was not looked at to its end (the run's time ran out, the pen had its pair after all), so the count
  * stays as it was; `forget`, the place is forgotten (a stand gone, or someone's), so its mark goes and none is written.
  * `upAt`: a run down the mine that ends down there: the block it stood on at the surface where it went down, which
- * the walk home comes up by first (walkUp).
+ * the walk home comes up by first when it is near (homeward.ts walkHome).
  */
 export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget'; upAt?: Pos }
 
@@ -790,28 +791,6 @@ function underMark(task: WorkTask, c: { index: number; first?: true }, world: Wo
   writes++;
 }
 
-/** How long the walk up to where a trip went down may take: the time the trip's budget keeps back for the walk back (deep.ts WALK_BACK). */
-const WALK_UP_MS = 2 * MINUTE;
-/** Within this of where it went down, the bot is up there already. */
-const UP_NEAR = 3;
-
-/**
- * A trip down the mine comes up where it went down (its WorkResult's `upAt`, the block it stood on at the mine start)
- * before the walk home. From down there Baritone's way home runs straight under the ground toward home and into the
- * home zone's column, where the bridge lets it break nothing: live on Nov 13 the walk home from (-505, -21, 2213)
- * stopped 55 under the yard at (-530, 7, 2189), and a trip's walk home after its iron at (-529, 10, 2179). So back
- * the way it came first (Baritone's own walk: out there, outside the column, it may dig), and home over the surface
- * from the mine start, 56 out on the far side of the yard. A walk that does not get there leaves the rest to go-home,
- * as before. Nothing when it stands there already. Adds the walk back to the start, less what it saves of the walk
- * home: some 20 to 60 s on the live trips (the mine start is 22 s from home on foot), 2 min at most.
- */
-export async function walkUp(ctx: GoalContext, upAt: Pos, from?: Pos): Promise<void> {
-  if (from && Math.hypot(from.x - upAt.x, from.y - upAt.y, from.z - upAt.z) <= UP_NEAR) return;
-  ctx.progress(`up where it went down, (${upAt.x}, ${upAt.y}, ${upAt.z}), before the walk home`);
-  await ctx.call('goto', { ...upAt, range: 1, timeoutMs: WALK_UP_MS }, WALK_UP_MS + 15_000).catch(() => undefined);
-  if (ctx.signal.aborted) throw new Error('aborted');
-}
-
 /**
  * One run of a task: room, the hour, the stamps, the task's own run, the marks, the walk home. The marks are written
  * before the walk (the storage house door sometimes holds the bot: what the run found must not be lost with it), and
@@ -881,11 +860,9 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // before the marks: a run that ended under the yard is marked as one cut short there is
     let away = true;
     let under = false;
-    let where: Pos | undefined;
     try {
       const st = await ctx.status();
       if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) {
-        where = st.position;
         away = !nearHomeAt(st.position, s.home, NEAR_HOME);
         under = underYard(st.position, s.home, ctx.world.yard);
       }
@@ -934,9 +911,11 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     const cut = () => { ctx.progress(`${text}; stopped on the walk home (its marks are written)`); return new Error('aborted'); };
     let h: { ok: boolean; text: string };
     try {
-      // a trip down comes up where it went down before it walks home (walkUp)
-      if (r.upAt) await walkUp(ctx, r.upAt, where);
-      h = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
+      // from down there Baritone's way home runs under the ground into the yard's column: a trip down comes up where
+      // it went down first (`upAt`) when that is near, else straight up where it is, and walks home over the surface
+      // (homeward.ts walkHome). Live on Nov 13 the walk home from (-505, -21, 2213) stopped 55 under the yard at
+      // (-530, 7, 2189). The walk back to the mine start adds some 20 to 60 s on the live trips, 2 min at most
+      h = await walkHome(ctx, { timeoutMs: 600_000, upAt: r.upAt });
     } catch (e) {
       throw ctx.signal.aborted ? cut() : e;
     }

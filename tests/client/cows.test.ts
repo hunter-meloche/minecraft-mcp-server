@@ -495,10 +495,12 @@ class Pasture {
           return { ok: true, text: 'Killed cow with 2 swing(s), 2 landed (diamond_sword x2) in 1s. Health 20/20, food 20/20.' };
         }
         if (tool === 'craft-item' && a.outputItem === 'lead') {
+          // the game's recipe, not the brain's table (26.3's data/minecraft/recipe/lead.json: five string, two leads):
+          // this fake once took the brain's 4 string and a slime ball, and passed while the game crafted none
           const times = Number(a.amount ?? 1);
-          if (this.count('string') < 4 * times || this.count('slime_ball') < times) return { ok: false, text: 'missing ingredients' };
-          this.take('string', 4 * times);
-          this.take('slime_ball', times);
+          const have = this.count('string');
+          if (have < 5 * times) return { ok: false, text: `missing ingredients for lead: needs string x${5 * times - have} (have ${have})` };
+          this.take('string', 5 * times);
           this.add('lead', 2 * times);
           return { ok: true, text: `Successfully crafted lead ${times} time(s)` };
         }
@@ -881,25 +883,27 @@ test('a side whose gate lets nobody through is not walked by another gate (its w
   t.true(p4.careful.every(c => c));
 });
 
-test('no lead and none to craft: the wheat lure, which also goes right across the pen; a lead crafted from string and a slime ball when none is stored', async (t) => {
+test('no lead and none to craft: the wheat lure, which also goes right across the pen; two leads crafted from five string when none is stored', async (t) => {
   // no lead stored, 3 string: none to make one
   const world = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 }, [k(DROPS_CHEST)]: { leather: 7, string: 3, slime_ball: 9 } });
   const herd = [cow(7, -503, 2183)];
   const pa = new Pasture(herd, world, [...KIT, { slot: 3, name: 'wheat', count: 10 }]);
   const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
-  t.deepEqual(r, { gain: 1, text: 'cow: no lead to be had (short of 1 string for one): on the wheat from 47 out; led in' });
+  t.deepEqual(r, { gain: 1, text: 'cow: no lead to be had (short of 2 string for one): on the wheat from 47 out; led in' });
   t.true(penned(herd[0]), JSON.stringify(herd[0].position));
   t.false(pa.log.some(l => l.startsWith('entity.use')));
-  // 15 string and a slime ball in the chests: two leads made the kit's way, one walks the cow home
+  // 15 string in the chests: two leads made the kit's way from five of them (the slime balls left be), one walks the
+  // cow home
   const w2 = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 } });
   const pb = new Pasture([cow(7, -503, 2183)], w2, KIT);
   t.deepEqual(await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 47 out; led in' });
-  t.deepEqual(pb.log.filter(l => /^(take-from-chest|craft-item)/.test(l)), ['take-from-chest string 4', 'take-from-chest slime_ball 1', 'craft-item lead 1']);
+  t.deepEqual(pb.log.filter(l => /^(take-from-chest|craft-item)/.test(l)), ['take-from-chest string 5', 'craft-item lead 1']);
   t.is(pb.count('lead'), 2);
+  t.is(pb.count('slime_ball'), 0);
   // neither a lead, nor what makes one, nor wheat: nothing is tried
   const w3 = liveWorld({}, { [k(GEAR_CHEST)]: { bucket: 8 }, [k(DROPS_CHEST)]: { leather: 7 }, [k(FARM_CHEST)]: { bone_meal: 3 } });
   const pc = new Pasture([cow(7, -503, 2183)], w3, KIT);
-  t.deepEqual(await fetchForPens(pc.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'cow: no lead to be had (short of 4 string, 1 slime_ball for one), and no wheat to lure one with' });
+  t.deepEqual(await fetchForPens(pc.ctx(w3), 'east', { now: () => T0 }), { gain: 0, text: 'cow: no lead to be had (short of 5 string for one), and no wheat to lure one with' });
 });
 
 test('a named, tamed or someone\'s animal is never leashed: on a lead (a knot on someone\'s post), named, tamed, by someone\'s build, in their pen', async (t) => {
@@ -1740,7 +1744,7 @@ test('the cows rung: unneeded with 2 adults, wanted with 0 or 1 whatever the pro
   t.is(ask(worlds.free), 'north: 256 blocks out');
   t.is(ask(worlds.nopen), 'unneeded: no cow pen with a gate');
   t.is(ask(worlds.unread), 'unneeded: the chests are not all looked into yet');
-  t.is(ask(worlds.nothing), 'kit: nothing to lead a cow home with (no lead, no 4 string and a slime ball for one, no wheat)');
+  t.is(ask(worlds.nothing), 'kit: nothing to lead a cow home with (no lead, no 5 string for one, no wheat)');
   // a lead carried is something to lead one with
   t.is(ask(worlds.nothing, [...KIT, { slot: 3, name: 'lead', count: 1 }]), 'north: 256 blocks out');
   // where one was seen, ahead of the sides' turn, as far out as the farther of the two nearest places it was seen

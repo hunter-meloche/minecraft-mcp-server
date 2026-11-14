@@ -51,7 +51,8 @@ export function yardRing(world: WorldMemory): FenceRing | undefined {
   return { x1: z.x, z1: z.z, x2: z.x + z.width - 1, z2: z.z + z.length - 1, y: z.y };
 }
 
-const onEdge = (r: FenceRing, p: { x: number; z: number }) =>
+/** On the ring's line, at any height. */
+export const onEdge = (r: FenceRing, p: { x: number; z: number }) =>
   ((p.z === r.z1 || p.z === r.z2) && p.x >= r.x1 && p.x <= r.x2) || ((p.x === r.x1 || p.x === r.x2) && p.z >= r.z1 && p.z <= r.z2);
 
 /** On the ring: its posts and gates (one over the ground) and what stands on them (the torches, two over). */

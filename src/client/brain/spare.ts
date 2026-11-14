@@ -3,6 +3,7 @@ import type { WorldMemory } from './memory.js';
 import { freeChestTotals, key } from './chests.js';
 import { toTheWoods } from './chores.js';
 import { daylightLeft } from './schedule.js';
+import { walkHome } from './homeward.js';
 
 /**
  * Spare time by day: with nothing else to do, stockpile what the home will want, instead of standing about till
@@ -77,7 +78,8 @@ export const spareGoal: Goal = {
     const after = inv.items.filter(i => i.slot < 36 && t.counts.test(i.name)).reduce((a, i) => a + i.count, 0);
     const got = Math.max(0, after - carried);
     if (!got) last[`fruitless:spare:${t.name}`] = ctx.s.now;
-    await ctx.act('go-home', { name: 'home', timeoutMs: 240_000 }).catch(() => undefined);
+    // (Baritone's mine follows the ore into the caves: from down there it climbs out first)
+    await walkHome(ctx, { timeoutMs: 240_000 }).catch(() => undefined);
     return `spare time: ${got} ${t.name}${got ? '' : ` (${r.text.split('\n')[0].slice(0, 100)})`}; back home`;
   }
 };

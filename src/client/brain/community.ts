@@ -9,6 +9,7 @@ import { tripDecline, diamondsWanted } from './deep.js';
 // (both come back to this file through their own imports: what they give is used inside functions only)
 import { tierOf } from './work.js';
 import { workKeeps } from './worktasks.js';
+import { walkHome } from './homeward.js';
 
 /**
  * The community chests: chests on a shared server where players and bots leave surplus for each other (a friend put
@@ -248,6 +249,8 @@ async function gather(ctx: GoalContext, m: Mission, src: Source): Promise<string
   const want = Math.min(left(m), src.underground ? 16 : 64);
   const start = await carried(ctx, src.gives);
   let budget: number;
+  /** where it went down: the walk home comes up there first (homeward.ts) */
+  let upAt: Pos | undefined;
   if (src.underground) {
     budget = Math.min(10 * MINUTE, tripBudgetMs(ctx.s.timeOfDay, 2 * MINUTE));
     if (budget < 3 * MINUTE) throw new Error('too late in the day for a trip under ground');
@@ -258,7 +261,8 @@ async function gather(ctx: GoalContext, m: Mission, src: Source): Promise<string
     ctx.progress(`#${m.id} ${m.item} for ${m.chest}: out to the mine at (${from.x}, ${from.z})`);
     await ctx.call('goto', { ...from, xz: true, range: 4, timeoutMs: 180_000 }, 195_000);
     const here = (await ctx.call<{ position?: Pos }>('status').catch(() => undefined))?.position ?? from;
-    const near = nearestZone({ x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) }, zones, true);
+    upAt = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
+    const near = nearestZone(upAt, zones, true);
     if (near.distance < MINE_FROM_BUILDS) {
       delete ctx.world.zones.mine;
       await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
@@ -276,7 +280,7 @@ async function gather(ctx: GoalContext, m: Mission, src: Source): Promise<string
   syncReserve(ctx.world);
   const line = `#${m.id} ${m.item} for ${m.chest}: got ${got} (${m.gathered}/${m.count} gathered)`;
   ctx.progress(line);
-  if (src.underground) await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+  if (src.underground) await walkHome(ctx, { timeoutMs: 300_000, upAt });
   if (!got) throw new Error(`${line}: ${r.text.split('\n')[0].slice(0, 120)}`);
   return line;
 }

@@ -8,6 +8,7 @@ import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.
 import { someones, type Creature } from './courtesy.js';
 import { placeNearHome } from './firsts.js';
 import { underNow } from './underyard.js';
+import { walkHome } from './homeward.js';
 
 /** How far round the bot the hunt looks for game. */
 const HUNT_RANGE = 64;
@@ -352,7 +353,8 @@ export const retreat: Goal = {
   // first and digs out, and the retreat is for once it is up
   wants: (s, world) => (s.health < 10 && s.home && !nearHome(s, RETREAT_FROM) && Number.isFinite(s.distHome) && !underNow(s, world) ? `health ${s.health.toFixed(1)}: home to heal` : null),
   run: async ctx => {
-    const r = await ctx.act('go-home', { name: 'home', timeoutMs: 600_000 });
+    // up out of a mine first: from down there go-home's way runs under the ground into the yard's column (walkHome)
+    const r = await walkHome(ctx, { timeoutMs: 600_000 });
     if (!r.ok) throw new Error(r.text);
     return 'home to heal';
   }

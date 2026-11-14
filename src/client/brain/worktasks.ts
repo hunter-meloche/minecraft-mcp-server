@@ -19,7 +19,7 @@ import { kitNeeds, tier } from './kit.js';
 import { WOODS_DIRS, kitSteps } from './chores.js';
 import { ownItems } from './community.js';
 import { NEAR_HOME } from './pockets.js';
-import { allItems, stillShort } from './progress.js';
+import { allItems, recipeFor, stillShort } from './progress.js';
 import { WATER_FROM_HOME, cutStand, dropDeadCells, findWildCane, liveCells, plantCane, wildCane } from './cane.js';
 import type { Zone } from './courtesy.js';
 import { PEN_FOOD } from './animals.js';
@@ -175,13 +175,20 @@ const PEN_FRESH = 30 * MINUTE;
 const LEAD_PACE = 1.5;
 
 /**
- * Something to walk a cow home by, carried or stored (beyond what a build job holds): a lead, or 4 string and a slime
- * ball to make one, or 2 wheat to lure one with. The run takes the same in that order (pens.ts holdFor).
+ * What a lead is made from, read off the recipe the run crafts it by (progress.ts RECIPES: five string), so the two
+ * cannot drift apart: this said "4 string and a slime ball" while the game took five string and no slime ball.
+ */
+const leadFrom = (): [string, number][] => Object.entries(recipeFor('lead')?.from ?? {});
+
+/**
+ * Something to walk a cow home by, carried or stored (beyond what a build job holds): a lead, or what makes one, or 2
+ * wheat to lure one with. The run takes the same in that order (pens.ts holdFor).
  */
 function canLead(s: Pick<Snapshot, 'counts'>, world: WorldMemory): boolean {
   const free = freeChestTotals(world);
   const n = (item: string) => (s.counts.get(item) ?? 0) + (free[item] ?? 0);
-  return n('lead') >= 1 || (n('string') >= 4 && n('slime_ball') >= 1) || PEN_FOOD.cow.some(f => n(f) >= 2);
+  const makes = leadFrom();
+  return n('lead') >= 1 || (makes.length > 0 && makes.every(([k, v]) => n(k) >= v)) || PEN_FOOD.cow.some(f => n(f) >= 2);
 }
 
 /**
@@ -196,7 +203,10 @@ function cowsWhy(s: Snapshot, world: WorldMemory): Decline | null {
   if (!allLooked(world)) return unread;
   const pen = penCount(world, 'cow');
   if (pen && s.now - pen.at < PEN_FRESH && pen.adults >= PAIR) return { cause: 'unneeded', text: `the pen has ${pen.adults} cows (they breed the rest)` };
-  if (!canLead(s, world)) return { cause: 'kit', text: 'nothing to lead a cow home with (no lead, no 4 string and a slime ball for one, no wheat)' };
+  if (!canLead(s, world)) {
+    const makes = leadFrom().map(([k, v]) => `${v} ${k}`).join(', ');
+    return { cause: 'kit', text: `nothing to lead a cow home with (no lead, no ${makes} for one, no wheat)` };
+  }
   return null;
 }
 
