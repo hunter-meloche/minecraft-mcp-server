@@ -12,8 +12,8 @@ import { kitNeeds, stashPlan } from '../../src/client/brain/kit.js';
 import { misplaced, stackSize } from '../../src/client/brain/storage.js';
 import { planFor } from '../../src/client/brain/anvil.js';
 import {
-  FROM_BUILDS, FROM_PENS, LIGHT_OFF, SPARE_SET, facesHome, homePortal, netherPortalMilestone, ownPortals, portalAvoid, portalSite, portalStanding,
-  siteForPortal, spareCandidate, spareSetStep
+  FROM_BUILDS, FROM_PENS, LIGHT_OFF, SPARE_SET, facesHome, homePortal, lightingSpot, netherPortalMilestone, ownPortals, portalAvoid, portalSite, portalStanding,
+  ringHoles, ringOf, siteForPortal, spareCandidate, spareSetStep
 } from '../../src/client/brain/portal.js';
 import { occupancy } from '../../src/client/brain/site.js';
 import { findLandmarks, type Pos, type WorldMemory } from '../../src/client/brain/memory.js';
@@ -650,6 +650,131 @@ test('the light: a frame short of obsidian, or with something in its inside, is 
   const c = atTheLight();
   t.like(await c.step.run(c.h.ctx, c.st), { status: 'done' });
   t.true(c.h.did.includes(`goto (${c.frame.x + 1}, 63, ${c.frame.z}) range 0 careful`), c.h.did.join(' | '));
+});
+
+test('F3: the light from the other side of the plane where the side toward home has no floor (live: a hole the frame\'s build left there); neither side will do: why, and no walk', async (t) => {
+  // the frame along z, home to the east: the spot a step east of the plane is over a hole, the one a step west is not
+  const a = atTheLight();
+  a.h.set({ x: a.frame.x + 1, y: 62, z: a.frame.z }, 'minecraft:air');
+  t.like(await a.step.run(a.h.ctx, a.st), { status: 'done' });
+  t.true(a.h.did.includes(`goto (${a.frame.x - 1}, 63, ${a.frame.z}) range 0 careful`), a.h.did.join(' | '));
+  t.false(a.h.did.some(d => d.startsWith(`goto (${a.frame.x + 1}, 63,`)), 'never toward the hole');
+  t.true(a.h.did.includes(`use-item-on-block flint_and_steel on (${a.frame.x}, 63, ${a.frame.z}) face up from (${a.frame.x - 1}, 63, ${a.frame.z})`));
+  t.truthy(a.h.lit());
+  // water is no floor, a block where the feet go no room: neither side, so it says why and walks nowhere
+  const b = atTheLight();
+  b.h.set({ x: b.frame.x + 1, y: 62, z: b.frame.z }, 'minecraft:water[level=0]');
+  b.h.set({ x: b.frame.x - 1, y: 63, z: b.frame.z }, 'minecraft:cobblestone');
+  const r = await b.step.run(b.h.ctx, b.st);
+  t.like(r, { status: 'blocked' });
+  t.is(r.text, `nowhere to stand to light the portal's frame at ${fmt(b.frame)}: no floor under (${b.frame.x + 1}, 63, ${b.frame.z}) (water); ` +
+    `no room to stand at (${b.frame.x - 1}, 63, ${b.frame.z}) (cobblestone)`);
+  t.false(b.h.did.some(d => /^goto|^use-item-on-block/.test(d)), b.h.did.join(' | '));
+  t.is(b.h.lit(), undefined);
+  // the pure rule along x, as live: home to the south, the hole at z 2148 under the spot: the north side, z 2146
+  const live = { step: 6, data: { site: { x: -562, y: 62, z: 2146, width: 6, length: 3, rotated: false }, axis: 'x' } };
+  const frame = { x: -560, y: 64, z: 2147 };
+  const ground = (holes: Pos[]) => (p: Pos) => (holes.some(q => fmt(q) === fmt(p)) ? 'air' : p.y <= 62 ? 'grass_block' : 'air');
+  t.deepEqual(lightingSpot(live, frame, HOME, ground([])), { x: -560, y: 63, z: 2148 });
+  t.deepEqual(lightingSpot(live, frame, HOME, ground([{ x: -560, y: 62, z: 2148 }])), { x: -560, y: 63, z: 2146 });
+  t.deepEqual(lightingSpot(live, frame, HOME, ground([{ x: -560, y: 62, z: 2148 }, { x: -560, y: 62, z: 2146 }])),
+    { why: 'no floor under (-560, 63, 2148) (air); no floor under (-560, 63, 2146) (air)' });
+});
+
+test('F3: the light: a flower, a bush or a torch where the bot stands to light the frame is walked through, not taken for a wall; a berry bush is no place to stand', async (t) => {
+  const live = { step: 6, data: { site: { x: -562, y: 62, z: 2146, width: 6, length: 3, rotated: false }, axis: 'x' } };
+  const frame = { x: -560, y: 64, z: 2147 };
+  const toward = { x: -560, y: 63, z: 2148 };
+  const standIn = (feet: string, head = 'air') => (p: Pos) => (fmt(p) === fmt(toward) ? feet : fmt(p) === fmt({ ...toward, y: 64 }) ? head : p.y <= 62 ? 'grass_block' : 'air');
+  for (const plant of ['oxeye_daisy', 'red_tulip', 'azure_bluet', 'cornflower', 'lily_of_the_valley', 'bush', 'firefly_bush', 'short_dry_grass', 'brown_mushroom', 'torch']) {
+    t.deepEqual(lightingSpot(live, frame, HOME, standIn(plant)), toward, plant);
+  }
+  t.deepEqual(lightingSpot(live, frame, HOME, standIn('air', 'lilac')), toward, 'a tall flower\'s top at the head');
+  // the berry bush harms: the other side
+  t.deepEqual(lightingSpot(live, frame, HOME, standIn('sweet_berry_bush')), { x: -560, y: 63, z: 2146 });
+  // the step as a whole, with an oxeye daisy toward home: it walks there and lights
+  const a = atTheLight();
+  a.h.set({ x: a.frame.x + 1, y: 63, z: a.frame.z }, 'minecraft:oxeye_daisy');
+  t.like(await a.step.run(a.h.ctx, a.st), { status: 'done' });
+  t.true(a.h.did.includes(`goto (${a.frame.x + 1}, 63, ${a.frame.z}) range 0 careful`), a.h.did.join(' | '));
+});
+
+/**
+ * The frame's build at the build step as atTheLight's site has it (along z, home to the east), Baritone digging the
+ * row toward home out as it builds (the live build left 5 such holes), and level-area as the tool levels: its dry run
+ * says the fill, then it fills each hole with dirt.
+ */
+function atTheBuild(items: InventoryItem[], fills = true) {
+  const world = stocked();
+  const site = { x: -562, y: 62, z: 2188, width: 3, length: 6, rotated: true };
+  world.progress!.current = { id: 'nether-portal', step: 5, data: { site, axis: 'z', wood: 'oak' } };
+  const h = home(world, [...kit(), { slot: 6, name: 'obsidian', count: 10 }, ...items]);
+  const dug = [0, 1, 2, 3, 4].map(i => ({ x: site.x + 2, y: 62, z: site.z + i }));
+  const levels: Record<string, unknown>[] = [];
+  const act = h.ctx.act;
+  (h.ctx as { act: GoalContext['act'] }).act = (async (tool: string, a: Record<string, unknown> = {}) => {
+    if (tool === 'level-area') {
+      levels.push(a);
+      const holes: Pos[] = [];
+      for (let x = Number(a.x1); x <= Number(a.x2); x++) for (let z = Number(a.z1); z <= Number(a.z2); z++) {
+        if (/^minecraft:(air|water)/.test(h.get({ x, y: Number(a.level), z }))) holes.push({ x, y: Number(a.level), z });
+      }
+      if (a.dryRun) return { ok: true, text: `Level (${a.x1}, ${a.z1})..(${a.x2}, ${a.z2}) to ground y ${a.level}: cut 0 block(s), fill ${holes.length} dirt + 0 cobblestone; left alone: 0 water column(s), 3 column(s) with builds, crops or furniture.` };
+      if (!fills) return { ok: true, text: 'Leveled 1 tile(s)\nNow level.' };
+      const dirt = h.inv.find(i => i.name === 'dirt');
+      for (const p of holes) if (dirt && dirt.count-- > 0) h.set(p, 'minecraft:dirt');
+      return { ok: true, text: 'Leveled 1 tile(s)\nNow level.' };
+    }
+    const r = await act(tool, a);
+    if (tool === 'build-structure') for (const p of dug) h.set(p, 'minecraft:air');
+    return r;
+  }) as GoalContext['act'];
+  return { world, h, site, dug, levels, step: TREE.at(-1)!.steps[5], st: world.progress!.current };
+}
+
+test('F3: after the frame\'s build the ground round its plinth is the yard\'s ground again: the holes Baritone dug as it built filled with dirt, as a site step levels', async (t) => {
+  const b = atTheBuild([{ slot: 7, name: 'dirt', count: 20 }]);
+  const r = await b.step.run(b.h.ctx, b.st);
+  t.like(r, { status: 'done' });
+  t.regex(r.text, /^portal frame built at /);
+  t.true(b.h.did.includes(`build-structure nether-portal at (${b.site.x}, 62, ${b.site.z})`));
+  // no hole left round the plinth: the row toward home where the light step stands, and every other cell of the ring
+  t.deepEqual(b.dug.map(p => b.h.get(p)), b.dug.map(() => 'minecraft:dirt'));
+  const ground = (p: Pos) => b.h.get(p).replace(/^minecraft:/, '').replace(/\[.*$/, '');
+  t.deepEqual(ringHoles({ ...b.site }, 'z', ground), []);
+  // levelled as a growing yard's strip is: the ring round the plinth (a cell past each end of it), to the site's ground
+  t.deepEqual(b.levels.map(l => `${l.dryRun ? 'dry ' : ''}${l.x1},${l.z1}..${l.x2},${l.z2} to ${l.level}`), [`dry -562,2187..-560,2194 to 62`, `-562,2187..-560,2194 to 62`]);
+  t.deepEqual(ringOf(b.site, 'z'), { x1: -562, z1: 2187, x2: -560, z2: 2194 });
+  t.like(b.levels[1], { fillWater: true });
+  // a build that left the ground whole: nothing levelled
+  const whole = atTheBuild([{ slot: 7, name: 'dirt', count: 20 }]);
+  whole.dug.splice(0);
+  t.like(await whole.step.run(whole.h.ctx, whole.st), { status: 'done' });
+  t.deepEqual(whole.levels, []);
+  // a levelling that fills none of them: said, and on to the light all the same (it stands on the side with a floor),
+  // not held at the build for good
+  const stuck = atTheBuild([{ slot: 7, name: 'dirt', count: 20 }], false);
+  const s = await stuck.step.run(stuck.h.ctx, stuck.st);
+  t.like(s, { status: 'done' });
+  t.regex(s.text, /^portal frame built at .*; the ground round the portal's plinth: 5 hole\(s\) left \(\(-560, 62, 2188\), /);
+  t.is(stuck.st!.data.ringLeft, undefined);
+});
+
+test('F3: the ground round the plinth short of dirt to fill it: the step waits for the fill (not done, the stock trips told), and goes on with the ring alone, never building again', async (t) => {
+  const b = atTheBuild([]);
+  for (const c of Object.values(b.world.chestItems ?? {})) delete c.dirt;
+  const r = await b.step.run(b.h.ctx, b.st);
+  t.like(r, { status: 'blocked', need: { dirt: 5 } });
+  t.is(r.text, 'the ground round the portal\'s plinth: 5 hole(s) to fill, short of 5 dirt');
+  t.true(b.dug.every(p => b.h.get(p) === 'minecraft:air'));
+  // the dirt fetched since: the next run levels the ring and builds nothing
+  b.h.inv.push({ slot: 7, name: 'dirt', count: 8 });
+  const builds = b.h.did.filter(d => d.startsWith('build-structure')).length;
+  const again = await b.step.run(b.h.ctx, b.st);
+  t.like(again, { status: 'done', text: 'portal frame built, the ground round its plinth level' });
+  t.is(b.h.did.filter(d => d.startsWith('build-structure')).length, builds);
+  t.true(b.dug.every(p => b.h.get(p) === 'minecraft:dirt'));
+  t.is(b.st!.data.ringLeft, undefined);
 });
 
 test('done with a lit portal already standing in the yard (it is then its own); not with one outside it', (t) => {

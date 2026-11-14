@@ -1,11 +1,11 @@
 import test from 'ava';
 import type { InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
-import type { Pos } from '../../src/client/brain/memory.js';
+import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   BLOCKS_KEPT, FROM_BUILDS, FROM_UNKNOWN, GONE, PLACED_GAP, SETUP_HOLD_MS, SETUP_LEAST_MS, SETUP_OBSIDIAN, SETUP_WAITS, SPOT_DY, SPOT_RADIUS, WAY_OUT, boxGap,
-  cellOf, chooseHut, fetchSetupKit, footing, grow, hutOf, hutSteps, inBox, judgeHut, maybeServers, overworldSideKnown, planHut, setupObsidian, setupOpen,
-  setupReady, setupRun, setupShort, shapeOf, standable, wayOut, zoneBox, type Box, type HutStep, type NetherZone, type SetupView
+  cellOf, chooseHut, fetchSetupKit, footing, grow, hutOf, hutSteps, inBox, judgeHut, judgedBox, maybeServers, overworldSideKnown, planHut, setupObsidian,
+  setupOpen, setupReady, setupRun, setupShort, shapeOf, standable, wayOut, zoneBox, type Box, type Grid, type HutStep, type NetherZone, type SetupView
 } from '../../src/client/brain/nethersetup.js';
 import {
   NETHER, OVERWORLD, linkedTo, netherLine, netherOf, netherPortalSpot, peekNether, portalCells, scaled, spotFault, type PortalShape
@@ -13,6 +13,7 @@ import {
 import { LADDER, NETHER_WORK } from '../../src/client/brain/worktasks.js';
 import { workGoals } from '../../src/client/brain/work.js';
 import { out as afield } from '../../src/client/brain/pockets.js';
+import { kit } from '../../src/client/brain/chores.js';
 import { MINUTE, T0, WORN, liveWorld, lookAt } from '../helpers/homestead.js';
 import {
   COMMUNITY, COMMUNITY_NETHER, CZ, HOME_PORTAL, KIT, ROOM_ZONE, fmt, frameOf, game, gridOf, k, netherGround, setupWorld
@@ -732,4 +733,174 @@ test.serial('a portal by home\'s scaled point that holds nothing but itself, on 
   t.false(maybeServers(at, HOME_PORTAL, [], []), 'in no build at all: not counted someone\'s');
   // the community's room is someone's build, as ever (the end to end trip's line)
   t.false(maybeServers(COMMUNITY_NETHER, HOME_PORTAL, [ROOM_ZONE], []));
+});
+
+// ------------------------------------------------------------------------------------------------ F3
+
+/**
+ * What the setup trip carried at its room on Nov 14 (22:10Z: "not setting out: 9 free slots < 12", after "stored 0,
+ * dropped 0"): the home kit, the Nether kit fetched, stacks split, a second diamond helmet, the armour worn.
+ */
+const AT_THE_SETUP: InventoryItem[] = [
+  ...['diamond_pickaxe', 'iron_pickaxe', 'diamond_sword', 'diamond_axe', 'diamond_shovel'].map((name, slot) => ({ slot, name, count: 1, damage: 0, maxDamage: 1561 })),
+  { slot: 5, name: 'torch', count: 40 }, { slot: 6, name: 'dirt', count: 47 }, { slot: 7, name: 'dirt', count: 16 }, { slot: 8, name: 'cobblestone', count: 40 },
+  { slot: 9, name: 'cobblestone', count: 15 }, { slot: 10, name: 'cobbled_deepslate', count: 9 }, { slot: 11, name: 'potato', count: 56 }, { slot: 12, name: 'potato', count: 8 },
+  { slot: 13, name: 'beef', count: 56 }, { slot: 14, name: 'beef', count: 8 }, { slot: 15, name: 'bread', count: 1 }, { slot: 16, name: 'bread', count: 4 },
+  { slot: 17, name: 'apple', count: 4 }, { slot: 18, name: 'rotten_flesh', count: 8 }, { slot: 19, name: 'water_bucket', count: 1 }, { slot: 20, name: 'bucket', count: 1 },
+  { slot: 21, name: 'diamond_hoe', count: 1, damage: 0, maxDamage: 1561 }, { slot: 22, name: 'wheat_seeds', count: 32 },
+  { slot: 23, name: 'diamond_helmet', count: 1, damage: 0, maxDamage: 363, enchanted: true, enchantments: [{ name: 'fire_protection', level: 4 }, { name: 'unbreaking', level: 3 }, { name: 'mending', level: 1 }] },
+  { slot: 24, name: 'shield', count: 1, damage: 0, maxDamage: 336 }, { slot: 25, name: 'obsidian', count: 10 }, { slot: 26, name: 'flint_and_steel', count: 1, damage: 0, maxDamage: 64 },
+  ...WORN.filter(i => i.name !== 'shield')
+];
+
+test.serial('F3: the setup\'s room at home with the pockets of Nov 14: the Nether kit kept and nothing of the home kit, 12 free and the golden helmet taken; the kit whole', async (t) => {
+  const w = setupWorld();
+  const f = game(w, { items: AT_THE_SETUP });
+  t.is(36 - new Set(f.inv.filter(i => i.slot < 36).map(i => i.slot)).size, 9);
+  // (the fake has no throw: what the caps send to the dump goes out of the pockets as the tool would)
+  const act = f.ctx.act;
+  (f.ctx as { act: GoalContext['act'] }).act = (async (tool: string, a: Record<string, unknown> = {}) => {
+    if (tool !== 'drop-item') return act(tool, a);
+    let left = Number(a.count);
+    for (const i of f.inv.filter(x => x.slot < 36 && x.name === a.item)) { const n = Math.min(left, i.count); i.count -= n; left -= n; }
+    for (let i = f.inv.length - 1; i >= 0; i--) if (f.inv[i].count <= 0) f.inv.splice(i, 1);
+    f.did.push(`drop ${a.item} x${Number(a.count) - left}`);
+    return { ok: true, text: `Dropped ${Number(a.count) - left} ${a.item}` };
+  }) as GoalContext['act'];
+  t.is(await fetchSetupKit(f.ctx), undefined);
+  const free = 36 - new Set(f.inv.filter(i => i.slot < 36).map(i => i.slot)).size;
+  t.true(free >= 12, `${free} free`);
+  t.is(f.did.filter(d => d.startsWith('take ')).at(-1), 'take golden_helmet x1');
+  const has = (n: string) => f.inv.filter(i => i.slot < 36 && i.name === n).reduce((a, i) => a + i.count, 0);
+  // (the home kit's tools stay: put away, the kit goal would take them back at once and stop the trip at the chests)
+  for (const [name, n] of [['obsidian', 10], ['flint_and_steel', 1], ['cobblestone', 55], ['cobbled_deepslate', 9], ['shield', 1], ['golden_helmet', 1], ['diamond_sword', 1],
+    ['diamond_axe', 1], ['diamond_shovel', 1], ['diamond_hoe', 1], ['bread', 5], ['apple', 4], ['torch', 16]] as const) {
+    t.is(has(name), n, name);
+  }
+  t.is(f.inv.filter(i => i.slot < 36 && i.name.endsWith('_pickaxe')).length, 2);
+  for (const name of ['wheat_seeds', 'dirt', 'water_bucket', 'bucket', 'potato', 'beef', 'rotten_flesh', 'diamond_helmet']) {
+    t.is(has(name), 0, name);
+  }
+  t.is(kit.wants(lookAt(f.inv, 1000), w), null, 'nothing the kit goal would stop the trip for');
+});
+
+test.serial('F3: the setup\'s kit eaten to full before its food is counted: a meal after the room, which keeps the trip\'s 40 points and no more, left it short', async (t) => {
+  // the pockets of Nov 14 with a stack of bread, hungry by a bread's worth since the gate looked
+  const w = setupWorld();
+  const items = AT_THE_SETUP.filter(i => i.name !== 'bread').concat({ slot: 15, name: 'bread', count: 64 });
+  const f = game(w, { items });
+  const state = { food: 15 };
+  const status = f.ctx.status;
+  const act = f.ctx.act;
+  (f.ctx as { status: GoalContext['status'] }).status = (async () => ({ ...(await status()), food: state.food })) as GoalContext['status'];
+  (f.ctx as { act: GoalContext['act'] }).act = (async (tool: string, a: Record<string, unknown> = {}) => {
+    if (tool === 'eat') {
+      const bread = f.inv.find(i => i.slot < 36 && i.name === 'bread');
+      if (!bread || state.food >= 20) return { ok: true, text: 'Not hungry' };
+      bread.count -= 1;
+      if (!bread.count) f.inv.splice(f.inv.indexOf(bread), 1);
+      state.food = Math.min(20, state.food + 5);
+      f.did.push('eat bread');
+      return { ok: true, text: 'Ate bread' };
+    }
+    if (tool !== 'drop-item') return act(tool, a);
+    let left = Number(a.count);
+    for (const i of f.inv.filter(x => x.slot < 36 && x.name === a.item)) { const n = Math.min(left, i.count); i.count -= n; left -= n; }
+    for (let i = f.inv.length - 1; i >= 0; i--) if (f.inv[i].count <= 0) f.inv.splice(i, 1);
+    return { ok: true, text: `Dropped ${Number(a.count) - left} ${a.item}` };
+  }) as GoalContext['act'];
+  t.is(await fetchSetupKit(f.ctx), undefined);
+  t.is(f.did.indexOf('eat bread'), 0, 'the meal first, before anything is taken or put away');
+  t.is(state.food, 20);
+  const bread = f.inv.filter(i => i.slot < 36 && i.name === 'bread').reduce((a, i) => a + i.count, 0);
+  t.true(bread * 5 >= 40, `${bread} bread`);
+});
+
+test('F3: the ground judged whole: lava in the ring round a hut that the read did not cover (the old re-plan read 2 round it, the ring goes 4 under) is never taken for clear; read as wide as the judgement, the lava itself', (t) => {
+  const hut = hutOf({ x: 0, y: 70, z: 0, axis: 'x', side: 1, door: 0 });
+  const have = { cobblestone: 64, obsidian: 10 };
+  const why = (g: Grid) => { const r = judgeHut(g, hut, have); return 'why' in r ? r.why : 'fine'; };
+  // 3 under the frame's ground: within the drop the bot could fall and one more, outside grow(box, 2)
+  const lava = { x: 1, y: hut.box.y1 - 3, z: 1 };
+  const get = flat({ [k(lava)]: 'lava' });
+  t.false(inBox(grow(hut.box, 2), lava));
+  t.true(inBox(judgedBox(hut), lava));
+  t.is(why(gridOf(get, grow(hut.box, 2))), 'not all loaded round it');
+  t.is(why(gridOf(get, judgedBox(hut))), 'lava or fire by it');
+  // a cell of the ring not loaded (null) is never clear either; all of it read and no lava: fine
+  const g = gridOf(flat(), judgedBox(hut));
+  t.is(why(g), 'fine');
+  t.is(why({ ...g, blocks: g.blocks.map((b, i) => (i === 0 ? null : b)) }), 'not all loaded round it');
+});
+
+test('F3: a spot whose ring a chunk not in yet hides (lava under it, unread): refused at the first judgement, another chosen with its ring read whole', (t) => {
+  // the open floor (the cliff gone), the community's room out of the way: spots enough; the one chosen there first
+  const nr = netherGround();
+  const floor = (p: Pos) => (p.y > 69 && p.y < 90 && p.x <= -77 && p.x > -110 ? 'air' : nr(p));
+  const first = chooseHut(view(floor, { zones: [] }));
+  if (!('plan' in first)) return t.fail(first.why);
+  const best = first.plan.hut.spot;
+  // lava 3 under its frame's ground, in a pocket of cells not loaded at the first read
+  const lava = { x: best.x, y: first.plan.hut.box.y1 - 3, z: best.z };
+  t.true(inBox(judgedBox(first.plan.hut), lava));
+  const v = view(p => (k(p) === k(lava) ? 'lava' : floor(p)), { zones: [] });
+  const hidden = (p: Pos) => Math.abs(p.x - lava.x) <= 1 && Math.abs(p.y - lava.y) <= 1 && Math.abs(p.z - lava.z) <= 1;
+  const g = v.grid;
+  const at = (i: number): Pos => ({ x: g.x + (i % g.width), y: g.y + Math.floor(i / (g.width * g.length)), z: g.z + (Math.floor(i / g.width) % g.length) });
+  const blind = { ...g, blocks: g.blocks.map((b, i) => (hidden(at(i)) ? null : b)) };
+  t.like(judgeHut(blind, hutOf(best), { cobblestone: 64, obsidian: 10 }), { why: 'not all loaded round it' });
+  const c = chooseHut({ ...v, grid: blind });
+  if (!('plan' in c)) return t.fail(c.why);
+  t.notDeepEqual(c.plan.hut.spot, best);
+  t.false(inBox(judgedBox(c.plan.hut), lava), c.why);
+});
+
+test('F3: chooseHut never takes a spot refused before, not even as the spot chosen before', (t) => {
+  const best = { x: -79, y: 70, z: 266, axis: 'z' as const, side: 1 as const, door: 1 as const };
+  const c = chooseHut(view(netherGround(), { refused: [best] }), best);
+  if (!('plan' in c)) return t.fail(c.why);
+  t.notDeepEqual(c.plan.hut.spot, best);
+  t.notRegex(c.why, /chosen before/);
+  // the same portal turned another way round is another spot
+  t.notDeepEqual(c.plan.hut.spot, best);
+  t.like(chooseHut(view(netherGround(), { refused: [{ ...best, door: 0 }] })), { plan: { hut: { spot: best } } });
+});
+
+test.serial('F3: a look again on the spot that finds lava by it (come since the first judgement) refuses that spot for good: let go, remembered, and the next trip builds elsewhere though the lava is gone', async (t) => {
+  const w = setupWorld();
+  const f = game(w);
+  const lava = { x: -74, y: 71, z: 264 };
+  let failed = false;
+  const call = f.ctx.call;
+  (f.ctx as { call: GoalContext['call'] }).call = (async (m: string, p: Record<string, unknown> = {}, ms?: number) => {
+    // the first dig fails as live ("out of reach or out of sight"), and lava by the hut from then on
+    if (m === 'dig.here' && f.state.dim === NETHER && !failed) { failed = true; return { dug: false, reason: 'out of reach or out of sight' }; }
+    const got = await call(m, p, ms) as { blocks?: (string | null)[] };
+    if (m === 'world.region' && f.state.dim === NETHER && failed) {
+      const x0 = Number(p.x), y0 = Number(p.y), z0 = Number(p.z), wd = Number(p.width), ln = Number(p.length);
+      got.blocks = got.blocks!.map((b, i) => (x0 + (i % wd) === lava.x && y0 + Math.floor(i / (wd * ln)) === lava.y && z0 + (Math.floor(i / wd) % ln) === lava.z ? 'minecraft:lava' : b));
+    }
+    return got;
+  }) as GoalContext['call'];
+  const r = await setupRun(f.ctx, HOUR, () => T0);
+  t.deepEqual(r, { gain: 0, text: 'the hut at nether (-79, 70, 266) could not be built: lava or fire by it; that spot refused for good' });
+  t.true(f.said.some(l => /^nether: the hut at nether \(-79, 70, 266\): could not dig at .*: out of reach or out of sight: looking again$/.test(l)), f.said.join(' | '));
+  t.true(f.said.includes('nether: its own portal\'s spot at nether (-79, 70, 266) refused: lava or fire by it'));
+  const n = peekNether(w);
+  t.is(n.setupSpot, undefined, 'let go: not the spot chosen before');
+  t.deepEqual(n.refusedSpots, [{ x: -79, y: 70, z: 266, axis: 'z', side: 1, door: 1, why: 'lava or fire by it', at: T0 }]);
+  // kept in brain.json as it is; what is not a spot is dropped
+  t.deepEqual(peekNether({ ...w, nether: JSON.parse(JSON.stringify(w.nether)) }).refusedSpots, n.refusedSpots);
+  const bad: unknown[] = [{ x: 1, y: 2, z: 3, axis: 'y', side: 1, door: 0, at: 1 }, 'x', { ...n.refusedSpots![0], at: 'now' }];
+  t.is(peekNether({ ...w, nether: { refusedSpots: bad } as unknown as WorldMemory['nether'] }).refusedSpots, undefined);
+  // the next trip, the lava gone (a fire burnt out): not that spot again, not as the spot chosen before
+  const g = game(w, { items: f.inv, after: f, now: T0 + 2 * HOUR });
+  const r2 = await setupRun(g.ctx, HOUR, () => T0 + 2 * HOUR);
+  const chose = g.said.find(l => l.startsWith('nether: its own portal goes at '));
+  t.truthy(chose, `${r2.text} | ${g.said.join(' | ')}`);
+  t.false(chose!.includes('(-79, 70, 266)'), chose);
+  t.false(chose!.includes('(chosen before)'), chose);
+  t.regex(r2.text, /^its own portal at nether \(-?\d+, \d+, \d+\), linked with the home portal$/, g.said.join(' | '));
+  t.notDeepEqual(peekNether(w).portal, { x: -79, y: 70, z: 266 });
+  t.truthy(peekNether(w).portal);
 });

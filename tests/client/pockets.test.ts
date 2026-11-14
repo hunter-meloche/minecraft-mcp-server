@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { putAway, stash, stashKeep, stashList, stock } from '../../src/client/brain/chores.js';
+import { kit as kitGoal, putAway, stash, stashKeep, stashList, stashWork, stock } from '../../src/client/brain/chores.js';
 import { GLUT, ROOM, makeRoom, noRoom, out as afield, pockets, room, type RoomKind } from '../../src/client/brain/pockets.js';
 import { workGoals, workOf, type WorkTask } from '../../src/client/brain/work.js';
 import { food, gatherFood } from '../../src/client/brain/food.js';
@@ -15,6 +15,7 @@ import { stackSize } from '../../src/client/brain/storage.js';
 import { TREE } from '../../src/client/brain/tree.js';
 import { structureGoal } from '../../src/client/structures/job.js';
 import { StructureStore } from '../../src/client/structures/store.js';
+import { T0, liveWorld, lookAt } from '../helpers/homestead.js';
 
 type Pos = { x: number; y: number; z: number };
 const CHEST = { x: 1, y: 64, z: 0 };
@@ -318,7 +319,7 @@ const carrying = (...carry: string[]): WorldMemory['progress'] => ({ done: [], j
 const tripLoad = (): InventoryItem[] => [...tools(), ...stacks('bread', 2, 6), { slot: 8, name: 'bread', count: 40 }, { slot: 9, name: 'torch', count: 20 },
   { slot: 10, name: 'cobblestone', count: 40 }, ...stacks('oak_log', 15, 11), ...stacks('oak_planks', 9, 26)];
 
-test('makeRoom for a trip puts the project carry and food over 64 away; not while a job is building', async t => {
+test('makeRoom for a trip puts the project carry and food over 64 away, the bread kept in one slot; not while a job is building', async t => {
   const s = snap(tripLoad());
   t.is(s.slotsUsed, 35);
   const w = world({ progress: carrying('oak_log', 'oak_planks') });
@@ -326,17 +327,19 @@ test('makeRoom for a trip puts the project carry and food over 64 away; not whil
   t.is(pockets(s, w).loose, 1);
   t.is(pockets(s, w, 'yard').loose, 1);
   t.is(pockets(s, w, 'project').loose, 1);
-  t.is(pockets(s, w, 'trip').loose, 25);
-  t.is(pockets(s, w, 'deep').loose, 25);
+  // (F3: a trip's room keeps the bread's stack in one slot, its last: 40, the 64 + 64 before it go whole; by count, a
+  // 64 kept was split 24 + 40 over two slots)
+  t.is(pockets(s, w, 'trip').loose, 26);
+  t.is(pockets(s, w, 'deep').loose, 26);
   t.is(room('trip', s, w), 'stash');
 
   const home = live(s, w);
   await makeRoom(home.ctx, 'trip');
-  t.is(home.m.used(), 10);
+  t.is(home.m.used(), 9);
   t.is(home.m.count('oak_log') + home.m.count('oak_planks'), 0);
-  t.is(home.m.count('bread'), 64);
-  t.deepEqual(home.m.held(), { bread: 104, oak_log: 960, oak_planks: 576 });
-  t.deepEqual(w.chestItems?.[KEY], { bread: 104, oak_log: 960, oak_planks: 576 }, 'the memory has what the chest took');
+  t.is(home.m.count('bread'), 40);
+  t.deepEqual(home.m.held(), { bread: 128, oak_log: 960, oak_planks: 576 });
+  t.deepEqual(w.chestItems?.[KEY], { bread: 128, oak_log: 960, oak_planks: 576 }, 'the memory has what the chest took');
   t.deepEqual(home.m.walks, [], 'at the chests already');
   t.false(home.m.acts.some(a => a.startsWith('take-from-chest')), 'nothing takes the carry back');
 
@@ -345,9 +348,9 @@ test('makeRoom for a trip puts the project carry and food over 64 away; not whil
   const away = live(snap(tripLoad(), out(30, 0)), w2);
   await makeRoom(away.ctx, 'trip');
   t.deepEqual(away.m.walks, [{ x: 0, y: 64, z: 0, range: 3, careful: true, timeoutMs: 60_000 }]);
-  t.is(away.m.acts[0], 'store-in-chest bread 104');
+  t.is(away.m.acts[0], 'store-in-chest bread 128');
   t.false(away.m.acts.some(a => a === 'go-home' || a.startsWith('move-to-position')), 'no walk that may dig or bridge');
-  t.is(away.m.used(), 10);
+  t.is(away.m.used(), 9);
 
   // a job in phase building keeps its load, whatever asks for room
   const building = world({ buildJobs: [job({ carry: ['oak_log', 'oak_planks'] })] });
@@ -367,7 +370,7 @@ test('makeRoom for a trip puts the project carry and food over 64 away; not whil
   t.false(stashKeep(provisioning, 'trip').keep?.has('oak_log'));
   t.true(stashKeep(provisioning).keep?.has('oak_log'));
   t.true(stashKeep(provisioning, 'yard').keep?.has('oak_log'));
-  t.is(pockets(s, provisioning, 'trip').loose, 25);
+  t.is(pockets(s, provisioning, 'trip').loose, 26);
 
   // the casting's buckets are project carry too: five empties stay for the stash, one for a trip
   const casting = world({ lavaCasting: true });
@@ -711,7 +714,7 @@ test('makeRoom throws when the room cannot be made, and says which way', async t
   const during = live(snap(tripLoad()), world(), cut.signal);
   during.m.after = () => cut.abort();
   await t.throwsAsync(makeRoom(during.ctx, 'trip'), { message: 'aborted' });
-  t.deepEqual(during.m.acts, ['store-in-chest bread 104']);
+  t.deepEqual(during.m.acts, ['store-in-chest bread 128']);
   t.is(during.ctx.world.lastDone?.['no room: trip'], undefined, 'stopped by the brain: that is no failed put-away');
   t.is(room('trip', snap(tripLoad()), during.ctx.world), 'stash');
 });
@@ -1370,4 +1373,112 @@ test.serial('a put-away that took the last of the day: the rung does not set out
   t.is(workOf(brain.worldMemory()!).last, undefined);
   t.deepEqual(afield, { trip: false, work: false });
   brain.setEnabled(false);
+});
+
+// ------------------------------------------------------------------------------------------------ F3: a Nether trip's room
+
+/**
+ * What the setup trip carried at its room on Nov 14 (22:10Z: "not setting out: 9 free slots < 12", after "stored 0,
+ * dropped 0"): the home kit as the stash keeps it for life at home, the Nether kit it had fetched, stacks split by
+ * earlier put-aways, a second diamond helmet (fire protection) and the armour worn.
+ */
+const atTheSetup = (): InventoryItem[] => [
+  tool(0, 'diamond_pickaxe', 1561), tool(1, 'iron_pickaxe', 250), tool(2, 'diamond_sword', 1561), tool(3, 'diamond_axe', 1561), tool(4, 'diamond_shovel', 1561),
+  { slot: 5, name: 'torch', count: 40 }, { slot: 6, name: 'dirt', count: 47 }, { slot: 7, name: 'dirt', count: 16 }, { slot: 8, name: 'cobblestone', count: 40 },
+  { slot: 9, name: 'cobblestone', count: 15 }, { slot: 10, name: 'cobbled_deepslate', count: 9 }, { slot: 11, name: 'potato', count: 56 }, { slot: 12, name: 'potato', count: 8 },
+  { slot: 13, name: 'beef', count: 56 }, { slot: 14, name: 'beef', count: 8 }, { slot: 15, name: 'bread', count: 1 }, { slot: 16, name: 'bread', count: 4 },
+  { slot: 17, name: 'apple', count: 4 }, { slot: 18, name: 'rotten_flesh', count: 8 }, { slot: 19, name: 'water_bucket', count: 1 }, { slot: 20, name: 'bucket', count: 1 },
+  tool(21, 'diamond_hoe', 1561), { slot: 22, name: 'wheat_seeds', count: 32 },
+  { ...tool(23, 'diamond_helmet', 363), enchanted: true, enchantments: [{ name: 'fire_protection', level: 4 }, { name: 'unbreaking', level: 3 }, { name: 'mending', level: 1 }] },
+  tool(24, 'shield', 336), { slot: 25, name: 'obsidian', count: 10 }, tool(26, 'flint_and_steel', 64),
+  ...['diamond_boots', 'diamond_leggings', 'diamond_chestplate'].map((name, i) => tool(36 + i, name, 500)),
+  { ...tool(39, 'diamond_helmet', 363), enchanted: true, enchantments: [{ name: 'protection', level: 3 }, { name: 'unbreaking', level: 3 }] }
+];
+
+test('F3: a Nether trip\'s room keeps its own kit, not the home kit: the setup\'s pockets of Nov 14 (9 free) reach the 12 it needs and the golden helmet\'s slot', async t => {
+  const s = snap(atTheSetup());
+  t.is(s.slotsUsed, 27);
+  const w = world();
+  // for life at home all of it stays but the frame's obsidian and the flint and steel (two slots: the setup kept those too)
+  t.is(pockets(s, w).loose, 2);
+  // a Nether trip's own keep: the seeds, the dirt, the buckets, the spare helmet, the raw food and the junk go (11
+  // slots); the kit stays, and the home kit's tools with it (the axe, the shovel, the hoe: put away, the kit goal would
+  // take them back at once and stop the trip for it, turn about)
+  const p = pockets(s, w, 'nether');
+  t.deepEqual(p, { used: 27, free: 9, loose: 11 });
+  t.true(p.free + p.loose >= ROOM.nether + 1);
+  t.is(room('nether', s, w), 'stash');
+  const home = live(s, w);
+  await makeRoom(home.ctx, 'nether');
+  t.is(36 - home.m.used(), 9 + 11, 'the body frees what the plan said');
+  const kept: [string, number][] = [['diamond_pickaxe', 1], ['iron_pickaxe', 1], ['diamond_sword', 1], ['diamond_axe', 1], ['diamond_shovel', 1], ['diamond_hoe', 1],
+    ['shield', 1], ['obsidian', 10], ['flint_and_steel', 1], ['cobblestone', 55], ['cobbled_deepslate', 9], ['bread', 5], ['apple', 4], ['torch', 16]];
+  for (const [name, n] of kept) t.is(home.m.count(name), n, name);
+  for (const name of ['wheat_seeds', 'dirt', 'water_bucket', 'bucket', 'potato', 'beef', 'rotten_flesh']) {
+    t.is(home.m.count(name), 0, name);
+  }
+  // nothing the kit goal wants back after it: near home it would stop the trip for it (it cuts a trip at the chests)
+  t.is(kitGoal.wants(snap(home.m.inv), w), null);
+  t.false(home.m.inv.some(i => i.name === 'diamond_helmet' && i.slot < 36), 'the spare helmet in the chest');
+  t.is(home.m.inv.find(i => i.slot === 39)?.name, 'diamond_helmet', 'the worn one worn');
+  // of the food, its best enough for the trip's 40 points: the 5 bread (25) and the 4 apples (16)
+  t.true(home.m.held().bread === undefined && home.m.held().apple === undefined);
+  // a golden helmet carried (a helmet worse than the one worn): the Nether's keep names it, so it stays; and a second
+  // shield stays as it does for home (two of a name, and a deposit by name cannot tell the kept one from the other)
+  const extra = snap([...atTheSetup().filter(i => i.slot !== 23), tool(23, 'golden_helmet', 77), tool(27, 'shield', 336), tool(28, 'fishing_rod', 64)]);
+  const deposit: Record<string, number> = Object.fromEntries(stashList(extra, w, stashKeep(w, 'nether')).deposit.map(e => [e.name, e.count]));
+  t.false('golden_helmet' in deposit);
+  t.false('shield' in deposit);
+  t.is(Object.fromEntries(stashList(extra, w).deposit.map(e => [e.name, e.count])).golden_helmet, 1, 'for home it is a spare helmet');
+  // the one fishing rod stays, as at home (nothing takes one back out of the chests: the food goal would craft a new
+  // one from their string); the bucket goes
+  t.false('fishing_rod' in deposit);
+  t.is(deposit.bucket, 1);
+  const rod = snap([...tools(), { slot: 6, name: 'fishing_rod', count: 1 }, { slot: 7, name: 'bucket', count: 1 }]);
+  t.deepEqual(stashList(rod, w, stashKeep(w, 'nether')).deposit, [{ name: 'bucket', count: 1 }], 'a rod the inventory gives no durability for, too');
+});
+
+test('F3: a Nether trip\'s room with a levelling\'s dirt carried: the few kept for home and the fill\'s over them both go, in sorted storage too', t => {
+  // the fill's dirt goes in the chests (the bills count it), the 64 kept for home with it: two entries of one name
+  const w = liveWorld();
+  w.progress!.fill = ['dirt'];
+  w.progress!.fillAt = T0;
+  const s = lookAt([...tools(), { slot: 6, name: 'dirt', count: 64 }, { slot: 7, name: 'dirt', count: 36 }], 1000);
+  t.deepEqual(stashList(s, w, stashKeep(w, 'nether')).deposit.filter(e => e.name === 'dirt').map(e => e.count).sort((a, b) => a - b), [36, 64]);
+  const work = stashWork(s, w, stashKeep(w, 'nether'));
+  t.is([...work.moves, ...work.rest].filter(e => e.name === 'dirt').reduce((a, e) => a + e.count, 0), 100, 'all of it, not the last entry\'s 36');
+  t.is(pockets(s, w, 'nether').loose, 2);
+});
+
+test('F3: a stack kept by count split over two slots: a trip\'s room keeps it in one, the last; never under what the kit or the food goal would fetch again; at home both stay', async t => {
+  const w = world();
+  const deposits = (items: InventoryItem[], kind?: RoomKind) => Object.fromEntries(stashList(snap(items), w, stashKeep(w, kind)).deposit.map(e => [e.name, e.count]));
+  // the potatoes and the beef of Nov 14, 56 + 8: a stack by count, in two slots
+  const split = [...tools(), { slot: 6, name: 'potato', count: 56 }, { slot: 20, name: 'potato', count: 8 }, { slot: 7, name: 'beef', count: 8 }, { slot: 21, name: 'beef', count: 56 }];
+  // at home both stay: the food goal fills a kind to its stack for the cook, and one slot kept, it would take the rest
+  // back out again (the turn about "food put away does not come straight back" pins)
+  t.deepEqual(deposits(split), {});
+  // a trip's room: what the last slot holds stays, the rest goes whole (a deposit by count takes from the first slot)
+  for (const kind of ['trip', 'deep'] as const) t.deepEqual(deposits(split, kind), { potato: 56, beef: 8 }, kind);
+  t.is(pockets(snap(split), w, 'deep').loose, 2);
+  const m = live(snap(split), w);
+  await putAway(m.ctx, snap(split), stashKeep(w, 'deep'));
+  t.deepEqual(m.m.inv.filter(i => i.name === 'potato' || i.name === 'beef').map(i => `${i.name} ${i.count} in ${i.slot}`), ['potato 8 in 20', 'beef 56 in 21'], 'one slot of each');
+  // the kit's torches and stone: one slot only where the last holds the kit's least (16 torches, 32 stone), else as before
+  const kit2 = [...tools(), { slot: 6, name: 'torch', count: 40 }, { slot: 20, name: 'torch', count: 30 }, { slot: 7, name: 'cobblestone', count: 54 }, { slot: 21, name: 'cobblestone', count: 10 }];
+  t.deepEqual(deposits(kit2, 'deep'), { torch: 40 }, 'the torches\' 30 will do; the stone\'s 10 would send the kit back for 22');
+  // ready food: one slot where the last alone is what the food goal fills to from the chests, its 20 points and the
+  // chests' spare 20 (8 bread); 4 bread is the target alone, and the first meal down the mine would send it back for
+  // more (the deep trip called home, Nov 14 21:41Z), 2 bread sooner still: the stack kept as before
+  t.deepEqual(deposits([...tools(), ...stacks('bread', 2, 6), { slot: 20, name: 'bread', count: 8 }], 'deep'), { bread: 128 });
+  t.deepEqual(deposits([...tools(), ...stacks('bread', 2, 6), { slot: 20, name: 'bread', count: 4 }], 'deep'), { bread: 68 });
+  t.deepEqual(deposits([...tools(), ...stacks('bread', 2, 6), { slot: 20, name: 'bread', count: 2 }], 'deep'), { bread: 66 });
+  for (const kind of ['trip', 'deep'] as const) t.deepEqual(deposits([...tools(), { slot: 6, name: 'bread', count: 60 }, { slot: 20, name: 'bread', count: 4 }], kind), {}, kind);
+  // under its stack it all stays (the food goal and the kit fill it no further than that), and one slot is one slot
+  t.deepEqual(deposits([...tools(), { slot: 6, name: 'potato', count: 30 }, { slot: 20, name: 'potato', count: 8 }], 'deep'), {});
+  t.deepEqual(deposits([...tools(), { slot: 6, name: 'potato', count: 64 }], 'deep'), {});
+  // a Nether trip: its torches capped at the kit's 16 and never fewer, split or not (fewer, the kit goal would stop the
+  // trip at the chests for more); the kit's tools all kept
+  t.deepEqual(deposits([...tools(), { slot: 6, name: 'torch', count: 10 }, { slot: 20, name: 'torch', count: 10 }], 'nether'), { torch: 4 });
+  t.deepEqual(deposits([...tools(), { slot: 6, name: 'torch', count: 40 }, { slot: 20, name: 'torch', count: 2 }], 'nether'), { torch: 26 });
 });

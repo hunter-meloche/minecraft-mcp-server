@@ -88,6 +88,12 @@ export interface NetherMemory {
   setupHold?: { until: number; why: string };
   /** the spot the setup trip chose for its own portal and hut, kept until the portal stands: a trip cut short goes on there */
   setupSpot?: SetupSpot;
+  /**
+   * spots for its own portal that a look again on the spot found would not do, and why: never chosen again (live on
+   * Nov 14 a re-plan at nether (-77, 91, 269) read "lava or fire by it"; kept, the next trip would have gone back to it
+   * first, as the spot chosen before). The last REFUSED_SPOTS of them
+   */
+  refusedSpots?: (SetupSpot & { why: string; at: number })[];
   /** where the bot stood at its first look in the Nether this time in, and when: the way home with no portal of its own */
   arrival?: Pos;
   enteredAt?: number;
@@ -99,6 +105,8 @@ export interface NetherMemory {
   sites: { kind: string; x: number; y: number; z: number; at?: number }[];
 }
 
+/** Spots of its own portal refused, kept (the oldest let go). */
+export const REFUSED_SPOTS = 16;
 /** Deaths kept (3 days' worth at most), starts (24 h), portals seen per dimension, sites. */
 const DEATHS = 32;
 const STARTS = 64;
@@ -168,11 +176,20 @@ function clean(raw: unknown): NetherMemory {
   if (typeof r.linked === 'boolean') m.linked = r.linked;
   const hold = r.setupHold;
   if (isObj(hold) && fin(hold.until)) m.setupHold = { until: hold.until, why: typeof hold.why === 'string' ? hold.why : '' };
+  const isSpot = (s: unknown): s is SetupSpot => isObj(s) && !!posOf(s) && (s.axis === 'x' || s.axis === 'z') && (s.side === 1 || s.side === -1) && (s.door === 0 || s.door === 1);
   const spot = r.setupSpot;
-  if (isObj(spot) && posOf(spot) && (spot.axis === 'x' || spot.axis === 'z') && (spot.side === 1 || spot.side === -1) && (spot.door === 0 || spot.door === 1)) {
+  if (isSpot(spot)) {
     m.setupSpot = { ...posOf(spot)!, axis: spot.axis, side: spot.side, door: spot.door };
     // (a frame's 10 at most)
     if (fin(spot.obsidian) && Number.isInteger(spot.obsidian) && spot.obsidian >= 0 && spot.obsidian <= 10) m.setupSpot.obsidian = spot.obsidian;
+  }
+  if (Array.isArray(r.refusedSpots)) {
+    const refused = (r.refusedSpots as unknown[]).flatMap(s => {
+      if (!isSpot(s)) return [];
+      const { why, at } = s as unknown as { why?: unknown; at?: unknown };
+      return fin(at) ? [{ ...posOf(s)!, axis: s.axis, side: s.side, door: s.door, why: typeof why === 'string' ? why : '', at }] : [];
+    });
+    if (refused.length) m.refusedSpots = refused.slice(-REFUSED_SPOTS);
   }
   const last = r.lastTrip;
   if (isObj(last) && fin(last.at) && typeof last.text === 'string' && typeof last.end === 'string' && ENDS.includes(last.end)) {

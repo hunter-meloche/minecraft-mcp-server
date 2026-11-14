@@ -368,6 +368,29 @@ export interface StashOptions {
   keep?: Set<string>;
   /** Kept (by `keep` or otherwise) only up to this many: the rest goes in the chests. */
   cap?: Record<string, number>;
+  /**
+   * A trip's own kit in place of what the stash keeps for life at home (the Nether's: chores.ts stashKeep). Of the
+   * kit's gear only `gear`'s kinds stay (the best of each, the spare pickaxe with the pickaxe), and a piece `keep`
+   * names (the golden helmet); the one bucket, water bucket and shield kept for home go unless `keep` names them, and
+   * so do the few of the junk kept for home (dirt for holes, seeds and saplings to plant). Not the one fishing rod:
+   * nothing takes a rod back out of the chests, and the food goal would craft a new one from their string. Of the
+   * food only the best ready food stays, enough for `foodPoints` (`points`: one's food points ready to eat, 0 for raw
+   * meat and what harms). Live on Nov 14 the setup trip's room kept the farm kit, two buckets, 63 dirt, a spare
+   * helmet and 128 raw potatoes and beef: "not setting out: 9 free slots < 12".
+   */
+  trip?: { gear: readonly GearKind[]; foodPoints: number; points: (name: string) => number };
+  /**
+   * Making room for a trip: a stack kept by count (the kit's torches and throwaway stone, a food capped at its stack)
+   * whose count has reached that stack and sits in more than one slot keeps only what the last of its slots holds,
+   * where that is at least `oneSlot(name)` of it (what the kit or the food goal would go back to the chests for). Kept
+   * by count, it stayed in two slots once the count was spread over them (live on Nov 14, potatoes and beef 56 + 8,
+   * both kept: a put-away by count takes from the first slot, so the surplus over a stack went and left the stack
+   * split). No click merges two stacks in the pockets, and a deposit or a throw by count goes through the slots from
+   * the first: what the last slot holds is the one keep that leaves a single slot. Not at home: there the food goal
+   * fills a kind up to its stack (FOOD_CARRY, often into a new slot) for the cook, and one slot kept, the stash would
+   * put the rest back and the food goal take it out again, turn about.
+   */
+  oneSlot?: (name: string) => number;
 }
 
 /** Carried up to this many, the rest dropped: junk, or worth a few (dirt fills holes, seeds and saplings replant). */
@@ -376,13 +399,16 @@ const DROP_BEYOND: [RegExp, number][] = [
 ];
 /** Kept one of (the extra ones go in the chest). */
 const KEEP_ONE = new Set(['fishing_rod', 'bucket', 'water_bucket', 'shield']);
+/** Of those, what a trip of its own kit leaves at home (StashOptions.trip): all but the fishing rod. */
+const tripLeaves = (name: string) => KEEP_ONE.has(name) && name !== 'fishing_rod';
 
 /**
  * What to put in the home chest and what to throw away, from the main inventory (slots 0-35; worn armour and the
  * off-hand are left alone). Kept: the best item of each kit kind and the spare pickaxe, up to 64 torches and 64
  * throwaway blocks, food, one each of fishing rod, bucket, water bucket and shield, and opts.keep. Dropped: junk
  * beyond what's worth keeping. Everything else, worse duplicates of kit gear included, is deposited; gear entries
- * carry their slot, since a kept and a deposited one can share a name.
+ * carry their slot, since a kept and a deposited one can share a name. opts.trip keeps a trip's own kit instead of the
+ * one for home; opts.oneSlot keeps a stack in one slot.
  */
 export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { deposit: StashEntry[]; drop: StashEntry[] } {
   const deposit: StashEntry[] = [];
@@ -390,10 +416,15 @@ export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { de
   const { best, spare } = carriedKit(items);
   const keptGear = new Set([...Object.values(best), spare].filter(i => i !== undefined));
   const main = items.filter(i => i.slot >= 0 && i.slot <= 35);
+  const trip = opts.trip;
+  // a trip's own kit: gear of a kind it does not take, and the one of a bucket kept for home, go with the rest of their
+  // name (none of the name stays, so a deposit by name takes the right ones)
+  const goes = (name: string) => !!trip && !opts.keep?.has(name) && (gearKind(name) ? !trip.gear.includes(gearKind(name)!) : tripLeaves(name));
   const totals = new Map<string, number>();
   for (const i of main) {
-    if (gearKind(i.name)) {
-      if (keptGear.has(i)) continue;
+    if (goes(i.name)) totals.set(i.name, (totals.get(i.name) ?? 0) + i.count);
+    else if (gearKind(i.name)) {
+      if (keptGear.has(i) || (trip && opts.keep?.has(i.name))) continue;
       // a worn one better than the sound one kept stays on the bot and is used until it breaks: put in the chest, the
       // kit took it back out again and again (chest items carry no durability, so it looked like an upgrade)
       const b = best[gearKind(i.name)!];
@@ -405,21 +436,51 @@ export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { de
       if (i !== keeper) deposit.push({ name: i.name, count: i.count, slot: i.slot });
     } else totals.set(i.name, (totals.get(i.name) ?? 0) + i.count);
   }
+  // a trip's food: its best ready food first, as much of each as its points still want
+  const tripFood = new Map<string, number>();
+  if (trip) {
+    let want = trip.foodPoints;
+    const ready = [...totals].filter(([n]) => opts.foods?.has(n) && trip.points(n) > 0)
+      .sort(([a], [b]) => trip.points(b) - trip.points(a) || (a < b ? -1 : a > b ? 1 : 0));
+    for (const [name, count] of ready) {
+      if (want <= 0) break;
+      const n = Math.min(count, Math.ceil(want / trip.points(name)));
+      tripFood.set(name, n);
+      want -= n * trip.points(name);
+    }
+  }
   for (const [name, count] of totals) {
     // what a project or a build job carries is never junk (a job's dirt for its farmland, its scaffold)
     const junk = opts.keep?.has(name) ? undefined : DROP_BEYOND.find(([re]) => re.test(name));
     if (junk) {
       if (count > junk[1]) drop.push({ name, count: count - junk[1] });
+      // (the few kept for home go in the chests on a trip of its own kit)
+      if (trip && Math.min(count, junk[1]) > 0) deposit.push({ name, count: Math.min(count, junk[1]) });
       continue;
     }
     let keep = 0;
-    if (opts.foods?.has(name) || opts.keep?.has(name)) keep = count;
-    else if (name === 'torch') keep = KIT.carryMax.torch;
+    // a stack it keeps at most by count (the kit's torches and throwaway stone, a food's stack): one slot of it on a
+    // trip, below
+    let stack: number | undefined;
+    if (opts.keep?.has(name)) keep = count;
+    else if (trip && opts.foods?.has(name)) keep = tripFood.get(name) ?? 0;
+    else if (opts.foods?.has(name)) keep = count;
+    else if (name === 'torch') keep = stack = KIT.carryMax.torch;
     // Throwaway blocks: cobblestone first, deepslate makes up the rest.
-    else if (name === 'cobblestone') keep = KIT.carryMax.cobblestone;
-    else if (name === 'cobbled_deepslate') keep = Math.max(0, KIT.carryMax.cobblestone - (totals.get('cobblestone') ?? 0));
-    else if (KEEP_ONE.has(name)) keep = 1;
-    if (opts.cap?.[name] !== undefined) keep = Math.min(keep, opts.cap[name]);
+    else if (name === 'cobblestone') keep = stack = KIT.carryMax.cobblestone;
+    else if (name === 'cobbled_deepslate') keep = stack = Math.max(0, KIT.carryMax.cobblestone - (totals.get('cobblestone') ?? 0));
+    else if (KEEP_ONE.has(name)) keep = trip && tripLeaves(name) ? 0 : 1;
+    if (opts.cap?.[name] !== undefined) {
+      keep = Math.min(keep, opts.cap[name]);
+      // (not a bill's cap on what it carries, which may be more than a stack, nor a trip's food, which it needs)
+      if (!opts.keep?.has(name) && !(trip && opts.foods?.has(name))) stack = Math.min(stack ?? Infinity, opts.cap[name]);
+    }
+    // making room for a trip, the stack fills one slot (opts.oneSlot)
+    if (opts.oneSlot && stack !== undefined && count >= stack && keep > 0) {
+      const slots = main.filter(i => i.name === name).sort((a, b) => a.slot - b.slot);
+      const last = slots[slots.length - 1];
+      if (slots.length > 1 && last.count >= opts.oneSlot(name)) keep = Math.min(keep, last.count);
+    }
     if (count > keep) deposit.push({ name, count: count - keep });
   }
   return { deposit, drop };

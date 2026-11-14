@@ -41,8 +41,8 @@ import { putAway, stashKeep } from './chores.js';
 import { homePortal } from './portal.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit } from './mine.js';
 import {
-  NETHER, OVERWORLD, SEARCH, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells, scaled,
-  spotFault, type PortalShape, type SetupSpot
+  NETHER, OVERWORLD, REFUSED_SPOTS, SEARCH, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells,
+  scaled, spotFault, type PortalShape, type SetupSpot
 } from './nether.js';
 
 const MINUTE = 60_000;
@@ -290,18 +290,34 @@ export function spotFor(out: Pos, axis: 'x' | 'z', side: 1 | -1, door: 0 | 1): S
 /** What a spot asks of the ground, before the build is walked through: the faults that rule it out, else its cost. */
 export interface Cost { places: number; obsidian: number; digs: number }
 
+/**
+ * All judgeHut reads of the ground: the hut and the ring round it where lava or fire rules it out (2 across and over
+ * it, and under it the drop it could fall and one more). A read for a judgement covers this.
+ */
+export const judgedBox = (hut: Hut): Box => {
+  const b = hut.box;
+  return { x1: b.x1 - 2, y1: b.y1 - 1 - MAX_DROP, z1: b.z1 - 2, x2: b.x2 + 2, y2: b.y2 + 2, z2: b.z2 + 2 };
+};
+
 /** Why the ground at a hut will not do (lava by it, a drop, something in the way...), or what the hut costs there. */
 export function judgeHut(g: Grid, hut: Hut, have: { cobblestone: number; obsidian: number }): Cost | { why: string } {
   const cell = (p: Pos) => cellOf(blockAt(g, p));
   const all = [...hut.inside, ...hut.frame, ...hut.corners, ...hut.room, ...hut.door, hut.sill, ...hut.shell, ...hut.under, hut.outside, add(hut.outside, 0, 1, 0), add(hut.outside, 0, -1, 0)];
   if (all.some(p => cell(p) === 'unknown')) return { why: 'not all loaded' };
-  // no lava or fire by it, nor under it within the drop it could fall (lava flows into a dug chamber, fire spreads)
-  const b = hut.box;
-  for (let x = b.x1 - 2; x <= b.x2 + 2; x++) for (let z = b.z1 - 2; z <= b.z2 + 2; z++) for (let y = b.y1 - 1 - MAX_DROP; y <= b.y2 + 2; y++) {
-    if (cell({ x, y, z }) === 'hot') return { why: 'lava or fire by it' };
+  // no lava or fire by it, nor under it within the drop it could fall (lava flows into a dug chamber, fire spreads);
+  // and every cell of that ring known: one not loaded, or not read, may hold either, and passed as clear it did once
+  // (a re-plan on the spot, reading what the first judgement had not, found "lava or fire by it")
+  const b = judgedBox(hut);
+  let unread = false;
+  for (let x = b.x1; x <= b.x2; x++) for (let z = b.z1; z <= b.z2; z++) for (let y = b.y1; y <= b.y2; y++) {
+    const c = cell({ x, y, z });
+    if (c === 'hot') return { why: 'lava or fire by it' };
+    if (c === 'unknown') unread = true;
   }
+  if (unread) return { why: 'not all loaded round it' };
+  const box = hut.box;
   // nothing that falls once what holds it up is dug: in the hut, or on its roof
-  for (let x = b.x1; x <= b.x2; x++) for (let z = b.z1; z <= b.z2; z++) for (let y = b.y1; y <= b.y2 + 1; y++) {
+  for (let x = box.x1; x <= box.x2; x++) for (let z = box.z1; z <= box.z2; z++) for (let y = box.y1; y <= box.y2 + 1; y++) {
     if (cell({ x, y, z }) === 'falls') return { why: 'gravel or sand in it or on it' };
   }
   if (hut.under.some(p => !firm(cell(p)))) return { why: 'no ground under the frame' };
@@ -535,6 +551,8 @@ export interface SetupView {
   obsidian: number;
   /** where the cobblestone is the bot's own: its old hut round a portal of its own that went out (built again there) */
   mine?: Box[];
+  /** spots a look again on the spot found would not do (world.nether.refusedSpots): never chosen again */
+  refused?: SetupSpot[];
 }
 
 export interface SetupChoice { plan: HutPlan; path: Pos[]; why: string }
@@ -562,7 +580,7 @@ export function placedIn(g: Grid): Pos[] {
  * (judgeHut, hutSteps). The one with the fewest blocks to place first (dug into the netherrack: then a ledge; then
  * open ground), then the nearest netherPortalSpot's spot, the nearest the arrival's height, the shortest walk.
  * `prefer`: a spot chosen before (a trip cut short: its cobblestone is the bot's own), taken first while it still
- * does. None: why, by how many spots fell to each reason.
+ * does. Never a spot refused before (`refused`). None: why, by how many spots fell to each reason.
  */
 export function chooseHut(v: SetupView, prefer?: SetupSpot): SetupChoice | { why: string } {
   const zones = v.zones.map(zoneBox);
@@ -574,7 +592,9 @@ export function chooseHut(v: SetupView, prefer?: SetupSpot): SetupChoice | { why
   const fell = (why: string) => { faults.set(why, (faults.get(why) ?? 0) + 1); };
   const linkFault = new Map<string, string | null>();
   const have = { cobblestone: v.cobblestone, obsidian: v.obsidian };
+  const refused = (spot: SetupSpot) => (v.refused ?? []).some(r => r.x === spot.x && r.y === spot.y && r.z === spot.z && r.axis === spot.axis && r.side === spot.side && r.door === spot.door);
   const rule = (spot: SetupSpot, chosenBefore = false): string | null => {
+    if (refused(spot)) return 'refused on an earlier trip';
     const hut = hutOf(spot);
     if (zones.some(z => boxGap(hut.box, z) < FROM_BUILDS)) return `within ${FROM_BUILDS} of someone's build`;
     if (!chosenBefore && placed.length) {
@@ -710,10 +730,19 @@ const PICKS = ['diamond_pickaxe', 'iron_pickaxe', 'netherite_pickaxe', 'stone_pi
 /**
  * The Nether kit at home before the walk to the portal (mine.ts NETHER_TRIP and the frame's obsidian): what is short of
  * it out of the chests (never the spare set: takeFromChests leaves its pieces), food enough for 40 points, room made
- * again for the trip's 12 free slots with the kit kept, the golden helmet last (the stash would put it away as spare
- * gear); then eaten to full and healed. Undefined when the bot is ready, else what it is still short of.
+ * again for the trip's 12 free slots with the Nether's own keep (the kit and nothing else), the golden helmet last (the
+ * home stash would put it away as spare gear); eaten to full first, healed last. Undefined when the bot is ready, else
+ * what it is still short of.
  */
 export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefined> {
+  // fed first: eaten to full (the Guardian tops up only while nothing goes to waste), before the food is counted. The
+  // room keeps the trip's 40 points of food and no more: a meal after it left the kit short (a bread eaten, 35 < 40)
+  // and the trip did not set out; the top-up below makes up what the meals ate
+  for (let i = 0; i < 4; i++) {
+    const st = await ctx.status().catch(() => undefined);
+    if (!st || (st.food ?? 20) >= NETHER_TRIP.food) break;
+    await ctx.act('eat', {}).catch(() => undefined);
+  }
   let items = await inventory(ctx);
   const refresh = async () => { items = await inventory(ctx); };
   // (its own portal standing already, the trip only checks the link: no frame to build; a frame part placed, only the
@@ -744,23 +773,18 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
       if (points() >= NETHER_TRIP.foodPoints) break;
     }
   }
-  // the trip's room with the kit kept: what the stash would put away, but none of this
+  // the trip's room with the Nether's own keep: its kit and nothing of what the bot carries for life at home (chores.ts
+  // stashKeep; with the home kit kept the live room stored nothing and the trip did not set out, 9 slots free of 12)
   const helmet = total(items, ['golden_helmet']) > 0;
   if (freeSlots(items) < NETHER_TRIP.slotsFree + (helmet ? 0 : 1)) {
-    const keep = stashKeep(ctx.world, 'nether');
-    await putAway(ctx, await look(ctx), { ...keep, keep: new Set([...(keep.keep ?? []), 'obsidian', 'flint_and_steel', ...NETHER_BLOCKS]) }).catch(e => {
+    await putAway(ctx, await look(ctx), stashKeep(ctx.world, 'nether')).catch(e => {
       ctx.progress(`making room for the nether kit: ${(e as Error).message}`);
     });
     await refresh();
   }
   if (!helmet) { await takeFromChests(ctx, 'golden_helmet', 1); await refresh(); }
   await holdHarmless(ctx);
-  // whole and fed: eaten to full (the Guardian tops up only while nothing goes to waste), then the healing that follows
-  for (let i = 0; i < 4; i++) {
-    const st = await ctx.status().catch(() => undefined);
-    if (!st || (st.food ?? 20) >= NETHER_TRIP.food) break;
-    await ctx.act('eat', {}).catch(() => undefined);
-  }
+  // whole: the healing that follows the meals
   for (let waited = 0; ; waited += SETUP_WAITS.pollMs) {
     const st = await ctx.status().catch(() => undefined);
     if (!st || (st.health ?? 20) >= NETHER_TRIP.health || waited >= SETUP_WAITS.healMs || !SETUP_WAITS.pollMs) break;
@@ -791,6 +815,18 @@ export const listPortals = async (ctx: GoalContext, range = 96): Promise<Listed[
 export function holdSetup(ctx: GoalContext, now: number, line: string, why: string): void {
   netherOf(ctx.world).setupHold = { until: now + SETUP_HOLD_MS, why };
   ctx.progress(line);
+}
+
+/** What a hut that will not do may yet do on another trip: blocks carried short, the ground round it not all loaded. */
+const STILL_MAY = /^(not all loaded|\d+ cobblestone to place|\d+ obsidian for the frame)/;
+
+/** A spot for its own portal let go (world.nether.setupSpot) and remembered as refused, with why: chooseHut never takes it again. */
+export function refuseSpot(world: WorldMemory, spot: SetupSpot, why: string, now: number): void {
+  const n = netherOf(world);
+  const same = (r: SetupSpot) => r.x === spot.x && r.y === spot.y && r.z === spot.z && r.axis === spot.axis && r.side === spot.side && r.door === spot.door;
+  if (n.setupSpot && same(n.setupSpot)) delete n.setupSpot;
+  const kept = (n.refusedSpots ?? []).filter(r => !same(r));
+  n.refusedSpots = [...kept, { x: spot.x, y: spot.y, z: spot.z, axis: spot.axis, side: spot.side, door: spot.door, why: why.slice(0, 120), at: now }].slice(-REFUSED_SPOTS);
 }
 
 /** Through a portal, the bottom cell of it given, stepping out toward home at the far end. */
@@ -1094,7 +1130,8 @@ export async function setupRun(ctx: GoalContext, budgetMs: number, now: () => nu
       grid: g, home: homeShape, netherPortals: others, overworldPortals, zones, base, arrival: at, from,
       cobblestone: carried(kit, ['cobblestone']), obsidian: carried(kit, ['obsidian']),
       // (the cobblestone round a portal of its own that went out is its old hut's)
-      ...(ownAt ? { mine: [grow(boxOf([ownAt]), 4)] } : {})
+      ...(ownAt ? { mine: [grow(boxOf([ownAt]), 4)] } : {}),
+      refused: known.refusedSpots ?? []
     };
     const choice = chooseHut(view, chosen);
     if (!('plan' in choice)) {
@@ -1117,13 +1154,21 @@ export async function setupRun(ctx: GoalContext, budgetMs: number, now: () => nu
     let plan: HutPlan | { why: string } = choice.plan;
     for (let round = 0; ; round++) {
       if (round > 0) {
-        const fresh = await readGround(ctx, grow(choice.plan.hut.box, 2));
+        // (all the judgement reads: the ring round the hut where lava or fire rules it out, and the drop under it)
+        const fresh = await readGround(ctx, judgedBox(choice.plan.hut));
         const s2 = await inventory(ctx);
         plan = planHut(fresh, spot, { cobblestone: carried(s2, ['cobblestone']), obsidian: carried(s2, ['obsidian']) });
         const sp = netherOf(world).setupSpot;
         if (sp && !('why' in plan)) sp.obsidian = plan.cost.obsidian;
       }
-      if ('why' in plan) return { gain: 0, text: `the hut at nether ${fmt(spot)} could not be built: ${plan.why}` };
+      if ('why' in plan) {
+        // the spot itself will not do, as it stands now: let go and never chosen again (kept, the next trip would go
+        // back to it first, the spot chosen before). Not for what is carried or not yet loaded: the spot may still do
+        if (STILL_MAY.test(plan.why)) return { gain: 0, text: `the hut at nether ${fmt(spot)} could not be built: ${plan.why}` };
+        refuseSpot(world, spot, plan.why, now());
+        ctx.progress(`nether: its own portal's spot at nether ${fmt(spot)} refused: ${plan.why}`);
+        return { gain: 0, text: `the hut at nether ${fmt(spot)} could not be built: ${plan.why}; that spot refused for good` };
+      }
       const why = await build(ctx, plan, left);
       await holdHarmless(ctx);
       if (!why) break;

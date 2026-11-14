@@ -3,10 +3,11 @@ import { foodsFor26, type InventoryItem } from '../tools.js';
 import { fromGate, nearHome, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 // lives with the goal that walks the bot back to the yard now (goals.ts cannot import from here); still found here
 export { outsideBy } from './goals.js';
-import { COOKS_TO } from './food.js';
+import { CHEST_SPARE, COOKS_TO, FOOD_TARGET } from './food.js';
 import { owedItems, ownItems } from './community.js';
 // (deep.ts comes in through community.ts already; its goal is asked inside a function only)
 import { deepTrip } from './deep.js';
+import { NETHER_BLOCKS, NETHER_TRIP } from './mine.js';
 import { chestSlots, chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests, withoutSpare } from './chests.js';
 import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, type ChestAssign, type Deposit } from './storage.js';
 import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
@@ -93,21 +94,76 @@ const CAST_EMPTY_BUCKETS = 5;
  * What the stash leaves on the bot: food (a stack of each kind: all of it stayed before, 541 bread in nine slots), the
  * project's and the jobs' materials, capped where they would hog the slots.
  *
- * Making room for a trip (`kind` trip, deep or nether) it does not leave the project's and the jobs' materials, nor the
+ * Making room for a trip (`kind` trip or deep) it does not leave the project's and the jobs' materials, nor the
  * casting's buckets: they were what held the pockets full (208 logs and 128 planks at 31 slots, five empty buckets at
  * 33), and a trip has no use for them. Nothing brings them back afterwards and nothing needs to: the bills count the
  * chests with the pockets, and the project and the jobs take what they build with from the chests when they next run.
  * Not while a build job is building: its load is in the pockets to be placed, and stays there whoever asks.
+ *
+ * A trip to the Nether keeps its own kit and the home kit's tools only (netherKeep), not what the bot carries for
+ * life at home.
  */
 export function stashKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
-  const away = (kind === 'trip' || kind === 'deep' || kind === 'nether') && !activeJobs(world).some(j => j.phase === 'building');
+  const building = activeJobs(world).some(j => j.phase === 'building');
+  if (kind === 'nether' && !building) return netherKeep();
+  const away = (kind === 'trip' || kind === 'deep') && !building;
   const keep = away ? new Set<string>() : projectCarry(world);
+  // (a Nether trip while a build job builds: what any trip keeps then, and its kit)
+  if (kind === 'nether') for (const n of netherKit()) keep.add(n);
   // food a bill carries is material, not provisions: it keeps the bill's own cap, or none
   const cap: Record<string, number> = {};
   for (const f of foods()) if (!keep.has(f)) cap[f] = FOOD_CARRY;
   // a build job's carry is its own: only the project's capped (what its bill could still use, billCarryCap)
   if (!away) Object.assign(cap, projectCap(world), castingAhead(world) ? { bucket: CAST_EMPTY_BUCKETS } : {});
-  return { foods: foods(), keep, cap };
+  // a trip's room keeps a stack in one slot (kit.ts StashOptions.oneSlot), never below what the kit or the food goal
+  // would go back to the chests for before the trip: the kit's torches and stone, a food enough for what the food goal
+  // fills to from the chests (its target and a few meals more)
+  return { foods: foods(), keep, cap, ...(away ? { oneSlot: tripLeast } : {}) };
+}
+
+/**
+ * The least of a kind a trip's room leaves in one slot: what the kit (KIT.consumables) would fetch again, and of a
+ * ready food what the food goal fills to from the chests (FOOD_TARGET and CHEST_SPARE). A food left at the target
+ * alone, the first meal down the mine put it under, and the food goal called the deep trip home (Nov 14 21:41Z).
+ */
+function tripLeast(name: string): number {
+  if (name === 'torch') return KIT.consumables.torch;
+  if (name === 'cobblestone' || name === 'cobbled_deepslate') return KIT.consumables.cobblestone;
+  const points = readyPoints(name);
+  return points ? Math.ceil((FOOD_TARGET + CHEST_SPARE) / points) : 0;
+}
+
+/** The food points of one of a kind, ready to eat as it is (readyFoodPoints' rule: no raw meat, nothing that harms). */
+const readyPoints = (name: string): number => {
+  const f = foodsFor26()[name];
+  return f && !COOKS_TO[name] && !AVOID_UNLESS_ASKED.has(name) ? f.foodPoints : 0;
+};
+
+/**
+ * What of the Nether kit (mine.ts NETHER_TRIP) is kept by name: the frame's obsidian, the fire starter, the gold, the
+ * shield, the blocks. (Made at the call: nothing imported is read as this module loads, the brain's modules reaching
+ * each other round about.)
+ */
+const netherKit = () => ['obsidian', 'flint_and_steel', 'golden_helmet', 'shield', ...NETHER_BLOCKS];
+
+/**
+ * What a trip to the Nether leaves carried (the pockets rule's `nether` room, and the setup's and the look's own room
+ * at home, nethersetup.ts fetchSetupKit): its kit (mine.ts NETHER_TRIP) and the home kit's tools, nothing else. Two
+ * pickaxes and the sword, the shield, the golden helmet, the blast-proof blocks, the frame's obsidian and the flint
+ * and steel, the kit's least of torches, and of the food its best, enough for the trip's 40 points. The axe, the
+ * shovel and the hoe stay too: put away at the chests, the kit goal would want them back at once ("needs axe
+ * (missing)") and stop the trip for that near home, the room and the kit taking turns and no trip setting out.
+ * Everything else goes in the chests (or to the dump, by the caps): the seeds, dirt, buckets (water boils away down
+ * there, and an empty one picks up lava on a stray click), spare armour, the other food and the raw. Live on Nov 14
+ * the setup's room kept all of the home kit, "stored 0, dropped 0", and did not set out: "9 free slots < 12".
+ */
+function netherKeep(): StashOptions {
+  return {
+    foods: foods(), keep: new Set(netherKit()), cap: { torch: KIT.consumables.torch },
+    // (no one-slot rule: the torches are capped at the kit's least, and a slot of fewer than that, the kit goal would
+    // stop the trip for more torches; the blocks and the food are kept by name and by points, not by a stack)
+    trip: { gear: ['pickaxe', 'axe', 'shovel', 'sword', 'hoe'], foodPoints: NETHER_TRIP.foodPoints, points: readyPoints }
+  };
 }
 
 /** The project's carry caps, less anything a build job carries too (its own load, never capped here). */
@@ -391,7 +447,10 @@ export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = 
   if (world.landmarks.chests.length < 3) return { moves: [], rest: deposit, drop };
   // sorted: each kind of thing to its own chest
   assign ??= assignChests(world.landmarks.chests, CATEGORIES, world.chestItems ?? {}, world.chestAssign ?? {});
-  const want = new Map(deposit.map(e => [e.name, e.count] as const));
+  // (summed by name: a trip of its own kit puts away the few of a junk kept for home, and a fill's or a project's
+  // junk over them goes in as well, two entries of one name; the last alone counted, 64 of 100 dirt rode along)
+  const want = new Map<string, number>();
+  for (const e of deposit) want.set(e.name, (want.get(e.name) ?? 0) + e.count);
   const total = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
   const sorted = depositPlan(s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, world.chestItems ?? {},
     chestSlots(world));

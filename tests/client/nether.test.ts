@@ -16,7 +16,7 @@ import {
   netherBudgetMs, netherCheck, netherHome, netherLine, netherOf, netherPortalSpot, netherTick, notePortals, peekNether, portalCells, scaled, spotFault,
   tripHold, type PortalShape
 } from '../../src/client/brain/nether.js';
-import { NETHER_TRIP, netherTripKit } from '../../src/client/brain/mine.js';
+import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit } from '../../src/client/brain/mine.js';
 import { ROOM, out as afield } from '../../src/client/brain/pockets.js';
 import { stashKeep } from '../../src/client/brain/chores.js';
 import { recoverGoal } from '../../src/client/brain/food.js';
@@ -239,10 +239,11 @@ test('the Nether kit: whole and fed, 40 food points, the golden helmet, a shield
   const short = lookAt(items.filter(i => i.name !== 'golden_helmet' && i.name !== 'cobbled_deepslate' && i.name !== 'iron_pickaxe').concat({ slot: 7, name: 'netherrack', count: 64 }), 1000, { health: 19 });
   t.deepEqual(netherTripKit(netherCheck(short)), { ok: false, why: 'health 19 < 20; no golden helmet; 1 pickaxe(s) < 2 (one in use, a spare); 40 blast-proof blocks < 64' });
   t.is(ROOM.nether, NETHER_TRIP.slotsFree);
-  // making room for one, the stash keeps no build's materials (as for a trip down the mine)
+  // making room for one, the stash keeps no build's materials (as for a trip down the mine), and of the rest only the
+  // Nether kit (F3: its own keep, not the home kit's)
   const w = liveWorld();
   w.progress!.carryCap = { oak_planks: 64 };
-  t.deepEqual(stashKeep(w, 'nether').keep, new Set());
+  t.deepEqual(stashKeep(w, 'nether').keep, new Set(['obsidian', 'flint_and_steel', 'golden_helmet', 'shield', ...NETHER_BLOCKS]));
   t.is(stashKeep(w, 'nether').cap?.oak_planks, undefined);
   t.is(stashKeep(w).cap?.oak_planks, 64, 'at home for anything else, the project\'s cap as ever');
 });

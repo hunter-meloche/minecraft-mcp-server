@@ -1,7 +1,7 @@
 import type { GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { haveFn, progressOf, reservedSites, type KeptSite, type Milestone, type MilestoneState, type Step, type StepResult } from './progress.js';
-import { buildStep, readBox, yardOf } from './milestones.js';
+import { buildStep, fillShort, readBox, yardOf } from './milestones.js';
 import { findSite, occupancy, type Grid, type Rect } from './site.js';
 import { portal } from './blueprints.js';
 import { layoutSpec } from '../schematic.js';
@@ -10,7 +10,7 @@ import { obsidianStep } from './cast.js';
 import { key, spareHeld, storedStacks, storeStackAt, takeFromChests, type SparePiece } from './chests.js';
 import { bookChests } from './enchant.js';
 import { carriedKit, gearKind, type GearKind } from './kit.js';
-import { holdHarmless } from './fluidpick.js';
+import { holdHarmless, isFloor, isPassable } from './fluidpick.js';
 import type { InventoryItem } from '../tools.js';
 
 /**
@@ -228,21 +228,121 @@ export const buildFrameStep: Step = {
   name: 'build the portal frame',
   bill: view => frameBuild().bill?.(view) ?? {},
   run: async (ctx, st) => {
+    // built already, the ground round it still to level (the last run said so): that alone, not the build again
+    if (st.data.ringLeft) {
+      const ring = await levelRing(ctx, st);
+      if (ring && ring.status !== 'done') return ring;
+      delete st.data.ringLeft;
+      return ring ?? ok('portal frame built, the ground round its plinth level');
+    }
     const plain = await carriedCount(ctx, 'cobblestone');
     if (plain < FRAME_COBBLESTONE) {
       const got = plain + await takeFromChests(ctx, 'cobblestone', FRAME_COBBLESTONE - plain);
       if (got < 10) return blocked(`the portal frame: ${got} plain cobblestone carried and none more in the chests (it needs 10; deepslate won't do)`);
     }
-    return frameBuild().run(ctx, st);
+    const r = await frameBuild().run(ctx, st);
+    if (r.status !== 'done') return r;
+    const ring = await levelRing(ctx, st);
+    if (!ring) return r;
+    if (ring.status === 'done') return ok(`${r.text}; ${ring.text}`);
+    st.data.ringLeft = true;
+    return ring;
   }
 };
 
-/** Where the bot stands to light it: on the ground a step out of the frame's plane toward home, before the inside. */
-export function lightingSpot(st: MilestoneState, frame: Pos, home: { x: number; z: number }): Pos {
+/** A block as a region read has it: its name, no `minecraft:` and no state; null where it is not known. */
+export type Ground = (p: Pos) => string | null;
+
+/**
+ * What a player walks through that fluidpick's open cells leave out (they choose stand spots by fluids, and know only
+ * the commonest flowers): the other flowers, bushes and dry grass, mushrooms, a torch. A flower where the bot stands
+ * to light the frame is no wall; the levelling leaves plants be. Not the sweet berry bush, nor the wither rose: they harm.
+ */
+const WALK_THROUGH = /^(.+_tulip|azure_bluet|oxeye_daisy|cornflower|allium|blue_orchid|lily_of_the_valley|torchflower|open_eyeblossom|closed_eyeblossom|sunflower|lilac|rose_bush|peony|bush|firefly_bush|short_dry_grass|tall_dry_grass|red_mushroom|brown_mushroom|torch|wall_torch|soul_torch|soul_wall_torch)$/;
+/** Feet or a head go through it. */
+const clear = (b: string | null) => isPassable(b) || (b !== null && WALK_THROUGH.test(b));
+
+/**
+ * Where the bot stands to light it: on the ground a step out of the frame's plane, before the inside, on the side
+ * toward home first, else on the other; with a floor under it (solid, not a fluid) and its feet and head clear. Live
+ * the cell toward home had a hole for a floor, one of five the frame's build left in front of the plinth: "no way on
+ * foot to the portal's frame at (-560, 64, 2147)". Neither side: why, for each.
+ */
+export function lightingSpot(st: MilestoneState, frame: Pos, home: { x: number; z: number }, ground: Ground): Pos | { why: string } {
   const site = st.data.site as PortalSite;
   const axis = (st.data.axis as Axis | undefined) ?? 'x';
-  if (axis === 'x') return { x: frame.x, y: site.y + 1, z: home.z > frame.z ? frame.z + 1 : frame.z - 1 };
-  return { x: home.x > frame.x ? frame.x + 1 : frame.x - 1, y: site.y + 1, z: frame.z };
+  const y = site.y + 1;
+  const toward = axis === 'x' ? (home.z > frame.z ? 1 : -1) : (home.x > frame.x ? 1 : -1);
+  const sides = [toward, -toward].map(d => (axis === 'x' ? { x: frame.x, y, z: frame.z + d } : { x: frame.x + d, y, z: frame.z }));
+  const faults: string[] = [];
+  for (const p of sides) {
+    const floor = ground({ ...p, y: p.y - 1 }), feet = ground(p), head = ground({ ...p, y: p.y + 1 });
+    if (isFloor(floor) && clear(feet) && clear(head)) return p;
+    faults.push(!isFloor(floor) ? `no floor under ${fmt(p)} (${floor ?? 'not loaded'})` : `no room to stand at ${fmt(p)} (${(clear(feet) ? head : feet) ?? 'not loaded'})`);
+  }
+  return { why: faults.join('; ') };
+}
+
+/** The plinth's row and the rows either side of it, and a cell past each end of the plinth: the ground round the frame. */
+export function ringOf(site: Rect, axis: Axis): { x1: number; z1: number; x2: number; z2: number } {
+  return axis === 'x' ? { x1: site.x - 1, z1: site.z, x2: site.x + site.width, z2: site.z + site.length - 1 }
+    : { x1: site.x, z1: site.z - 1, x2: site.x + site.width - 1, z2: site.z + site.length };
+}
+
+/** The holes in the ground round the frame, pure: the cells of the ring at the site's ground layer that are no floor. */
+export function ringHoles(site: Rect & { y: number }, axis: Axis, ground: Ground): Pos[] {
+  const r = ringOf(site, axis);
+  const out: Pos[] = [];
+  for (let z = r.z1; z <= r.z2; z++) for (let x = r.x1; x <= r.x2; x++) {
+    const p = { x, y: site.y, z };
+    const b = ground(p);
+    // (not loaded: not known to be a hole)
+    if (b !== null && !isFloor(b)) out.push(p);
+  }
+  return out;
+}
+
+/** A region read as a Ground. */
+async function groundOf(ctx: GoalContext, box: { x: number; y: number; z: number; width: number; height: number; length: number }): Promise<Ground> {
+  const blocks = await readBox(ctx, box);
+  return p => {
+    const ix = p.x - box.x, iy = p.y - box.y, iz = p.z - box.z;
+    if (ix < 0 || iy < 0 || iz < 0 || ix >= box.width || iy >= box.height || iz >= box.length) return null;
+    const b = blocks[ix + iz * box.width + iy * box.width * box.length];
+    return b ? b.replace(/^minecraft:/, '').replace(/\[.*$/, '') : null;
+  };
+}
+
+/** The ground layer of the ring round the frame, as it stands. */
+async function ringGround(ctx: GoalContext, site: PortalSite, axis: Axis): Promise<Ground> {
+  const r = ringOf(site, axis);
+  return groundOf(ctx, { x: r.x1, y: site.y, z: r.z1, width: r.x2 - r.x1 + 1, height: 1, length: r.z2 - r.z1 + 1 });
+}
+
+/**
+ * The ring round the plinth at the yard's ground after the frame's build: Baritone digs as it builds, and the live
+ * build left 5 one-deep holes in the row toward home (z 2148, y 62, x -562..-558; stone under them), where the light
+ * step stands to light the frame and any later walk to it goes. Filled with dirt as a site step levels a strip for the
+ * yard (fillShort, level-area to the site's ground), only where the ring has a hole. Undefined when none is left,
+ * else the step's result: short of the fill, holes still there, or done with what the levelling could not fill.
+ */
+async function levelRing(ctx: GoalContext, st: MilestoneState): Promise<StepResult | undefined> {
+  const site = st.data.site as PortalSite | undefined;
+  if (!site) return undefined;
+  const axis = (st.data.axis as Axis | undefined) ?? 'x';
+  const holes = ringHoles(site, axis, await ringGround(ctx, site, axis));
+  if (!holes.length) return undefined;
+  const strip = { ...ringOf(site, axis), level: site.y };
+  const short = await fillShort(ctx, strip);
+  if (Object.keys(short).length) return shortOf(`the ground round the portal's plinth: ${holes.length} hole(s) to fill, short of ${list(short)}`, short);
+  // (water in a hole is a stray: the site was chosen dry)
+  const r = await ctx.act('level-area', { ...strip, fillWater: true, timeoutMs: 4 * MINUTE });
+  const left = ringHoles(site, axis, await ringGround(ctx, site, axis));
+  if (!left.length) return undefined;
+  const text = `the ground round the portal's plinth: ${left.length} hole(s) left (${left.slice(0, 3).map(fmt).join(', ')}): ${r.text.split('\n').pop()?.slice(0, 100) ?? ''}`;
+  // some filled: once more. None: the levelling cannot fill them, and a wait here would hold the light for good: on to
+  // it as it is (the light stands on whichever side of the frame has a floor)
+  return left.length < holes.length ? going(text) : ok(text);
 }
 
 type Listed = { x: number; y: number; z: number; axis: string; width: number; height: number; blocks: number; own?: boolean };
@@ -287,7 +387,12 @@ export const lightStep: Step = {
       }
       // the walk with a harmless hand (a fire starter's right click at a door on the way would be a fire)
       await holdHarmless(ctx);
-      const spot = lightingSpot(st, frame, ctx.s.home!);
+      // (the cells a step out of the plane either side, from their floor to their head room)
+      const site = st.data.site as PortalSite;
+      const across = ((st.data.axis as Axis | undefined) ?? 'x') === 'x';
+      const ground = await groundOf(ctx, across ? { x: frame.x, y: site.y, z: frame.z - 1, width: 1, height: 3, length: 3 } : { x: frame.x - 1, y: site.y, z: frame.z, width: 3, height: 3, length: 1 });
+      const spot = lightingSpot(st, frame, ctx.s.home!, ground);
+      if ('why' in spot) return blocked(`nowhere to stand to light the portal's frame at ${fmt(frame)}: ${spot.why}`);
       const walk = await ctx.call<{ arrived?: boolean }>('goto', { ...spot, range: 0, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
       if (walk?.arrived === false) return blocked(`no way on foot to the portal's frame at ${fmt(frame)}`);
       const r = await ctx.act('use-item-on-block', { x: frame.x, y: frame.y - 1, z: frame.z, item: 'flint_and_steel', face: 'up' });

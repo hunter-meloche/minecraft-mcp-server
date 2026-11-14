@@ -29,6 +29,10 @@ const isFluid = (b: string | null | undefined) => /^(lava|water|bubble_column)(\
 const PASSABLE = /^(air|cave_air|short_grass|tall_grass|fern|large_fern|dead_bush|dandelion|poppy|leaf_litter|wildflowers|pink_petals|snow)(\[|$)/;
 /** A floor to stand on: solid, not a fluid, not hot, not something that isn't a full floor. */
 const NOT_FLOOR = /^(air|cave_air|void_air|water|lava|fire|soul_fire|magma_block|powder_snow|.*_fence|.*_wall|.*_gate|.*_door|.*_trapdoor|.*torch|.*_sign|.*_carpet|.*_pressure_plate|.*_button|ladder|vine|short_grass|tall_grass|fern|.*_leaves|scaffolding|cobweb|sweet_berry_bush|cactus|campfire|.*_campfire)(\[|$)/;
+/** A block a player stands on (NOT_FLOOR's rule; unknown, unloaded, is none). */
+export const isFloor = (b: string | null | undefined): boolean => b != null && !NOT_FLOOR.test(id(b));
+/** A block feet or a head go through (PASSABLE's rule; unknown is no). */
+export const isPassable = (b: string | null | undefined): boolean => b != null && PASSABLE.test(id(b));
 
 /** The region of blocks round a source a stand spot is chosen from (feet levels from one under it to two over). */
 export const aroundBox = (t: P): Box => ({ x: t.x - AROUND, y: t.y - 1, z: t.z - AROUND, width: 2 * AROUND + 1, height: 5, length: 2 * AROUND + 1 });
