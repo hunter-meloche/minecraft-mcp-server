@@ -708,3 +708,57 @@ test('a round is due in the evening, or when twice overdue, or when no far or de
   }
   t.deepEqual(bad, []);
 });
+
+test('kit: full pockets home from a trip down: the haul goes in the chests before the kit takes its materials', async (t) => {
+  // live, Nov 14: 36/36 after a deep trip, every take came back empty and the craft after it failed, 4 runs in 30 s
+  const items: InventoryItem[] = gear().filter(i => i.name !== 'stone_axe');
+  for (let slot = 0; slot < 36; slot++) if (!items.some(i => i.slot === slot)) items.push({ slot, name: 'tuff', count: 64 });
+  const w = world({ chestItems: { '1,64,0': { stick: 10 } }, lastDone: { chests: 10 * 60 * 60_000 } });
+  const acts: string[] = [];
+  const ctx = {
+    s: snap(items), world: w, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      acts.push(`${tool} ${String(a.item ?? a.outputItem ?? '')}`);
+      if (tool === 'store-in-chest') {
+        const n = items.filter(i => i.name === a.item).reduce((k, i) => k + i.count, 0);
+        for (let i = items.length - 1; i >= 0; i--) if (items[i].name === a.item) items.splice(i, 1);
+        return { ok: true, text: `Stored ${n} ${String(a.item)}` };
+      }
+      if (tool === 'take-from-chest') {
+        if (items.filter(i => i.slot < 36).length >= 36) return { ok: true, text: 'Took 0: the inventory is full' };
+        items.push({ slot: 30, name: 'stick', count: Number(a.count) });
+        return { ok: true, text: `Took ${Number(a.count)} stick` };
+      }
+      if (tool === 'craft-item') {
+        const sticks = items.find(i => i.name === 'stick');
+        if (!sticks) return { ok: false, text: 'Failed: missing ingredients for stone_axe: needs stick x2 (have 0)' };
+        items.push({ slot: 31, name: 'stone_axe', count: 1, damage: 0, maxDamage: 131 });
+        return { ok: true, text: 'Crafted stone_axe' };
+      }
+      return { ok: true, text: 'ok' };
+    },
+    // the chest holds the sticks, whatever went in (looked in first: the kit always does)
+    call: (async (m: string) => (m === 'inventory' ? { items: items.map(i => ({ ...i })) } : m === 'chest.open' ? { items: { stick: 10 } } : {})) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null, position: { x: 0, y: 64, z: 0 }, dimension: 'overworld', timeOfDay: 1000 }),
+    progress: () => undefined, gain: () => undefined
+  } as unknown as GoalContext;
+  t.regex(kit.wants(ctx.s, w) ?? '', /axe \(missing\)/);
+  const r = await kit.run(ctx);
+  t.regex(r, /took|crafted stone_axe/);
+  const store = acts.findIndex(a => a === 'store-in-chest tuff');
+  t.true(store >= 0, acts.join(' | '));
+  t.true(store < acts.findIndex(a => a.startsWith('take-from-chest')), acts.join(' | '));
+  t.true(acts.includes('craft-item stone_axe'), acts.join(' | '));
+});
+
+test('kit: a run where every step came to nothing fails (held for the retry time), not done and wanted again at once', async (t) => {
+  const items = gear().filter(i => i.name !== 'stone_axe').concat([{ slot: 20, name: 'stick', count: 4 }]);
+  const ctx = {
+    s: snap(items), world: world({ lastDone: { chests: 10 * 60 * 60_000 } }), signal: new AbortController().signal,
+    act: async () => ({ ok: false, text: 'Failed: missing ingredients for stone_axe: needs cobblestone x3 (have 0)' }),
+    call: (async (m: string) => (m === 'inventory' ? { items } : {})) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined, gain: () => undefined
+  } as unknown as GoalContext;
+  await t.throwsAsync(() => kit.run(ctx), { message: /could not craft stone_axe/ });
+});

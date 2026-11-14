@@ -13,6 +13,12 @@ export interface Landmarks {
   chests: Pos[];
   furnace?: Pos;
   table?: Pos;
+  /**
+   * an anvil (chipped or damaged too) and a smithing table: the workshop's, or ones the improvement run put up (the
+   * workshop milestone counts those as its own: workshop.ts)
+   */
+  anvil?: Pos;
+  smithing?: Pos;
   /** farmland cells near home */
   farmland: Pos[];
   /** when these were looked for (ms) */
@@ -155,6 +161,8 @@ export interface WorldMemory {
   idle?: import('./idlelog.js').IdleMemory;
   /** the work queue's marks: which variants came back dry and when, the deep trips and deaths, the last run (work.ts) */
   work?: import('./work.js').WorkMemory;
+  /** the anvil's: the pairs that gave nothing worth taking, an anvil that wore out to put back (anvil.ts) */
+  anvil?: import('./anvil.js').AnvilMemory;
 }
 
 export const DEFAULT_LEASH = 96;
@@ -206,7 +214,7 @@ const id = (b: string | null) => (b ?? '').replace(/^minecraft:/, '').replace(/\
  */
 export function findLandmarks(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
   const found: Landmarks = { chests: [], farmland: [] };
-  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [];
+  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [];
   blocks.forEach((b, i) => {
     const name = id(b);
     if (!name) return;
@@ -217,6 +225,8 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
     else if ((name === 'chest' || name === 'barrel' || name === 'trapped_chest') && !/type=right/.test(b ?? '')) found.chests.push(at);
     else if (name === 'furnace' || name === 'smoker' || name === 'blast_furnace') furnaces.push(at);
     else if (name === 'crafting_table') tables.push(at);
+    else if (name === 'anvil' || name === 'chipped_anvil' || name === 'damaged_anvil') anvils.push(at);
+    else if (name === 'smithing_table') smithings.push(at);
     else if (name === 'farmland') found.farmland.push(at);
   });
   const near = (a: Pos, b: Pos) => Math.hypot(a.x - home.x, a.y - home.y, a.z - home.z) - Math.hypot(b.x - home.x, b.y - home.y, b.z - home.z);
@@ -224,5 +234,9 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
   found.bed = beds.sort(near)[0];
   found.furnace = furnaces.sort(near)[0];
   found.table = tables.sort(near)[0];
+  // (set only where found: a home without them has the landmarks it had before, key for key)
+  const anvil = anvils.sort(near)[0], smithing = smithings.sort(near)[0];
+  if (anvil) found.anvil = anvil;
+  if (smithing) found.smithing = smithing;
   return found;
 }

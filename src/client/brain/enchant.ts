@@ -1,10 +1,16 @@
-import { brainRun, type InventoryItem } from '../tools.js';
+import { brainRun, type InventoryItem, type ItemEnchantment } from '../tools.js';
 import { nearHome, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Milestone, MilestoneState, StepResult } from './progress.js';
+import type { Pos, WorldMemory } from './memory.js';
 import { buildStep, siteStep } from './milestones.js';
 import { progressOf } from './progress.js';
 import { enchantRoom, type Side } from './blueprints.js';
-import { chestTotals, takeFromChests } from './chests.js';
+import { chestTotals, freeChestTotals, key, sameStack, storeStack, storedStacks, takeFromChests } from './chests.js';
+import { prepare } from './project.js';
+import { billKinds } from './chores.js';
+import { categoryOf, stackSize } from './storage.js';
+// (anvil.ts takes plainLeft and wornSlot from here: each uses the other's exports inside functions only)
+import { bookOfUse } from './anvil.js';
 import { gearKind, tier } from './kit.js';
 import { DEEP_TRIP, deepTripReady, pickMineStart } from './mine.js';
 import { tripCheck } from './deep.js';
@@ -60,7 +66,8 @@ const countOf = async (ctx: GoalContext, item: string) =>
   (await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory')).items
     .filter(i => i.name === item).reduce((a, i) => a + i.count, 0);
 
-function doorToward(st: MilestoneState, home: { x: number; z: number }): Side {
+/** The door of a 7 x 7 room (the enchanting room, the workshop) on the side of its site toward home. */
+export function doorToward(st: MilestoneState, home: { x: number; z: number }): Side {
   const site = st.data.site as { x: number; z: number };
   const cx = site.x + 3.5, cz = site.z + 3.5;
   return Math.abs(home.x - cx) > Math.abs(home.z - cz) ? (home.x < cx ? 'west' : 'east') : (home.z < cz ? 'north' : 'south');
@@ -210,7 +217,10 @@ const pickFor = (s: Snapshot) => {
  */
 const UNEQUIP_HOLD_MS = 30_000;
 
-/** Every so often by day at level 30 with lapis: enchant the next unenchanted piece at the table, worn armour too. */
+/**
+ * Every so often by day at level 30 with lapis: enchant the next unenchanted piece at the table, worn armour too; with
+ * every piece done, a book for the anvil now and then (bookFor: at 33, while fewer than 6 of use are stored).
+ */
 export const enchantGoal: Goal = {
   name: 'enchant',
   priority: 31,
@@ -218,15 +228,22 @@ export const enchantGoal: Goal = {
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || (s.xpLevel ?? 0) < 30 || !world.zones?.['enchanting:table']?.length || !nearHome(s, 24)) return null;
-    const piece = pickFor(s);
-    if (!piece) return null;
     const lapis = (s.counts.get('lapis_lazuli') ?? 0) + (chestTotals(world).lapis_lazuli ?? 0);
-    return lapis >= 3 ? `level ${s.xpLevel}: enchant the ${piece.name}${wornSlot(piece) ? ' (worn)' : ''}` : null;
+    if (lapis < 3) return null;
+    const piece = pickFor(s);
+    if (piece) return `level ${s.xpLevel}: enchant the ${piece.name}${wornSlot(piece) ? ' (worn)' : ''}`;
+    const book = bookFor(s, world);
+    return book ? `level ${s.xpLevel}: enchant a book (${book.ofUse} of use in store, keeps ${BOOK_STOCK})` : null;
   },
+  // a plain piece cuts in as it always has (a handful of times, ever); a book waits for the hand-over, as the anvil
+  // does: once every piece is done it wants whenever the level is past 33 near home, and at 31 it would have stopped
+  // the project, the cane, the farm and the yard rounds midway for one to five books in a row
+  cuts: s => !!pickFor(s),
   run: async ctx => {
     const table = ctx.world.zones!['enchanting:table'][0];
     const piece = pickFor(ctx.s);
-    if (!piece) return 'nothing to enchant';
+    // every piece done: a book for the anvil (anvil.ts), if one is wanted
+    if (!piece) return enchantBook(ctx, table);
     if ((ctx.s.counts.get('lapis_lazuli') ?? 0) < 3) await takeFromChests(ctx, 'lapis_lazuli', 16);
     await ctx.act('move-to-position', { ...table, range: 2, timeoutMs: 60_000 });
     const worn = wornSlot(piece);
@@ -274,3 +291,118 @@ export const enchantGoal: Goal = {
     return `${done}; ${closed?.wore?.includes(piece.name) ? 'worn again' : 'not worn again: enchant.close put nothing on'}`;
   }
 };
+
+// ------------------------------------------------------------------------------------------------ books for the anvil
+
+/** Enchanted books the anvil has a use for (anvil.ts bookOfUse), kept in store: below this the chore makes another. */
+export const BOOK_STOCK = 6;
+/**
+ * Enchanted books in store at most, of use or not: a book from the table is a draw (bane of arthropods, a bow's
+ * power), each takes a chest slot of its own, and those of no use would pile up for ever.
+ */
+export const BOOK_PILE = 24;
+/** The level from which a book is made: the table's dearest offer wants 30 and takes 3 of them. */
+export const BOOK_LEVEL = 33;
+/** Sugar cane left in the chests for the cane round's replanting: the books take the rest. */
+export const CANE_KEEP = 16;
+/** A book and what it is made from: none of them is taken while a bill has a use for one (chores.ts billKinds). */
+const BOOK_KINDS = ['book', 'paper', 'sugar_cane', 'leather'];
+
+const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
+const named = (list: ItemEnchantment[]) => list.map(e => `${e.name} ${e.level}`).join(', ');
+
+/**
+ * A plain piece of diamond or better left for the table, carried or worn (also one no pocket slot is free to take off
+ * into: enchantPick passes it over for now, it is still the table's): its levels come first, for the anvil and for
+ * books alike.
+ */
+export function plainLeft(items: InventoryItem[]): boolean {
+  return items.some(i => {
+    const kind = gearKind(i.name);
+    return !!kind && (ENCHANT_ORDER as readonly string[]).includes(kind) && !i.enchanted && !i.enchantments?.length &&
+      tier(i.name) >= tier(`diamond_${kind}`) && (i.slot < 36 || wornSlot(i) !== undefined);
+  });
+}
+
+/**
+ * The enchanted books there are, carried and stored (`all`), and those the anvil has a use for (`ofUse`): a book in a
+ * chest whose stack memory has let go of (a tool's reply: chests.ts remember) counts as of use until the anvil looks.
+ */
+export function booksStored(s: Snapshot, world: WorldMemory): { all: number; ofUse: number } {
+  const carried = s.items.filter(i => i.slot < 36 && i.name === 'enchanted_book');
+  const known = storedStacks(world, st => st.name === 'enchanted_book').map(f => f.stack);
+  const inChests = chestTotals(world).enchanted_book ?? 0;
+  const count = (list: InventoryItem[]) => list.reduce((n, i) => n + i.count, 0);
+  const unknown = Math.max(0, inChests - count(known));
+  return { all: inChests + count(carried), ofUse: count([...carried, ...known].filter(b => bookOfUse(s.items, b))) + unknown };
+}
+
+/**
+ * Whether the chore makes a book now, and where its plain book comes from. Only once no plain piece is left (plainLeft:
+ * the table's levels are theirs first), at BOOK_LEVEL or more, with fewer than BOOK_STOCK books of use and BOOK_PILE in
+ * all. Nothing is gathered for it: a book carried or stored, else paper from the cane and leather from the cows as the
+ * cane round and the pens bring them in (CANE_KEEP of the cane stays), and none of it while a bill has a use for any
+ * of them (the project's, a build job's, the community's). And with the pockets' room for a piece (freeFor), less what
+ * the book takes on its way: a slot from the chests, two while it is made (the cane and the leather, the paper and the
+ * leather).
+ */
+export function bookFor(s: Snapshot, world: WorldMemory): { from: 'carried' | 'stored' | 'made'; ofUse: number } | undefined {
+  if ((s.xpLevel ?? 0) < BOOK_LEVEL || plainLeft(s.items)) return undefined;
+  const { all, ofUse } = booksStored(s, world);
+  if (ofUse >= BOOK_STOCK || all >= BOOK_PILE) return undefined;
+  const billed = billKinds(s, world);
+  if (BOOK_KINDS.some(k => billed.has(k))) return undefined;
+  const stored = freeChestTotals(world);
+  const have = (n: string) => (s.counts.get(n) ?? 0) + (stored[n] ?? 0);
+  const from = (s.counts.get('book') ?? 0) > 0 ? 'carried' : (stored.book ?? 0) > 0 ? 'stored'
+    : have('leather') >= 1 && (have('paper') >= 3 || have('sugar_cane') - CANE_KEEP >= 3) ? 'made' : undefined;
+  if (!from || freeFor(s) - (from === 'carried' ? 0 : from === 'stored' ? 1 : 2) < 0) return undefined;
+  return { from, ofUse };
+}
+
+/**
+ * The home chests in the order a book goes into them: those the stash keeps its kind in first (storage.ts: with the
+ * gear), the fullest of a kind as last seen after the emptier. storeStack tries three: in list order, the one misc chest
+ * and the two after it were full, and the first four books stayed carried ("no chest took it", live Nov 14).
+ */
+export function bookChests(world: WorldMemory): Pos[] {
+  const kind = categoryOf('enchanted_book');
+  const own = (c: Pos) => world.chestAssign?.[key(c)] === kind;
+  // by its stacks or its totals, the more of the two (a take's reply keeps only the stacks it left alone)
+  const used = (c: Pos) => Math.max(world.chestStacks?.[key(c)]?.length ?? 0,
+    Object.entries(world.chestItems?.[key(c)] ?? {}).reduce((n, [name, k]) => n + Math.ceil(k / stackSize(name)), 0));
+  return [...world.landmarks.chests].sort((a, b) => Number(own(b)) - Number(own(a)) || used(a) - used(b));
+}
+
+/**
+ * Enchant a book at the table for the anvil (bookFor says whether): the plain book from the pockets, the chests, or
+ * made (prepare: paper crafted from the cane, the leather from the chests; it gathers nothing), the walk to the table on
+ * foot only (A11), the dearest offer, the table closed in a finally outside the run, as for a piece. The book goes into
+ * the chests by its slot, with the chest's stacks remembered: the anvil takes it out again by what it holds.
+ */
+async function enchantBook(ctx: GoalContext, table: Pos): Promise<string> {
+  if (!bookFor(ctx.s, ctx.world)) return 'nothing to enchant';
+  if ((ctx.s.counts.get('lapis_lazuli') ?? 0) < 3) await takeFromChests(ctx, 'lapis_lazuli', 16);
+  const short = await prepare(ctx, 'book', 1);
+  if (Object.keys(short).length) throw new Error(`no book to enchant: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+  const walk = await ctx.call<{ arrived?: boolean }>('goto', { ...table, range: 2, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
+  if (walk?.arrived === false) throw new Error(`no way on foot to the enchanting table at ${fmt(table)}`);
+  let made: ItemEnchantment[] = [];
+  try {
+    await ctx.call('enchant.open', { ...table });
+    const st = await ctx.call<{ offers: { slot: number; cost: number }[]; enchantable?: boolean }>('enchant.put', { name: 'book', lapis: 3 });
+    const offer = [...st.offers].filter(o => o.cost > 0 && o.cost <= (ctx.s.xpLevel ?? 0)).sort((a, b) => b.cost - a.cost)[0];
+    if (!offer) throw new Error(`no offer for the book${st.enchantable === false ? ' (not enchantable)' : ''}`);
+    const r = await ctx.call<{ ok: boolean; enchantments?: ItemEnchantment[]; reason?: string }>('enchant.choose', { slot: offer.slot }, 15_000);
+    if (!r.ok) throw new Error(r.reason ?? 'not enchanted');
+    made = r.enchantments ?? [];
+  } finally {
+    await brainRun.exit(() => ctx.call('enchant.close')).catch(() => undefined);
+  }
+  const done = `enchanted a book: ${named(made)}`;
+  ctx.progress(done);
+  const like = { slot: -1, name: 'enchanted_book', count: 1, enchantments: made };
+  const book = (await ctx.call<{ items: InventoryItem[] }>('inventory')).items.find(i => i.slot < 36 && sameStack(i, like));
+  const chest = book && await storeStack(ctx, 'enchanted_book', book.slot, bookChests(ctx.world));
+  return `${done}; ${chest ? `into the chest at ${fmt(chest)}` : 'kept carried: no chest took it'}`;
+}

@@ -145,6 +145,33 @@ export async function takeSlot(ctx: GoalContext, chest: Pos, slot: number, count
   }
 }
 
+/**
+ * Put the one stack in pocket `slot` (0-35) into a home chest and remember that chest by its stacks: an enchanted book
+ * the enchant chore made, which the anvil later takes back out by what it holds (anvil.ts). A tool's "It holds:" reply
+ * says how many went, not which, and the chest's books were then told apart no longer (remember). Of `chests` in their
+ * order (the caller's: the stash's chest for the kind first), the first few. Returns the chest it went into; undefined
+ * when none took it (it stays carried, and the stash puts it away in time).
+ */
+export async function storeStack(ctx: GoalContext, name: string, slot: number, chests: Pos[] = ctx.world.landmarks.chests, tries = 3): Promise<Pos | undefined> {
+  for (const c of chests.slice(0, tries)) {
+    if (ctx.signal.aborted) break;
+    try {
+      const opened = await openAt(ctx, c);
+      remember(ctx.world, c, opened.items, opened.stacks);
+      if (opened.free <= 0) continue;
+      // with the slot and a count of one: that stack, never another of its name (Interact.sources)
+      const r = await ctx.call<ChestContents>('chest.deposit', { name, slot, count: 1 });
+      remember(ctx.world, c, r.items, r.stacks);
+      if ((r.moved ?? 0) > 0) return c;
+    } catch (e) {
+      ctx.progress(`the ${name} into the chest at ${fmt(c)}: ${(e as Error).message}`);
+    } finally {
+      await ctx.call('container.close').catch(() => undefined);
+    }
+  }
+  return undefined;
+}
+
 /** Everything in the home chests together, as last seen. */
 export function chestTotals(world: WorldMemory): Record<string, number> {
   const out: Record<string, number> = {};

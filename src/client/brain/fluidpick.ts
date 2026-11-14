@@ -127,6 +127,23 @@ export async function judgeSource(ctx: Pick<GoalContext, 'call'>, t: P, fluid: '
  * Fill one empty bucket at a source from a safe spot: walk there carefully, check the arrival and the cells round
  * the feet again, use the bucket through useOn (never walking closer). True when the inventory gained the filled bucket.
  */
+/**
+ * What the hand holds once a bucket is full: a sword or a pickaxe (nothing a stray right-click uses on a block), never
+ * the full bucket. A walk's right-clicks (Baritone opening a door or a gate, the Guardian raising the shield) use the
+ * main hand when the block click does nothing: a water bucket held from the lake to the workshop poured itself three
+ * blocks in front of the workshop's door and of the storage house's, twice each, and the running water walled both
+ * doors off for Baritone (it never paths through flowing water; live, Nov 14). A lava bucket held so is a fire.
+ */
+export const HARMLESS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
+  'netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'golden_pickaxe', 'wooden_pickaxe'];
+
+export async function holdHarmless(ctx: Pick<GoalContext, 'call'>): Promise<string | undefined> {
+  const inv = await ctx.call<{ items: { name: string; slot: number }[] }>('inventory').catch(() => ({ items: [] as { name: string; slot: number }[] }));
+  const name = HARMLESS.find(n => inv.items.some(i => i.slot < 36 && i.name === n));
+  if (name) await ctx.call('item.select', { name }).catch(() => undefined);
+  return name;
+}
+
 export async function fillAt(ctx: GoalContext, v: SourceVerdict, fluid: 'lava' | 'water'): Promise<{ ok: boolean; text: string }> {
   const filled = `${fluid}_bucket`;
   const count = async (n: string) => (await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory')).items
@@ -153,7 +170,10 @@ export async function fillAt(ctx: GoalContext, v: SourceVerdict, fluid: 'lava' |
     for (const pl of sightLine(look, s, v.at) ?? []) await ctx.call('dig.here', { ...pl, timeoutMs: 5_000 }, 10_000).catch(() => undefined);
     await ctx.call('item.select', { name: 'bucket' });
     const r = await ctx.call<{ used: boolean; reason?: string }>('useOn', { ...v.at, face: 'up' }, 15_000).catch(e => ({ used: false, reason: (e as Error).message }));
-    if ((await count(filled)) > before) return { ok: true, text: `filled a ${filled} at (${v.at.x}, ${v.at.y}, ${v.at.z}) from (${s.x}, ${s.y}, ${s.z})` };
+    if ((await count(filled)) > before) {
+      await holdHarmless(ctx);
+      return { ok: true, text: `filled a ${filled} at (${v.at.x}, ${v.at.y}, ${v.at.z}) from (${s.x}, ${s.y}, ${s.z})` };
+    }
     whys.push(`from (${s.x}, ${s.y}, ${s.z}): ${r.used ? 'nothing filled' : r.reason}`);
   }
   return { ok: false, text: whys.join('; ') || 'no spot to stand at' };

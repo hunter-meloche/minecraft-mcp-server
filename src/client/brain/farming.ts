@@ -7,6 +7,7 @@ import { addZone, readBox, siteStep } from './milestones.js';
 import { takeFromChests } from './chests.js';
 import { makeRoom, noRoom, room } from './pockets.js';
 import { digByHand } from '../structures/job.js';
+import { holdHarmless } from './fluidpick.js';
 
 /**
  * Farm v2: a 9 x 9 crop plot with a water source in the middle (one source keeps 4 blocks each way wet), tilled and
@@ -59,7 +60,11 @@ export const waterBucketStep: Step = {
       if (col.some(b => b && !/^(minecraft:)?(air|cave_air|void_air)$/.test(b))) continue;
       tried++;
       const r = await ctx.act('use-item-on-block', { ...w, item: 'bucket', face: 'up' });
-      if ((await inv(ctx)).get('water_bucket')) return ok(`filled a bucket at (${w.x}, ${w.y}, ${w.z})`);
+      if ((await inv(ctx)).get('water_bucket')) {
+        // never walked with the full bucket in hand (fluidpick.ts holdHarmless)
+        await holdHarmless(ctx);
+        return ok(`filled a bucket at (${w.x}, ${w.y}, ${w.z})`);
+      }
       ctx.progress(`bucket at (${w.x}, ${w.y}, ${w.z}): ${r.text.slice(0, 80)}`);
     }
     return blocked('no still water to fill the bucket at within 64 blocks', 20 * MINUTE);

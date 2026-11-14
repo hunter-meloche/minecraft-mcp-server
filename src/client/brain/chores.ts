@@ -234,7 +234,7 @@ function fillKinds(s: Snapshot, world: WorldMemory): string[] {
  * Kinds a bill carries, is being secured for or is short of (the project's, the build jobs', the community's), and
  * what a levelling's fill took out of the chests for the yard (progress.fill): never glut.
  */
-function billKinds(s: Snapshot, world: WorldMemory): Set<string> {
+export function billKinds(s: Snapshot, world: WorldMemory): Set<string> {
   const out = new Set<string>([...projectCarry(world), ...fillKinds(s, world), ...Object.keys(allNeeds(world)),
     ...Object.keys(world.progress?.blocked?.need ?? {}), ...Object.keys(owedItems(world))]);
   for (const j of activeJobs(world)) for (const k of [...Object.keys(j.bill ?? {}), ...Object.keys(j.missing ?? {})]) out.add(k);
@@ -554,6 +554,10 @@ export const smelt: Goal = {
 
 const doable = (n: KitNeed) => n.plan.some(st => 'take' in st || 'craft' in st);
 const label = (n: KitNeed) => `${'spare' in n && n.spare ? 'spare ' : ''}${n.kind} (${n.why})`;
+/** A need whose plan takes something out of the chests (a stack to carry, or a craft's materials). */
+const fromChests = (n: KitNeed) => n.plan.some(st => 'take' in st || ('craft' in st && Object.keys(st.fromChest ?? {}).length > 0));
+/** A step's line that says it did nothing (runStep's own words). */
+const stepFailed = (r: string) => /^could not |^no .+ in the chests after all$/.test(r);
 
 /** Tools and armour worn out or missing, torches or throwaway blocks short: take from the chests or craft. */
 export const kit: Goal = {
@@ -574,9 +578,14 @@ export const kit: Goal = {
   cuts: () => !(afield.work && !afield.trip),
   run: async ctx => {
     await refreshChests(ctx, 0);
-    const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
     // what it carries for a community mission is not its own to craft with
-    const needs = kitNeeds(ownItems(inv.items, ctx.world), freeChestTotals(ctx.world));
+    const plan = async () => kitNeeds(ownItems((await ctx.call<{ items: Snapshot['items'] }>('inventory')).items, ctx.world), freeChestTotals(ctx.world));
+    let needs = await plan();
+    // what comes out of the chests needs room in the pockets. Home from a trip down at 36/36, every take came back
+    // empty and the craft after it failed: "missing ingredients for diamond_helmet: needs diamond x5 (have 0)" with
+    // 512 in the chests, 4 runs in 30 s till the loop watch held the kit (live, Nov 14). makeRoom puts the haul away
+    // first (or throws, and the kit waits its retry time)
+    if (needs.filter(doable).some(fromChests) && (await makeRoom(ctx, 'trip')) !== ctx.s) needs = await plan();
     const did: string[] = [];
     for (const need of needs.filter(doable)) {
       for (const step of need.plan) {
@@ -584,6 +593,8 @@ export const kit: Goal = {
         if (r) { did.push(r); ctx.progress(`${label(need)}: ${r}`); }
       }
     }
+    // every step came to nothing: a failure, so the kit waits its retry time (a done run is wanted again the next tick)
+    if (did.length && did.every(stepFailed)) throw new Error(did.join('; '));
     return did.join('; ') || 'nothing could be done (materials ran short)';
   }
 };

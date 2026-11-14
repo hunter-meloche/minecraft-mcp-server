@@ -230,6 +230,12 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   furnace: { makes: 1, from: { cobblestone: 8 } },
   bucket: { makes: 1, from: { iron_ingot: 3 } },
   shears: { makes: 1, from: { iron_ingot: 2 } },
+  // the workshop's (P1), all three on the table's 3x3 grid, as 26.3's data/minecraft/recipe/iron_block.json, anvil.json
+  // and smithing_table.json have them: an anvil is 31 iron (three blocks of nine and four ingots), the smithing table
+  // takes planks of any wood (#minecraft:planks). No iron_ingot from a block here: the two would make a loop
+  iron_block: { makes: 1, from: { iron_ingot: 9 } },
+  anvil: { makes: 1, from: { iron_block: 3, iron_ingot: 4 } },
+  smithing_table: { makes: 1, from: { iron_ingot: 2, planks: 4 } },
   // the cows are walked home to the pen on a lead (pens.ts): two from five string, on the table's 3x3 grid. The game
   // dropped the slime ball from it (26.3's data/minecraft/recipe/lead.json): with the old recipe here the bot took 4
   // string and a slime ball out and the game, a string short, crafted none ("none would craft", live 2026-11-13)

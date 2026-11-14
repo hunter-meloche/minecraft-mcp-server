@@ -8,6 +8,7 @@ import { deepTrip } from '../../src/client/brain/deep.js';
 import { treeFarm } from '../../src/client/brain/farming.js';
 import { caneRound } from '../../src/client/brain/cane.js';
 import { enchantGoal } from '../../src/client/brain/enchant.js';
+import { anvilGoal } from '../../src/client/brain/anvil.js';
 import { projectGoal } from '../../src/client/brain/project.js';
 import { kitNeeds } from '../../src/client/brain/kit.js';
 import type { Snapshot } from '../../src/client/brain/goals.js';
@@ -17,7 +18,7 @@ const tiers = [
   [wake, breakOut, recoverGoal(() => undefined), retreat, shelterGoal(), food],
   [kit, smelt, stash, storageGoal],
   [larder, farm, pens],
-  [lights, deepTrip, treeFarm, caneRound, enchantGoal, projectGoal([])]
+  [lights, deepTrip, treeFarm, caneRound, enchantGoal, anvilGoal, projectGoal([])]
 ];
 
 test('the tiers: every goal outranks every goal of the tiers below', (t) => {

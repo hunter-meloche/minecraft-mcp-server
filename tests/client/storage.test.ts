@@ -12,7 +12,7 @@ test('categories sort the usual items', (t) => {
     bread: 'food', cooked_beef: 'food', carrot: 'food', golden_carrot: 'food',
     wheat_seeds: 'farming', oak_sapling: 'farming', wheat: 'farming', sugar_cane: 'farming', bone_meal: 'farming', egg: 'farming',
     rotten_flesh: 'mobdrops', spider_eye: 'mobdrops', bone: 'mobdrops', string: 'mobdrops', leather: 'mobdrops', ender_pearl: 'mobdrops',
-    iron_pickaxe: 'gear', diamond_helmet: 'gear', shield: 'gear', bucket: 'gear', water_bucket: 'gear', fishing_rod: 'gear', shears: 'gear', bow: 'gear',
+    iron_pickaxe: 'gear', diamond_helmet: 'gear', shield: 'gear', bucket: 'gear', water_bucket: 'gear', fishing_rod: 'gear', shears: 'gear', bow: 'gear', enchanted_book: 'gear',
     torch: 'misc', white_wool: 'misc'
   };
   for (const [item, cat] of Object.entries(cases)) t.is(categoryOf(item) as string, cat, item);

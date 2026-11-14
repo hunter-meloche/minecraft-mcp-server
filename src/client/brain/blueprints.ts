@@ -360,6 +360,33 @@ export function enchantRoom(opts: { doorSide?: Side } = {}): Blueprint {
   return rotate(blueprint('enchanting-room', spec, { entrances: [{ ...door, facing: 'south' }], landmarks }), TURNS_FROM_SOUTH[doorSide]);
 }
 
+/**
+ * A 7 x 7 workshop (P1 of the progression plan) in the enchanting room's shell (walls 4 high, a flat roof, the door in
+ * the middle of `doorSide`), drawn with the door south: along the back wall a crafting table, the anvil and a smithing
+ * table; by the west wall a cell kept empty for the brewing stand (P4) and, next to it toward the door, one cell of the
+ * floor for water to fill its bottles from: a hole in the ground under layer 0, dug and filled from a bucket after the
+ * build as the crop plot's is (water is poured, not placed: the spec only keeps the cell over it clear); floor torches
+ * in the two front corners. The anvil has a room of its own because the enchanting table's ring of air must stay clear.
+ * No chest: findLandmarks takes every chest round home for home storage. The anvil names no facing (the placer's look
+ * decides it). Landmarks: 'anvil', 'smithing', 'table', 'stand', 'water' (y -1: in the ground), 'torch' x2, 'door'.
+ */
+export function workshop(opts: { doorSide?: Side } = {}): Blueprint {
+  const doorSide = opts.doorSide ?? 'south';
+  checkSide(doorSide);
+  const N = 7;
+  const { g, door } = room(N, N, 4);
+  const placed: [string, string, Pos][] = [
+    ['table', 'C', { x: 1, y: 0, z: 1 }], ['anvil', 'A', { x: 3, y: 0, z: 1 }], ['smithing', 'S', { x: N - 2, y: 0, z: 1 }],
+    ['torch', 'T', { x: 1, y: 0, z: N - 2 }], ['torch', 'T', { x: N - 2, y: 0, z: N - 2 }]
+  ];
+  const landmarks: Landmark[] = [];
+  for (const [kind, ch, at] of placed) { g.set(at.x, at.y, at.z, ch); landmarks.push({ kind, at }); }
+  // left as room() clears them ('.'): the stand's cell, and the cell over the water
+  landmarks.push({ kind: 'stand', at: { x: 1, y: 0, z: 3 } }, { kind: 'water', at: { x: 1, y: -1, z: 4 } }, { kind: 'door', at: door });
+  const spec: StructureSpec = { palette: { ...ROOM_PALETTE, C: 'crafting_table', A: 'anvil', S: 'smithing_table' }, layers: g.layers() };
+  return rotate(blueprint('workshop', spec, { entrances: [{ ...door, facing: 'south' }], landmarks }), TURNS_FROM_SOUTH[doorSide]);
+}
+
 export interface Gate { side: Side; offset: number }
 
 /** The perimeter of a width x length box, clockwise from the north-west corner, with which cells are corners. */

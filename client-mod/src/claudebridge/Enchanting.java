@@ -16,9 +16,6 @@ import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
-import java.util.List;
-import java.util.Set;
-
 import static claudebridge.Interact.click;
 import static claudebridge.Interact.player;
 import static claudebridge.Json.*;
@@ -227,27 +224,8 @@ public final class Enchanting {
             // must not shut the chest the next job has open
             if (was) pl.closeContainer(); // the server returns the item and lapis left in it
             // the table has had the piece armor.unequip took off (or the run gave up): put it back on now, the
-            // enchanted piece if it took, not when the Guardian next looks. With auto-defend off its gear check never
-            // runs, and the chore would take all four pieces off, one a run, with nothing to wear them again
-            Set<Integer> held = Guardian.releaseGear();
-            JsonArray wore = new JsonArray();
-            if (!held.isEmpty() && pl.containerMenu == pl.inventoryMenu) {
-                for (String n : Combat.equipBestArmor(true, held)) wore.add(n);
-                // a piece still in the table (no offer) comes back from the server a tick or two after the close
-                Ticker.add(new Ticker.Task() {
-                    int age;
-                    @Override public boolean tick(Minecraft mc) {
-                        if (++age % 10 != 0) return false;
-                        LocalPlayer me = mc.player;
-                        if (me != null && me.containerMenu == me.inventoryMenu) {
-                            List<String> put = Combat.equipBestArmor(true, held);
-                            if (!put.isEmpty()) Guardian.note("put on " + String.join(", ", put) + " (back from the table)");
-                        }
-                        return age >= 40;
-                    }
-                });
-            }
-            return obj("ok", true, "wasOpen", was, "wore", wore);
+            // enchanted piece if it took, not when the Guardian next looks (Guardian.wearHeldAgain)
+            return obj("ok", true, "wasOpen", was, "wore", Guardian.wearHeldAgain(pl, "table"));
         });
     }
 }

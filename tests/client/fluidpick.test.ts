@@ -1,5 +1,6 @@
 import test from 'ava';
-import { aroundBox, openToSky, standSpots, SKY, type Box, type P } from '../../src/client/brain/fluidpick.js';
+import { aroundBox, holdHarmless, openToSky, standSpots, SKY, type Box, type P } from '../../src/client/brain/fluidpick.js';
+import type { GoalContext } from '../../src/client/brain/goals.js';
 
 /** The blocks round a source at (0, 62, 0) as aroundBox reads them: grass ground (top y 62 is the source's level). */
 function around(set: (x: number, y: number, z: number) => string | undefined) {
@@ -89,4 +90,20 @@ test('tall grass on the line from the eye to the water: still a spot, and the gr
   t.true(standSpots(blocks, box, src, { x: 5, y: 63, z: 0 }, 1).some(s => s.x === spot.x && s.z === spot.z));
   // both halves of the tall grass lie on the line (breaking either takes the plant)
   t.deepEqual(sightLine(look, spot, src), [{ x: 1, y: 64, z: 0 }, { x: 1, y: 63, z: 0 }]);
+});
+
+test('holdHarmless: a sword before a pickaxe in hand (never the full bucket); none carried, nothing selected; armour slots do not count', async (t) => {
+  const run = async (items: { name: string; slot: number; count: number }[]) => {
+    const calls: string[] = [];
+    const ctx = { call: (async (m: string, p: Record<string, unknown> = {}) => { calls.push(`${m} ${String(p.name ?? '')}`.trim()); return m === 'inventory' ? { items } : {}; }) as GoalContext['call'] };
+    return { name: await holdHarmless(ctx), calls };
+  };
+  const a = await run([{ slot: 0, name: 'water_bucket', count: 1 }, { slot: 3, name: 'diamond_pickaxe', count: 1 }, { slot: 7, name: 'diamond_sword', count: 1 }]);
+  t.is(a.name, 'diamond_sword');
+  t.deepEqual(a.calls, ['inventory', 'item.select diamond_sword']);
+  const b = await run([{ slot: 0, name: 'lava_bucket', count: 1 }, { slot: 3, name: 'iron_pickaxe', count: 1 }]);
+  t.is(b.name, 'iron_pickaxe');
+  const c = await run([{ slot: 0, name: 'water_bucket', count: 1 }, { slot: 38, name: 'diamond_sword', count: 1 }]);
+  t.is(c.name, undefined);
+  t.deepEqual(c.calls, ['inventory']);
 });

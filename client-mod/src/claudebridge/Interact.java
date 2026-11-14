@@ -254,9 +254,10 @@ public final class Interact {
         // `slot` (inventory index 0-35): of several by the name, that one (the plain pickaxe, the fire resistance potion)
         s.register("item.select", true, (p, c) -> obj("held", select(required(p, "name"), intParam(p, "slot", -1))));
 
-        // take a worn piece off into the pockets (the enchanting table takes only carried items), and keep the
-        // Guardian's gear check (every 2 s) from wearing it, or a spare of the kind, again for holdMs (default 60 s, at
-        // most 10 min): it would be back on before the table opened. enchant.close ends the hold and wears it again
+        // take a worn piece off into the pockets (the enchanting table and the anvil take only carried items), and keep
+        // the Guardian's gear check (every 2 s) from wearing it, or a spare of the kind, again for holdMs (default 60 s,
+        // at most 10 min): it would be back on before the table opened. enchant.close (or anvil.close) ends the hold and
+        // wears it again
         // (the enchanted piece beats a plain one of its tier: Combat.armorRank), and the hold gives way while the bot is
         // being hurt (Guardian.gearHeld). Refused with a hostile near or just hurt. Replies with the inventory index it
         // went to (`slot`, for enchant.put): the first free of 9-35, then the hotbar (InventoryMenu.quickMoveStack)

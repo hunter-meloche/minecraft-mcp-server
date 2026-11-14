@@ -2,7 +2,7 @@ import test from 'ava';
 import { checkBuild, layoutSpec, LEAVE, parseState, splitDirectional, type StructureSpec } from '../../src/client/schematic.js';
 import {
   billOf, caneStrip, chestPartner, cropPlot, enchantRoom, fenceRing, itemOf, mineStairs, pen, rotate, rotatePos, rotateSpec,
-  rotateState, storageHouse, treeGrid, turn, cabin, type Blueprint, type Side
+  rotateState, storageHouse, treeGrid, turn, cabin, workshop, type Blueprint, type Side
 } from '../../src/client/brain/blueprints.js';
 import type { Pos } from '../../src/client/survey.js';
 
@@ -42,7 +42,8 @@ const all = (): [string, Blueprint][] => [
   ['storageHouse', storageHouse()], ['storageHouse east', storageHouse({ doorSide: 'east', chests: 6 })],
   ['fenceRing', fenceRing({ width: 10, length: 8 }, [{ side: 'south', offset: 4 }])], ['pen', pen()],
   ['cropPlot', cropPlot()], ['treeGrid', treeGrid(3, 2)], ['caneStrip', caneStrip(5)], ['enchantRoom', enchantRoom()],
-  ['cabin', cabin({ bed: 'white_bed' })], ['cabin east, no bed', cabin({ doorSide: 'east' })]
+  ['cabin', cabin({ bed: 'white_bed' })], ['cabin east, no bed', cabin({ doorSide: 'east' })],
+  ['workshop', workshop()], ['workshop west', workshop({ doorSide: 'west' })]
 ];
 
 test('every blueprint lays out, and its size is the layout\'s', (t) => {

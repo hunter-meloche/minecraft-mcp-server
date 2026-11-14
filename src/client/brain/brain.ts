@@ -10,6 +10,7 @@ import { pens } from './pens.js';
 import { deepTrip } from './deep.js';
 import { caneRound } from './cane.js';
 import { enchantGoal } from './enchant.js';
+import { anvilGoal } from './anvil.js';
 import { HeatMap } from './paths.js';
 import { signsGoal } from './signs.js';
 import { driftGoal, structureGoal } from '../structures/job.js';
@@ -179,7 +180,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -619,7 +620,7 @@ export class Brain {
     const l = world.landmarks;
     const y = world.yard;
     const ours = (p: Pos) => (y && p.x >= y.x1 - 6 && p.x <= y.x2 + 6 && p.z >= y.z1 - 6 && p.z <= y.z2 + 6) || Math.hypot(p.x - home.x, p.z - home.z) <= 24;
-    const all = [l.bed, ...l.chests, l.furnace, l.table, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
+    const all = [l.bed, ...l.chests, l.furnace, l.table, l.anvil, l.smithing, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
     if (!all.length) return;
     const r = await this.rt.call<{ inside?: boolean[] }>('foreign.at', { positions: all.map(p => [p.x, p.y, p.z]) }).catch(() => undefined);
     if (!Array.isArray(r?.inside)) return;
@@ -630,6 +631,8 @@ export class Brain {
     l.bed = mine(l.bed);
     l.furnace = mine(l.furnace);
     l.table = mine(l.table);
+    if (l.anvil) l.anvil = mine(l.anvil);
+    if (l.smithing) l.smithing = mine(l.smithing);
     l.chests = l.chests.filter(p => mine(p));
     l.farmland = l.farmland.filter(p => mine(p));
     this.note(`landmarks: left ${theirs.size} of someone else's alone (their chests, bed or farm)`);
@@ -657,7 +660,8 @@ export class Brain {
     await this.dropForeign(world, s.home);
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
       const l = world.landmarks;
-      this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland`);
+      this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland` +
+        `${l.anvil ? ', an anvil' : ''}${l.smithing ? ', a smithing table' : ''}`);
     }
     this.memory.save();
   }

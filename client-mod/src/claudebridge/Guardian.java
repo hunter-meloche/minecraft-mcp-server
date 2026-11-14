@@ -50,8 +50,8 @@ public final class Guardian {
 
     /**
      * Armour slots the gear check leaves alone for now: inventory index (36 feet .. 39 head) -> until when (ms). Set by
-     * armor.unequip, so a piece taken off for the enchanting table stays off (and no spare goes on in its place) until
-     * the table has it; ended by enchant.close or the time running out. Game thread only.
+     * armor.unequip, so a piece taken off for the enchanting table or the anvil stays off (and no spare goes on in its
+     * place) until the block has it; ended by enchant.close, anvil.close or the time running out. Game thread only.
      */
     static final Map<Integer, Long> gearHoldUntil = new HashMap<>();
 
@@ -63,11 +63,39 @@ public final class Guardian {
         gearHoldUntil.remove(index);
     }
 
-    /** End every hold; returns the slots that were held, for enchant.close to put back what armor.unequip took off. */
+    /** End every hold; returns the slots that were held, for wearHeldAgain to put back what armor.unequip took off. */
     static java.util.Set<Integer> releaseGear() {
         java.util.Set<Integer> was = new java.util.HashSet<>(gearHoldUntil.keySet());
         gearHoldUntil.clear();
         return was;
+    }
+
+    /**
+     * After the enchanting table or the anvil has had a piece armor.unequip took off (or the run gave up): end every
+     * hold and put the best of the held kinds on again now, the enchanted or mended piece if it took, not when the gear
+     * check next looks. With auto-defend off that check never runs, and the chore would take all four pieces off, one
+     * a run, with nothing to wear them again. A piece still in the block's menu (no offer, no result) comes back from
+     * the server a tick or two after the close: a few more looks over 2 s put it on then (`from` names the block in
+     * that note). Returns what went on at once. Call it after the menu is closed.
+     */
+    static JsonArray wearHeldAgain(LocalPlayer pl, String from) {
+        java.util.Set<Integer> held = releaseGear();
+        JsonArray wore = new JsonArray();
+        if (held.isEmpty() || pl.containerMenu != pl.inventoryMenu) return wore;
+        for (String n : Combat.equipBestArmor(true, held)) wore.add(n);
+        Ticker.add(new Ticker.Task() {
+            int age;
+            @Override public boolean tick(Minecraft mc) {
+                if (++age % 10 != 0) return false;
+                LocalPlayer me = mc.player;
+                if (me != null && me.containerMenu == me.inventoryMenu) {
+                    List<String> put = Combat.equipBestArmor(true, held);
+                    if (!put.isEmpty()) note("put on " + String.join(", ", put) + " (back from the " + from + ")");
+                }
+                return age >= 40;
+            }
+        });
+        return wore;
     }
 
     /** Whether the bot was hurt in the last `ticks` ticks. */

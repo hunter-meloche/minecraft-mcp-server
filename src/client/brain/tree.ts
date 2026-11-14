@@ -9,6 +9,7 @@ import { progressOf, type Milestone, type MilestoneState } from './progress.js';
 import { blocksWorked } from './project.js';
 import type { GoalContext } from './goals.js';
 import { homeMilestone } from './home.js';
+import { workshopMilestone } from './workshop.js';
 
 /**
  * The bot's long game, in order. Each milestone is done once the world shows it (a zone the build registered), so
@@ -317,4 +318,4 @@ const moreChests: Milestone = {
 
 export const TREE: Milestone[] = [homeMilestone, storage, moreChests, perimeter, fenceClear, yardLevel, cropPlotMilestone(1, ['perimeter']), treeFarmMilestone(['plot1']),
   penMilestone('cow', ['plot1']), penMilestone('sheep', ['pen-cow']),
-  caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow'])];
+  caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow']), workshopMilestone(['enchanting'])];

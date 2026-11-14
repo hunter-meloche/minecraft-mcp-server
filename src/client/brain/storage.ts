@@ -21,7 +21,7 @@ export type ChestContents = Record<string, Record<string, number>>;
 const keyOf = (p: Pos) => `${p.x},${p.y},${p.z}`;
 const bare = (name: string) => name.replace(/^minecraft:/, '');
 
-const GEAR = /_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots|horse_armor)$|^(shield|bow|crossbow|trident|mace|elytra|bucket|fishing_rod|shears|flint_and_steel|carrot_on_a_stick|warped_fungus_on_a_stick|brush|spyglass|compass|clock|lead|saddle)$|_bucket$/;
+const GEAR = /_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots|horse_armor)$|^(shield|bow|crossbow|trident|mace|elytra|bucket|fishing_rod|shears|flint_and_steel|carrot_on_a_stick|warped_fungus_on_a_stick|brush|spyglass|compass|clock|lead|saddle|enchanted_book)$|_bucket$/;
 /** Checked before food: rotten flesh and spider eyes are "edible", but nobody wants them in the food chest. */
 const MOBDROPS = new Set(['rotten_flesh', 'string', 'spider_eye', 'gunpowder', 'bone', 'arrow', 'leather', 'feather', 'phantom_membrane',
   'ender_pearl', 'slime_ball', 'blaze_rod', 'ghast_tear', 'ink_sac', 'glow_ink_sac', 'rabbit_hide', 'rabbit_foot', 'magma_cream', 'prismarine_shard', 'prismarine_crystals', 'breeze_rod', 'armadillo_scute', 'turtle_scute']);
