@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'use-item-on-block']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'use-item-on-block', 'use-portal']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -115,7 +115,8 @@ test('mine-blocks never digs up the home area: from home it walks out to ore bey
   });
   await run('set-home');
   await run('get-position');
-  t.deepEqual(zones.at(-1), { x: 0, z: 0, radius: 24 });
+  // (each says the dimension it is for since P2a: a portal trip between the look and the call files it right)
+  t.deepEqual(zones.at(-1), { x: 0, z: 0, radius: 24, dimension: 'overworld' });
   t.regex((await run('mine-blocks', { block: 'coal_ore', count: 3 })).text, /^Mined for 20s: coal x3/);
   t.like(gotos[0], { x: 0, z: 45, xz: true }); // the nearest one outside the zone, not the one under the lawn
   // away from home it mines where it is
@@ -473,7 +474,7 @@ test('blocks the bot built are remembered per world, and mine-blocks digs around
   t.is(digs.length, 1);
   t.false(miner.request.getCalls().some(c => c.args[0] === 'mine')); // not Baritone's mine process
   // the game client got the list (it becomes Baritone's no-break list near the builds)
-  t.deepEqual(miner.request.getCalls().find(c => c.args[0] === 'protect.set')?.args[1], { positions: [[0, 65, 0]] });
+  t.deepEqual(miner.request.getCalls().find(c => c.args[0] === 'protect.set')?.args[1], { positions: [[0, 65, 0]], dimension: 'overworld' });
   t.regex(r.text, /^Mined 1 oak_log one by one in [\d.]+s, leaving 1 that belong to your builds: oak_log x1\.$/);
 });
 
@@ -866,6 +867,45 @@ test('set-home and go-home: saved per world, walked back to in legs', async (t) 
   t.like(legs.at(-1), { x: 10, y: 64, z: -4, range: 2 });
 });
 
+test('use-portal: through the portal given, or the nearest lit one in sight (its own first); out toward home from the Nether; the bridge\'s reason as an error', async (t) => {
+  let dim = 'overworld';
+  const status = () => ({ ...STATUS, hashedSeed: '7', dimension: dim });
+  const entered: Record<string, unknown>[] = [];
+  let reply: Record<string, unknown> = {};
+  let listed: Record<string, unknown>[] = [];
+  const { run, request } = setup({
+    status,
+    'portal.list': () => ({ dimension: dim, portals: listed }),
+    'portal.enter': (p: Record<string, unknown>) => { entered.push(p); return reply; }
+  });
+  t.is((await run('set-home')).text, "Home 'home' set at (10, 64, -4) (overworld)");
+  // stranded in the Nether: someone's portal nearer, its own further; out on the side toward home
+  dim = 'the_nether';
+  listed = [
+    { x: -60, y: 70, z: 267, axis: 'x', width: 2, height: 3, distance: 12, own: false },
+    { x: -71, y: 63, z: 273, axis: 'x', width: 2, height: 3, distance: 20, own: true }
+  ];
+  reply = { ok: true, from: 'the_nether', dimension: 'overworld', position: { x: -562.5, y: 63, z: 2190.5 }, block: { x: -563, y: 63, z: 2190 }, portal: { x: -562, y: 63, z: 2191 }, stepped: true, steppedTo: { x: -564, y: 63, z: 2191 }, seconds: 6.2 };
+  const home = await run('use-portal');
+  t.false(home.isError);
+  t.is(home.text, 'Through the portal at (-71, 63, 273): the_nether -> overworld at (-563, 63, 2190), by the portal at (-562, 63, 2191); stepped out to (-564, 63, 2191) after 6.2s.');
+  t.deepEqual(entered.at(-1), { x: -71, y: 63, z: 273, timeoutMs: 60_000, toward: { x: 10, z: -4 } });
+  t.deepEqual((request.getCalls().find(c => c.args[0] === 'portal.enter')!.args as unknown[])[2], { timeoutMs: 90_000 }, 'the call waits the portal\'s time and the walk');
+  // a block of the portal given (to the block), in the overworld: no side asked for; the bridge's reason comes back
+  dim = 'overworld';
+  reply = { ok: false, reason: 'timed out in the portal (60 s in it)' };
+  const stuck = await run('use-portal', { x: 1.5, y: 64, z: 2.7, timeoutMs: 70_000 });
+  t.true(stuck.isError);
+  t.is(stuck.text, 'Failed: Not through the portal at (1, 64, 2) in overworld: timed out in the portal (60 s in it).');
+  t.deepEqual(entered.at(-1), { x: 1, y: 64, z: 2, timeoutMs: 70_000 });
+  // nothing lit in sight
+  listed = [];
+  const none = await run('use-portal');
+  t.true(none.isError);
+  t.regex(none.text, /^Failed: No lit portal in sight \(within 128\) in overworld/);
+  t.is(entered.length, 2);
+});
+
 test('explore walks legs in a direction until the target shows up', async (t) => {
   let pos = { x: 0, y: 64, z: 0 };
   let looks = 0;
@@ -1017,7 +1057,7 @@ test('the pens\' fence rings go to the client mod with the yard\'s rectangle (it
   const cowPen = { x1: -558, z1: 2165, x2: -552, z2: 2171 }, sheepPen = { x1: -542, z1: 2196, x2: -536, z2: 2202 };
   rt.setHomeZone(yard, [cowPen, sheepPen]);
   await run('get-position');
-  t.deepEqual(zones.at(-1), { ...yard, pens: [cowPen, sheepPen] });
+  t.deepEqual(zones.at(-1), { ...yard, pens: [cowPen, sheepPen], dimension: 'overworld' });
   // the same again: nothing resent
   const sent = zones.length;
   rt.setHomeZone(yard, [cowPen, sheepPen]);
@@ -1026,10 +1066,10 @@ test('the pens\' fence rings go to the client mod with the yard\'s rectangle (it
   // a pen gone (or none built yet): the yard's rectangle as it always went, and the mod drops the pens' bands
   rt.setHomeZone(yard, [cowPen]);
   await run('get-position');
-  t.deepEqual(zones.at(-1), { ...yard, pens: [cowPen] });
+  t.deepEqual(zones.at(-1), { ...yard, pens: [cowPen], dimension: 'overworld' });
   rt.setHomeZone(yard);
   await run('get-position');
-  t.deepEqual(zones.at(-1), { ...yard });
+  t.deepEqual(zones.at(-1), { ...yard, dimension: 'overworld' });
 });
 
 test('a new server with no home and nothing built: the mod still hears both (its build scanner waits for them)', async t => {
@@ -1041,13 +1081,13 @@ test('a new server with no home and nothing built: the mod still hears both (its
     'protect.zone': (p: Record<string, unknown>) => { sent.push(`zone ${JSON.stringify(p)}`); return { set: false }; }
   });
   await run('get-position');
-  t.deepEqual(sent, ['set []', 'zone {"x":0,"z":0,"radius":0}']);
+  t.deepEqual(sent, ['set []', 'zone {"x":0,"z":0,"radius":0,"dimension":"overworld"}']);
   synced = { protectSynced: true, zoneSynced: true };
   await run('get-position');
   t.is(sent.length, 2, 'nothing resent once the mod has both');
   synced = { protectSynced: false, zoneSynced: false }; // the client was relaunched
   await run('get-position');
-  t.deepEqual(sent.slice(2), ['set []', 'zone {"x":0,"z":0,"radius":0}']);
+  t.deepEqual(sent.slice(2), ['set []', 'zone {"x":0,"z":0,"radius":0,"dimension":"overworld"}']);
 });
 
 test('use-item-on-block too far with a full bucket: a harmless item in hand for the walk closer, the bucket back for the use', async (t) => {

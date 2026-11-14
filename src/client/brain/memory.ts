@@ -19,6 +19,11 @@ export interface Landmarks {
    */
   anvil?: Pos;
   smithing?: Pos;
+  /**
+   * a lit nether portal's block (the nearest home) in the yard: the portal milestone's own once lit, or one the
+   * improvement run or a player lit there, which the milestone counts as its own (portal.ts)
+   */
+  portal?: Pos;
   /** farmland cells near home */
   farmland: Pos[];
   /** when these were looked for (ms) */
@@ -186,6 +191,19 @@ export interface WorldMemory {
   work?: import('./work.js').WorkMemory;
   /** the anvil's: the pairs that gave nothing worth taking, an anvil that wore out to put back (anvil.ts) */
   anvil?: import('./anvil.js').AnvilMemory;
+  /**
+   * The Nether (progression P2a). `trips` is the nether-trips switch: anything that goes through a portal waits for it
+   * to be true, and it is off (undefined) until the lead turns it on (the nether-trips tool); the portal milestone
+   * lights the home portal only then (portal.ts). The rest is nether.ts's: the stage, the clean trips and the deaths
+   * the holds read, the day's trips, its own Nether-side portal, where it came in, the portals it has seen. Partial as
+   * brain.json may hold it (a file from before has only the switch): nether.ts netherOf makes it whole
+   */
+  nether?: Partial<import('./nether.js').NetherMemory>;
+  /**
+   * The spare diamond set the portal milestone stored for a regear after a death in the Nether (chests.ts SpareSet):
+   * which chest slots hold it. Nothing else takes or uses those pieces
+   */
+  spareSet?: import('./chests.js').SpareSet;
 }
 
 export const DEFAULT_LEASH = 96;
@@ -237,7 +255,7 @@ const id = (b: string | null) => (b ?? '').replace(/^minecraft:/, '').replace(/\
  */
 export function findLandmarks(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
   const found: Landmarks = { chests: [], farmland: [] };
-  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [];
+  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [], portals: Pos[] = [];
   blocks.forEach((b, i) => {
     const name = id(b);
     if (!name) return;
@@ -250,6 +268,7 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
     else if (name === 'crafting_table') tables.push(at);
     else if (name === 'anvil' || name === 'chipped_anvil' || name === 'damaged_anvil') anvils.push(at);
     else if (name === 'smithing_table') smithings.push(at);
+    else if (name === 'nether_portal') portals.push(at);
     else if (name === 'farmland') found.farmland.push(at);
   });
   const near = (a: Pos, b: Pos) => Math.hypot(a.x - home.x, a.y - home.y, a.z - home.z) - Math.hypot(b.x - home.x, b.y - home.y, b.z - home.z);
@@ -258,8 +277,9 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
   found.furnace = furnaces.sort(near)[0];
   found.table = tables.sort(near)[0];
   // (set only where found: a home without them has the landmarks it had before, key for key)
-  const anvil = anvils.sort(near)[0], smithing = smithings.sort(near)[0];
+  const anvil = anvils.sort(near)[0], smithing = smithings.sort(near)[0], portal = portals.sort(near)[0];
   if (anvil) found.anvil = anvil;
   if (smithing) found.smithing = smithing;
+  if (portal) found.portal = portal;
   return found;
 }

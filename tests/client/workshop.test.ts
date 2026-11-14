@@ -242,8 +242,11 @@ function afterEnchanting(): WorldMemory {
   return w;
 }
 
-test('the workshop is the tree\'s last milestone, after the enchanting room: its site, its build, its water; with the room done it is next', (t) => {
-  const m = TREE.at(-1)!;
+test('the workshop comes after the enchanting room (the nether portal after it, P2a): its site, its build, its water; with the room done it is next', (t) => {
+  const m = TREE.find(x => x.id === 'workshop')!;
+  t.is(TREE.indexOf(m), TREE.findIndex(x => x.id === 'enchanting') + 1);
+  t.is(TREE.at(-1)!.id, 'nether-portal');
+  t.deepEqual(TREE.at(-1)!.prereqs, ['workshop']);
   t.is(m.id, 'workshop');
   t.is(m.title, 'a workshop');
   t.deepEqual(m.prereqs, ['enchanting']);
@@ -266,7 +269,7 @@ test('the live homestead: a site in the yard, the build with its door toward hom
   const s = lookAt(items, 1000);
   const goal = projectGoal(TREE);
   const { ctx, did } = runCtx(world, s, fw, { inv: items });
-  const m = TREE.at(-1)!;
+  const m = TREE.find(x => x.id === 'workshop')!;
   const view = () => ({ s, world, have: () => 0 });
 
   t.regex(await goal.run(ctx), /^a workshop - find room for the workshop: workshop goes at \(-?\d+, 62, \d+\)$/);
@@ -322,9 +325,8 @@ test('the live homestead: a site in the yard, the build with its door toward hom
   const far = { x: 2 * water.x - bx, y: water.y, z: 2 * water.z - bz };
   const face = bx < water.x ? 'west' : bx > water.x ? 'east' : bz < water.z ? 'north' : 'south';
   t.deepEqual([dig, pour], [`dig.here ${fmt(water)}`, `use-item-on-block water_bucket on ${fmt(far)} face ${face}`]);
-  // and nothing left in the tree
-  t.is(goal.wants(s, world), null);
-  t.like(goal.declines!(s, world), { cause: 'unneeded', text: `all ${TREE.length} milestone(s) done` });
+  // and the next in the tree: the nether portal (P2a), its obsidian first
+  t.is(goal.wants(s, world), 'a nether portal: gather 20 obsidian');
 });
 
 test('the build puts each landmark\'s zone on its block whichever way the door faces, and the water step finds its cell where the build put it', async (t) => {

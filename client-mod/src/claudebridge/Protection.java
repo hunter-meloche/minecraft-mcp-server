@@ -11,6 +11,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import static claudebridge.Json.intParam;
+import static claudebridge.Json.strParam;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -36,10 +37,37 @@ public final class Protection {
     private static int suspended = 0;
     /** what the bot built and its home zone have come from Node: until then nothing can be told apart as someone else's */
     private static boolean positionsSynced, zoneSynced;
+    /**
+     * The dimension each was sent for (the call's `dimension`, else the one the bot was in): what the bot built in the
+     * overworld is not its own at the same numbers in the Nether. Each holds only in its own dimension, and after a
+     * portal the status says "not synced" until Node sends the new dimension's (tools.ts resends on that).
+     */
+    private static volatile String positionsDim = "overworld", zoneDim = "overworld";
 
-    static boolean synced() { return positionsSynced && zoneSynced; }
-    static boolean positionsSynced() { return positionsSynced; }
-    static boolean zoneSynced() { return zoneSynced; }
+    static boolean synced() { return positionsSynced() && zoneSynced(); }
+    static boolean positionsSynced() { return positionsSynced && positionsDim.equals(Nether.here()); }
+    static boolean zoneSynced() { return zoneSynced && zoneDim.equals(Nether.here()); }
+
+    /**
+     * Whether the build scan may judge what it sees: once both are synced for this dimension, as before; or, through a
+     * portal, a minute on with Node's word only for the dimension left (Node not answering): others' builds there must
+     * not go unprotected for that, and a chunk looked at again later is judged afresh.
+     */
+    static boolean scanAllowed() {
+        return synced() || (positionsSynced && zoneSynced && Nether.ticksSinceChange() > 1200);
+    }
+
+    /** The positions sent are this dimension's. */
+    private static boolean positionsHere() { return positionsDim.equals(Nether.here()); }
+
+    /**
+     * The home zone holds where Node said it is, and only in the overworld: the yard's numbers in the Nether are a place
+     * 8 times as far from home, someone else's ground or the open Nether, where the zone's no-dig rule would only stop
+     * the bot's own way out.
+     */
+    static boolean zoneActive() {
+        return zoneSet && "overworld".equals(zoneDim) && zoneDim.equals(Nether.here());
+    }
 
     private Protection() { }
 
@@ -83,7 +111,7 @@ public final class Protection {
         if (mc.player == null || mc.level == null) return List.of();
         BlockPos me = mc.player.blockPosition();
         Set<Block> types = new LinkedHashSet<>();
-        for (long l : POSITIONS) {
+        if (positionsHere()) for (long l : POSITIONS) {
             BlockPos p = BlockPos.of(l);
             if (p.distManhattan(me) > RADIUS * 2 || p.distSqr(me) > RADIUS * RADIUS || !mc.level.isLoaded(p)) continue;
             Block b = mc.level.getBlockState(p).getBlock();
@@ -104,9 +132,9 @@ public final class Protection {
         return (st.is(Blocks.OBSIDIAN) || st.is(Blocks.CRYING_OBSIDIAN)) && Foreign.portalNear(p, 3);
     }
 
-    /** The bot's own: a block it built, or anywhere in its home zone (its yard). */
+    /** The bot's own: a block it built (in this dimension), or anywhere in its home zone (its yard, in the overworld). */
     static boolean isOwn(BlockPos p) {
-        return POSITIONS.contains(p.asLong()) || nearZone(p);
+        return (positionsHere() && POSITIONS.contains(p.asLong())) || nearZone(p);
     }
 
     private static void apply(List<Block> types) {
@@ -140,12 +168,23 @@ public final class Protection {
         Blocks.DEEPSLATE_EMERALD_ORE);
 
     static boolean nearZone(BlockPos p) {
-        if (!zoneSet) return false;
+        if (!zoneActive()) return false;
         // the yard's rectangle: a circle round home as wide as its farthest corner covered seven times the yard once it
         // grew long, and Baritone, never allowed to dig while in it, found no path to any ore
         if (zoneRect) return p.getX() >= zoneX1 - ZONE_MARGIN && p.getX() <= zoneX2 + ZONE_MARGIN && p.getZ() >= zoneZ1 - ZONE_MARGIN && p.getZ() <= zoneZ2 + ZONE_MARGIN;
         double dx = p.getX() - zoneX, dz = p.getZ() - zoneZ;
         return dx * dx + dz * dz <= (double) (zoneRadius + ZONE_MARGIN) * (zoneRadius + ZONE_MARGIN);
+    }
+
+    /**
+     * In the home zone itself (no margin), in that dimension: where a lit portal is the bot's own (Portal.own). Only the
+     * overworld has one.
+     */
+    static boolean inHomeZone(String dimension, BlockPos p) {
+        if (!zoneSet || !"overworld".equals(dimension) || !zoneDim.equals(dimension)) return false;
+        if (zoneRect) return p.getX() >= zoneX1 && p.getX() <= zoneX2 && p.getZ() >= zoneZ1 && p.getZ() <= zoneZ2;
+        double dx = p.getX() - zoneX, dz = p.getZ() - zoneZ;
+        return dx * dx + dz * dz <= (double) zoneRadius * zoneRadius;
     }
 
     /** Whether the miner has asked yet (the client log says so once), and when the log last told what it left out. */
@@ -179,7 +218,7 @@ public final class Protection {
 
     /** The same with the block at a place given (null: not known, kept). The list itself when nothing comes off. */
     static List<BlockPos> mineTargets(List<BlockPos> locs, java.util.function.Function<BlockPos, Block> blockAt) {
-        if (!zoneSet || suspended > 0) return locs;
+        if (!zoneActive() || suspended > 0) return locs;
         List<BlockPos> kept = null;
         for (int i = 0; i < locs.size(); i++) {
             BlockPos p = locs.get(i);
@@ -250,7 +289,9 @@ public final class Protection {
 
     /** Where a block Baritone weighs placing while it paths would go (FenceScaffoldMixin, as the cost starts). */
     public static void placingAt(int x, int y, int z) {
-        BY_THE_FENCE.get()[0] = byAFence(band, penBands, x, y, z);
+        // the fences are the yard's, in the overworld: none in the Nether
+        boolean here = zoneActive();
+        BY_THE_FENCE.get()[0] = here && byAFence(band, penBands, x, y, z);
     }
 
     /** In the yard fence's band or a pen's. */
@@ -383,7 +424,7 @@ public final class Protection {
         // in or right by someone else's build: Baritone places nothing (no pillars or bridges left at a friend's base)
         Careful.setForeign(Foreign.nearest(me) <= FOREIGN_NO_PLACE);
         Set<Block> types = new LinkedHashSet<>();
-        for (long l : POSITIONS) {
+        if (positionsHere()) for (long l : POSITIONS) {
             BlockPos p = BlockPos.of(l);
             if (p.distManhattan(me) > RADIUS * 2 || p.distSqr(me) > RADIUS * RADIUS || !mc.level.isLoaded(p)) continue;
             var st = mc.level.getBlockState(p);
@@ -401,10 +442,11 @@ public final class Protection {
     static void refresh() { tick(Minecraft.getInstance()); }
 
     public static void register(BridgeServer s) {
-        // the full list for the current dimension, replacing what was there
+        // the full list for the current dimension (or `dimension`), replacing what was there
         s.register("protect.set", true, (p, c) -> {
             POSITIONS.clear();
             positionsSynced = true;
+            positionsDim = Names.strip(strParam(p, "dimension", Nether.here()));
             JsonElement list = p.get("positions");
             if (list != null && list.isJsonArray()) {
                 for (JsonElement e : list.getAsJsonArray()) {
@@ -420,8 +462,10 @@ public final class Protection {
         // the home zone: {x, z, radius}; radius 0 clears it
         s.register("protect.zone", true, (p, c) -> {
             // {x, z, radius} a circle (radius 0 clears it), or {x1, z1, x2, z2} a rectangle; with either, `pens`: the
-            // pens' fence rings (none sent, none kept)
+            // pens' fence rings (none sent, none kept); `dimension`: the one it is for (default: the one the bot is in).
+            // It holds only in the overworld
             zoneSynced = true;
+            zoneDim = Names.strip(strParam(p, "dimension", Nether.here()));
             penRings = ringsOf(p);
             zoneRect = p.has("x1");
             if (zoneRect) {
@@ -440,6 +484,9 @@ public final class Protection {
         s.register("protect.status", true, (p, c) -> {
             JsonObject r = new JsonObject();
             r.addProperty("zone", !zoneSet ? null : zoneRect ? zoneX1 + "," + zoneZ1 + ".." + zoneX2 + "," + zoneZ2 : zoneX + "," + zoneZ + " r" + zoneRadius);
+            r.addProperty("zoneDimension", zoneDim);
+            r.addProperty("zoneActive", zoneActive());
+            r.addProperty("positionsDimension", positionsDim);
             r.addProperty("count", POSITIONS.size());
             r.addProperty("suspended", suspended);
             Band fence = band;

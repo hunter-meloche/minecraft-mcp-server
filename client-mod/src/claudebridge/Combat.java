@@ -37,8 +37,11 @@ import static claudebridge.Json.*;
 public final class Combat {
     private Combat() { }
 
-    /** Not picked by 'hostile' (neutral until provoked, or not winnable with early gear); still attackable by name. */
-    static final Set<String> NOT_PICKED_AS_HOSTILE = Set.of("enderman", "piglin", "zombified_piglin", "warden", "creaking", "wither",
+    /**
+     * Not picked by 'hostile' (neutral until provoked, or not winnable with early gear); still attackable by name. A
+     * piglin brute too: never attacked unless it is after the bot (Nether.mayAttack), like the other piglins.
+     */
+    static final Set<String> NOT_PICKED_AS_HOSTILE = Set.of("enderman", "piglin", "piglin_brute", "zombified_piglin", "warden", "creaking", "wither",
         "ender_dragon", "elder_guardian", "giant");
     /** Mobs that hurt from a distance: worth raising a shield against. */
     static final Set<String> RANGED = Set.of("skeleton", "stray", "bogged", "parched", "pillager", "blaze", "ghast", "witch", "breeze",
@@ -63,7 +66,8 @@ public final class Combat {
         String name = Names.entity(e);
         return switch (query) {
             case "hostile" -> isHostile(e) && !NOT_PICKED_AS_HOSTILE.contains(name);
-            case "mob" -> e instanceof Mob;
+            // any mob, but never a neutral one that is not after the bot (a zombified piglin's group, a villager, a golem)
+            case "mob" -> e instanceof Mob && Nether.mayAttack(e, self);
             case "player" -> e instanceof Player;
             default -> !(e instanceof Player) && e instanceof LivingEntity && name.equals(query);
         };
@@ -113,15 +117,34 @@ public final class Combat {
 
     /** Hold the best weapon carried (unless digging); fist when there is none. */
     static void holdWeapon() {
-        Inventory inv = Minecraft.getInstance().player.getInventory();
-        int best = -1, bestScore = -1;
-        for (int i = 0; i < 36; i++) {
-            ItemStack s = inv.getItem(i);
-            if (s.isEmpty()) continue;
-            int score = weaponScore(Names.item(s));
+        holdWeapon(null);
+    }
+
+    /**
+     * The same for a hit on `target`: with a neutral mob, a villager or a golem near it (Nether.sweepWouldAnger) not a
+     * sword, whose sweep hits the neighbours too and angers a zombified piglin's whole group: the best axe, else a
+     * pickaxe or a shovel (none of them sweeps), a sword only when nothing else is carried.
+     */
+    static void holdWeapon(Entity target) {
+        LocalPlayer p = Minecraft.getInstance().player;
+        Inventory inv = p.getInventory();
+        String[] names = new String[36];
+        for (int i = 0; i < 36; i++) names[i] = inv.getItem(i).isEmpty() ? null : Names.item(inv.getItem(i));
+        int best = pickWeapon(names, target != null && Nether.sweepWouldAnger(target, p));
+        if (best >= 0 && best != inv.getSelectedSlot()) Interact.select(names[best], best);
+    }
+
+    /** The slot of the weapon to hold (-1: none): the best by weaponScore, not a sword when `noSweep` unless only swords. Pure. */
+    static int pickWeapon(String[] names, boolean noSweep) {
+        int best = -1, bestScore = -1, sword = -1, swordScore = -1;
+        for (int i = 0; i < names.length; i++) {
+            if (names[i] == null) continue;
+            int score = weaponScore(names[i]);
+            if (score < 0) continue;
+            if (noSweep && names[i].endsWith("_sword")) { if (score > swordScore) { sword = i; swordScore = score; } continue; }
             if (score > bestScore) { best = i; bestScore = score; }
         }
-        if (best >= 0 && best != inv.getSelectedSlot()) Interact.select(Names.item(inv.getItem(best)));
+        return best >= 0 ? best : sword;
     }
 
     static int armorScore(ItemStack s) {
@@ -186,11 +209,21 @@ public final class Combat {
         return best;
     }
 
+    /**
+     * How good a piece is to wear in its slot here: armorRank, but in the Nether a golden helmet first (piglins leave
+     * a player in gold alone); back in the overworld the best helmet wins again by armorRank.
+     */
+    static int wearRank(String slot, ItemStack s, boolean nether) {
+        int rank = armorRank(s);
+        return slot.equals("helmet") && !s.isEmpty() ? Nether.helmetRank(Names.item(s), rank, nether) : rank;
+    }
+
     /** `only`: just these armour slots (inventory index 36-39), or all of them when null. */
     static List<String> equipBestArmor(boolean heedHolds, Set<Integer> only) {
         LocalPlayer p = Minecraft.getInstance().player;
         Inventory inv = p.getInventory();
         List<String> put = new ArrayList<>();
+        boolean nether = Nether.inNether();
         for (var slot : ARMOR_SLOT.entrySet()) {
             if (only != null && !only.contains(slot.getValue())) continue;
             if (heedHolds && Guardian.gearHeld(slot.getValue())) continue;
@@ -200,10 +233,10 @@ public final class Combat {
             for (int i = 0; i < 36; i++) {
                 ItemStack s = inv.getItem(i);
                 Matcher m = ARMOR.matcher(s.isEmpty() ? "" : Names.item(s));
-                rank[i] = m.matches() && m.group(2).equals(slot.getKey()) ? armorRank(s) : -1;
+                rank[i] = m.matches() && m.group(2).equals(slot.getKey()) ? wearRank(slot.getKey(), s, nether) : -1;
                 cursed[i] = rank[i] >= 0 && bound(s);
             }
-            int best = pickArmor(armorRank(worn), bound(worn), rank, cursed);
+            int best = pickArmor(wearRank(slot.getKey(), worn, nether), bound(worn), rank, cursed);
             if (best < 0) continue;
             if (p.containerMenu != p.inventoryMenu) p.closeContainer();
             String name = Names.item(inv.getItem(best));
@@ -334,11 +367,15 @@ public final class Combat {
             boolean died = false;
             BlockPos lastPos = first.blockPosition();
 
+            /** why the victim is let go rather than chased (it flies, stands by lava, across a drop), as last seen */
+            String letGo;
+
             @Override
             public boolean tick(Minecraft m) {
                 age++;
                 LocalPlayer p = m.player;
                 if (p == null) return end("none");
+                if (Nether.drinking) return false; // a potion of fire resistance going down: hands off the hand for it
                 if (victim instanceof LivingEntity le && le.isDeadOrDying()) died = true;
                 if (!victim.isAlive() || victim.isRemoved()) {
                     (died ? kills : vanished).add(Names.entity(victim) + (died ? "" : Names.entity(victim).equals("creeper") ? " (exploded)" : " (despawned)"));
@@ -354,7 +391,7 @@ public final class Combat {
                 double d = p.distanceTo(victim);
                 if (d < closest - 1) { closest = d; closestAt = age; }
                 if (age - closestAt > 240) { // not getting closer for 12 s
-                    unreachable.add(Names.entity(victim));
+                    unreachable.add(Names.entity(victim) + (letGo != null ? " (" + letGo + ")" : ""));
                     skip.add(victim.getId());
                     Entity next = multiple ? pick(query, maxDistance, skip) : null;
                     if (next == null) return end(kills.isEmpty() ? "unreachable" : "done");
@@ -365,6 +402,14 @@ public final class Combat {
 
                 boolean inReach = d <= 3.2 && p.hasLineOfSight(victim);
                 if (!inReach) {
+                    // never after one that flies, or in the Nether one that stands by lava or across a drop: let it go
+                    // behind the shield (the 12 s rule above gives it up if it does not come into reach)
+                    letGo = Nether.chaseRefusal(p, victim);
+                    if (letGo != null) {
+                        if (Processes.active() != null) Processes.baritone().getPathingBehavior().cancelEverything();
+                        if (shield) { p.lookAt(EntityAnchorArgument.Anchor.EYES, victim.getEyePosition()); shieldUp(); }
+                        return false;
+                    }
                     shieldDown();
                     if (age - chasedAt >= 10) { Processes.baritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(victim.blockPosition(), 2)); chasedAt = age; }
                     return false;
@@ -376,7 +421,7 @@ public final class Combat {
                     return false;
                 }
                 shieldDown();
-                holdWeapon();
+                holdWeapon(victim);
                 String held = p.getMainHandItem().isEmpty() ? "fist" : Names.item(p.getMainHandItem());
                 attack(p, victim);
                 hits++;

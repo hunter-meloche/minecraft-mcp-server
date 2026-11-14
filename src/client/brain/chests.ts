@@ -158,6 +158,14 @@ export async function takeSlot(ctx: GoalContext, chest: Pos, slot: number, count
  * when none took it (it stays carried, and the stash puts it away in time).
  */
 export async function storeStack(ctx: GoalContext, name: string, slot: number, chests: Pos[] = ctx.world.landmarks.chests, tries = 3): Promise<Pos | undefined> {
+  return (await storeStackAt(ctx, name, slot, chests, tries))?.chest;
+}
+
+/**
+ * storeStack, and the chest's own slot the stack went into, by the deposit's reply against the chest as it was opened
+ * (undefined when the jar sends no stacks): the spare set is remembered by it (portal.ts).
+ */
+export async function storeStackAt(ctx: GoalContext, name: string, slot: number, chests: Pos[] = ctx.world.landmarks.chests, tries = 3): Promise<{ chest: Pos; slot?: number } | undefined> {
   for (const c of chests.slice(0, tries)) {
     if (ctx.signal.aborted) break;
     try {
@@ -167,7 +175,11 @@ export async function storeStack(ctx: GoalContext, name: string, slot: number, c
       // with the slot and a count of one: that stack, never another of its name (Interact.sources)
       const r = await ctx.call<ChestContents>('chest.deposit', { name, slot, count: 1 });
       remember(ctx.world, c, r.items, r.stacks, r.free, r.slots);
-      if ((r.moved ?? 0) > 0) return c;
+      if ((r.moved ?? 0) > 0) {
+        const before = new Map((opened.stacks ?? []).map(st => [st.slot, st]));
+        const into = (r.stacks ?? []).find(st => st.name === name && (before.get(st.slot)?.name !== name || before.get(st.slot)!.count < st.count));
+        return { chest: c, slot: into?.slot };
+      }
     } catch (e) {
       ctx.progress(`the ${name} into the chest at ${fmt(c)}: ${(e as Error).message}`);
     } finally {
@@ -292,20 +304,116 @@ export function storeSlots(world: WorldMemory): (chest: string) => number {
  */
 export function freeChestTotals(world: WorldMemory): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const [n, k] of Object.entries(chestTotals(world))) { const free = k - reservedCount(world, n); if (free > 0) out[n] = free; }
+  // (the spare set counted once, not once a name: the gates ask this many times a tick)
+  const spare = new Map<string, number>();
+  for (const p of spareHeld(world)) spare.set(p.name, (spare.get(p.name) ?? 0) + 1);
+  for (const [n, k] of Object.entries(chestTotals(world))) { const free = k - reservedCount(world, n, SPARE) - (spare.get(n) ?? 0); if (free > 0) out[n] = free; }
   return out;
 }
 
-/** How many of an item the build jobs (and the community's missions, key 'community') hold in the chests (all, or all but `except`'s). */
+/**
+ * How many of an item the build jobs (and the community's missions, key 'community') hold in the chests (all, or all but
+ * `except`'s), and the spare set's pieces (but for `except` SPARE: the regear's own takes).
+ */
 export function reservedCount(world: WorldMemory, item: string, except?: number | string): number {
   let n = 0;
   for (const [job, items] of Object.entries(world.reserved ?? {})) if (except === undefined || job !== String(except)) n += items[item] ?? 0;
+  if (except !== SPARE) n += spareHeld(world).filter(p => p.name === item).length;
   return n;
+}
+
+// ------------------------------------------------------------------------------------------------ the spare set
+
+/**
+ * The spare diamond set (the portal milestone's, P2a of the progression plan): a plain diamond helmet, chestplate,
+ * leggings, boots, pickaxe and sword in a home chest, for the regear after a death in the Nether (P2b takes them out
+ * by their slots). Each piece by its chest and the chest's own slot, as the deposit's reply had it.
+ */
+export interface SparePiece { name: string; chest: Pos; slot: number }
+export interface SpareSet { pieces: SparePiece[]; at?: number }
+/** The key reservedCount and takeFromChests leave the spare set out under: the regear's own takes. */
+export const SPARE = 'spare';
+
+/** The spare set's pieces as remembered; whatever else brain.json holds there reads as none. */
+export function sparePieces(world: WorldMemory): SparePiece[] {
+  const list: unknown = world.spareSet?.pieces;
+  if (!Array.isArray(list)) return [];
+  return list.filter((p): p is SparePiece => !!p && typeof p === 'object' && typeof (p as SparePiece).name === 'string' &&
+    !!(p as SparePiece).chest && typeof (p as SparePiece).chest.x === 'number' && Number.isInteger((p as SparePiece).slot));
+}
+
+/**
+ * The spare set's pieces still in their chests, as the chests' memory has them: in a home chest that holds that many
+ * of the name, and in its slot where the chest's stacks of that name are known (a tool's text reply lets go of a
+ * name's stacks: then the count alone). What is gone is reserved no longer, and the spare set's step makes it again.
+ */
+export function spareHeld(world: WorldMemory): SparePiece[] {
+  const out: SparePiece[] = [];
+  const seen = new Map<string, number>();
+  const home = new Set(world.landmarks.chests.map(key));
+  for (const p of sparePieces(world)) {
+    const k = key(p.chest);
+    if (!home.has(k)) continue;
+    const stacks = world.chestStacks?.[k];
+    if (Array.isArray(stacks) && stacks.some(st => st.name === p.name) && !stacks.some(st => st.slot === p.slot && st.name === p.name)) continue;
+    const n = (seen.get(`${k}|${p.name}`) ?? 0) + 1;
+    if (n > (world.chestItems?.[k]?.[p.name] ?? 0)) continue;
+    seen.set(`${k}|${p.name}`, n);
+    out.push(p);
+  }
+  return out;
+}
+
+/** The slots of a chest that hold the spare set's pieces (of `item` only, if given). */
+export function spareSlots(world: WorldMemory, chest: Pos, item?: string): Set<number> {
+  const k = key(chest);
+  return new Set(spareHeld(world).filter(p => key(p.chest) === k && (item === undefined || p.name === item)).map(p => p.slot));
+}
+
+/**
+ * The home chests' contents as remembered, less the spare set's pieces: what the sort may move (storage.ts misplaced).
+ * Moved to their category's chest, the pieces would no longer be where the spare set says.
+ */
+export function withoutSpare(world: WorldMemory): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const [k, items] of Object.entries(world.chestItems ?? {})) out[k] = { ...items };
+  for (const p of spareHeld(world)) {
+    const items = out[key(p.chest)];
+    if (!items?.[p.name]) continue;
+    items[p.name] -= 1;
+    if (items[p.name] <= 0) delete items[p.name];
+  }
+  return out;
+}
+
+/**
+ * Take `count` of an item from a chest that holds spare-set pieces of that name: the other stacks, each by its slot
+ * (a take by name takes the first stack of it the game finds, which may be the spare one). Nothing from a jar that
+ * sends no stacks. Returns how many came.
+ */
+async function takeAround(ctx: GoalContext, chest: Pos, item: string, count: number, kept: Set<number>): Promise<number> {
+  let got = 0;
+  try {
+    const opened = await openAt(ctx, chest);
+    remember(ctx.world, chest, opened.items, opened.stacks, opened.free, opened.slots);
+    if (!Array.isArray(opened.stacks)) return 0;
+    for (const st of opened.stacks.filter(x => x.name === item && !kept.has(x.slot))) {
+      if (got >= count) break;
+      const r = await ctx.call<ChestContents>('chest.withdraw', { name: item, slot: st.slot, count: Math.min(st.count, count - got) });
+      remember(ctx.world, chest, r.items, r.stacks, r.free, r.slots);
+      got += r.moved ?? 0;
+    }
+  } finally {
+    await ctx.call('container.close').catch(() => undefined);
+  }
+  if (got > 0 && isHazard(item)) await holdHarmless(ctx);
+  return got;
 }
 
 /**
  * Take an item from whichever home chests hold it; returns how many it got. What a build job has secured there is
- * left alone, unless `forJob` is that job (its materials stay its own: the kit, the cook and the fuel take the rest).
+ * left alone, unless `forJob` is that job (its materials stay its own: the kit, the cook and the fuel take the rest),
+ * and so is the spare set (unless `forJob` is SPARE).
  * A full bucket or a fire starter taken is put out of the hand before anything walks on (holdHarmless): a chest's
  * shift-click fills the hotbar first, from its far end, often the slot in hand.
  */
@@ -316,6 +424,9 @@ export async function takeFromChests(ctx: GoalContext, item: string, count: numb
   let got = 0;
   for (const c of chestsWith(ctx.world, item)) {
     if (got >= count) break;
+    // the chest with the spare set's piece of this name: the other stacks by their slots, never the spare one
+    const kept = opts.forJob === SPARE ? new Set<number>() : spareSlots(ctx.world, c, item);
+    if (kept.size) { got += await takeAround(ctx, c, item, count - got, kept); continue; }
     const r = await ctx.act('take-from-chest', { ...c, item, count: count - got });
     rememberReply(ctx.world, c, r.text);
     const m = /^Took (\d+)/.exec(r.text);

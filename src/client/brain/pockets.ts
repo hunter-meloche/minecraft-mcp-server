@@ -17,9 +17,10 @@ import { putAway, stashKeep, stashWork } from './chores.js';
 /**
  * Free slots a goal needs to set out: a project step that only builds picks up next to nothing, a round in the yard
  * (cane, the pens, the farm) a kind or two, a trip for materials three stacks of what it went for, a trip down the
- * mine ten (ore, stone and what else a long way underground turns up).
+ * mine ten (ore, stone and what else a long way underground turns up), a trip to the Nether twelve (mine.ts
+ * NETHER_TRIP: what is mined or bartered there, and the netherrack the way is dug through).
  */
-export const ROOM = { project: 1, yard: 2, trip: 3, deep: 10 } as const;
+export const ROOM = { project: 1, yard: 2, trip: 3, deep: 10, nether: 12 } as const;
 export type RoomKind = keyof typeof ROOM;
 
 /** Near enough home for chores at the chests and furnace. */
@@ -82,7 +83,7 @@ const SLOTS = 36;
  */
 const TRIED_FOR = 10 * 60_000;
 /** Who needs the room, for makeRoom's own words (it is called by kind, not by goal). */
-const WHO: Record<RoomKind, string> = { project: 'a build', yard: 'a round in the yard', trip: 'a trip', deep: 'the mine' };
+const WHO: Record<RoomKind, string> = { project: 'a build', yard: 'a round in the yard', trip: 'a trip', deep: 'the mine', nether: 'a nether trip' };
 
 export interface Pockets {
   /** main slots in use (of 36) */

@@ -59,6 +59,17 @@ export function projectGoal(tree: Milestone[]): Goal {
     // goal running, the project held back after a failure, the LLM driving, the autopilot off), and a milestone marked
     // done there was one the brain had not got to: it must say the same "no" and leave the world as it was
     declines: (s, world) => off(s) ?? waiting(tree, s, world) ?? heldBack(s, world),
+    // a step that waits for what the project cannot bring about (the portal's light step with nether trips off: it
+    // comes back blocked at once, every 30 min, and the cane round it stopped would have marked itself done) stops
+    // nothing: it runs at the hand-over. Every other cuts in as the project always has; a look only, any doubt cuts in
+    cuts: (s, world) => {
+      try {
+        const { next } = look(tree, s, world);
+        return !(next && waitsFor(next, s, world));
+      } catch {
+        return true;
+      }
+    },
     // a step that ends where it began (short of something, waiting) is busy time to no gain
     gains: true,
     run: async ctx => {
@@ -179,6 +190,12 @@ async function totalsNow(ctx: GoalContext, before: Record<string, number>): Prom
   }
 }
 
+/** What the step a milestone is at waits for that the project cannot bring about (Step.waits), if anything. A look. */
+function waitsFor(m: Milestone, s: Snapshot, world: WorldMemory): string | undefined {
+  const step = m.steps[stepOf(world.progress, m.id)];
+  return step?.waits?.({ s, world, have: haveFn(s, world) }) ?? undefined;
+}
+
 /** The tree as nextMilestone() sees it, as a look only: the milestone it would work on, and the ones that wait. */
 function look(tree: Milestone[], s: Snapshot, world: WorldMemory): { next?: Milestone; held: { m: Milestone; until: number }[]; done: Set<string> } {
   const done = new Set(world.progress?.done ?? []);
@@ -238,6 +255,12 @@ function waiting(tree: Milestone[], s: Snapshot, world: WorldMemory): Decline | 
         : { cause: 'unneeded', text: `all ${tree.length} milestone(s) done` };
     }
     const first = held.reduce((a, b) => (b.until < a.until ? b : a));
+    // held at a step that waits for a switch the lead turns (the portal's light, nether trips off): unneeded for now,
+    // not the project's to get on with, and no idle of the project's
+    if (held.every(h => waitsFor(h.m, s, world))) {
+      const step = first.m.steps[stepOf(p, first.m.id)]?.name ?? 'its step';
+      return { cause: 'unneeded', text: `${first.m.title}: ${step} waits (${waitsFor(first.m, s, world)})`, until: first.until };
+    }
     const list = (short: [string, number][]) => short.map(([k, n]) => `${n} ${k}`).join(', ');
     // a step waiting for materials: what is short of them now (it goes down as they come in), which try that was and
     // when the next one is, so the status shows a wait that grows and not a bot that forgot its project

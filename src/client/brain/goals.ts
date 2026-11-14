@@ -63,6 +63,11 @@ export interface GoalContext {
    * up as it goes, so a run stopped midway keeps what it got. A `gains` goal that ends with none was busy to no gain
    */
   gain: (n: number) => void;
+  /**
+   * the boxes of the structures placed in this world (the structure store's, compiled: the improvement runs' builds,
+   * which keep no zone), for a site that keeps its distance from every build (portal.ts); none where nothing gives them
+   */
+  builds?: () => { x: number; z: number; width: number; length: number }[];
 }
 
 /**
@@ -447,7 +452,9 @@ export function shelterGoal(): Goal {
       if (!onto.ok) did.push('home cell not reached');
       const shut = await closeDoors(ctx, home);
       if (shut) did.push(`shut ${shut} door(s)`);
-      const bed = ctx.world.landmarks.bed;
+      // never a bed outside the overworld: one explodes in the Nether (the bridge refuses too). The shelter wants only
+      // in the overworld; a run started anywhere else would wall in, never lie down
+      const bed = ctx.s.dimension === 'overworld' ? ctx.world.landmarks.bed : undefined;
       if (ctx.s.activity === 'rest' && bed) {
         const sleep = () => ctx.call<{ sleeping: boolean; reason?: string }>('bed.sleep', { ...bed }, 15_000);
         // from home the bed is usually in reach already (walking right up to it timed out 2.8 blocks away)

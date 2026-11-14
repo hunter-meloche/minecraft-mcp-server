@@ -38,6 +38,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Interact.register(server);
         Enchanting.register(server);
         Anvil.register(server);
+        Portal.register(server);
         Signs.register(server);
         Terraslicer.register(server);
         Foreign.register(server);
@@ -49,6 +50,7 @@ public class ClaudeBridge implements ClientModInitializer {
         BrainHud.register(server);
         Passive.register();
         Hazards.register();
+        Nether.register();
         Processes.baritone().getPathingControlManager().registerProcess(new DefendProcess());
         Processes.baritone().getPathingControlManager().registerProcess(new EatPause());
         configureBaritone();
@@ -66,6 +68,9 @@ public class ClaudeBridge implements ClientModInitializer {
         s.allowWaterBucketFall.value = false;
         s.avoidance.value = true;
         s.blocksToAvoid.value.add(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH); // it hurts: 5 hits on one walk
+        // a portal block has no collision, so any path could lead through one, and a path that stops in it for 4 s (a
+        // pause to think, a defence) is a trip to the Nether nobody asked for: only portal.enter's own walk goes in
+        s.blocksToAvoid.value.add(net.minecraft.world.level.block.Blocks.NETHER_PORTAL);
         // scaffold with stone-type blocks only: dirt is worth keeping for farmland and fills (Baritone climbed a hill on
         // the bot's last 8 dirt, which a level-area fill then lacked)
         s.acceptableThrowawayItems.value = new java.util.ArrayList<>(java.util.List.of(net.minecraft.world.item.Items.COBBLESTONE,

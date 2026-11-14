@@ -44,6 +44,12 @@ import static claudebridge.Json.*;
  *
  * Stone, dirt, logs, leaves and the bot's throwaway blocks never mark a build: they're the world's, and the bot's own
  * scaffold is made of them.
+ *
+ * Each dimension has its own: the zones, the markers and the portals seen in the Nether are never mixed with the
+ * overworld's (the same numbers there are another place). The Nether has no sky light, so the open-sky rule can't
+ * tell a build there from a cellar: every build in it counts as on the surface, fully protected, except a natural
+ * nether fortress or bastion (natural: its palette alone, nothing only a player puts there within 8 of it), which is
+ * the world's, as a mineshaft is (lootable later).
  */
 public final class Foreign {
     private Foreign() { }
@@ -56,6 +62,8 @@ public final class Foreign {
         int markers;
         /** on the surface (a house, a farm, a village); otherwise under ground (a mineshaft, a dungeon, a cellar) */
         boolean surface;
+        /** a natural nether fortress or bastion (the world's, not anyone's): "fortress" or "bastion", else null */
+        String natural;
         /** the markers' kinds, and how many of each */
         final Map<String, Integer> kinds = new HashMap<>();
         /** the markers' blocks: what it's built of */
@@ -82,7 +90,29 @@ public final class Foreign {
         }
     }
 
-    private static final List<Zone> ZONES = new CopyOnWriteArrayList<>();
+    /** A lit portal block seen, and its axis. */
+    record Seen(BlockPos pos, net.minecraft.core.Direction.Axis axis) { }
+
+    /** What is known of one dimension. */
+    static final class Dim {
+        final List<Zone> zones = new CopyOnWriteArrayList<>();
+        /** The markers last seen in each chunk looked at (chunk key -> markers), replaced each time it's looked at again. */
+        final Map<Long, List<Mark>> byChunk = new HashMap<>();
+        /** Lit nether portals seen, by chunk (the bot's own too) */
+        final Map<Long, List<Seen>> portals = new java.util.concurrent.ConcurrentHashMap<>();
+        /** the tick of the last scan */
+        long lastScan = Long.MIN_VALUE / 2;
+    }
+
+    private static final Map<String, Dim> DIMS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    static Dim dim(String name) { return DIMS.computeIfAbsent(name == null ? "overworld" : name, k -> new Dim()); }
+
+    /** The dimension the bot is in. */
+    private static Dim here() { return dim(Nether.here()); }
+
+    /** A portal took the bot elsewhere: the first ask there scans afresh. */
+    static void dimensionChanged() { here().lastScan = Long.MIN_VALUE / 2; }
     /** How far round the bot it looks (horizontally; every height). */
     private static final int SCAN_RADIUS = 48;
     /** Markers this close together are one build; a zone on the surface is their box and this much more. */
@@ -134,7 +164,7 @@ public final class Foreign {
 
     /** Inside someone else's build (its zone), on the surface or under it. */
     public static boolean inZone(BlockPos p) {
-        for (Zone z : ZONES) if (z.contains(p.getX(), p.getY(), p.getZ())) return true;
+        for (Zone z : here().zones) if (z.contains(p.getX(), p.getY(), p.getZ())) return true;
         return false;
     }
 
@@ -145,7 +175,7 @@ public final class Foreign {
     public static boolean guarded(BlockPos p, BlockState s) {
         // what the bot put there itself is its own to take back (an emergency wall-in at a friend's, its scaffold)
         if (Protection.isOwn(p) || Guardian.WALL.contains(p)) return false;
-        for (Zone z : ZONES) {
+        for (Zone z : here().zones) {
             if (!z.contains(p.getX(), p.getY(), p.getZ())) continue;
             if (z.surface || z.built.contains(s.getBlock())) return true;
         }
@@ -177,7 +207,7 @@ public final class Foreign {
     static Set<Block> typesNear(BlockPos me, int radius) {
         Set<Block> out = new LinkedHashSet<>();
         boolean surface = false;
-        for (Zone z : ZONES) {
+        for (Zone z : here().zones) {
             if (z.flatDistance(me.getX(), me.getZ()) > radius) continue;
             if (me.getY() < z.y1 - radius || me.getY() > z.y2 + radius) continue;
             out.addAll(z.types);
@@ -190,18 +220,16 @@ public final class Foreign {
     /** How far the nearest build on the surface is, in a straight line (Infinity with none). */
     static double nearest(BlockPos me) {
         double best = Double.POSITIVE_INFINITY;
-        for (Zone z : ZONES) if (z.surface) best = Math.min(best, z.distance(me.getX(), me.getY(), me.getZ()));
+        for (Zone z : here().zones) if (z.surface) best = Math.min(best, z.distance(me.getX(), me.getY(), me.getZ()));
         return best;
     }
 
-    static int count() { return ZONES.size(); }
+    static int count() { return here().zones.size(); }
 
     private static long cell(int x, int y, int z) {
         return BlockPos.asLong(Math.floorDiv(x, JOIN), Math.floorDiv(y, JOIN), Math.floorDiv(z, JOIN));
     }
 
-    /** The markers last seen in each chunk looked at (chunk key -> markers), replaced each time it's looked at again. */
-    private static final Map<Long, List<Mark>> BY_CHUNK = new HashMap<>();
     /** One of these alone is someone's (a stash chest in a field, a bed); other markers make a build from MIN_MARKERS up. */
     private static final Pattern STASH = Pattern.compile("^(chest|trapped_chest|barrel|.*shulker_box|.*_bed|furnace|blast_furnace|smoker|ender_chest)$");
     private static final int MIN_MARKERS = 4;
@@ -212,33 +240,32 @@ public final class Foreign {
      * zone over the whole homestead, and the bot dropped its own bed and chests). A chunk looked at again replaces what
      * was seen there, so nothing wrong sticks (the yard grows, a friend takes something down).
      */
-    /** the tick of the last scan */
-    private static long lastScan = Long.MIN_VALUE / 2;
-
     /** A scan now unless one ran in the last two seconds: what's asked about is never older than that. */
     private static void fresh(Minecraft mc) {
-        if (Ticker.ticks() - lastScan < 40) return;
+        if (Ticker.ticks() - here().lastScan < 40) return;
         try { scan(mc); } catch (RuntimeException e) { /* a chunk unloading under it: the zones as they were */ }
     }
 
     /**
-     * Lit nether portals seen, by chunk: every one (the bot's own too), not only others'. A portal's frame is obsidian,
-     * the very block the enchanting room's trip goes out to mine: no obsidian is broken near a lit portal, whoever's.
+     * A lit nether portal within `radius` of p (as last scanned, in this dimension): every one (the bot's own too), not
+     * only others'. A portal's frame is obsidian, the very block the enchanting room's trip goes out to mine: no
+     * obsidian is broken near a lit portal, whoever's.
      */
-    private static final Map<Long, List<BlockPos>> PORTALS = new HashMap<>();
-
-    /** A lit nether portal within `radius` of p (as last scanned). */
     static boolean portalNear(BlockPos p, int radius) {
         long r2 = (long) radius * radius;
-        for (List<BlockPos> l : PORTALS.values()) for (BlockPos q : l) if (q.distSqr(p) <= r2) return true;
+        for (List<Seen> l : here().portals.values()) for (Seen q : l) if (q.pos().distSqr(p) <= r2) return true;
         return false;
     }
 
     static void scan(Minecraft mc) {
         ClientLevel level = mc.level;
-        if (mc.player == null || level == null || !Protection.synced()) return;
-        lastScan = Ticker.ticks();
+        if (mc.player == null || level == null || !Protection.scanAllowed()) return;
+        String dimName = Names.dimension(level);
+        Dim dim = dim(dimName);
+        dim.lastScan = Ticker.ticks();
         BlockPos me = mc.player.blockPosition();
+        // its own portals' blocks are no marker of anyone's build (the home portal is in the yard anyway; its Nether-side one)
+        Set<BlockPos> ownPortal = Portal.ownBlocks(level, dimName);
         boolean changed = false;
         BlockPos.MutableBlockPos side = new BlockPos.MutableBlockPos();
         for (int cx = (me.getX() - SCAN_RADIUS) >> 4; cx <= (me.getX() + SCAN_RADIUS) >> 4; cx++) {
@@ -246,7 +273,7 @@ public final class Foreign {
                 LevelChunk ch = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
                 if (ch == null) continue;
                 List<Mark> marks = new ArrayList<>();
-                List<BlockPos> portals = new ArrayList<>();
+                List<Seen> portals = new ArrayList<>();
                 LevelChunkSection[] sections = ch.getSections();
                 for (int si = 0; si < sections.length; si++) {
                     LevelChunkSection sec = sections[si];
@@ -256,19 +283,22 @@ public final class Foreign {
                         BlockState st = sec.getBlockState(x, y, z);
                         if (!marker(st)) continue;
                         BlockPos at = new BlockPos((cx << 4) + x, by + y, (cz << 4) + z);
-                        if (st.is(net.minecraft.world.level.block.Blocks.NETHER_PORTAL)) portals.add(at);
+                        if (st.is(net.minecraft.world.level.block.Blocks.NETHER_PORTAL)) {
+                            portals.add(new Seen(at, st.getValue(net.minecraft.world.level.block.NetherPortalBlock.AXIS)));
+                            if (ownPortal.contains(at)) continue;
+                        }
                         if (Protection.isOwn(at)) continue;
                         marks.add(new Mark(at, st.getBlock(), skyBeside(level, at, side)));
                     }
                 }
                 long key = (((long) cx) << 32) ^ (cz & 0xffffffffL);
-                if (portals.isEmpty()) PORTALS.remove(key); else PORTALS.put(key, portals);
-                List<Mark> before = BY_CHUNK.get(key);
-                if (marks.isEmpty()) { if (before != null) { BY_CHUNK.remove(key); changed = true; } }
-                else if (!marks.equals(before)) { BY_CHUNK.put(key, marks); changed = true; }
+                if (portals.isEmpty()) dim.portals.remove(key); else dim.portals.put(key, portals);
+                List<Mark> before = dim.byChunk.get(key);
+                if (marks.isEmpty()) { if (before != null) { dim.byChunk.remove(key); changed = true; } }
+                else if (!marks.equals(before)) { dim.byChunk.put(key, marks); changed = true; }
             }
         }
-        if (changed) rebuild(level);
+        if (changed) rebuild(level, dim);
     }
 
     /** The most sky light in the six cells round a block (a solid block has none of its own). */
@@ -282,11 +312,22 @@ public final class Foreign {
     }
 
     /** The zones from every marker seen: groups of markers close together, each a box with a margin. */
-    private static void rebuild(ClientLevel level) {
+    private static void rebuild(ClientLevel level, Dim dim) {
         Map<Long, List<Mark>> cells = new HashMap<>();
-        for (List<Mark> l : BY_CHUNK.values()) for (Mark m : l) cells.computeIfAbsent(cell(m.pos().getX(), m.pos().getY(), m.pos().getZ()), k -> new ArrayList<>()).add(m);
+        for (List<Mark> l : dim.byChunk.values()) for (Mark m : l) cells.computeIfAbsent(cell(m.pos().getX(), m.pos().getY(), m.pos().getZ()), k -> new ArrayList<>()).add(m);
         Map<String, Set<Block>> known = new HashMap<>();
-        for (Zone o : ZONES) known.put(boxKey(o), o.types);
+        for (Zone o : dim.zones) known.put(boxKey(o), o.types);
+        // no sky (the Nether): the open-sky rule can't work; a build is someone's (on the surface) unless it is a natural
+        // fortress or bastion. The markers that are no part of either palette, to look for within 8 of each
+        boolean noSky = !level.dimensionType().hasSkyLight();
+        List<Mark> offFortress = new ArrayList<>(), offBastion = new ArrayList<>();
+        if (noSky) {
+            for (List<Mark> l : dim.byChunk.values()) for (Mark m : l) {
+                String n = name(m.block());
+                if (!FORTRESS.contains(n)) offFortress.add(m);
+                if (!BASTION.contains(n)) offBastion.add(m);
+            }
+        }
         List<Zone> next = new ArrayList<>();
         Set<Long> seen = new HashSet<>();
         for (Long start : cells.keySet()) {
@@ -321,6 +362,11 @@ public final class Foreign {
             if (group.size() < MIN_MARKERS && !stash) continue; // a lone torch or rail isn't a build
             // on the surface: a fair part of it out in the open (a roof, walls, a fence, crops); a mineshaft only when most of it is
             z.surface = mineshaft ? open * 2 > group.size() : open * 4 >= group.size();
+            if (noSky) {
+                String pal = naturalPalette(z.kinds);
+                if (pal != null && natural(z.kinds, kindsNear(pal.equals("fortress") ? offFortress : offBastion, z, NATURAL_CLEAR))) z.natural = pal;
+                z.surface = z.natural == null;
+            }
             if (z.surface) {
                 // a margin round it, the ground it stands on, a little over its top
                 z.x1 -= MARGIN; z.z1 -= MARGIN; z.x2 += MARGIN; z.z2 += MARGIN; z.y1 -= 3; z.y2 += MARGIN;
@@ -341,6 +387,9 @@ public final class Foreign {
                 a.x2 = Math.max(a.x2, b.x2); a.y2 = Math.max(a.y2, b.y2); a.z2 = Math.max(a.z2, b.z2);
                 a.markers += b.markers;
                 a.surface |= b.surface;
+                // natural only when both parts are the same structure's (a natural one by someone's build is theirs too)
+                a.natural = a.natural != null && a.natural.equals(b.natural) ? a.natural : null;
+                if (noSky) a.surface = a.natural == null;
                 for (Map.Entry<String, Integer> e : b.kinds.entrySet()) a.kinds.merge(e.getKey(), e.getValue(), Integer::sum);
                 a.built.addAll(b.built);
                 next.remove(j);
@@ -353,11 +402,89 @@ public final class Foreign {
             if (t != null) z.types.addAll(t); else typesOf(level, z);
             z.types.addAll(z.built); // what it's built of, even where its chunks aren't loaded now
         }
-        ZONES.clear();
-        ZONES.addAll(next);
+        dim.zones.clear();
+        dim.zones.addAll(next);
     }
 
-    private static String boxKey(Zone z) { return z.x1 + "," + z.y1 + "," + z.z1 + "," + z.x2 + "," + z.y2 + "," + z.z2 + "," + z.surface; }
+    // ---------------------------------------------------------------- natural fortresses and bastions
+
+    /**
+     * A nether fortress's markers (26.3 NetherFortressPieces: nether bricks, their fence and stairs; the loot chests a
+     * StructurePiece puts in). Its slabs, walls and red nether bricks are a player's.
+     */
+    static final Set<String> FORTRESS = Set.of("nether_bricks", "nether_brick_fence", "nether_brick_stairs", "chest");
+    /**
+     * A bastion's (its 26.3 templates and processors) and a Nether ruined portal's (blackstone in place of its stone:
+     * BlackstoneReplaceProcessor) markers: the blackstone family, polished basalt, the lanterns and chains that hang in
+     * them, the treasure room's quartz, the chests. (Blackstone, gilded blackstone and basalt are no markers at all.)
+     */
+    static final Set<String> BASTION = Set.of("polished_blackstone", "polished_blackstone_bricks", "cracked_polished_blackstone_bricks",
+        "chiseled_polished_blackstone", "polished_blackstone_stairs", "polished_blackstone_slab", "polished_blackstone_brick_stairs",
+        "polished_blackstone_brick_slab", "polished_blackstone_brick_wall", "blackstone_stairs", "blackstone_slab", "blackstone_wall",
+        "polished_basalt", "lantern", "iron_chain", "chest", "quartz_block", "smooth_quartz", "smooth_quartz_slab");
+    /** In both, but no part of the walls: a player's chest and lanterns alone are no bastion. */
+    private static final Set<String> FURNISHING = Set.of("chest", "lantern", "iron_chain", "quartz_block", "smooth_quartz", "smooth_quartz_slab");
+    /**
+     * At least this many of the walls' markers: a natural one is hundreds of blocks (a fortress's corridors, a bastion's
+     * walls); a player's nether-brick hut, or a ruined portal's few blocks, stay someone's (fully protected).
+     */
+    static final int NATURAL_MIN = 64;
+    /** How far round it nothing only a player puts there may stand (a torch, a sign, a bed, glass, a portal...). */
+    static final int NATURAL_CLEAR = 8;
+
+    /**
+     * Which natural structure a build's markers are all of: "fortress", "bastion", or null (anything else among them,
+     * or too few of the walls). Pure.
+     */
+    static String naturalPalette(Map<String, Integer> kinds) {
+        if (kinds.isEmpty()) return null;
+        boolean fortress = true, bastion = true;
+        int walls = 0;
+        for (var e : kinds.entrySet()) {
+            String k = e.getKey();
+            if (!FORTRESS.contains(k)) fortress = false;
+            if (!BASTION.contains(k)) bastion = false;
+            if (!FURNISHING.contains(k)) walls += e.getValue();
+        }
+        if (walls < NATURAL_MIN) return null;
+        return fortress ? "fortress" : bastion ? "bastion" : null;
+    }
+
+    /**
+     * Natural: its markers all of one structure's palette, and every marker within NATURAL_CLEAR of it too (`near`: the
+     * kinds of those, its own included). Pure.
+     */
+    static boolean natural(Map<String, Integer> kinds, java.util.Collection<String> near) {
+        String pal = naturalPalette(kinds);
+        if (pal == null) return false;
+        Set<String> palette = pal.equals("fortress") ? FORTRESS : BASTION;
+        for (String n : near) if (!palette.contains(n)) return false;
+        return true;
+    }
+
+    /**
+     * The kinds of these markers within `r` of the zone's box (its markers' own box: the margin comes after). Only the
+     * markers off its palette are passed in: the structure's own thousands of bricks need no looking at.
+     */
+    private static Set<String> kindsNear(List<Mark> marks, Zone z, int r) {
+        Set<String> out = new HashSet<>();
+        for (Mark m : marks) {
+            BlockPos p = m.pos();
+            if (p.getX() >= z.x1 - r && p.getX() <= z.x2 + r && p.getY() >= z.y1 - r && p.getY() <= z.y2 + r && p.getZ() >= z.z1 - r && p.getZ() <= z.z2 + r) out.add(name(m.block()));
+        }
+        return out;
+    }
+
+    /** The lit portals seen in a dimension that are not the bot's own, as portals (Portal.Shape). */
+    static List<Portal.Shape> foreignPortals(String dimension) {
+        Map<BlockPos, net.minecraft.core.Direction.Axis> blocks = new HashMap<>();
+        for (List<Seen> l : dim(dimension).portals.values()) for (Seen q : l) blocks.put(q.pos(), q.axis());
+        List<Portal.Shape> out = new ArrayList<>();
+        for (Portal.Shape sh : Portal.group(blocks)) if (!Portal.own(dimension, sh)) out.add(sh);
+        return out;
+    }
+
+    private static String boxKey(Zone z) { return z.x1 + "," + z.y1 + "," + z.z1 + "," + z.x2 + "," + z.y2 + "," + z.z2 + "," + z.surface + "," + z.natural; }
 
     /**
      * What Baritone mustn't break near a zone. On the surface: every kind of block in it (air and fluids aside): its
@@ -386,16 +513,29 @@ public final class Foreign {
     }
 
     public static void register(BridgeServer s) {
-        // {} -> {zones: [{x1, y1, z1, x2, y2, z2, markers, surface, sample, kinds}]}
+        // {dimension?} -> {dimension, zones: [{x1, y1, z1, x2, y2, z2, markers, surface, natural, sample, kinds}]}: the
+        // dimension the bot is in, or the one asked for (as last seen there). natural: "fortress" or "bastion" (the
+        // world's: only in the Nether), else absent
         s.register("foreign.zones", true, (p, c) -> {
             fresh(Minecraft.getInstance()); // the first ask on a new server comes right after Node's first sync
+            String which = Names.strip(strParam(p, "dimension", Nether.here()));
             JsonArray out = new JsonArray();
-            for (Zone z : ZONES) {
+            for (Zone z : dim(which).zones) {
                 JsonObject o = obj("x1", z.x1, "y1", z.y1, "z1", z.z1, "x2", z.x2, "y2", z.y2, "z2", z.z2, "markers", z.markers, "surface", z.surface, "sample", z.sample());
+                if (z.natural != null) o.addProperty("natural", z.natural);
                 o.add("kinds", kindsOf(z, 6));
                 out.add(o);
             }
-            return obj("zones", out);
+            return obj("dimension", which, "zones", out);
+        });
+        // {dimension?} -> {dimension, portals: [{x, y, z (lowest corner), axis, width, height, blocks, center}]}: the lit
+        // portals seen there (as the scans round the bot found them, in chunks loaded or not since) that are not its own
+        s.register("foreign.portals", true, (p, c) -> {
+            fresh(Minecraft.getInstance());
+            String which = Names.strip(strParam(p, "dimension", Nether.here()));
+            JsonArray out = new JsonArray();
+            for (Portal.Shape sh : foreignPortals(which)) out.add(sh.json());
+            return obj("dimension", which, "portals", out);
         });
         // {positions: [[x, y, z], ...]} -> {inside: [bool, ...]}: which are in someone else's build
         s.register("foreign.at", true, (p, c) -> {
@@ -410,8 +550,18 @@ public final class Foreign {
             }
             return obj("inside", out);
         });
-        // forget them all (the next scans find what's there again)
-        s.register("foreign.clear", true, (p, c) -> { int n = ZONES.size(); ZONES.clear(); BY_CHUNK.clear(); return obj("cleared", n); });
+        // forget them all, in this dimension (`all`: in every one); the next scans find what's there again
+        s.register("foreign.clear", true, (p, c) -> {
+            boolean all = p.has("all") && p.get("all").getAsBoolean();
+            int n = 0;
+            for (var e : DIMS.entrySet()) {
+                if (!all && !e.getKey().equals(Nether.here())) continue;
+                n += e.getValue().zones.size();
+                e.getValue().zones.clear();
+                e.getValue().byChunk.clear();
+            }
+            return obj("cleared", n);
+        });
         Ticker.every(new Ticker.Task() {
             int n = 0;
             @Override public boolean tick(Minecraft mc) {
@@ -426,8 +576,11 @@ public final class Foreign {
     /** For the status line: how many zones (and how many on the surface), and the nearest on the surface. */
     static JsonObject summary(BlockPos me) {
         double d = nearest(me);
-        int surface = 0;
-        for (Zone z : ZONES) if (z.surface) surface++;
-        return obj("zones", ZONES.size(), "surface", surface, "nearest", Double.isInfinite(d) ? null : round(d));
+        int surface = 0, natural = 0;
+        List<Zone> zones = here().zones;
+        for (Zone z : zones) { if (z.surface) surface++; if (z.natural != null) natural++; }
+        JsonObject o = obj("zones", zones.size(), "surface", surface, "nearest", Double.isInfinite(d) ? null : round(d));
+        if (natural > 0) o.addProperty("natural", natural);
+        return o;
     }
 }

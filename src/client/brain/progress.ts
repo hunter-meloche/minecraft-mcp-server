@@ -21,6 +21,14 @@ export interface Step {
   name: string;
   /** items this step uses (item names; crafted ones are broken down into what stock trips gather) */
   bill?: (ctx: StepView) => Record<string, number>;
+  /**
+   * What the step waits for that the project cannot bring about (a switch the lead turns), or undefined when it can get
+   * on. A look. Its run still comes back blocked, as it says, and is held its time; meanwhile the project stops no
+   * running goal for it (its `cuts`: the portal's light step with nether trips off, every 30 min at the project's
+   * urgency of 39, would have stopped the cane round, which marks itself done as it starts), and its wait is said as
+   * unneeded, not as the project's: nothing the bot could do would get it on
+   */
+  waits?: (view: StepView) => string | undefined;
   run: (ctx: GoalContext, state: MilestoneState) => Promise<StepResult>;
 }
 
@@ -244,6 +252,11 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   book: { makes: 1, from: { paper: 3, leather: 1 } },
   bookshelf: { makes: 1, from: { planks: 6, book: 3 } },
   enchanting_table: { makes: 1, from: { book: 1, diamond: 2, obsidian: 4 } },
+  // the nether portal's (P2a), as 26.3's data/minecraft/recipe/flint_and_steel.json (shapeless: an iron ingot and a
+  // flint, in the inventory's 2x2) and golden_helmet.json (five ingots in a helmet's shape, at a table) have them. The
+  // flint comes from the chests (the gravel the trips dig drops it), the gold ingots from the raw gold (SMELTED)
+  flint_and_steel: { makes: 1, from: { iron_ingot: 1, flint: 1 } },
+  golden_helmet: { makes: 1, from: { gold_ingot: 5 } },
   ladder: { makes: 3, from: { stick: 7 } },
   stone_hoe: { makes: 1, from: { cobblestone: 2, stick: 2 } },
   oak_trapdoor: { makes: 2, from: { planks: 6 } },

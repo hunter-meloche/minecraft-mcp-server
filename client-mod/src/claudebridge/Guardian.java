@@ -27,7 +27,9 @@ import static claudebridge.Json.*;
 /**
  * Reflexes that run beside whatever else the bot does, every tick (ported from src/auto-defend.ts and src/bunker.ts):
  * hazard escape (out of air under water, in lava), emergency cover at low health under attack, a melee reflex on
- * hostiles in reach, a shield guard while idle, and a gear check. Notes go to Node as "guardian" events.
+ * hostiles in reach, a shield guard while idle, and a gear check. Notes go to Node as "guardian" events. The Nether's
+ * (Nether.java): a potion of fire resistance drunk when burning, a ghast's fireball hit back, neutral mobs left alone
+ * until they are after the bot, cover only of blast-proof blocks, a golden helmet worn there (Combat.wearRank).
  */
 public final class Guardian {
     private Guardian() { }
@@ -128,6 +130,10 @@ public final class Guardian {
         String mode = mc.gameMode.getPlayerMode().name();
         if (mode.equals("CREATIVE") || mode.equals("SPECTATOR")) return;
         hazards(mc, p);
+        Nether.fireResistance(mc, p);
+        if (Nether.drinking) return;
+        // a fireball closing in: hit back (or the shield toward it) before anything else takes the hands
+        if (!busy && !Interact.using && Nether.deflect(mc, p)) return;
         if (Combat.fighting || busy || Interact.using) return;
         waterFooting(mc, p);
 
@@ -148,7 +154,7 @@ public final class Guardian {
         Entity melee = meleeTarget(p);
         if (melee != null && p.getAttackStrengthScale(0.5f) >= 0.95f) {
             shieldGuardDown();
-            if (!mc.gameMode.isDestroying()) Combat.holdWeapon();
+            if (!mc.gameMode.isDestroying()) Combat.holdWeapon(melee);
             Combat.attack(p, melee);
             note("auto-defend hit " + Names.entity(melee));
         } else {
@@ -178,7 +184,7 @@ public final class Guardian {
     private static void keepFed(LocalPlayer p, Entity melee) {
         int food = p.getFoodData().getFoodLevel();
         boolean hurt = p.getHealth() < p.getMaxHealth() - 1;
-        if (eating || Interact.using || Interact.handsBusy || melee != null) return;
+        if (eating || Interact.using || Interact.handsBusy || Nether.drinking || melee != null) return;
         // during a Baritone job only when it matters (hurt): the job is paused for the bite (EatPause)
         boolean job = Processes.active() != null && !"Eating".equals(Processes.active());
         // desperate (starving, or nearly dead): raw chicken and rotten flesh too; else they wait (they can poison)
@@ -211,8 +217,14 @@ public final class Guardian {
         Entity best = null;
         for (Entity e : Minecraft.getInstance().level.entitiesForRendering()) {
             if (e == p || !e.isAlive() || e.distanceTo(p) > 3.2 || !p.hasLineOfSight(e)) continue;
-            boolean hostile = Combat.isHostile(e) && !Combat.NOT_PICKED_AS_HOSTILE.contains(Names.entity(e));
-            if (!hostile && !(recentAttacker(e) && !(e instanceof Player))) continue;
+            if (Nether.neutral(e)) {
+                // a neutral mob (piglins, zombified piglins, endermen, golems, villagers...) only when it is after the
+                // bot (a zombified piglin by a lit portal at home): its whole group angers with one hit
+                if (!Nether.mayAttack(e, p)) continue;
+            } else {
+                boolean hostile = Combat.isHostile(e) && !Combat.NOT_PICKED_AS_HOSTILE.contains(Names.entity(e));
+                if (!hostile && !(recentAttacker(e) && !(e instanceof Player))) continue;
+            }
             if (best == null || e.distanceTo(p) < best.distanceTo(p)) best = e;
         }
         return best;
@@ -302,22 +314,40 @@ public final class Guardian {
 
     private static final String[] COVER = {"dirt", "cobblestone", "cobbled_deepslate", "netherrack", "andesite", "diorite", "granite", "tuff",
         "stone", "deepslate", "coarse_dirt", "rooted_dirt", "blackstone", "basalt", "end_stone", "mud_bricks", "packed_mud"};
+    /**
+     * The Nether's: blast-proof enough for a ghast's fireball (Nether.coverOk), cobblestone first (a Nether trip's kit
+     * carries 64); never netherrack, dirt, gravel or sand, which a fireball blows open.
+     */
+    private static final String[] NETHER_COVER = {"cobblestone", "cobbled_deepslate", "stone_bricks", "stone", "deepslate", "blackstone",
+        "andesite", "diorite", "granite", "tuff", "end_stone"};
+
+    /** The cover blocks for this dimension, best first. */
+    static String[] cover() {
+        if (!Nether.inNether()) return COVER;
+        List<String> ok = new ArrayList<>();
+        for (String n : NETHER_COVER) if (Nether.coverOk(n)) ok.add(n);
+        return ok.toArray(new String[0]);
+    }
 
     static String coverBlock() {
         Inventory inv = Minecraft.getInstance().player.getInventory();
-        for (String name : COVER) { int i = Interact.find(inv, name); if (i >= 0 && i < 36 && Names.item(inv.getItem(i)).equals(name)) return name; }
+        String[] cover = cover();
+        for (String name : cover) { int i = Interact.find(inv, name); if (i >= 0 && i < 36 && Names.item(inv.getItem(i)).equals(name)) return name; }
+        if (Nether.inNether()) return null; // planks burn and blow open
         for (int i = 0; i < 36; i++) { ItemStack s = inv.getItem(i); if (!s.isEmpty() && Names.item(s).endsWith("_planks")) return Names.item(s); }
         return null;
     }
 
     static int coverCount() {
         Inventory inv = Minecraft.getInstance().player.getInventory();
+        List<String> cover = java.util.Arrays.asList(cover());
+        boolean planks = !Nether.inNether();
         int n = 0;
         for (int i = 0; i < 36; i++) {
             ItemStack s = inv.getItem(i);
             if (s.isEmpty()) continue;
             String name = Names.item(s);
-            if (name.endsWith("_planks") || java.util.Arrays.asList(COVER).contains(name)) n += s.getCount();
+            if ((planks && name.endsWith("_planks")) || cover.contains(name)) n += s.getCount();
         }
         return n;
     }

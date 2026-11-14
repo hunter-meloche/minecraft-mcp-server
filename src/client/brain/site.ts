@@ -79,6 +79,8 @@ export interface SitePrefs {
   near?: { x: number; z: number };
   /** rectangles to keep clear of (planned buildings, farm extensions); the site and its clearance must not touch them */
   avoidRect?: Rect[];
+  /** false: only w x l as asked, not turned (the portal tries each way round itself: its plane faces home) */
+  turn?: boolean;
 }
 
 /** 2D prefix sums of a predicate over the grid, so any rectangle can be counted in O(1). */
@@ -109,7 +111,7 @@ export function findSite(grid: Grid, w: number, l: number, prefs: SitePrefs = {}
   const blocking = prefix(grid, s => s === 'built' || s === 'farm' || s === 'water');
   const uneven = prefix(grid, s => s === 'uneven');
   const shapes: [number, number, boolean][] = [[w, l, false]];
-  if (w !== l) shapes.push([l, w, true]);
+  if (w !== l && prefs.turn !== false) shapes.push([l, w, true]);
   let best: { site: Site; dist: number; rough: number } | null = null;
   for (const [sw, sl, rotated] of shapes) {
     for (let z = 0; z + sl <= grid.length; z++) for (let x = 0; x + sw <= grid.width; x++) {

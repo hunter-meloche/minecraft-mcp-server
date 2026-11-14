@@ -128,6 +128,7 @@ It offers the same tools (all except fly-to; combat and the auto-defend reflexes
 - `set-home` / `go-home` - Remember home (per world) and walk back to it from anywhere
 - `nearby-builds` - Other players' builds the bot has seen round itself, and what's built under ground
 - `leave-server` / `rejoin-server` - Log off when asked to; come back after a kick once the people there agree
+- `use-portal` - Go through a lit nether portal and step out onto safe ground at the far end (a bot stranded in the Nether)
 
 ### On a friend's server
 

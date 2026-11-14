@@ -21,6 +21,7 @@ import { ZONE_MARGIN, underYard } from './underyard.js';
 import { walkHome } from './homeward.js';
 import { SIDE_STEP, outByGate, type HomeSide } from './yardgates.js';
 import { brainRun } from '../tools.js';
+import { NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, tripHold } from './nether.js';
 
 // (the yard's gates and the walks through them live in yardgates.ts: the walk home comes in by a gate too)
 export { CLEAR, gatesBetween, inFence, outByGate, type HomeSide, type YardGate } from './yardgates.js';
@@ -33,8 +34,11 @@ const MS_PER_TICK = 50;
 const ticksToMs = (ticks: number) => ticks * MS_PER_TICK;
 const msToTicks = (ms: number) => ms / MS_PER_TICK;
 
-/** How far a task goes: about the yard, a short way out, to the leash, or down the mine. */
-export type Reach = 'yard' | 'near' | 'far' | 'deep';
+/**
+ * How far a task goes: about the yard, a short way out, to the leash, down the mine, or through the home portal into
+ * the Nether (a trip wherever the deep one is: its own holds, the day's clock for a budget, home by the portal).
+ */
+export type Reach = 'yard' | 'near' | 'far' | 'deep' | 'nether';
 /**
  * What a run brought in (items, cells, animals: whatever the task counts) and what it has to say. `untried`: it never
  * got to the work (the place was not reached, or someone's build stood by it), so it says nothing of the place: no dry
@@ -134,7 +138,7 @@ export const MIN_WORK = { yard: 15_000, near: 20_000, far: 60_000 } as const;
  * run that brings its find home at a slower pace (`backPace`, blocks a second: a cow on the lead) is counted back at
  * that pace (to the whole ms).
  */
-export const needMs = (dist: number, reach: Exclude<Reach, 'deep'>, backPace?: number): number =>
+export const needMs = (dist: number, reach: Exclude<Reach, 'deep' | 'nether'>, backPace?: number): number =>
   (backPace ? Math.round(dist * 1000 / 3 + dist * 1000 / backPace) : 2 * dist / 3 * 1000) + MIN_WORK[reach];
 /** the deep trip's walk back up, and the least mining worth going down for (as deep.ts has them) */
 const DEEP_WALK_BACK = 2 * MINUTE;
@@ -312,8 +316,11 @@ export async function toRound(ctx: GoalContext, reach: number): Promise<Snapshot
   return s;
 }
 
-/** A death as the runtime tells it: where, and when (real ms; known only while this process lives). */
-export interface Death { at?: { x: number; z: number }; time: number }
+/**
+ * A death as the runtime tells it: where, when (real ms; known only while this process lives), and in which dimension
+ * (the bridge says so since P2a; an older jar does not).
+ */
+export interface Death { at?: { x: number; y?: number; z: number }; time: number; dimension?: string }
 
 /** The runtime's word on deaths, as the brain handed it to the ladder (workGoals). */
 let deathSource: () => Death | undefined = () => undefined;
@@ -453,7 +460,9 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: strin
  */
 export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean; first?: true } | { decline: Decline };
 
-const isTrip = (task: WorkTask) => task.reach === 'far' || task.reach === 'deep';
+const isTrip = (task: WorkTask) => task.reach === 'far' || task.reach === 'deep' || task.reach === 'nether';
+/** A trip whose budget is the day's clock, not its own: down the mine, or to the Nether. */
+const byDay = (task: WorkTask) => task.reach === 'deep' || task.reach === 'nether';
 /** the rungs that unblock the project (cows, cane): they may not starve the deep rung */
 const isUnblocker = (task: WorkTask) => task.rank === 2 || task.rank === 3;
 /** the day number of the idle tally (read only: the tally is the brain's) */
@@ -501,16 +510,25 @@ function common(task: WorkTask, s: Snapshot, world: WorldMemory): Decline | null
   // pockets is what keeps the rung at home (the seven-day replay booked whole held afternoons to `hold`, and evenings
   // with full pockets to `pockets`). The hour itself is said only by a rung that is otherwise ready (choose): with
   // the kit short, or every ore dry, that is the afternoon's reason, and the 30 s release can see the dry marks
-  if (task.reach === 'deep' && lateFor(task, 0, s)) return null;
+  if (byDay(task) && lateFor(task, 0, s)) return null;
   if (isTrip(task)) {
-    const held = kitHold(s, world) ?? (task.reach === 'deep' ? deepHold(s, world) : null);
+    // (a Nether trip has its own: deaths down there, its probation, two a game day)
+    const held = kitHold(s, world) ?? (task.reach === 'deep' ? deepHold(s, world) : task.reach === 'nether' ? deathHold(s, world) ?? tripHold(s, world) : null);
     if (held) return held;
   }
   return room(task.room, s, world) === 'no' ? noRoom(task.room, who, s, world) : null;
 }
 
-/** Too little of the day left for this variant: the walk there and back and the least work do not fit before the return home. */
+/**
+ * Too little of the day left for this variant: the walk there and back and the least work do not fit before the
+ * return home. A Nether trip that could not be home by dusk does not set out (nether.ts netherBudgetMs: until the
+ * leave nether goal's own hour, less the way through the portals).
+ */
 function lateFor(task: WorkTask, dist: number, s: Snapshot): Decline | null {
+  if (task.reach === 'nether') {
+    const left = netherBudgetMs(s.timeOfDay);
+    return left < NETHER_WORTH_MS ? { cause: 'late', text: `${task.name} needs ${NETHER_WORTH_MS / MINUTE} min down there and home by dusk, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
+  }
   if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(needMs(dist, task.reach, task.backPace)));
   const left = tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
   // (rounded down, as deep.ts does: a tick too late is "2.9 left", not "3.0")
@@ -527,6 +545,7 @@ function lateFor(task: WorkTask, dist: number, s: Snapshot): Decline | null {
  */
 function budgetFor(task: WorkTask, dist: number, s: Snapshot): number {
   if (task.reach === 'deep') return tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
+  if (task.reach === 'nether') return netherBudgetMs(s.timeOfDay);
   const day = ticksToMs(daylightLeft(s.timeOfDay));
   if (task.backPace) return Math.max(0, Math.min(Math.max(task.budgetMs, needMs(dist, task.reach, task.backPace)), day - 15_000));
   return Math.max(0, Math.min(task.budgetMs, day - dist / 3 * 1000 - 15_000));
@@ -537,7 +556,7 @@ function budgetFor(task: WorkTask, dist: number, s: Snapshot): number {
  * home itself is given two minutes more: making room before it and the walk home from as far out as it lets its find
  * go (85 s from 256 out) come on top of a budget that holds the whole way back.
  */
-const timeoutOf = (task: WorkTask): number => (task.reach === 'deep' ? 12 * MINUTE : task.budgetMs + (task.backPace ? 4 : 2) * MINUTE);
+const timeoutOf = (task: WorkTask): number => (byDay(task) ? 12 * MINUTE : task.budgetMs + (task.backPace ? 4 : 2) * MINUTE);
 /**
  * The run's own time left at the place when the brain will stop it, ms: what making room took and the walk there and
  * back come off it (for a run that brings its find home itself, the walk home from out there only: the way back with
@@ -580,7 +599,7 @@ function choose(task: WorkTask, s: Snapshot, world: WorldMemory): Choice {
     // the hour is asked last: it is the reason only for a variant nothing else stands in the way of
     const l = lateFor(task, v.dist, s);
     if (l) { if (!late || v.dist < late.dist) late = { dist: v.dist, d: l }; continue; }
-    const where = task.reach === 'yard' ? 'in the yard' : task.reach === 'deep' ? 'under ground' : `${Math.round(v.dist)} blocks out`;
+    const where = task.reach === 'yard' ? 'in the yard' : task.reach === 'deep' ? 'under ground' : task.reach === 'nether' ? 'in the nether' : `${Math.round(v.dist)} blocks out`;
     const tried = mark?.early ? `, let go early after ${mark.n} dry` : mark ? `, ${mark.n} dry before` : '';
     const below = demotedBy(task, mark, w, world);
     return { variant: v.id, index, dist: v.dist, demoted: !!below, why: `${where}${tried}${below ? ` (${below})` : ''}`, ...(v.first ? { first: true as const } : {}) };
@@ -702,6 +721,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
   const token = {};
   const startedAt = now();
   let deepOut = false;
+  let netherOut = false;
   let ranItsCourse = false;
   /** the bot was seen home (or walked there) at the run's end */
   let home = false;
@@ -718,7 +738,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     const off = (s !== ctx.s ? task.ready(s, ctx.world, variant) : null) ?? lateFor(task, dist, s);
     if (off) return `[${variant}] not setting out: ${off.text}`;
     let budgetMs = budgetFor(task, dist, s);
-    if (task.reach !== 'deep') {
+    if (task.reach !== 'deep' && task.reach !== 'nether') {
       // the brain stops the run at its timeout, counted from its start: a put-away of a minute or two and the full
       // budget after it ran past that while still mining, and what it had mined was never told (a deep trip's
       // budget is the day's clock, which the put-away has already moved on)
@@ -731,6 +751,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     }
     const setOut = now();
     if (task.reach === 'deep') { deepStart(ctx.world, setOut); deepOut = true; }
+    else if (task.reach === 'nether') { netherStart(ctx.world, setOut); netherOut = true; writes++; }
     else if (task.reach === 'far' && isUnblocker(task)) { farDayOf(workOf(ctx.world), ctx.world).unblockers += 1; writes++; }
 
     let told = 0;
@@ -762,8 +783,11 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // before the marks: a run that ended under the yard is marked as one cut short there is
     let away = true;
     let under = false;
+    /** a Nether trip's run that ended down there: home through a portal first */
+    let inNether = false;
     try {
       const st = await ctx.status();
+      inNether = (st.dimension ?? s.home?.dimension) === NETHER;
       if (s.home && st.position && (st.dimension ?? s.home.dimension) === s.home.dimension) {
         away = !nearHomeAt(st.position, s.home, NEAR_HOME);
         under = underYard(st.position, s.home, ctx.world.yard);
@@ -811,6 +835,19 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // would never be logged then, only "stopped ...: aborted", as if the trip had come to nothing (the coal it
     // brought in, the mark it left). It is said here once, as the run was stopped
     const cut = () => { ctx.progress(`${text}; stopped on the walk home (its marks are written)`); return new Error('aborted'); };
+    if (inNether) {
+      // from the Nether the way home is through a portal (its own on that side, else the one it came in by: nether.ts
+      // netherHome), and the walk home after it from the home portal in the yard. Not got through, the run fails and
+      // the leave nether goal (survival, as soon as no run is under way) goes on trying
+      let back: { ok: boolean; text: string };
+      try {
+        back = await netherHome(ctx);
+      } catch (e) {
+        throw ctx.signal.aborted ? cut() : e;
+      }
+      if (ctx.signal.aborted) throw cut();
+      if (!back.ok) throw new Error(`${text}, but could not get home: ${back.text}`);
+    }
     let h: { ok: boolean; text: string };
     try {
       // from down there Baritone's way home runs under the ground into the yard's column: a trip down comes up where
@@ -831,6 +868,8 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // Cut short out there (retreat, shelter), the trip stays open until the bot is seen home: the death that follows
     // a few seconds on the walk up is the trip's too (workTick)
     if (deepOut) { try { deepEnd(ctx.world, startedAt, lastDeath(), ranItsCourse, home ? undefined : now()); } catch { /* the flags below matter more */ } }
+    // a Nether trip the same way: a death since it set out (down there or on the way) ends its run of clean trips
+    if (netherOut) { try { netherEnd(ctx.world, startedAt, lastDeath(), ranItsCourse); writes++; } catch { /* the flags below matter more */ } }
     if (current?.token === token) clearOut();
   }
 }
@@ -912,7 +951,9 @@ export function workTick(
         lines.push('work: a death on the way back from a deep trip: on probation again');
       }
     }
-    if (s.now - d.time < KIT_HOLD_MS && w.deep.kitHold !== d.time && diedAway(d.at, s, world)) {
+    // (a death in another dimension, the Nether, is away whatever its numbers)
+    const elsewhere = !!d.dimension && d.dimension !== (s.home?.dimension ?? 'overworld');
+    if (s.now - d.time < KIT_HOLD_MS && w.deep.kitHold !== d.time && (elsewhere || diedAway(d.at, s, world))) {
       w.deep.kitHold = d.time;
       wrote = fresh = true;
       lines.push(`work: died away from home: the trips wait for the kit, until ${clock(d.time + KIT_HOLD_MS)} at the latest`);
@@ -963,6 +1004,11 @@ export function workTick(
   }
   for (const name of Object.keys(w.ranges ?? {})) if (!known.has(name)) { delete w.ranges![name]; wrote = true; }
   if (w.farDay && w.farDay.day !== dayOf(world)) { delete w.farDay; wrote = true; }
+  // the Nether's own: its deaths (the holds, the switch off after three in 3 days), where it came in, the day's trips
+  if (world.nether !== undefined || s.dimension === NETHER || d?.dimension === NETHER) {
+    lines.push(...netherTick(s, world, d));
+    wrote = true;
+  }
   if (wrote) writes++;
   const next = step(s, world, w.tier);
   if (next) {
@@ -999,6 +1045,9 @@ export function releaseOldestDry(world: WorldMemory, now: number, s: Snapshot, t
   return oldest.key;
 }
 
+/** The longest `skipped:` line written: past it, cut short. */
+const SKIPPED_MAX = 400;
+
 /** a decline's words without the task's own name in front (the line names the task already) */
 function short(task: WorkTask, d: Decline): string {
   if (d.cause === 'dry') return d.text.replace(`${task.name} [`, '').replace(']', '');
@@ -1022,7 +1071,8 @@ export function skippedLine(goal: Goal, s: Snapshot, world: WorldMemory, goals: 
     return h ? `${t.name} (hold: ${h})` : `${t.name} (${c.demoted ? 'demoted' : 'passed over'}: ${c.variant}: ${c.why})`;
   });
   const line = `work: ${task.name}: skipped: ${parts.join(' | ')}`;
-  return line.length > 300 ? `${line.slice(0, 297)}...` : line;
+  // (a bound on the line, not on what it says: with the nether rung the surface's line names six rungs, some 330)
+  return line.length > SKIPPED_MAX ? `${line.slice(0, SKIPPED_MAX - 3)}...` : line;
 }
 
 /** brain-status, `Blocked:`: the ladder tasks that wait on dry marks alone (`work: cane - dry south until 14:32`). */

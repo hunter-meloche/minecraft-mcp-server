@@ -324,8 +324,10 @@ export async function makeRod(ctx: GoalContext): Promise<boolean> {
 }
 
 /** Died a moment ago: go back for the drops while they last (5 minutes), by day and when the spot is safe enough. */
-export function recoverGoal(lastDeath: () => { at: Pos; time: number } | undefined): Goal {
+export function recoverGoal(lastDeath: () => { at: Pos; time: number; dimension?: string } | undefined): Goal {
   let handled = 0;
+  /** a death outside the overworld (the Nether): its drops are another place's, and losing them there is accepted */
+  const elsewhere = (d: { dimension?: string }) => d.dimension !== undefined && d.dimension !== 'overworld';
   return {
     name: 'recover',
     priority: 90,
@@ -334,12 +336,15 @@ export function recoverGoal(lastDeath: () => { at: Pos; time: number } | undefin
     wants: s => {
       const d = lastDeath();
       if (!d || d.time <= handled || s.now - d.time > 4 * 60_000) return null;
+      // (no walk for it: said once, by day or night; the regear comes from the spare set and the stores)
+      if (elsewhere(d)) return `died in ${d.dimension === 'the_nether' ? 'the nether' : d.dimension} at ${fmt(d.at)}: nothing is recovered there`;
       if (s.activity !== 'work' || d.at.y < -60) return null; // night, or fell into the void
       return `died at ${fmt(d.at)} ${Math.round((s.now - d.time) / 1000)}s ago: get the drops back`;
     },
     run: async ctx => {
       const d = lastDeath()!;
       handled = d.time;
+      if (elsewhere(d)) return `death in ${d.dimension === 'the_nether' ? 'the nether' : d.dimension}: not recovered`;
       const r = await ctx.act('collect-items', { ...d.at, radius: 10, timeoutMs: 180_000 });
       if (!r.ok) throw new Error(r.text);
       return r.text;

@@ -23,4 +23,9 @@ public final class Names {
     public static String entity(Entity e) {
         return strip(e.getType().builtInRegistryHolder().getRegisteredName());
     }
+
+    /** A level's dimension: "overworld", "the_nether", "the_end" (the name status replies with); null for no level. */
+    public static String dimension(net.minecraft.world.level.Level level) {
+        return level == null ? null : strip(level.dimension().identifier().toString());
+    }
 }

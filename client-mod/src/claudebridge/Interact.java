@@ -946,6 +946,9 @@ public final class Interact {
             LocalPlayer pl = player();
             BlockPos at = blockPos(p);
             if (pl.isSleeping()) return obj("sleeping", true);
+            // outside the overworld a bed explodes when used (the Nether's bed_rule: destroy_on_use): never there
+            String never = Nether.bedRefusal(Names.dimension(mc.level), true);
+            if (never != null) return obj("sleeping", false, "reason", never);
             Vec3 hit = Vec3.atBottomCenterOf(at).add(0, 0.5625, 0); // the top of the mattress (beds are 9/16 tall)
             if (pl.getEyePosition().distanceTo(hit) > 4.5) throw new IllegalStateException("bed too far");
             pl.lookAt(EntityAnchorArgument.Anchor.EYES, hit);

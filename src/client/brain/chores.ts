@@ -7,7 +7,7 @@ import { COOKS_TO } from './food.js';
 import { owedItems, ownItems } from './community.js';
 // (deep.ts comes in through community.ts already; its goal is asked inside a function only)
 import { deepTrip } from './deep.js';
-import { chestSlots, chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
+import { chestSlots, chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests, withoutSpare } from './chests.js';
 import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, type ChestAssign, type Deposit } from './storage.js';
 import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
@@ -24,6 +24,8 @@ import { roundDue, roundFrom, toRound } from './work.js';
 import { goHome, walkHome } from './homeward.js';
 import { holdHarmless, isHazard } from './fluidpick.js';
 import { EXPLORE_MIN, exploreReach, leaveYard } from './yardgates.js';
+// (cast.ts reaches this file through deep.ts and pockets.ts: its list is read inside castingAhead only)
+import { OBSIDIAN_MILESTONES } from './cast.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -57,15 +59,21 @@ function foods(): Set<string> {
 
 /** What the project in hand and the build jobs are gathering and building with: stays carried (the stash put a trip's logs away). */
 /**
- * The casting still has obsidian to make: it's on, and the enchanting room (the only thing cast for) is neither past
- * its obsidian step nor built. With the table made and the room waiting on leather, its 5 empty buckets stayed carried
- * a day, five slots that held the pockets at 33/36 with nothing else to put away: every farm round's wheat set the
- * stash off, and the stash cut the farm, the pens and the fetch of a cow for the pen short each time (live 2026-11-09).
+ * The casting still has obsidian to make: it's on, and a milestone with an obsidian step (cast.ts OBSIDIAN_MILESTONES:
+ * the enchanting room's, the portal's) is neither past that step nor built nor done, and the milestones it waits for
+ * are done. With the table made and the room waiting on leather, its 5 empty buckets stayed carried a day, five slots that
+ * held the pockets at 33/36 with nothing else to put away: every farm round's wheat set the stash off, and the stash
+ * cut the farm, the pens and the fetch of a cow for the pen short each time (live 2026-11-09).
  */
 export function castingAhead(world: WorldMemory): boolean {
-  if (!world.lavaCasting || world.zones?.enchanting?.length) return false;
-  // the room's step also while it is set aside (the band outside the fence redone ahead of it)
-  return !(stepOf(world.progress, 'enchanting') > 0);
+  if (!world.lavaCasting) return false;
+  const p = world.progress;
+  const done = (id: string) => Array.isArray(p?.done) && p.done.includes(id);
+  // its step also while it is set aside (the band outside the fence redone ahead of it); one in hand or set aside has
+  // what it waits for done already
+  const started = (id: string) => p?.current?.id === id || !!p?.aside?.[id];
+  return OBSIDIAN_MILESTONES.some(o => !o.built(world) && !done(o.milestone) && !(stepOf(p, o.milestone) > o.step) &&
+    (started(o.milestone) || (o.after ?? []).every(done)));
 }
 
 function projectCarry(world: WorldMemory): Set<string> {
@@ -85,14 +93,14 @@ const CAST_EMPTY_BUCKETS = 5;
  * What the stash leaves on the bot: food (a stack of each kind: all of it stayed before, 541 bread in nine slots), the
  * project's and the jobs' materials, capped where they would hog the slots.
  *
- * Making room for a trip (`kind` trip or deep) it does not leave the project's and the jobs' materials, nor the
+ * Making room for a trip (`kind` trip, deep or nether) it does not leave the project's and the jobs' materials, nor the
  * casting's buckets: they were what held the pockets full (208 logs and 128 planks at 31 slots, five empty buckets at
  * 33), and a trip has no use for them. Nothing brings them back afterwards and nothing needs to: the bills count the
  * chests with the pockets, and the project and the jobs take what they build with from the chests when they next run.
  * Not while a build job is building: its load is in the pockets to be placed, and stays there whoever asks.
  */
 export function stashKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
-  const away = (kind === 'trip' || kind === 'deep') && !activeJobs(world).some(j => j.phase === 'building');
+  const away = (kind === 'trip' || kind === 'deep' || kind === 'nether') && !activeJobs(world).some(j => j.phase === 'building');
   const keep = away ? new Set<string>() : projectCarry(world);
   // food a bill carries is material, not provisions: it keeps the bill's own cap, or none
   const cap: Record<string, number> = {};
@@ -477,7 +485,8 @@ export const sortStorage: Goal = {
     if (s.activity !== 'work' || !awakeForRound(s, world) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
     // after 30 min, and then in the evening, or when no trip could go instead (or it has waited an hour)
     if (!roundDue(s, world, 'sort', 30 * MINUTE)) return null;
-    const moves = misplaced(chestAssignment(world), world.chestItems ?? {}, undefined, chestSlots(world));
+    // (never the spare set's pieces: they stay in the slots it remembers them by, whatever chest they are in)
+    const moves = misplaced(chestAssignment(world), withoutSpare(world), undefined, chestSlots(world));
     return moves.length ? `${moves.length} kind(s) of things in the wrong chest` : null;
   },
   // within 10 of home it cuts in as ever; from out in the yard it waits for what runs to end
@@ -488,7 +497,7 @@ export const sortStorage: Goal = {
     done(ctx.world, 'sort', ctx.s.now);
     await refreshChests(ctx, 0);
     let moved = 0;
-    for (const m of misplaced(chestAssignment(ctx.world), ctx.world.chestItems ?? {}, undefined, chestSlots(ctx.world))) {
+    for (const m of misplaced(chestAssignment(ctx.world), withoutSpare(ctx.world), undefined, chestSlots(ctx.world))) {
       const [fx, fy, fz] = m.from.split(',').map(Number);
       const [tx, ty, tz] = m.to.split(',').map(Number);
       const t = await ctx.act('take-from-chest', { x: fx, y: fy, z: fz, item: m.name, count: m.count });

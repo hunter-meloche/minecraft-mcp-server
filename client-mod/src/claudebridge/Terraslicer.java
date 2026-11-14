@@ -66,6 +66,8 @@ public final class Terraslicer {
         s.register("pillar", true, (p, c) -> {
             int count = Math.max(1, intParam(p, "count", 1));
             String item = required(p, "item");
+            // a pillar in the Nether only of a block a ghast's fireball does not blow away (never netherrack, dirt, gravel, sand)
+            if (!Nether.coverOk(Names.strip(item))) return obj("placed", 0, "reason", "the " + Names.strip(item) + " is not blast-proof: no pillar of it in the nether");
             Ticker.add(new Ticker.Task() {
                 int done = 0, age = 0, phase = 0;
                 double base;

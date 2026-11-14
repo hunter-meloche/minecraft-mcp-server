@@ -15,7 +15,9 @@ import net.minecraft.world.entity.Entity;
  * while a zombie hits the bot (it died that way), and resumes it afterwards. Melee mobs in reach: stand still and let
  * the Guardian's melee reflex swing. Further away or ranged (skeletons, pillagers): close in. Creepers: back off.
  * Off at 6 HP or less (the emergency wall-in / flee handles that), during attack-entity fights, and when auto-defend
- * is off.
+ * is off. Never after a target out of reach that flies (a ghast, a phantom, a blaze in the air) or, in the Nether,
+ * stands by lava or across a drop deeper than Baritone falls (Nether.chaseRefusal): the job goes on, and the shield
+ * guard has it when idle. A creeper is never let go that way: it is run from, not chased.
  */
 public final class DefendProcess implements IBaritoneProcess {
     private Entity target;
@@ -37,6 +39,15 @@ public final class DefendProcess implements IBaritoneProcess {
         return Guardian.recentAttacker(e);
     }
 
+    /**
+     * Whether the no-chase rule may pass this one over: out of the melee reflex's reach, and not a creeper. A creeper's
+     * move is GoalRunAway, a retreat, so lava or a drop by it is no reason to let it be: skipped until 2.8 it was only
+     * fled from once its fuse (under 3) was lit.
+     */
+    static boolean mayLetBe(String mob, double d) {
+        return d > 2.8 && !mob.equals("creeper");
+    }
+
     private Entity pick(LocalPlayer p) {
         Entity best = null;
         double bestD = Double.MAX_VALUE;
@@ -45,6 +56,8 @@ public final class DefendProcess implements IBaritoneProcess {
             double d = e.distanceTo(p);
             if (d > 8 || !p.hasLineOfSight(e)) continue;
             if (d > 4 && !recentlyHitUs(e)) continue;
+            // one it would have to chase (out of the melee reflex's reach) where no chase goes: let it be
+            if (mayLetBe(Names.entity(e), d) && Nether.chaseRefusal(p, e) != null) continue;
             if (d < bestD) { best = e; bestD = d; }
         }
         return best;
@@ -79,7 +92,7 @@ public final class DefendProcess implements IBaritoneProcess {
         if (name.equals("creeper")) {
             return new PathingCommand(new GoalRunAway(7, target.blockPosition()), PathingCommandType.SET_GOAL_AND_PATH);
         }
-        Combat.holdWeapon();
+        if (!Nether.drinking) Combat.holdWeapon(target);
         if (target.distanceTo(p) <= 2.8 && !calcFailed) {
             // in reach: hold still; the melee reflex swings when the attack meter is full
             return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);

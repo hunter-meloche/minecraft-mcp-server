@@ -67,7 +67,7 @@ interface Stub extends WorkTask {
   ran: { variant: string; budgetMs: number }[];
   body?: (ctx: GoalContext, variant: string) => Promise<void>;
 }
-const ROOMS = { yard: 'yard', near: 'trip', far: 'trip', deep: 'deep' } as const;
+const ROOMS = { yard: 'yard', near: 'trip', far: 'trip', deep: 'deep', nether: 'nether' } as const;
 function stub(name: string, rank: number, reach: WorkTask['reach'], list?: [string, number][], over: Partial<WorkTask> = {}): Stub {
   const t: Stub = {
     name, rank, reach, room: ROOMS[reach], budgetMs: 2 * MINUTE,
@@ -375,12 +375,12 @@ test('the skipped line: why each rung above the one that starts did not run inst
   t.is(skippedLine(b.goal(kit), snap(), world, goals, none), undefined);
   t.is(skippedLine(other, snap(), world, goals, none), undefined);
 
-  // a long ladder's line is cut at 300 characters
+  // a long ladder's line is cut at 400 characters (300 before P2a: with the nether rung the live ladder's own line ran past it)
   const many = Array.from({ length: 12 }, (_, i) => stub(`rung number ${i + 1}`, i + 1, 'yard', [], { none: () => ({ cause: 'unneeded', text: 'nothing to do here for now' }) }));
   const last = stub('last', 13, 'yard');
   const long = bench([...many, last]);
   const line = skippedLine(long.goal(last), snap(), emptyWorld(), long.goals, none)!;
-  t.is(line.length, 300);
+  t.is(line.length, 400);
   t.true(line.startsWith('work: last: skipped: rung number 1 (unneeded: nothing to do here for now) | rung number 2 ('));
   t.true(line.endsWith('...'));
 });
@@ -2401,7 +2401,8 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
   t.deepEqual(b.said().filter(l => !l.startsWith('landmarks: ')).slice(1), [
     'start work: deep: iron: under ground',
     // (no cane to plant a patch with, no cow pen, and no project waiting on cane: the rungs above have nothing to do)
-    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready)',
+    // (the nether rung, 4.5, above the deep one since P2a: its switch is off)
+    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready) | nether (unneeded: trips are off)',
     'work: deep: out to the mine at (0, -56)',
     'work: deep: mining iron for 23 more (180 s)',
     'work: deep: Mined for 100s: raw_iron x23.',
@@ -2434,7 +2435,8 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
     'work: every deep target met: tier 1 (diamond 32, iron 192, gold 64, redstone 128, lapis 64)',
     'start work: surface: coal: 96 blocks out',
     // the stored ingots make the armour: at home that is the kit goal's to do
-    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | deep (kit: armour below iron (deep needs the deep kit))',
+    // (the nether rung, 4.5, above the deep one since P2a: its switch is off)
+    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | nether (unneeded: trips are off) | deep (kit: armour below iron (deep needs the deep kit))',
     'work: surface: mining coal_ore for up to 24 (90 s)',
     'work: surface: mining coal_ore for up to 1 (90 s)',
     'done work: surface in 0s: [coal] +23 coal; back home'

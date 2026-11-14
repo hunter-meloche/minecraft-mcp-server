@@ -70,6 +70,48 @@ export function deepTripReady(s: TripCheck): { ok: boolean; why?: string } {
   return why.length ? { ok: false, why: why.join('; ') } : { ok: true };
 }
 
+/**
+ * What a trip to the Nether needs (progression P2a): whole and fed (no food or health to spare there: a ghast's
+ * fireball, a fall into lava's reach, piglins), 40 food points of ready food carried (twice the deep trip's: no farm
+ * and nothing worth eating comes down there), the golden helmet (piglins leave a player wearing gold alone; the
+ * Guardian wears it there), a shield (fireballs), a pickaxe in use and a spare one (netherrack wears one down fast,
+ * and with none the way home may be dug shut), a flint and steel (a portal a ghast blew out is lit again with it),
+ * 64 blocks that stand a ghast's blast (cobblestone, cobbled deepslate, stone bricks: never netherrack, dirt or sand:
+ * the bridge's cover and pillars there take nothing else), and 12 slots free (the pockets rule's `nether` room).
+ */
+export const NETHER_TRIP = { health: 20, food: 20, foodPoints: 40, pickaxes: 2, flintAndSteel: 1, blocks: 64, slotsFree: 12 } as const;
+/** The blocks a Nether trip's cover and pillars are made of: blast-proof, and no falling block (the bridge's rule there). */
+export const NETHER_BLOCKS: readonly string[] = ['cobblestone', 'cobbled_deepslate', 'stone_bricks'];
+
+/** What the Nether kit asks of the bot itself, as nether.ts netherCheck reads it from a look. */
+export interface NetherCheck {
+  health: number; food: number; foodPoints: number;
+  /** a golden helmet carried or worn */
+  goldenHelmet: boolean;
+  /** a shield carried or in the off hand */
+  shield: boolean;
+  pickaxes: number; flintAndSteel: number;
+  /** NETHER_BLOCKS carried */
+  blocks: number;
+}
+
+/**
+ * Whether the bot has the kit for a Nether trip, every shortfall in order (health and food first): the pockets are
+ * the pockets rule's (its `nether` room), the hour the trip's own gate's, as for the deep trip.
+ */
+export function netherTripKit(c: NetherCheck): { ok: boolean; why?: string } {
+  const why: string[] = [];
+  if (c.health < NETHER_TRIP.health) why.push(`health ${c.health} < ${NETHER_TRIP.health}`);
+  if (c.food < NETHER_TRIP.food) why.push(`food ${c.food} < ${NETHER_TRIP.food}`);
+  if (c.foodPoints < NETHER_TRIP.foodPoints) why.push(`ready food ${c.foodPoints} < ${NETHER_TRIP.foodPoints} points`);
+  if (!c.goldenHelmet) why.push('no golden helmet');
+  if (!c.shield) why.push('no shield');
+  if (c.pickaxes < NETHER_TRIP.pickaxes) why.push(`${c.pickaxes} pickaxe(s) < ${NETHER_TRIP.pickaxes} (one in use, a spare)`);
+  if (c.flintAndSteel < NETHER_TRIP.flintAndSteel) why.push('no flint and steel');
+  if (c.blocks < NETHER_TRIP.blocks) why.push(`${c.blocks} blast-proof blocks < ${NETHER_TRIP.blocks}`);
+  return why.length ? { ok: false, why: why.join('; ') } : { ok: true };
+}
+
 /** Home by this time of day: dusk starts at 12000 and mobs spawn from about 13000. */
 export const HOME_BY = 11000;
 const MS_PER_TICK = 50;

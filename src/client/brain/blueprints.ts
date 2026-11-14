@@ -387,6 +387,29 @@ export function workshop(opts: { doorSide?: Side } = {}): Blueprint {
   return rotate(blueprint('workshop', spec, { entrances: [{ ...door, facing: 'south' }], landmarks }), TURNS_FROM_SOUTH[doorSide]);
 }
 
+/**
+ * A nether portal's frame (P2a of the progression plan), 6 x 6 x 3, groundOffset 0, drawn along x (`axis` 'x'; 'z'
+ * turns it a quarter): in the middle row (z 1) a 6 x 1 plinth of cobblestone in the ground layer itself (layer 0), on
+ * it the standard 4 wide x 5 tall frame (layers 1-5): 10 obsidian, the four corners cobblestone (a portal lights
+ * without them; they square it off), and its 2 x 3 inside cleared. The rows either side of the frame are left as they
+ * are (' '): the ground the bot steps down onto across the plane (the portal's bottom cells stand a block over it, on
+ * the frame's bottom row), and up from on the way in. The portal that lights in it has the same axis. Landmark 'frame': the inside's lowest corner (the bottom cell nearest the
+ * origin), which the bridge's portal.list gives as the lit portal's own corner and portal.own takes as its position.
+ */
+export function portal(opts: { axis?: 'x' | 'z' } = {}): Blueprint {
+  const axis = opts.axis ?? 'x';
+  if (axis !== 'x' && axis !== 'z') throw new Error(`a portal's axis is x or z, not "${String(axis)}"`);
+  const g = new Grid(6, 6, 3, ' ');
+  for (let x = 0; x < 6; x++) g.set(x, 0, 1, 'C');
+  for (let y = 1; y <= 5; y++) for (let x = 1; x <= 4; x++) {
+    const edgeX = x === 1 || x === 4, edgeY = y === 1 || y === 5;
+    g.set(x, y, 1, edgeX && edgeY ? 'C' : edgeX || edgeY ? 'O' : '.');
+  }
+  const spec: StructureSpec = { palette: { C: 'cobblestone', O: 'obsidian' }, layers: g.layers() };
+  const bp = blueprint('nether-portal', spec, { landmarks: [{ kind: 'frame', at: { x: 2, y: 2, z: 1 } }], groundOffset: 0 });
+  return axis === 'x' ? bp : rotate(bp, 1);
+}
+
 export interface Gate { side: Side; offset: number }
 
 /** The perimeter of a width x length box, clockwise from the north-west corner, with which cells are corners. */

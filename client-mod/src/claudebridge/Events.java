@@ -3,6 +3,7 @@ package claudebridge;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerCombatKillPacket;
+import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.world.entity.Entity;
 
 import java.util.ArrayDeque;
@@ -44,11 +45,20 @@ public final class Events {
         });
     }
 
-    /** The bot died. Respawn right away (as mineflayer does) and report where and why. */
+    /** How many times the bot has died since the client started (a walk through a portal tells a death from a trip). */
+    private static volatile long deaths;
+
+    static long deaths() { return deaths; }
+
+    /** The bot died. Respawn right away (as mineflayer does) and report where, in which dimension, and why. */
     public static void onCombatKill(ClientboundPlayerCombatKillPacket packet) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || packet.playerId() != mc.player.getId()) return;
-        server().emit("death", Json.obj("message", packet.message().getString(), "at", Json.pos(mc.player.blockPosition())));
+        deaths++;
+        // the dimension too: a death in the Nether is never walked back to (nothing is recovered there), and its
+        // coordinates are another place's
+        server().emit("death", Json.obj("message", packet.message().getString(), "at", Json.pos(mc.player.blockPosition()),
+            "dimension", Names.dimension(mc.level)));
         Ticker.add(new Ticker.Task() {
             int wait = 10;
             @Override public boolean tick(Minecraft m) {
@@ -60,13 +70,40 @@ public final class Events {
         });
     }
 
-    public static void onRespawn() {
+    /** The dimension the bot was in as a respawn packet came (its handler swaps the level). */
+    private static String respawnFrom;
+
+    public static void beforeRespawn() {
+        respawnFrom = Names.dimension(Minecraft.getInstance().level);
+    }
+
+    /**
+     * Whether a respawn packet is a move to another dimension (a portal: the server keeps all the player's data) and
+     * not a respawn after a death (the server keeps none, or only the attributes on the way out of the End). Checked
+     * against 26.3: ServerPlayer.teleport sends KEEP_ALL_DATA (3), PlayerList.respawn 0 or 1.
+     */
+    static boolean travel(byte dataToKeep) {
+        return (dataToKeep & ClientboundRespawnPacket.KEEP_ENTITY_DATA) != 0;
+    }
+
+    /**
+     * The server's respawn packet: after a death (the respawn, where and in which dimension) or for a portal (no
+     * respawn: once 26.x had both under one packet, every trip through a portal looked like a respawn). Either way a
+     * new dimension says so: "dimension" {from, to, at, death}. The rules that change with the dimension apply at once.
+     */
+    public static void onRespawn(ClientboundRespawnPacket packet) {
+        boolean travel = travel(packet.dataToKeep());
+        String from = respawnFrom;
+        Nether.noteDimension(Minecraft.getInstance());
         // the new position arrives a moment later: report it from a later tick
         Ticker.add(new Ticker.Task() {
             int wait = 20;
             @Override public boolean tick(Minecraft m) {
                 if (--wait > 0) return false;
-                if (m.player != null) server().emit("respawn", Json.obj("at", Json.pos(m.player.blockPosition())));
+                if (m.player == null) return true;
+                String to = Names.dimension(m.level);
+                if (!travel) server().emit("respawn", Json.obj("at", Json.pos(m.player.blockPosition()), "dimension", to));
+                if (to != null && !to.equals(from)) server().emit("dimension", Json.obj("from", from, "to", to, "at", Json.pos(m.player.blockPosition()), "death", !travel));
                 return true;
             }
         });

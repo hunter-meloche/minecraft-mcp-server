@@ -19,8 +19,11 @@ import { compile } from '../structures/format.js';
 import { LoopWatch, sameResult, type Outcome, type Run } from './loops.js';
 import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
-/** Staying alive: never backed off by the loop watch. */
-const SURVIVAL = new Set(['wake', 'out from under', 'break out', 'recover', 'retreat', 'shelter', 'food']);
+/**
+ * Staying alive: never backed off by the loop watch, and the only goals that cut a trip short out there. Leaving the
+ * Nether is one (a trip down there is home by dusk, and whatever stops one leaves the bot there).
+ */
+export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 'break out', 'recover', 'retreat', 'shelter', 'food', 'leave nether']);
 import { breakOut, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { outFromUnder } from './underyard.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
@@ -40,6 +43,7 @@ import { statusAnswer } from './chatstatus.js';
 import { getOut, wedgedOut } from './wedge.js';
 import { penFences } from './yardgates.js';
 import { holdHarmless, unsafeInHand } from './fluidpick.js';
+import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -196,7 +200,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -245,6 +249,17 @@ export class Brain {
     this.memory.save();
   }
 
+  /**
+   * The nether-trips switch (the nether-trips tool): anything that goes through a portal waits for it. Said in the log
+   * with who turned it (`nether trips on (by the lead)`), and saved at once.
+   */
+  setNetherTrips(on: boolean, by: string): void {
+    if (!this.worldId) throw new Error('not in a world yet');
+    netherOf(this.memory.world(this.worldId)).trips = on;
+    this.note(`nether trips ${on ? 'on' : 'off'} (by ${by})`);
+    this.memory.save();
+  }
+
   /** The LLM ran a tool: step back now and stay out until it has been quiet for a while. */
   async manual(tool: string): Promise<void> {
     this.leaseUntil = this.now() + this.leaseMs;
@@ -279,6 +294,10 @@ export class Brain {
         const y = world.yard;
         this.rt.setHomeZone?.({ x1: y.x1, z1: y.z1, x2: y.x2, z2: y.z2 }, penFences(world).map(({ x1, z1, x2, z2 }) => ({ x1, z1, x2, z2 })));
       }
+      // its own portals (the home one, and its Nether side once it has one), which the protection sync sends the
+      // bridge whenever they change or the bridge has none (nothing then counts them as anyone's build)
+      this.measure('portals', () => this.rt.setOwnPortals?.(allOwnPortals(world)));
+      await this.seePortals(s, world);
       this.idleTrack(s);
       this.workQueue(s, world);
       this.measure('daily', () => this.dailyLines(s, world));
@@ -453,6 +472,8 @@ export class Brain {
     }
     lines.push(...communityStatus(world), ...yardGrowStatus(world));
     if (world?.yard) lines.push(`Yard: x ${world.yard.x1}..${world.yard.x2}, z ${world.yard.z1}..${world.yard.z2}, ground y ${world.yard.y}.`);
+    // the Nether: the switch, the stage, the clean trips, the deaths, the portals known
+    if (world) this.measure('status', () => lines.push(netherLine(world, this.now())));
     if (world) this.measure('status', () => {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
@@ -532,6 +553,23 @@ export class Brain {
     return out;
   }
 
+  /**
+   * The boxes of the LLM's structures in this world, as structure-site keeps off them: the improvement runs' builds
+   * keep no zone, and the portal site keeps 8 from every build (portal.ts portalAvoid).
+   */
+  private structureBoxes(world: WorldMemory): { x: number; z: number; width: number; length: number }[] {
+    const out: { x: number; z: number; width: number; length: number }[] = [];
+    if (!world.id) return out;
+    for (const n of this.structures.listStructures(world.id)) {
+      try {
+        const s = this.structures.loadStructure(world.id, n);
+        if (!s) continue;
+        const b = compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box;
+        out.push({ x: b.x, z: b.z, width: b.width, length: b.length });
+      } catch { /* a structure that won't compile has no box */ }
+    }
+    return out;
+  }
 
   /** The memory of the world the bot is in (chests, zones, jobs), once it knows which world that is. */
   worldMemory(): WorldMemory | undefined {
@@ -620,6 +658,23 @@ export class Brain {
     return s;
   }
 
+  /** when the portals of others were last asked for (seePortals) */
+  private portalsAt = -Infinity;
+
+  /**
+   * The lit portals of others the bridge has seen in the dimension the bot is in (foreign.portals), kept in the world's
+   * memory every 5 minutes: the bridge's list lasts a client session, and where the bot's own Nether-side portal can
+   * go (nether.ts netherPortalSpot) depends on the community's portals on both sides, seen days apart. An older jar
+   * without the call: nothing kept.
+   */
+  private async seePortals(s: Snapshot, world: WorldMemory): Promise<void> {
+    if (this.now() - this.portalsAt < 5 * 60_000 || (s.dimension !== OVERWORLD && s.dimension !== NETHER)) return;
+    this.portalsAt = this.now();
+    const r = await this.rt.call<{ dimension?: string; portals?: PortalShape[] }>('foreign.portals', { dimension: s.dimension }).catch(() => undefined);
+    if (!Array.isArray(r?.portals)) return;
+    this.measure('portals', () => notePortals(world, r.dimension ?? s.dimension, r.portals!));
+  }
+
   /** Look around home for the bed, chests, furnace, table and farmland: once, then every 10 minutes while near it. */
   /**
    * Leave out the landmarks in someone else's build (an older client without the call: as they are). Never what's in
@@ -630,7 +685,7 @@ export class Brain {
     const l = world.landmarks;
     const y = world.yard;
     const ours = (p: Pos) => (y && p.x >= y.x1 - 6 && p.x <= y.x2 + 6 && p.z >= y.z1 - 6 && p.z <= y.z2 + 6) || Math.hypot(p.x - home.x, p.z - home.z) <= 24;
-    const all = [l.bed, ...l.chests, l.furnace, l.table, l.anvil, l.smithing, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
+    const all = [l.bed, ...l.chests, l.furnace, l.table, l.anvil, l.smithing, l.portal, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
     if (!all.length) return;
     const r = await this.rt.call<{ inside?: boolean[] }>('foreign.at', { positions: all.map(p => [p.x, p.y, p.z]) }).catch(() => undefined);
     if (!Array.isArray(r?.inside)) return;
@@ -643,6 +698,7 @@ export class Brain {
     l.table = mine(l.table);
     if (l.anvil) l.anvil = mine(l.anvil);
     if (l.smithing) l.smithing = mine(l.smithing);
+    if (l.portal) l.portal = mine(l.portal);
     l.chests = l.chests.filter(p => mine(p));
     l.farmland = l.farmland.filter(p => mine(p));
     this.note(`landmarks: left ${theirs.size} of someone else's alone (their chests, bed or farm)`);
@@ -671,7 +727,7 @@ export class Brain {
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
       const l = world.landmarks;
       this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland` +
-        `${l.anvil ? ', an anvil' : ''}${l.smithing ? ', a smithing table' : ''}`);
+        `${l.anvil ? ', an anvil' : ''}${l.smithing ? ', a smithing table' : ''}${l.portal ? ', a lit portal' : ''}`);
     }
     this.memory.save();
   }
@@ -701,7 +757,8 @@ export class Brain {
         if (!Number.isFinite(n) || n <= 0) return;
         used.gain += n;
         run.gain = used.gain; // the loop watch's record of this run
-      }
+      },
+      builds: () => this.structureBoxes(world)
     };
     this.note(`start ${goal.name}: ${reason}`);
     // a rung of the work queue: why each rung above it did not run instead, from the answers this choice was made by

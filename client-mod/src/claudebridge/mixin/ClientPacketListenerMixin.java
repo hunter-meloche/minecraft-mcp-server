@@ -32,9 +32,16 @@ public class ClientPacketListenerMixin {
         Events.onCombatKill(packet);
     }
 
+    // the dimension it came from, read before the handler swaps the level (HEAD also runs once on the network thread,
+    // before the handler hands itself over to the game thread: nothing is read there)
+    @Inject(method = "handleRespawn", at = @At("HEAD"))
+    private void claudebridge$beforeRespawn(ClientboundRespawnPacket packet, CallbackInfo ci) {
+        if (net.minecraft.client.Minecraft.getInstance().packetProcessor().isSameThread()) Events.beforeRespawn();
+    }
+
     @Inject(method = "handleRespawn", at = @At("TAIL"))
     private void claudebridge$respawn(ClientboundRespawnPacket packet, CallbackInfo ci) {
-        Events.onRespawn();
+        Events.onRespawn(packet);
     }
 
     @Inject(method = "handleSystemChat", at = @At("TAIL"))

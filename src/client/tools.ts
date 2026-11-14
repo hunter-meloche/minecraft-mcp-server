@@ -45,8 +45,13 @@ export interface Status {
   position?: Pos; block?: Pos; health?: number; food?: number; saturation?: number; air?: number;
   underWater?: boolean; inLava?: boolean; dimension?: string; gameMode?: string; difficulty?: string;
   timeOfDay?: number; process?: string | null; goal?: string | null; hashedSeed?: string | null; protectedCount?: number;
-  /** whether the mod has had the bot's built blocks and its home zone (none counts) from Node */
+  /**
+   * whether the mod has had the bot's built blocks and its home zone (none counts) from Node, for the dimension it is
+   * in (through a portal both read false until Node sends that dimension's)
+   */
   protectSynced?: boolean; zoneSynced?: boolean;
+  /** standing in a nether portal's blocks; whether Node has told the mod which portals are its own (false after a client restart) */
+  inPortal?: boolean; ownPortalsSynced?: boolean;
   windowMinimized?: boolean; mouseGrabbed?: boolean; onGround?: boolean; destroying?: boolean; sleeping?: boolean; raining?: boolean; thundering?: boolean;
   /** boxed in where it stands: the cells the Guardian's last wall-in filled there (empty when it didn't build this one) */
   boxedIn?: Pos[];
@@ -261,8 +266,8 @@ export interface ClientRuntime {
   status: () => Promise<Status>;
   /** a place saved with set-home in the world the bot is in */
   home: (s: Status, name?: string) => (Pos & { dimension: string }) | undefined;
-  /** where and when (ms) the bot last died, if it has this session */
-  lastDeath: () => { at: Pos; time: number } | undefined;
+  /** where, when (ms) and in which dimension (an older jar: not said) the bot last died, if it has this session */
+  lastDeath: () => { at: Pos; time: number; dimension?: string } | undefined;
   /** called before any tool the LLM runs that does more than look (the brain steps back) */
   setManualHook: (fn: ((tool: string) => Promise<void>) | undefined) => void;
   /**
@@ -276,6 +281,11 @@ export interface ClientRuntime {
    * it, sent with the yard's (the client mod keeps Baritone's paths from placing blocks by them, as by the yard's)
    */
   setHomeZone: (yard: { x1: number; z1: number; x2: number; z2: number } | undefined, pens?: { x1: number; z1: number; x2: number; z2: number }[]) => void;
+  /**
+   * the portals that are the bot's own, by dimension (the brain's: the home portal, its Nether side): sent to the
+   * client mod (portal.own) when they change and whenever it says it has none, so nothing counts them as anyone's build
+   */
+  setOwnPortals?: (portals: { dimension: string; x: number; y: number; z: number }[]) => void;
   /**
    * Put `item` back at `at` (selecting it, clearing a wrong block, stepping out of the cell or closer as needed),
    * turned to `facing` (the way the bot looks while placing: see placerFacing) when given. Resolves to why it could
@@ -324,12 +334,21 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     fs.mkdirSync(path.dirname(options.homesFile), { recursive: true });
     fs.writeFileSync(options.homesFile, JSON.stringify(h, null, 1));
   };
-  // where the bot last died, for collect-items (its drops lie there for 5 minutes)
-  let lastDeath: { at: Pos; time: number } | undefined;
-  const events = bridge as unknown as { on?: (event: string, fn: (e: { type: string; at?: Pos }) => void) => void };
-  events.on?.('event', e => { if (e.type === 'death' && e.at) lastDeath = { at: e.at, time: Date.now() }; });
+  // where the bot last died, for collect-items (its drops lie there for 5 minutes), and in which dimension: a death in
+  // the Nether is never walked back to, and its coordinates are another place's
+  let lastDeath: { at: Pos; time: number; dimension?: string } | undefined;
+  const events = bridge as unknown as { on?: (event: string, fn: (e: { type: string; at?: Pos; dimension?: string }) => void) => void };
+  events.on?.('event', e => {
+    if (e.type === 'death' && e.at) lastDeath = { at: e.at, time: Date.now(), ...(typeof e.dimension === 'string' ? { dimension: e.dimension } : {}) };
+  });
   let syncedVersion = -1;
-  let zoneSent = 'none'; // a client starts without one
+  /** the dimension the positions went for: through a portal the other dimension's are sent */
+  let syncedDim = 'overworld';
+  // a client starts without one (the zone's key is its dimension and the zone: 'overworld none')
+  let zoneSent = 'overworld none';
+  /** the bot's own portals as the brain last said them, and the list as last sent (portal.own) */
+  let ownPortals: { dimension: string; x: number; y: number; z: number }[] | undefined;
+  let ownSent: string | undefined;
   /** the home zone's radius: grows with the yard (the brain sets it) */
   let zoneRect: { x1: number; z1: number; x2: number; z2: number } | undefined;
   /**
@@ -345,31 +364,47 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     : Math.hypot(p.x - home.x, p.z - home.z) - HOME_ZONE);
   /** the dimension at the last status read */
   let lastDimension = 'overworld';
-  /** Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current. */
+  /**
+   * Keep the game client's copy of the protected positions (it turns them into Baritone's no-break list) current: for
+   * the dimension the bot is in, said with them (a portal trip between the look and the call must not file the
+   * overworld's under the Nether), and again on a change of dimension.
+   */
   const syncProtection = async (dim: string, force = false) => {
-    if (!force && syncedVersion === protection.version) return;
+    if (!force && syncedVersion === protection.version && syncedDim === dim) return;
     const positions = protection.positions(dim).map(p => [p.x, p.y, p.z]);
-    await call('protect.set', { positions }).then(() => { syncedVersion = protection.version; }).catch(() => undefined);
+    await call('protect.set', { positions, dimension: dim }).then(() => { syncedVersion = protection.version; syncedDim = dim; }).catch(() => undefined);
   };
   const status = async () => {
     const s = await call<Status>('status');
     if (!s.inWorld) throw new Error(offServer(s));
     protection.attach(worldIdFromSeed(s.hashedSeed ?? undefined));
     lastDimension = s.dimension ?? 'overworld';
+    const dim = s.dimension ?? 'overworld';
     // a relaunched client starts with none: resend when its count differs, or when it says it has had none (a new
-    // world with nothing built has the same count as a fresh client: 0)
-    const relaunched = (s.protectedCount !== undefined && s.protectedCount !== protection.positions(s.dimension ?? 'overworld').length) || s.protectSynced === false;
-    await syncProtection(s.dimension ?? 'overworld', relaunched);
-    // the home zone, for the home in the dimension the bot is in (resent when it changes or the client is new)
+    // world with nothing built has the same count as a fresh client: 0). Through a portal it says so too: its
+    // positions are the other dimension's (and syncProtection resends on the change of dimension anyway)
+    const relaunched = (s.protectedCount !== undefined && s.protectedCount !== protection.positions(dim).length) || s.protectSynced === false;
+    await syncProtection(dim, relaunched);
+    // the home zone, for the home in the dimension the bot is in (resent when it changes, the dimension changes or the
+    // client is new): in the Nether none, and the mod keeps the home zone and the pens' bands off there
     const world = worldIdFromSeed(s.hashedSeed ?? undefined);
     const home = world ? readHomes()[world]?.home : undefined;
     const pensKey = zonePens.map(p => `${p.x1},${p.z1},${p.x2},${p.z2}`).join(';');
-    const zone = home && home.dimension === (s.dimension ?? 'overworld') ? (zoneRect ? `${zoneRect.x1},${zoneRect.z1},${zoneRect.x2},${zoneRect.z2}${pensKey ? ` pens ${pensKey}` : ''}` : `${home.x},${home.z}`) : 'none';
+    const zone = home && home.dimension === dim ? (zoneRect ? `${zoneRect.x1},${zoneRect.z1},${zoneRect.x2},${zoneRect.z2}${pensKey ? ` pens ${pensKey}` : ''}` : `${home.x},${home.z}`) : 'none';
+    const zoneKey = `${dim} ${zone}`;
     // no home yet is an answer too: the mod's build scanner waits for one (a new server: nearby-builds, set-home)
-    if (zone !== zoneSent || s.zoneSynced === false || (relaunched && zone !== 'none')) {
+    if (zoneKey !== zoneSent || s.zoneSynced === false || (relaunched && zone !== 'none')) {
       const [x, z] = zone === 'none' ? [0, 0] : zone.split(',').map(Number);
       const params = zone === 'none' ? { x, z, radius: 0 } : zoneRect ? { ...zoneRect, ...(zonePens.length ? { pens: zonePens.map(p => ({ ...p })) } : {}) } : { x, z, radius: HOME_ZONE };
-      await call('protect.zone', params).then(() => { zoneSent = zone; }).catch(() => undefined);
+      await call('protect.zone', { ...params, dimension: dim }).then(() => { zoneSent = zoneKey; }).catch(() => undefined);
+    }
+    // its own portals: whenever the list changes, and whenever the mod says it has none (a client restart). Only to a
+    // jar that knows them (its status says whether it has them): an older one would be asked on every look
+    if (ownPortals && s.ownPortalsSynced !== undefined) {
+      const key = JSON.stringify(ownPortals);
+      if (s.ownPortalsSynced === false || key !== ownSent) {
+        await call('portal.own', { portals: ownPortals.map(p => ({ ...p })) }).then(() => { ownSent = key; }).catch(() => undefined);
+      }
     }
     return s;
   };
@@ -1567,6 +1602,48 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
+  // the operator's way through a portal: the brain's own trips go by portal.enter (nether.ts netherHome) and wait for
+  // the nether-trips switch, and nether_portal is on Baritone's avoid list, so move-to-position stops short of one and
+  // move-in-direction walks through its one block before the game's 4 s are up. A bot stranded in the Nether (the leave
+  // nether goal's 'stranded' line) comes home by this
+  register(
+    'use-portal',
+    "Go through a lit nether portal: walk carefully (nothing placed or broken) into it, stand in it until the game takes the bot across, then step out of the far portal onto safe ground. Give a block of the portal, or nothing for the nearest lit one in sight (the bot's own first). From the Nether it steps out on the side toward home. For a bot stranded in the Nether; the autopilot's own trips wait for its nether-trips switch.",
+    {
+      x: z.coerce.number().optional().describe('X of a block of the portal (its bottom row is best; default: the nearest lit portal)'),
+      y: z.coerce.number().optional().describe('Y of that block'),
+      z: z.coerce.number().optional().describe('Z of that block'),
+      toward: z.object({ x: z.coerce.number(), z: z.coerce.number() }).optional().describe('Step out of the far portal on the side nearer this point (default: home, from the Nether)'),
+      timeoutMs: z.number().int().min(10000).optional().describe('Give up after this long (default: 60000)')
+    },
+    async ({ x, y, z: zz, toward, timeoutMs = 60_000 }: { x?: number; y?: number; z?: number; toward?: { x: number; z: number }; timeoutMs?: number }) => {
+      const s = await status();
+      const dim = s.dimension ?? 'overworld';
+      let at = x !== undefined && y !== undefined && zz !== undefined ? floorPos({ x, y, z: zz }) : undefined;
+      if (!at) {
+        type Listed = Pos & { own?: boolean; distance?: number };
+        const listed = (await call<{ portals?: Listed[] }>('portal.list', { range: 128 }).catch(() => ({ portals: [] as Listed[] }))).portals ?? [];
+        const pick = [...listed].sort((a, b) => Number(!!b.own) - Number(!!a.own) || (a.distance ?? 0) - (b.distance ?? 0))[0];
+        if (!pick) return factory.createErrorResponse(`No lit portal in sight (within 128) in ${dim}: give one's position.`);
+        at = { x: pick.x, y: pick.y, z: pick.z };
+      }
+      let side = toward;
+      if (!side && dim === 'the_nether') {
+        const world = worldIdFromSeed(s.hashedSeed ?? undefined);
+        const home = world ? readHomes()[world]?.home : undefined;
+        if (home && home.dimension === 'overworld') side = { x: home.x, z: home.z };
+      }
+      type Entered = { ok?: boolean; reason?: string; from?: string; dimension?: string; block?: Pos; portal?: Pos | null; stepped?: boolean; steppedTo?: Pos; seconds?: number; note?: string };
+      const r = await call<Entered>('portal.enter', { ...at, timeoutMs, ...(side ? { toward: { x: side.x, z: side.z } } : {}) }, timeoutMs + 30_000)
+        .catch((e: Error): Entered => ({ ok: false, reason: e.message }));
+      if (!r.ok) return factory.createErrorResponse(`Not through the portal at ${fmt(at)} in ${dim}: ${r.reason ?? 'no answer'}.`);
+      const where = r.block ? ` at ${fmt(r.block)}` : '';
+      const came = r.portal ? `, by the portal at ${fmt(r.portal)}` : '';
+      const out = r.stepped ? `stepped out${r.steppedTo ? ` to ${fmt(r.steppedTo)}` : ''}` : `still in the arrival portal (${r.note ?? 'no safe side to step out'})`;
+      return factory.createResponse(`Through the portal at ${fmt(at)}: ${r.from ?? dim} -> ${r.dimension ?? 'unknown'}${where}${came}; ${out}${r.seconds !== undefined ? ` after ${r.seconds}s` : ''}.`);
+    }
+  );
+
   register(
     'explore',
     "Travel in a direction looking for something: an entity type ('sheep', 'cow', 'villager') or a block ('sweet_berry_bush', 'water'). Walks in legs of `step` blocks and looks around after each, up to maxDistance. Says where it found it and how far home is. Set home first so go-home can bring the bot back.",
@@ -1632,7 +1709,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     },
     async ({ x, y, z: zz, radius = 8, timeoutMs = 90_000 }: { x?: number; y?: number; z?: number; radius?: number; timeoutMs?: number }) => {
       const s = await status();
-      const recentDeath = lastDeath && Date.now() - lastDeath.time < 5 * 60_000 ? lastDeath.at : undefined;
+      // (a death in another dimension than the bot's left its drops there: around the bot, then)
+      const recentDeath = lastDeath && Date.now() - lastDeath.time < 5 * 60_000 && (lastDeath.dimension ?? s.dimension ?? 'overworld') === (s.dimension ?? 'overworld') ? lastDeath.at : undefined;
       const centre: Pos = x !== undefined && y !== undefined && zz !== undefined ? { x, y, z: zz } : recentDeath ?? s.position!;
       const why = x !== undefined ? '' : recentDeath ? ' (where the bot died)' : ' (around the bot)';
       const before = (await inventoryCounts()).counts;
@@ -1838,6 +1916,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     setHomeZone: (yard, pens = []) => {
       zoneRect = yard ? { x1: yard.x1, z1: yard.z1, x2: yard.x2, z2: yard.z2 } : undefined;
       zonePens = yard ? pens.map(p => ({ x1: p.x1, z1: p.z1, x2: p.x2, z2: p.z2 })) : [];
+    },
+    setOwnPortals: portals => {
+      ownPortals = portals.map(p => ({ dimension: p.dimension, x: p.x, y: p.y, z: p.z }));
     },
     builtNear: (center, radius) => protection.entries(lastDimension).filter(({ at }) =>
       Math.hypot(at.x - center.x, at.z - center.z) <= radius && Math.abs(at.y - center.y) <= radius),

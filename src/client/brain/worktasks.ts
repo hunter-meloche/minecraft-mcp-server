@@ -26,6 +26,8 @@ import { PEN_FOOD } from './animals.js';
 import { IN_SIGHT, cowRange, fetchForPens, penAt } from './pens.js';
 import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult, type WorkTask } from './work.js';
 import { leaveYard } from './yardgates.js';
+import { homePortal, tripsOn } from './portal.js';
+import { netherKitDecline, peekNether } from './nether.js';
 
 const MINUTE = 60_000;
 
@@ -418,6 +420,45 @@ const tripKit: WorkTask = {
   }
 };
 
+// ------------------------------------------------------------------------------------------------ nether
+
+/**
+ * The Nether rung's work, each open from a stage of the trips (`world.nether.stage`, which P2b's ramp raises): none
+ * yet. P2b adds `setup` (the bot's own Nether-side portal), P3 the barter, the quartz and the rest.
+ */
+export const NETHER_WORK: readonly { id: string; stage: number }[] = [];
+
+/** The home portal is lit and the bot's own: the portal milestone is done and the portal known. */
+const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).includes('nether-portal') && !!homePortal(world);
+
+/**
+ * Rung 4.5 (fractional: the unblockers' rule and the order of the others are as they were). Through the home portal
+ * into the Nether, for the work its stage opens (NETHER_WORK), with the Nether kit (mine.ts NETHER_TRIP) and twelve
+ * slots free, home by dusk (nether.ts netherBudgetMs), held after deaths down there, on probation until three trips
+ * end well, two a game day at most (work.ts). Never while the switch is off or the home portal not lit. P2a ships it
+ * with no work at all: it says `nether trips are off` while the switch is off, and `no nether work yet` while on.
+ */
+const nether: WorkTask = {
+  name: 'nether',
+  rank: 4.5,
+  reach: 'nether',
+  room: 'nether',
+  // (a Nether trip is given the day instead: work.ts budgetFor)
+  budgetMs: 0,
+  variants: (_s, world) => {
+    if (!tripsOn(world) || !portalReady(world)) return [];
+    const stage = peekNether(world).stage;
+    return NETHER_WORK.filter(v => v.stage <= stage).map(v => ({ id: v.id, dist: 0 }));
+  },
+  none: (_s, world) => ({
+    cause: 'unneeded',
+    text: !tripsOn(world) ? 'nether trips are off' : portalReady(world) ? 'no nether work yet' : 'no nether work yet: the home portal is not lit'
+  }),
+  ready: s => netherKitDecline(s),
+  // (no work is open yet: a run that got here never went through)
+  run: async () => ({ gain: 0, text: 'no nether work yet', untried: true })
+};
+
 // ------------------------------------------------------------------------------------------------ deep
 
 /**
@@ -518,4 +559,4 @@ const surface: WorkTask = {
   }
 };
 
-export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, deep, surface];
+export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, nether, deep, surface];

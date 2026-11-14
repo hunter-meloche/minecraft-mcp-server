@@ -90,6 +90,10 @@ public final class Handlers {
             // round it can be told apart as someone else's, and the build scanner waits
             r.addProperty("protectSynced", Protection.positionsSynced());
             r.addProperty("zoneSynced", Protection.zoneSynced());
+            // (both for the dimension the bot is in: through a portal they read false until Node sends that one's)
+            // in a nether portal's blocks (the server counts its time there), and whether Node has said which are its own
+            r.addProperty("inPortal", Portal.inside(pl));
+            r.addProperty("ownPortalsSynced", Portal.ownSynced());
             // the world spawn (non-ops can't build within the server's spawn protection round it), and others' builds
             r.add("spawn", pos(mc.level.getRespawnData().pos()));
             r.add("foreign", Foreign.summary(pl.blockPosition()));

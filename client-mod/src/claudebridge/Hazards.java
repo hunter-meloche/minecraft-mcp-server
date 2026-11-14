@@ -119,6 +119,8 @@ public final class Hazards {
     /** HazardUseMixin: true when this use is to be answered PASS, without using. {@code hit} is null for useItem. */
     public static boolean refuse(Player player, InteractionHand hand, BlockHitResult hit) {
         if (player == null || ClaudeBridge.server == null) return false; // no bridge (no token): a plain client
+        // a click on a bed outside the overworld, with anything in hand or none (it explodes): whoever clicks, never
+        if (hit != null && refuseBed(Minecraft.getInstance(), hit)) return true;
         ItemStack st = player.getItemInHand(hand);
         if (st.isEmpty()) return false;
         String item = Names.item(st);
@@ -132,6 +134,16 @@ public final class Hazards {
         if (NOTED.add(noteKind(item, who, why))) {
             System.out.println("[claudebridge] guard: refused a stray use of the " + item + " (" + who + "): " + why);
         }
+        return true;
+    }
+
+    /** A click on a bed where beds explode (Nether.bedRefusal), logged once per caller. */
+    private static boolean refuseBed(Minecraft mc, BlockHitResult hit) {
+        if (mc.level == null || "overworld".equals(Nether.here())) return false;
+        String why = Nether.bedRefusal(Nether.here(), Nether.isBed(mc.level.getBlockState(hit.getBlockPos())));
+        if (why == null) return false;
+        String who = who();
+        if (NOTED.add("bed|" + who)) System.out.println("[claudebridge] guard: refused a click on a bed (" + who + "): " + why);
         return true;
     }
 
