@@ -599,7 +599,11 @@ export class Brain {
       distHome: home && home.dimension === dimension ? Math.hypot(home.x - st.position.x, home.z - st.position.z) : Infinity,
       boxedIn: st.boxedIn,
       xpLevel: st.xpLevel,
-      foreign: st.foreign
+      foreign: st.foreign,
+      // what the bot has drunk and whether it burns (the Nether's lava work and the potions read them); an older
+      // jar sends neither: no effects, not burning
+      effects: Array.isArray(st.effects) ? st.effects.filter(e => typeof e?.name === 'string') : [],
+      onFire: !!st.onFire
     };
     this.last = s;
     return s;

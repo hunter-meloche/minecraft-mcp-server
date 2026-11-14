@@ -17,6 +17,10 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.tags.EnchantmentTags;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -63,6 +67,15 @@ public final class Combat {
             case "player" -> e instanceof Player;
             default -> !(e instanceof Player) && e instanceof LivingEntity && name.equals(query);
         };
+    }
+
+    /**
+     * A hostile that keeps the armour on (armor.unequip): any within 5 blocks, one in sight within 12. Not the neutral
+     * ones (an enderman about at dusk), nor one out of sight further off (in a cave under the yard: it can't reach the
+     * table in the few seconds the piece is off).
+     */
+    static boolean keepsArmourOn(String mob, double distance, boolean seen) {
+        return !NOT_PICKED_AS_HOSTILE.contains(mob) && distance <= 12 && (distance <= 5 || seen);
     }
 
     static List<Entity> hostilesNear(double range) {
@@ -117,19 +130,80 @@ public final class Combat {
         return m.matches() && ARMOR_TIER.containsKey(m.group(1)) ? ARMOR_TIER.get(m.group(1)) : 0;
     }
 
-    /** Wear the best armor carried, piece by piece; returns what was put on. */
+    /**
+     * How good a piece is to wear: its tier first, then its enchantment levels (curses count against), so of two
+     * diamond chestplates the enchanted one is worn and stays worn. Tier 0 (not armour, or nothing) is 0.
+     */
+    static int armorRank(int tier, int levels) {
+        return tier <= 0 ? 0 : tier * 1000 + Math.max(-999, Math.min(999, levels));
+    }
+
+    /** One enchantment's part in armorRank: its level, or less its level for a curse. */
+    static int levelScore(boolean curse, int level) {
+        return curse ? -level : level;
+    }
+
+    static int armorRank(ItemStack s) {
+        int tier = armorScore(s);
+        if (tier <= 0) return 0;
+        int levels = 0;
+        for (var en : s.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY).entrySet()) {
+            levels += levelScore(en.getKey().is(EnchantmentTags.CURSE), en.getIntValue());
+        }
+        return armorRank(tier, levels);
+    }
+
+    /** Wear the best armor carried, piece by piece; returns what was put on. Slots armor.unequip holds are left alone. */
     static List<String> equipBestArmor() {
+        return equipBestArmor(true);
+    }
+
+    /**
+     * heedHolds false: a fight wears its best whatever armor.unequip holds (a chore that has a piece off for the table
+     * takes it off again after).
+     */
+    static List<String> equipBestArmor(boolean heedHolds) {
+        return equipBestArmor(heedHolds, null);
+    }
+
+    /**
+     * A piece with curse of binding: once worn it never comes off again (26.3 ArmorSlot.mayPickup), for the table, the
+     * anvil or the smithing table. Its protection 4 outranks a plain piece by a level or two, so it would be put on.
+     */
+    static boolean bound(ItemStack s) {
+        return !s.isEmpty() && EnchantmentHelper.has(s, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE);
+    }
+
+    /**
+     * Of the pocket slots' pieces for one armour slot, the one to wear in place of what is worn, or -1: strictly better
+     * (two the same never swap back and forth), never one with curse of binding (it would stay on for good), and none
+     * over a worn one with it (it can't come off: no swap to try every 2 s). rank[i] < 0: not a piece for this slot.
+     */
+    static int pickArmor(int wornRank, boolean wornBound, int[] rank, boolean[] cursed) {
+        if (wornBound) return -1;
+        int best = -1, bestRank = wornRank;
+        for (int i = 0; i < rank.length; i++) if (rank[i] >= 0 && !cursed[i] && rank[i] > bestRank) { best = i; bestRank = rank[i]; }
+        return best;
+    }
+
+    /** `only`: just these armour slots (inventory index 36-39), or all of them when null. */
+    static List<String> equipBestArmor(boolean heedHolds, Set<Integer> only) {
         LocalPlayer p = Minecraft.getInstance().player;
         Inventory inv = p.getInventory();
         List<String> put = new ArrayList<>();
         for (var slot : ARMOR_SLOT.entrySet()) {
-            int wornScore = armorScore(inv.getItem(slot.getValue()));
-            int best = -1, bestScore = wornScore;
+            if (only != null && !only.contains(slot.getValue())) continue;
+            if (heedHolds && Guardian.gearHeld(slot.getValue())) continue;
+            ItemStack worn = inv.getItem(slot.getValue());
+            int[] rank = new int[36];
+            boolean[] cursed = new boolean[36];
             for (int i = 0; i < 36; i++) {
                 ItemStack s = inv.getItem(i);
                 Matcher m = ARMOR.matcher(s.isEmpty() ? "" : Names.item(s));
-                if (m.matches() && m.group(2).equals(slot.getKey()) && armorScore(s) > bestScore) { best = i; bestScore = armorScore(s); }
+                rank[i] = m.matches() && m.group(2).equals(slot.getKey()) ? armorRank(s) : -1;
+                cursed[i] = rank[i] >= 0 && bound(s);
             }
+            int best = pickArmor(armorRank(worn), bound(worn), rank, cursed);
             if (best < 0) continue;
             if (p.containerMenu != p.inventoryMenu) p.closeContainer();
             String name = Names.item(inv.getItem(best));
@@ -232,7 +306,7 @@ public final class Combat {
         Entity first = pick(query, maxDistance, Set.of());
         if (first == null) { c.ok(obj("outcome", "none")); return; }
         fighting = true;
-        List<String> wore = equipBestArmor();
+        List<String> wore = equipBestArmor(false);
         boolean shield = equipShield();
         boolean multiple = query.equals("hostile");
         victimId = first.getId();

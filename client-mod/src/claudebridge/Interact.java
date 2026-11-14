@@ -71,6 +71,40 @@ public final class Interact {
         return -1;
     }
 
+    /**
+     * The one rule for `slot` (enchant.put, chest.withdraw, chest.deposit, item.select): the slot asked for when it holds
+     * that item, else the first that does, else -1. Names are null for an empty slot. `slot` picks one of several by the
+     * same name: the first diamond_pickaxe by name may be the one already enchanted, which the table offers nothing for.
+     */
+    static int pick(java.util.function.IntFunction<String> nameAt, int size, String name, int want) {
+        if (want >= 0 && want < size && name.equals(nameAt.apply(want))) return want;
+        for (int i = 0; i < size; i++) if (name.equals(nameAt.apply(i))) return i;
+        return -1;
+    }
+
+    /**
+     * The slots a move takes from, in order. With no `slot` (want -1): every slot holding the name. With one: the slot
+     * pick() finds, then only stacks the same as it (`same`: the same item with the same components), never another of
+     * the name: three potions of fire resistance asked for by a slot must not bring a potion of weakness along.
+     */
+    static List<Integer> sources(java.util.function.IntFunction<String> nameAt, int size, String name, int want,
+                                 java.util.function.BiPredicate<Integer, Integer> same) {
+        List<Integer> out = new ArrayList<>();
+        if (want < 0) {
+            for (int i = 0; i < size; i++) if (name.equals(nameAt.apply(i))) out.add(i);
+            return out;
+        }
+        int first = pick(nameAt, size, name, want);
+        if (first < 0) return out;
+        out.add(first);
+        for (int i = 0; i < size; i++) if (i != first && name.equals(nameAt.apply(i)) && same.test(first, i)) out.add(i);
+        return out;
+    }
+
+    static String nameOf(ItemStack st) {
+        return st.isEmpty() ? null : Names.item(st);
+    }
+
     /** Slot of an inventory index in the player's own inventory menu (hotbar 36-44, armor 5-8, off-hand 45). */
     static int inventoryMenuSlot(int i) {
         if (i < 9) return 36 + i;
@@ -99,14 +133,18 @@ public final class Interact {
 
     static JsonObject chestContents(net.minecraft.world.inventory.ChestMenu menu) {
         JsonObject items = new JsonObject();
+        // and each stack by its slot, with what tells one of a name from another (enchanted books, potions, a worn
+        // pickaxe and a fresh one), so Node can ask for that one by `slot`
+        com.google.gson.JsonArray stacks = new com.google.gson.JsonArray();
         int own = menu.getRowCount() * 9, free = 0;
         for (int k = 0; k < own; k++) {
             ItemStack in = menu.getSlot(k).getItem();
             if (in.isEmpty()) { free++; continue; }
             String n = Names.item(in);
             items.addProperty(n, (items.has(n) ? items.get(n).getAsInt() : 0) + in.getCount());
+            stacks.add(Handlers.withDetail(obj("slot", k, "name", n, "count", in.getCount()), in));
         }
-        return obj("slots", own, "free", free, "items", items);
+        return obj("slots", own, "free", free, "items", items, "stacks", stacks);
     }
 
     static int containerMenuSlot(int containerSlots, int i) {
@@ -131,9 +169,15 @@ public final class Interact {
     }
 
     public static int select(String name) {
+        return select(name, -1);
+    }
+
+    /** select, of several by the name the one at inventory index `want` (0-35) when it holds that item (see pick). */
+    public static int select(String name, int want) {
         LocalPlayer p = player();
         Inventory inv = p.getInventory();
-        int i = find(inv, name);
+        int i = pick(k -> nameOf(inv.getItem(k)), 36, name.replace("minecraft:", ""), want);
+        if (i < 0) i = find(inv, name); // a name in part ("log"), or one only worn
         if (i < 0) throw new IllegalArgumentException("no " + name + " in inventory");
         if (i < 9) { inv.setSelectedSlot(i); return i; } // in slot 0 or 8 it is Baritone's own pick: it stays there
         if (i > 35) throw new IllegalArgumentException(name + " is worn; take it off first");
@@ -207,7 +251,54 @@ public final class Interact {
     }
 
     public static void register(BridgeServer s) {
-        s.register("item.select", true, (p, c) -> obj("held", select(required(p, "name"))));
+        // `slot` (inventory index 0-35): of several by the name, that one (the plain pickaxe, the fire resistance potion)
+        s.register("item.select", true, (p, c) -> obj("held", select(required(p, "name"), intParam(p, "slot", -1))));
+
+        // take a worn piece off into the pockets (the enchanting table takes only carried items), and keep the
+        // Guardian's gear check (every 2 s) from wearing it, or a spare of the kind, again for holdMs (default 60 s, at
+        // most 10 min): it would be back on before the table opened. enchant.close ends the hold and wears it again
+        // (the enchanted piece beats a plain one of its tier: Combat.armorRank), and the hold gives way while the bot is
+        // being hurt (Guardian.gearHeld). Refused with a hostile near or just hurt. Replies with the inventory index it
+        // went to (`slot`, for enchant.put): the first free of 9-35, then the hotbar (InventoryMenu.quickMoveStack)
+        s.register("armor.unequip", true, (p, c) -> {
+            LocalPlayer pl = player();
+            String which = required(p, "slot");
+            int index = switch (which) {
+                case "feet" -> 36;
+                case "legs" -> 37;
+                case "chest" -> 38;
+                case "head" -> 39;
+                default -> throw new IllegalArgumentException("slot must be head, chest, legs or feet");
+            };
+            long holdMs = Math.max(0, Math.min(600_000L, (long) numParam(p, "holdMs", 60_000)));
+            Inventory inv = pl.getInventory();
+            ItemStack worn = inv.getItem(index).copy();
+            if (worn.isEmpty()) throw new IllegalStateException("nothing worn on the " + which);
+            if (inv.getFreeSlot() < 0) throw new IllegalStateException("no free slot to take the " + Names.item(worn) + " off into");
+            if (Combat.bound(worn)) throw new IllegalStateException("the " + Names.item(worn) + " has curse of binding: it can't come off");
+            // not with a hostile about, nor while being hurt: once the table has the piece nothing can wear it again
+            // until the close, and the Guardian's give-way (gearHeld) only works on a piece in the pockets
+            for (var e : Combat.hostilesNear(12)) {
+                String mob = Names.entity(e);
+                if (!Combat.keepsArmourOn(mob, e.distanceTo(pl), pl.hasLineOfSight(e))) continue;
+                throw new IllegalStateException("a " + mob + " " + Math.round(e.distanceTo(pl)) + " blocks away: keeping the " + Names.item(worn) + " on");
+            }
+            if (Guardian.hurtRecently(100)) throw new IllegalStateException("hurt in the last 5 s: keeping the " + Names.item(worn) + " on");
+            java.util.Set<Integer> already = new java.util.HashSet<>();
+            for (int i = 0; i < 36; i++) if (ItemStack.isSameItemSameComponents(inv.getItem(i), worn)) already.add(i);
+            Guardian.holdGear(index, holdMs);
+            if (pl.containerMenu != pl.inventoryMenu) pl.closeContainer();
+            click(pl.inventoryMenu, inventoryMenuSlot(index), 0, ContainerInput.QUICK_MOVE); // armour shift-clicks into the pockets
+            if (!inv.getItem(index).isEmpty()) {
+                Guardian.releaseGear(index);
+                throw new IllegalStateException("could not take the " + Names.item(worn) + " off (a curse of binding?)");
+            }
+            int at = -1;
+            for (int i = 0; i < 36 && at < 0; i++) if (!already.contains(i) && ItemStack.isSameItemSameComponents(inv.getItem(i), worn)) at = i;
+            JsonObject r = Handlers.withDetail(obj("ok", true, "slot", at, "name", Names.item(worn), "count", worn.getCount()), worn);
+            r.addProperty("holdMs", holdMs);
+            return r;
+        });
 
         s.register("item.equip", true, (p, c) -> {
             LocalPlayer pl = player();
@@ -546,7 +637,14 @@ public final class Interact {
             int want = intParam(p, "count", Integer.MAX_VALUE);
             int own = menu.getRowCount() * 9;
             int moved = 0;
-            for (int i = 0; i < 36 && moved < want; i++) {
+            // `slot` (inventory index 0-35): that stack first, then only ones the same as it (sources): of two pickaxes
+            // the plain one goes, not the enchanted one first by name
+            var inv = pl.getInventory();
+            int from = intParam(p, "slot", -1);
+            List<Integer> order = sources(k -> nameOf(inv.getItem(k)), 36, name, from,
+                (a, b) -> ItemStack.isSameItemSameComponents(inv.getItem(a), inv.getItem(b)));
+            for (int i : order) {
+                if (moved >= want) break;
                 ItemStack st = pl.getInventory().getItem(i);
                 if (st.isEmpty() || !Names.item(st).equals(name)) continue;
                 int slot = containerMenuSlot(own, i);
@@ -572,6 +670,7 @@ public final class Interact {
             }
             JsonObject r = chestContents(menu);
             r.addProperty("moved", moved);
+            if (from >= 0) r.addProperty("from", order.isEmpty() ? -1 : order.getFirst()); // the slot it took from first
             return r;
         });
 
@@ -582,7 +681,13 @@ public final class Interact {
             int want = intParam(p, "count", Integer.MAX_VALUE);
             int own = menu.getRowCount() * 9;
             int taken = 0;
-            for (int k = 0; k < own && taken < want; k++) {
+            // `slot` (the chest's, 0 the top left, as `stacks` numbers them): that stack first, then only ones the same
+            // as it (sources): the book with mending, not the first enchanted_book by name
+            int from = intParam(p, "slot", -1);
+            List<Integer> order = sources(k -> nameOf(menu.getSlot(k).getItem()), own, name, from,
+                (a, b) -> ItemStack.isSameItemSameComponents(menu.getSlot(a).getItem(), menu.getSlot(b).getItem()));
+            for (int k : order) {
+                if (taken >= want) break;
                 ItemStack in = menu.getSlot(k).getItem();
                 if (in.isEmpty() || !Names.item(in).equals(name)) continue;
                 int before = in.getCount();
@@ -608,6 +713,7 @@ public final class Interact {
             }
             JsonObject r = chestContents(menu);
             r.addProperty("moved", taken);
+            if (from >= 0) r.addProperty("from", order.isEmpty() ? -1 : order.getFirst()); // the slot it took from first
             return r;
         });
 

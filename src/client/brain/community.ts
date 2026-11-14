@@ -145,10 +145,14 @@ export function ownItems<T extends { name: string; count: number; slot: number }
 
 // ------------------------------------------------------------------------------------------------ donations
 
-/** What the bot keeps of each precious thing; what's beyond it goes to the community, a lot at a time. */
+/**
+ * What the bot keeps of each precious thing; what's beyond it goes to the community, a lot at a time. Emeralds: a
+ * stack, to buy Mending from its own librarian later (the progression plan's villager hall): with keep 0 every
+ * emerald it came by went up for the community chest. None is held yet.
+ */
 export const KEEP: Record<string, { keep: number; lot: number }> = {
   diamond: { keep: 8, lot: 4 },
-  emerald: { keep: 0, lot: 4 },
+  emerald: { keep: 64, lot: 8 },
   gold_ingot: { keep: 16, lot: 8 },
   iron_ingot: { keep: 48, lot: 16 }
 };

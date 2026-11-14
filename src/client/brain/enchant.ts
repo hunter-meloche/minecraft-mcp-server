@@ -1,16 +1,18 @@
-import { nearHome, type Goal, type GoalContext } from './goals.js';
+import { brainRun, type InventoryItem } from '../tools.js';
+import { nearHome, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Milestone, MilestoneState, StepResult } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
 import { progressOf } from './progress.js';
 import { enchantRoom, type Side } from './blueprints.js';
 import { chestTotals, takeFromChests } from './chests.js';
-import { tier } from './kit.js';
+import { gearKind, tier } from './kit.js';
 import { DEEP_TRIP, deepTripReady, pickMineStart } from './mine.js';
 import { tripCheck } from './deep.js';
 import { nearestZone, type Zone } from './courtesy.js';
 import { bucketsFor, castObsidian, fetchLava, LAVA_POOL } from './cast.js';
 import { walkHome } from './homeward.js';
 import { leaveYard } from './yardgates.js';
+import { ROOM } from './pockets.js';
 
 /**
  * Enchanting: obsidian (mined with a diamond pickaxe), then a 7 x 7 room with the table in the middle and 15 shelves
@@ -151,10 +153,64 @@ export function enchantingMilestone(prereqs: string[]): Milestone {
   };
 }
 
-/** Gear worth enchanting: diamond (or better) tools and armour that aren't enchanted yet. */
-const WORTH = /_(pickaxe|sword|helmet|chestplate|leggings|boots)$/;
+/**
+ * Gear worth enchanting, in the order the chore does it, one piece a run: the sword and the pickaxe (done first live,
+ * Nov 14), then the armour, the chestplate first (it covers the most). Of diamond or better, not enchanted yet.
+ */
+export const ENCHANT_ORDER = ['sword', 'pickaxe', 'chestplate', 'leggings', 'helmet', 'boots'] as const;
 
-/** Every so often by day at level 30 with lapis: enchant the best unenchanted piece at the table. */
+/** A worn piece: its inventory index (36 boots .. 39 helmet) and armor.unequip's name for its slot. */
+const WORN: Record<string, { index: number; slot: 'head' | 'chest' | 'legs' | 'feet' }> = {
+  boots: { index: 36, slot: 'feet' }, leggings: { index: 37, slot: 'legs' }, chestplate: { index: 38, slot: 'chest' }, helmet: { index: 39, slot: 'head' }
+};
+
+/** The armour slot to take a worn piece off from, for armor.unequip; undefined for a carried one (0-35). */
+export function wornSlot(i: Pick<InventoryItem, 'slot' | 'name'>): 'head' | 'chest' | 'legs' | 'feet' | undefined {
+  const w = WORN[gearKind(i.name) ?? ''];
+  return w && i.slot === w.index ? w.slot : undefined;
+}
+
+/**
+ * The next piece to enchant: by ENCHANT_ORDER, of a kind the first plain one of diamond or better, carried or worn.
+ * Of one kind the best tier first, and a carried one before the one worn (nothing to take off: the Guardian wears the
+ * enchanted one over the plain). A worn piece only with a free pocket slot to take it off into (`free`: armor.unequip
+ * refuses without one). Worn armour was left out until P0: the bot sat in plain diamond armour at level 59.
+ */
+export function enchantPick(items: InventoryItem[], free: number): InventoryItem | undefined {
+  const plain = (i: InventoryItem) => !i.enchanted && !i.enchantments?.length;
+  for (const kind of ENCHANT_ORDER) {
+    const ofKind = items
+      .filter(i => gearKind(i.name) === kind && plain(i) && tier(i.name) >= tier(`diamond_${kind}`))
+      .filter(i => i.slot < 36 || (wornSlot(i) !== undefined && free > 0))
+      .sort((a, b) => tier(b.name) - tier(a.name) || Number(a.slot >= 36) - Number(b.slot >= 36));
+    if (ofKind[0]) return ofKind[0];
+  }
+  return undefined;
+}
+
+/**
+ * Free pocket slots for a piece taken off, after the room the stash leaves a yard round (ROOM.yard: with fewer free it
+ * stops whatever runs, to put things away); below 0 nothing is started. The lapis from the chests takes one first
+ * when too little is carried. At 34 kept slots the lapis fetched made 35: the stash stopped the run on its walk to
+ * the table and put the lapis back, and enchant wanted again, round and round.
+ */
+const freeFor = (s: Snapshot) => 36 - s.slotsUsed - ((s.counts.get('lapis_lazuli') ?? 0) < 3 ? 1 : 0) - ROOM.yard;
+
+/** The next piece, where the pockets leave room for it (freeFor). */
+const pickFor = (s: Snapshot) => {
+  const free = freeFor(s);
+  return free < 0 ? undefined : enchantPick(s.items, free);
+};
+
+/**
+ * How long a piece taken off stays off whatever the Guardian's gear check would wear (Guardian.gearHoldUntil): it is
+ * taken off at the table, so this covers the opening and the put, a few seconds. enchant.close ends it and wears the
+ * piece again, also for a run the brain gave up (sent outside it, below): this is only the backstop for a close that
+ * never reaches the client.
+ */
+const UNEQUIP_HOLD_MS = 30_000;
+
+/** Every so often by day at level 30 with lapis: enchant the next unenchanted piece at the table, worn armour too. */
 export const enchantGoal: Goal = {
   name: 'enchant',
   priority: 31,
@@ -162,33 +218,59 @@ export const enchantGoal: Goal = {
   retryMs: 30 * MINUTE,
   wants: (s, world) => {
     if (s.activity !== 'work' || s.sleeping || (s.xpLevel ?? 0) < 30 || !world.zones?.['enchanting:table']?.length || !nearHome(s, 24)) return null;
-    const piece = s.items.find(i => i.slot < 36 && WORTH.test(i.name) && !i.enchanted && tier(i.name) >= tier(i.name.replace(/^[a-z]+_/, 'diamond_')));
+    const piece = pickFor(s);
     if (!piece) return null;
     const lapis = (s.counts.get('lapis_lazuli') ?? 0) + (chestTotals(world).lapis_lazuli ?? 0);
-    return lapis >= 3 ? `level ${s.xpLevel}: enchant the ${piece.name}` : null;
+    return lapis >= 3 ? `level ${s.xpLevel}: enchant the ${piece.name}${wornSlot(piece) ? ' (worn)' : ''}` : null;
   },
   run: async ctx => {
     const table = ctx.world.zones!['enchanting:table'][0];
-    // carried pieces, 0-35 (worn armour, 36-39, isn't where the table takes from: it waits for a spare)
-    const piece = ctx.s.items.filter(i => i.slot < 36 && WORTH.test(i.name) && !i.enchanted).sort((a, b) => tier(b.name) - tier(a.name))[0];
+    const piece = pickFor(ctx.s);
     if (!piece) return 'nothing to enchant';
     if ((ctx.s.counts.get('lapis_lazuli') ?? 0) < 3) await takeFromChests(ctx, 'lapis_lazuli', 16);
     await ctx.act('move-to-position', { ...table, range: 2, timeoutMs: 60_000 });
+    const worn = wornSlot(piece);
+    let done: string;
+    let closed: { wore?: string[] } | undefined;
     try {
+      // a worn piece comes off at the table, not before the walk (no armour off on the way), and before the table
+      // opens: its menu has no armour slots, and armor.unequip shuts any open screen. The hold keeps the Guardian
+      // (every 2 s) from wearing it again before the table has it; enchant.close (below) ends the hold and wears the
+      // best there is again, the enchanted piece, whatever the Guardian's state (auto-defend off skips its gear check).
+      // armor.unequip refuses with a hostile near or the bot just hurt: a failure, the piece still on
+      let slot = piece.slot;
+      if (worn) {
+        const off = await ctx.call<{ ok: boolean; slot: number; name: string }>('armor.unequip', { slot: worn, holdMs: UNEQUIP_HOLD_MS });
+        slot = off.slot;
+        ctx.progress(`took the ${piece.name} off for the table`);
+      }
       await ctx.call('enchant.open', { ...table });
       // one put: the piece (from its own slot: with two pickaxes, the first by name may be the enchanted one) and the
       // lapis with it. A second put of 'lapis_lazuli' took the piece back out and set one lapis in the item slot: 27
       // tries in a day, "no offer for the diamond_sword" every time, and it ping-ponged with signs and sort
       const st = await ctx.call<{ offers: { slot: number; cost: number; enchant: string | null }[]; enchantable?: boolean; put?: string }>(
-        'enchant.put', { name: piece.name, slot: piece.slot, lapis: 3 });
+        'enchant.put', { name: piece.name, slot, lapis: 3 }).catch((e: unknown) => {
+        // the hold gives way while the bot is hurt, and a fight wears its best whatever the hold says: the piece can be
+        // back on before the table has it. Said so, not as a piece lost from the pockets
+        if (worn && e instanceof Error && e.message.includes(`no ${piece.name} in inventory`)) {
+          throw new Error(`the ${piece.name} went back on before the table had it (hurt, or a fight)`);
+        }
+        throw e;
+      });
       const offer = [...st.offers].filter(o => o.cost > 0 && o.cost <= (ctx.s.xpLevel ?? 0)).sort((a, b) => b.cost - a.cost)[0];
       // a failure, not a done: it holds for retryMs instead of coming back every few seconds
       if (!offer) throw new Error(`no offer for the ${st.put ?? piece.name}${st.enchantable === false ? ' (not enchantable)' : ''}`);
       const r = await ctx.call<{ ok: boolean; enchantments?: { name: string; level: number }[]; reason?: string }>('enchant.choose', { slot: offer.slot }, 15_000);
       if (!r.ok) throw new Error(r.reason ?? 'not enchanted');
-      return `enchanted the ${piece.name}: ${(r.enchantments ?? []).map(e => `${e.name} ${e.level}`).join(', ')}`;
+      done = `enchanted the ${piece.name}: ${(r.enchantments ?? []).map(e => `${e.name} ${e.level}`).join(', ')}`;
     } finally {
-      await ctx.call('enchant.close').catch(() => undefined);
+      // outside the run: once the brain gives a run up (something more urgent, the LLM, the timeout) every call of it
+      // is refused, and the table stayed open with the piece in it (the Guardian looks at gear only with no screen
+      // open). The close ends the hold and wears the piece again
+      closed = await brainRun.exit(() => ctx.call<{ wore?: string[] }>('enchant.close')).catch(() => undefined);
     }
+    // a worn piece: whether it is on again (the Guardian's own "put on" notes reach the LLM, not brain.log)
+    if (!worn) return done;
+    return `${done}; ${closed?.wore?.includes(piece.name) ? 'worn again' : 'not worn again: enchant.close put nothing on'}`;
   }
 };

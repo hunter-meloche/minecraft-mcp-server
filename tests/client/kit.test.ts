@@ -1,5 +1,5 @@
 import test from 'ava';
-import { KIT, carriedKit, kitNeeds, slotsUsed, stashPlan, tier } from '../../src/client/brain/kit.js';
+import { KIT, better, carriedKit, enchantLevels, kitNeeds, slotsUsed, stashPlan, tier } from '../../src/client/brain/kit.js';
 import type { InventoryItem } from '../../src/client/tools.js';
 
 /** A full kit: diamond tools, a stone spare pickaxe, iron armour worn, torches and cobblestone. */
@@ -188,4 +188,79 @@ test('a shield, always: from the chest, else crafted from 6 planks and an iron i
   const crafted = kitNeeds([...bare, { slot: 20, name: 'oak_planks', count: 6 }, { slot: 21, name: 'iron_ingot', count: 1 }], {}).find(n => n.kind === 'shield');
   t.like(crafted!.plan[0], { craft: 'shield', times: 1 });
   t.deepEqual(kitNeeds(bare, {}).find(n => n.kind === 'shield')!.plan, [{ gather: { log: 2, iron_ingot: 1 } }]);
+});
+
+test('better(): tier first, then enchantment levels (a curse against), then durability; one the same is a tie', (t) => {
+  const sharp = [{ name: 'sharpness', level: 5 }, { name: 'unbreaking', level: 3 }];
+  const item = (name: string, damage: number, enchantments?: { name: string; level: number }[]): InventoryItem =>
+    ({ slot: 0, name, count: 1, damage, maxDamage: 1561, ...(enchantments ? { enchanted: true, enchantments } : {}) });
+  const first = (a: InventoryItem, b: InventoryItem) => [a, b].sort(better)[0];
+  // a plain diamond sword over an enchanted iron one: levels never lift a piece into the next tier
+  t.is(first(item('iron_sword', 0, sharp), item('diamond_sword', 0)).name, 'diamond_sword');
+  // of a tier the enchanted one, even a little worn
+  const enchanted = item('diamond_sword', 400, sharp);
+  t.is(first(item('diamond_sword', 0), enchanted), enchanted);
+  t.is(first(enchanted, item('diamond_sword', 0)), enchanted);
+  // more levels first; the same levels: the one with more use left
+  t.is(first(item('diamond_sword', 0, [{ name: 'unbreaking', level: 1 }]), enchanted), enchanted);
+  const fresh = item('diamond_sword', 10, [{ name: 'unbreaking', level: 3 }, { name: 'sharpness', level: 5 }]);
+  t.is(first(enchanted, fresh), fresh);
+  // a curse counts against: sharpness 1 and curse of vanishing 1 is level for level a plain one
+  t.is(enchantLevels({ enchantments: [{ name: 'sharpness', level: 1 }, { name: 'vanishing_curse', level: 1 }] }), 0);
+  const cursed = item('diamond_sword', 50, [{ name: 'sharpness', level: 1 }, { name: 'vanishing_curse', level: 1 }]);
+  t.is(first(cursed, item('diamond_sword', 0)).damage, 0);
+  // the same in every way: a tie, either way round
+  t.is(better(item('diamond_sword', 3, sharp), item('diamond_sword', 3, sharp)), 0);
+  t.is(better(item('diamond_sword', 3), item('diamond_sword', 3)), 0);
+  // an older jar says only enchanted: that still beats a plain one of the tier
+  t.is(enchantLevels({ enchanted: true }), 1);
+  t.is(enchantLevels({}), 0);
+  const old: InventoryItem = { slot: 0, name: 'diamond_sword', count: 1, damage: 300, maxDamage: 1561, enchanted: true };
+  t.is(first(item('diamond_sword', 0), old), old);
+});
+
+test('better(): a piece with curse of binding comes after a plain one of its tier, whatever else it has (it never comes off again)', (t) => {
+  // the Guardian never puts one on (Combat.bound); counted level for level, protection 4 and binding made 3, above a
+  // plain piece, and the kit kept the cursed one as its best
+  const binding = [{ name: 'protection', level: 4 }, { name: 'unbreaking', level: 3 }, { name: 'binding_curse', level: 1 }];
+  t.true(enchantLevels({ enchantments: binding }) < enchantLevels({}));
+  const cursed: InventoryItem = { slot: 12, name: 'diamond_chestplate', count: 1, damage: 0, maxDamage: 528, enchanted: true, enchantments: binding };
+  const plain: InventoryItem = { slot: 13, name: 'diamond_chestplate', count: 1, damage: 300, maxDamage: 528 };
+  t.is([cursed, plain].sort(better)[0], plain);
+  t.is([plain, cursed].sort(better)[0], plain);
+  // still a tier above: a cursed diamond piece over a plain iron one
+  t.is([{ ...plain, name: 'iron_chestplate' }, cursed].sort(better)[0], cursed);
+  const items: InventoryItem[] = [...kit().filter(i => i.slot !== 38), cursed, plain];
+  t.is(carriedKit(items).best.chestplate?.slot, 13);
+});
+
+test('the kit and the stash keep the enchanted piece over a plain one of its tier, and never put it away for the plain one', (t) => {
+  const prot = { enchanted: true, enchantments: [{ name: 'protection', level: 4 }, { name: 'unbreaking', level: 3 }] };
+  // a fresh plain chestplate worn and the enchanted one carried, a little used: by durability alone the worn one was
+  // the best and the enchanted one went in the chest
+  const items: InventoryItem[] = [
+    ...kit().filter(i => i.slot !== 38),
+    { slot: 38, name: 'diamond_chestplate', count: 1, damage: 0, maxDamage: 528 },
+    { slot: 12, name: 'diamond_chestplate', count: 1, damage: 40, maxDamage: 528, ...prot }
+  ];
+  t.is(carriedKit(items).best.chestplate?.slot, 12);
+  t.false(stashPlan(items).deposit.some(e => e.name === 'diamond_chestplate'));
+  // both carried: the plain one is what the plan puts away, by its slot, never the enchanted one
+  const swords: InventoryItem[] = [
+    ...kit().filter(i => i.name !== 'diamond_sword'),
+    { slot: 3, name: 'diamond_sword', count: 1, damage: 0, maxDamage: 1561 },
+    { slot: 9, name: 'diamond_sword', count: 1, damage: 200, maxDamage: 1561, enchanted: true, enchantments: [{ name: 'sharpness', level: 5 }] }
+  ];
+  t.is(carriedKit(swords).best.sword?.slot, 9);
+  t.deepEqual(stashPlan(swords).deposit.filter(e => e.name === 'diamond_sword'), [{ name: 'diamond_sword', count: 1, slot: 3 }]);
+  // the pickaxes: the enchanted one is the main pickaxe, a plain one the spare
+  const picks: InventoryItem[] = [
+    ...kit().filter(i => !/pickaxe/.test(i.name)),
+    { slot: 0, name: 'diamond_pickaxe', count: 1, damage: 0, maxDamage: 1561 },
+    { slot: 5, name: 'diamond_pickaxe', count: 1, damage: 90, maxDamage: 1561, enchanted: true, enchantments: [{ name: 'fortune', level: 3 }, { name: 'unbreaking', level: 3 }] }
+  ];
+  const { best, spare } = carriedKit(picks);
+  t.is(best.pickaxe?.slot, 5);
+  t.is(spare?.slot, 0);
+  t.deepEqual(kitNeeds(picks, {}).filter(n => n.kind === 'pickaxe'), []);
 });

@@ -179,8 +179,8 @@ Good to know:
 (`name`, `x`, `y`, `z`). The bot only puts things in it, never takes, and it is never the bot's storage. Two things go
 there:
 - Donations, every few hours of play: precious things beyond what the bot keeps for itself. That is diamonds beyond
-  8 (only once its own diamond kit is done), any emeralds, gold beyond 16 and iron beyond 48. Each goes in lots of at
-  least 4, 4, 8 and 16.
+  8 (only once its own diamond kit is done), emeralds beyond 64, gold beyond 16 and iron beyond 48. Each goes in lots of
+  at least 4, 8, 8 and 16.
 - Missions, only when asked for one (`community-mission` with `item`, `count`, `chest`, e.g. "gather 64 diamond for
   the community1 chest").
   - It works on a mission by itself, just after the build jobs. Ores come from trips under ground, kitted out like a

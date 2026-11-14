@@ -61,6 +61,16 @@ public final class Handlers {
             r.addProperty("air", Math.max(0, pl.getAirSupply()) / 15); // 0..20 like mineflayer's oxygenLevel
             r.addProperty("underWater", pl.isUnderWater());
             r.addProperty("inLava", pl.isInLava());
+            // burning (synced from the server: a fire resistance potion stops the hurt, not the flames), and the effects
+            // on the bot, which the server sends the player itself: name, amplifier (0 is level I), seconds left (-1 for
+            // one that never runs out)
+            r.addProperty("onFire", pl.isOnFire());
+            JsonArray effects = new JsonArray();
+            for (var e : pl.getActiveEffects()) {
+                effects.add(obj("name", Names.strip(e.getEffect().getRegisteredName()), "amplifier", e.getAmplifier(),
+                    "seconds", e.isInfiniteDuration() ? -1 : e.getDuration() / 20));
+            }
+            r.add("effects", effects);
             r.addProperty("dimension", Names.strip(mc.level.dimension().identifier().toString()));
             r.addProperty("gameMode", mc.gameMode == null ? null : mc.gameMode.getPlayerMode().name().toLowerCase());
             r.addProperty("difficulty", mc.level.getLevelData().getDifficulty().getSerializedName());
@@ -100,7 +110,7 @@ public final class Handlers {
             for (int i = 0; i < inv.getContainerSize(); i++) {
                 var st = inv.getItem(i);
                 if (st.isEmpty()) continue;
-                items.add(withDamage(obj("slot", i, "name", Names.item(st), "count", st.getCount()), st));
+                items.add(withDetail(obj("slot", i, "name", Names.item(st), "count", st.getCount()), st));
             }
             // the same worn items by name, so Node needn't know the index mapping
             JsonArray armor = new JsonArray();
@@ -108,7 +118,7 @@ public final class Handlers {
             for (int k = 0; k < worn.length; k++) {
                 var st = inv.getItem(Inventory.INVENTORY_SIZE + k);
                 if (st.isEmpty()) continue;
-                armor.add(withDamage(obj("slot", worn[k], "name", Names.item(st), "count", st.getCount()), st));
+                armor.add(withDetail(obj("slot", worn[k], "name", Names.item(st), "count", st.getCount()), st));
             }
             var held = pl.getMainHandItem();
             return obj("items", items, "armor", armor, "selectedSlot", inv.getSelectedSlot(),
@@ -428,6 +438,22 @@ public final class Handlers {
             o.addProperty("maxDamage", st.getMaxDamage());
         }
         if (st.isEnchanted()) o.addProperty("enchanted", true);
+        return o;
+    }
+
+    /**
+     * withDamage, plus what tells two stacks of one name apart: the enchantments (an enchanted book's are the ones it
+     * stores: `enchanted` alone said only yes or no, and every book reads no), the potion contents (a potion, a splash
+     * or lingering one, a tipped arrow: they all share four names), and the anvil's repair cost once it has one.
+     */
+    static JsonObject withDetail(JsonObject o, net.minecraft.world.item.ItemStack st) {
+        withDamage(o, st);
+        JsonArray en = Enchanting.enchantments(st);
+        if (!en.isEmpty()) o.add("enchantments", en);
+        var potion = st.get(net.minecraft.core.component.DataComponents.POTION_CONTENTS);
+        if (potion != null) potion.potion().ifPresent(h -> o.addProperty("potion", Names.strip(h.getRegisteredName())));
+        int repairCost = st.getOrDefault(net.minecraft.core.component.DataComponents.REPAIR_COST, 0);
+        if (repairCost > 0) o.addProperty("repairCost", repairCost);
         return o;
     }
 

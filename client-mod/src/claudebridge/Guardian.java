@@ -48,6 +48,44 @@ public final class Guardian {
         ClaudeBridge.server.emit("guardian", obj("note", text));
     }
 
+    /**
+     * Armour slots the gear check leaves alone for now: inventory index (36 feet .. 39 head) -> until when (ms). Set by
+     * armor.unequip, so a piece taken off for the enchanting table stays off (and no spare goes on in its place) until
+     * the table has it; ended by enchant.close or the time running out. Game thread only.
+     */
+    static final Map<Integer, Long> gearHoldUntil = new HashMap<>();
+
+    static void holdGear(int index, long ms) {
+        gearHoldUntil.put(index, System.currentTimeMillis() + ms);
+    }
+
+    static void releaseGear(int index) {
+        gearHoldUntil.remove(index);
+    }
+
+    /** End every hold; returns the slots that were held, for enchant.close to put back what armor.unequip took off. */
+    static java.util.Set<Integer> releaseGear() {
+        java.util.Set<Integer> was = new java.util.HashSet<>(gearHoldUntil.keySet());
+        gearHoldUntil.clear();
+        return was;
+    }
+
+    /** Whether the bot was hurt in the last `ticks` ticks. */
+    static boolean hurtRecently(int ticks) {
+        return Ticker.ticks() - lastHurtTick < ticks;
+    }
+
+    /**
+     * Whether the gear check leaves this slot as it is. Not while the bot is being hurt (in the last 5 s): armour on
+     * beats an enchantment to come, and the chore tries again later.
+     */
+    static boolean gearHeld(int index) {
+        Long until = gearHoldUntil.get(index);
+        if (until == null) return false;
+        if (System.currentTimeMillis() >= until) { gearHoldUntil.remove(index); return false; }
+        return !hurtRecently(100);
+    }
+
     /** Fed by Events.onDamage when the bot itself is hurt. */
     static void onSelfHurt(int causeId) {
         lastHurtTick = Ticker.ticks();

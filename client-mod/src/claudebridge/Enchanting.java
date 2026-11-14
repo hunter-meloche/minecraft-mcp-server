@@ -16,6 +16,9 @@ import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
+import java.util.Set;
+
 import static claudebridge.Interact.click;
 import static claudebridge.Interact.player;
 import static claudebridge.Json.*;
@@ -117,17 +120,16 @@ public final class Enchanting {
             String name = required(p, "name").replace("minecraft:", "");
             int lapisWanted = Math.max(0, Math.min(64, intParam(p, "lapis", 3)));
             if (!menu.getCarried().isEmpty()) throw new IllegalStateException("something is on the cursor; close the menu first");
-            int i = Interact.find(pl.getInventory(), name);
-            if (i < 0 || i > 35) throw new IllegalArgumentException("no " + name + " in inventory");
+            var inv = pl.getInventory();
+            if (Interact.pick(k -> Interact.nameOf(inv.getItem(k)), 36, name, -1) < 0) throw new IllegalArgumentException("no " + name + " in inventory");
             // whatever is in the item slot goes back to the inventory first
             if (!menu.getSlot(ITEM).getItem().isEmpty()) click(menu, ITEM, 0, ContainerInput.QUICK_MOVE);
             if (!menu.getSlot(ITEM).getItem().isEmpty()) throw new IllegalStateException("could not clear the item slot (inventory full?)");
-            i = Interact.find(pl.getInventory(), name); // the slot may have moved if it was the one just taken out
             // `slot` (inventory index 0-35) picks one of several by the same name: the first diamond_pickaxe by name
-            // may be the one already enchanted, which gets no offers
-            int want = intParam(p, "slot", -1);
-            if (want >= 0 && want < 36 && Names.item(pl.getInventory().getItem(want)).equals(name)) i = want;
-            if (i < 0 || i > 35) throw new IllegalArgumentException("no " + name + " in inventory");
+            // may be the one already enchanted, which gets no offers (looked up after the clearing: the slot may have
+            // moved if it was the one just taken out)
+            int i = Interact.pick(k -> Interact.nameOf(inv.getItem(k)), 36, name, intParam(p, "slot", -1));
+            if (i < 0) throw new IllegalArgumentException("no " + name + " in inventory");
             String put = Names.item(pl.getInventory().getItem(i));
             int source = Interact.containerMenuSlot(OWN_SLOTS, i);
             click(menu, source, 0, ContainerInput.PICKUP); // carry the stack
@@ -221,8 +223,31 @@ public final class Enchanting {
         s.register("enchant.close", true, (p, c) -> {
             LocalPlayer pl = player();
             boolean was = pl.containerMenu instanceof EnchantmentMenu;
-            if (pl.containerMenu != pl.inventoryMenu) pl.closeContainer(); // the server returns the item and lapis left in it
-            return obj("ok", true, "wasOpen", was);
+            // the table only: the close of a run the brain gave up can come late (it waited on enchant.choose), and
+            // must not shut the chest the next job has open
+            if (was) pl.closeContainer(); // the server returns the item and lapis left in it
+            // the table has had the piece armor.unequip took off (or the run gave up): put it back on now, the
+            // enchanted piece if it took, not when the Guardian next looks. With auto-defend off its gear check never
+            // runs, and the chore would take all four pieces off, one a run, with nothing to wear them again
+            Set<Integer> held = Guardian.releaseGear();
+            JsonArray wore = new JsonArray();
+            if (!held.isEmpty() && pl.containerMenu == pl.inventoryMenu) {
+                for (String n : Combat.equipBestArmor(true, held)) wore.add(n);
+                // a piece still in the table (no offer) comes back from the server a tick or two after the close
+                Ticker.add(new Ticker.Task() {
+                    int age;
+                    @Override public boolean tick(Minecraft mc) {
+                        if (++age % 10 != 0) return false;
+                        LocalPlayer me = mc.player;
+                        if (me != null && me.containerMenu == me.inventoryMenu) {
+                            List<String> put = Combat.equipBestArmor(true, held);
+                            if (!put.isEmpty()) Guardian.note("put on " + String.join(", ", put) + " (back from the table)");
+                        }
+                        return age >= 40;
+                    }
+                });
+            }
+            return obj("ok", true, "wasOpen", was, "wore", wore);
         });
     }
 }

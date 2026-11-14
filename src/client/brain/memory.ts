@@ -84,6 +84,13 @@ export interface WorldMemory {
   leash: number;
   /** what each home chest held when last opened, by "x,y,z" */
   chestItems?: Record<string, Record<string, number>>;
+  /**
+   * each home chest's stacks by the chest's own slot, as last seen ("x,y,z" -> stacks; chests.ts remember): what
+   * tells one of a name from another (an enchanted book's enchantments, a potion's contents), for chest.withdraw's
+   * `slot`. A chest a tool's reply said held another count of a name has that name's stacks left out until it is
+   * opened again (the reply says how many, not which)
+   */
+  chestStacks?: Record<string, import('../tools.js').ChestStack[]>;
   /** when (ms) daily chores last ran, by chore */
   lastDone?: Record<string, number>;
   /** dark spots ("x,y,z") no torch of the lights round reached: left out from then on */

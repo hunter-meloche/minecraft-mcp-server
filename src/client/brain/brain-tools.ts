@@ -171,7 +171,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
 
   factory.registerTool(
     'community-chest',
-    "The community chests: chests on a shared server where players and bots leave surplus for each other. The bot only ever puts things in them, never takes, and they are never its own storage. Now and then it gives its precious surplus there (diamonds once its diamond kit is done and beyond 8, emeralds, gold beyond 16, iron beyond 48). Give name with x, y, z to add one (or move it), name with remove to forget it, nothing to list them.",
+    "The community chests: chests on a shared server where players and bots leave surplus for each other. The bot only ever puts things in them, never takes, and they are never its own storage. Now and then it gives its precious surplus there (diamonds once its diamond kit is done and beyond 8, emeralds beyond 64, gold beyond 16, iron beyond 48). Give name with x, y, z to add one (or move it), name with remove to forget it, nothing to list them.",
     {
       name: z.string().regex(/^[a-z0-9_-]{1,32}$/i).optional().describe('Its label, e.g. "community1"'),
       x: z.coerce.number().optional().describe('X of the chest'),

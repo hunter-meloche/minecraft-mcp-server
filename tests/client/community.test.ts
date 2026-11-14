@@ -70,8 +70,21 @@ test('donations: only the surplus beyond what the bot keeps and what the work qu
   t.deepEqual(donationPlan({ raw_gold: 30, gold_ingot: 26 }, 0, 0), { gold_ingot: 10 });
   t.deepEqual(donationPlan({ raw_gold: 400, gold_ingot: 20, raw_iron: 1000, iron_ingot: 60 }, 0, 0), {});
   t.deepEqual(donationPlan({ raw_iron: 20, iron_ingot: 100 }, 0, 0), { iron_ingot: 24 });
-  // emeralds no rung mines: what the bot keeps of them is all there is to it
-  t.deepEqual(donationPlan({ emerald: 4 }, 0, 4), { emerald: 4 });
+  // emeralds no rung mines: what the bot keeps of them is all there is to it. A stack now (P0: they buy Mending later),
+  // given 8 at a time over it; it was keep 0, lot 4, and these 4 went
+  t.deepEqual(donationPlan({ emerald: 4 }, 0, 4), {});
+  t.deepEqual(donationPlan({ emerald: 64 }, 0, 4), {});
+  t.deepEqual(donationPlan({ emerald: 70 }, 0, 4), {});
+  t.deepEqual(donationPlan({ emerald: 72 }, 0, 4), { emerald: 8 });
+  t.deepEqual(donationPlan({ emerald: 80 }, 0, 4), { emerald: 16 });
+});
+
+test('the donation round keeps a stack of emeralds: 70 in the chests give none, 80 give 16', (t) => {
+  t.is(donateGoal.wants(snap(), world({ chestItems: { '1,64,1': { emerald: 70 } } })), null);
+  t.is(donateGoal.wants(snap(), world({ chestItems: { '1,64,1': { emerald: 80 } } })), 'spare for the community: 16 emerald');
+  // carried ones count with the chests' (the bot's own share)
+  const carrying = snap({ items: [{ slot: 3, name: 'emerald', count: 20 }], counts: new Map([['emerald', 20]]) });
+  t.is(donateGoal.wants(carrying, world({ chestItems: { '1,64,1': { emerald: 60 } } })), 'spare for the community: 16 emerald');
 });
 
 test('the donation round: now and then, by day at home, with a community chest', (t) => {

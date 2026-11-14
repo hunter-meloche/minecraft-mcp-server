@@ -1,5 +1,5 @@
 import test from 'ava';
-import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stashKeep, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
+import { farm, kit, lightArea, lights, smelt, sortStorage, stash, stashKeep, stashList, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
 import { stashPlan } from '../../src/client/brain/kit.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
@@ -55,6 +55,23 @@ test('stash: past the enchanting room\'s obsidian step (or with it built) the ca
   // set aside at its obsidian step: casting still
   const early = { current: { id: 'fence-clear', step: 0, data: {} }, aside: { enchanting: { step: 0, data: { obsidianTurn: 1 } } } };
   t.deepEqual(buckets(world({ lavaCasting: true, progress: early as never })), []);
+});
+
+test('stash: an enchanted piece stays carried, never put away for a plain one of its tier (worn or carried)', (t) => {
+  const sharp = { enchanted: true, enchantments: [{ name: 'sharpness', level: 5 }] };
+  const prot = { enchanted: true, enchantments: [{ name: 'protection', level: 4 }] };
+  // the plain chestplate worn, the enchanted one carried: the enchanted one is the kit's (the Guardian puts it on)
+  const items = [...gear().filter(i => i.slot !== 38), { slot: 38, name: 'diamond_chestplate', count: 1, damage: 0, maxDamage: 528 },
+    { slot: 20, name: 'diamond_chestplate', count: 1, damage: 60, maxDamage: 528, ...prot }];
+  t.false(stashList(snap(items), world()).deposit.some(e => e.name === 'diamond_chestplate'));
+  // two swords carried: store-in-chest takes the first by name, so neither goes (the enchanted one might)
+  const swords = [...gear().filter(i => i.name !== 'stone_sword'), { slot: 4, name: 'diamond_sword', count: 1, damage: 0, maxDamage: 1561 },
+    { slot: 21, name: 'diamond_sword', count: 1, damage: 90, maxDamage: 1561, ...sharp }];
+  t.false(stashList(snap(swords), world()).deposit.some(e => e.name === 'diamond_sword'));
+  // a worse sword of another name still goes in the chest: the enchanted diamond one is kept, the iron one put away
+  const plainOnly = [...gear().filter(i => i.name !== 'stone_sword'), { slot: 4, name: 'diamond_sword', count: 1, damage: 0, maxDamage: 1561, ...sharp },
+    { slot: 21, name: 'iron_sword', count: 1, damage: 0, maxDamage: 250 }];
+  t.deepEqual(stashList(snap(plainOnly), world()).deposit.filter(e => /sword/.test(e.name)), [{ name: 'iron_sword', count: 1, slot: 21 }]);
 });
 
 test('ready food counts cooked food and bread, not raw meat or poison', (t) => {

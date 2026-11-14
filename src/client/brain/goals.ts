@@ -1,4 +1,4 @@
-import type { InventoryItem, Status } from '../tools.js';
+import type { InventoryItem, Status, StatusEffect } from '../tools.js';
 import { tier } from './kit.js';
 import { daylightLeft, type Activity } from './schedule.js';
 import type { Pos, WorldMemory } from './memory.js';
@@ -37,6 +37,13 @@ export interface Snapshot {
   boxedIn?: Pos[];
   /** experience level (enchanting costs up to 30) */
   xpLevel?: number;
+  /**
+   * the effects on the bot (a fire resistance potion drunk, poison...): amplifier 0 is level I, seconds left (-1: no
+   * end). Empty with none, and from a jar that does not send them
+   */
+  effects?: StatusEffect[];
+  /** burning: fire resistance stops the hurt, not the flames */
+  onFire?: boolean;
 }
 
 export interface GoalContext {

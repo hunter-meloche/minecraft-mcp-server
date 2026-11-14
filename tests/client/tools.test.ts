@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor, offServer } from '../../src/client/tools.js';
+import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor, offServer, itemDetail, effectsText } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -603,6 +603,73 @@ test('take-from-chest takes what was asked and says when the chest has none', as
   t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot', count: 27 })).text, 'Took 27 iron_ingot from the chest at (1, 64, 0). It holds: iron_ingot x5.');
   t.like(request.getCalls().find(c => c.args[0] === 'chest.withdraw')!.args[1], { name: 'iron_ingot', count: 27 });
   t.true((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'diamond' })).isError);
+});
+
+test('take-from-chest by slot takes that stack (the book with mending) and says so; a stale slot says what it took instead', async (t) => {
+  const stacks = [
+    { slot: 2, name: 'enchanted_book', count: 1, enchantments: [{ name: 'unbreaking', level: 3 }] },
+    { slot: 7, name: 'enchanted_book', count: 1, enchantments: [{ name: 'mending', level: 1 }] }
+  ];
+  // the bridge: the slot asked for when it holds the item, else the first of the name (slot 2)
+  const from = (p: Record<string, unknown>) => (p.slot === 7 ? 7 : 2);
+  const { run, request } = setup({
+    'world.block': { loaded: true, name: 'chest' },
+    'chest.open': { slots: 27, free: 25, items: { enchanted_book: 2 }, stacks },
+    'chest.withdraw': (p: Record<string, unknown>) =>
+      ({ slots: 27, free: 26, items: { enchanted_book: 1 }, stacks: stacks.filter(st => st.slot !== from(p)), moved: 1, from: from(p) }),
+    'container.close': { ok: true }
+  });
+  t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', slot: 7 })).text,
+    'Took 1 enchanted_book from slot 7 of the chest at (1, 64, 0). It holds: enchanted_book x1.');
+  t.deepEqual(request.getCalls().find(c => c.args[0] === 'chest.withdraw')!.args[1], { name: 'enchanted_book', slot: 7 });
+  // one of two taken from a stale slot is the whole of the stack it took from, not a full inventory
+  t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', slot: 5 })).text,
+    'Took 1 enchanted_book from slot 2 of the chest at (1, 64, 0) (slot 5 held no enchanted_book). It holds: enchanted_book x1.');
+  // an older jar ignores the slot and says nothing of it: the reply is the plain one
+  const old = setup({
+    'world.block': { loaded: true, name: 'chest' },
+    'chest.open': { slots: 27, free: 26, items: { enchanted_book: 2 } },
+    'chest.withdraw': { slots: 27, free: 26, items: { enchanted_book: 1 }, moved: 1 },
+    'container.close': { ok: true }
+  });
+  t.is((await old.run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', count: 1, slot: 7 })).text,
+    'Took 1 enchanted_book from the chest at (1, 64, 0). It holds: enchanted_book x1.');
+});
+
+test('list-inventory shows enchantments (a book\'s stored ones too) and potion contents; get-status shows effects and fire', async (t) => {
+  const { run } = setup({
+    status: { ...STATUS, onFire: true, effects: [{ name: 'fire_resistance', amplifier: 0, seconds: 160 }, { name: 'strength', amplifier: 1, seconds: 65 }] },
+    'guardian.status': { enabled: true, armor: ['diamond_chestplate'] },
+    inventory: {
+      items: [
+        { slot: 0, name: 'diamond_sword', count: 1, damage: 3, maxDamage: 1561, enchanted: true, enchantments: [{ name: 'sharpness', level: 5 }, { name: 'unbreaking', level: 3 }] },
+        { slot: 12, name: 'enchanted_book', count: 1, enchantments: [{ name: 'mending', level: 1 }] },
+        { slot: 13, name: 'potion', count: 1, potion: 'long_fire_resistance' },
+        { slot: 14, name: 'tipped_arrow', count: 8, potion: 'poison' },
+        { slot: 15, name: 'oak_log', count: 5 }
+      ],
+      selectedSlot: 0, held: null
+    }
+  });
+  t.is((await run('list-inventory')).text, 'Found 5 items in inventory:\n\n' +
+    '- diamond_sword (x1) in slot 36: sharpness 5, unbreaking 3\n' +
+    '- enchanted_book (x1) in slot 12: mending 1\n' +
+    '- potion (x1) in slot 13: long_fire_resistance\n' +
+    '- tipped_arrow (x8) in slot 14: poison\n' +
+    '- oak_log (x5) in slot 15\n');
+  t.regex((await run('get-status')).text, /^Health 18\/20, food 17\/20, saturation 2.5\nEffects: fire_resistance 2:40, strength II 1:05, on fire\nTime of day/);
+});
+
+test('itemDetail and effectsText: nothing for a plain stack or a bot with no effects', (t) => {
+  t.is(itemDetail({}), '');
+  t.is(itemDetail({ enchantments: [] }), '');
+  t.is(itemDetail({ enchantments: [{ name: 'fortune', level: 3 }, { name: 'unbreaking', level: 3 }] }), ': fortune 3, unbreaking 3');
+  t.is(itemDetail({ potion: 'water' }), ': water');
+  t.is(effectsText({}), '');
+  t.is(effectsText({ effects: [], onFire: false }), '');
+  t.is(effectsText({ effects: [{ name: 'night_vision', amplifier: 0, seconds: -1 }] }), 'night_vision no end');
+  t.is(effectsText({ effects: [{ name: 'haste', amplifier: 9, seconds: 5 }] }), 'haste 10 0:05');
+  t.is(effectsText({ onFire: true }), 'on fire');
 });
 
 test('processName makes Baritone process names readable', (t) => {

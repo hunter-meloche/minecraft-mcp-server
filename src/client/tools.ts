@@ -55,8 +55,34 @@ export interface Status {
   spawn?: Pos;
   /** other players' builds the bot has seen (zones), and the nearest one's distance */
   foreign?: { zones: number; surface?: number; nearest: number | null };
+  /** the effects on the bot (fire resistance drunk, poison...) */
+  effects?: StatusEffect[];
+  /** burning (fire resistance stops the hurt, not the flames) */
+  onFire?: boolean;
 }
-export interface InventoryItem { slot: number; name: string; count: number; damage?: number; maxDamage?: number; enchanted?: boolean }
+/** An effect on the bot: amplifier 0 is level I; seconds left, -1 for one that never runs out. */
+export interface StatusEffect { name: string; amplifier: number; seconds: number }
+/** An enchantment and its level ('sharpness', 5). */
+export interface ItemEnchantment { name: string; level: number }
+export interface InventoryItem {
+  slot: number; name: string; count: number; damage?: number; maxDamage?: number; enchanted?: boolean;
+  /** its enchantments, absent when none; an enchanted book's are the ones it stores (its `enchanted` is not set) */
+  enchantments?: ItemEnchantment[];
+  /** the contents of a potion, splash or lingering potion or tipped arrow: 'long_fire_resistance', 'water' */
+  potion?: string;
+  /** what an anvil adds to the cost for the work done on it before (the game's REPAIR_COST); absent: 0 */
+  repairCost?: number;
+}
+/** A stack in a chest: `slot` is the chest's own (0 the top left), what chest.withdraw's `slot` takes. */
+export type ChestStack = InventoryItem;
+/** What chest.open, chest.withdraw and chest.deposit answer: the totals by name, and each stack by its slot. */
+export interface ChestContents {
+  slots: number; free: number; items: Record<string, number>; stacks?: ChestStack[];
+  /** withdraw/deposit: how many went */
+  moved?: number;
+  /** withdraw/deposit with `slot`: the slot taken from first (the one asked for, or the first by name when it no longer held that item); -1 none */
+  from?: number;
+}
 interface Inventory { items: InventoryItem[]; selectedSlot: number; held: { name: string; count: number } | null }
 interface EntityInfo { id: number; name: string; category: string; position: Pos; distance: number; health?: number }
 interface FightResult {
@@ -125,6 +151,24 @@ export function mineflayerSlot(clientSlot: number): number {
   if (clientSlot <= 35) return clientSlot;
   if (clientSlot <= 39) return 8 - (clientSlot - 36); // feet 36 -> 8 ... head 39 -> 5
   return 45;
+}
+
+/**
+ * What tells a stack from others of its name, for list-inventory: ": sharpness 5, unbreaking 3" (an enchanted book's
+ * stored ones too), ": long_fire_resistance" for a potion's contents; nothing for a plain stack.
+ */
+export function itemDetail(i: Pick<InventoryItem, 'enchantments' | 'potion'>): string {
+  const parts = [...(i.enchantments ?? []).map(e => `${e.name} ${e.level}`), ...(i.potion ? [i.potion] : [])];
+  return parts.length ? `: ${parts.join(', ')}` : '';
+}
+
+/** The effects on the bot for get-status: "fire_resistance 2:40, strength II 1:30, on fire"; '' when none. */
+export function effectsText(s: Pick<Status, 'effects' | 'onFire'>): string {
+  const roman = ['', ' II', ' III', ' IV', ' V'];
+  const left = (sec: number) => (sec < 0 ? 'no end' : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`);
+  const parts = (s.effects ?? []).map(e => `${e.name}${roman[e.amplifier] ?? ` ${e.amplifier + 1}`} ${left(e.seconds)}`);
+  if (s.onFire) parts.push('on fire');
+  return parts.join(', ');
 }
 
 /**
@@ -341,8 +385,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     'get-status': async () => {
       const s = await status();
       const guard = await call<{ enabled: boolean; armor: string[] }>('guardian.status');
+      const effects = effectsText(s);
       return factory.createResponse([
         `Health ${s.health}/20, food ${s.food}/20, saturation ${s.saturation}`,
+        ...(effects ? [`Effects: ${effects}`] : []),
         timeLine(s.timeOfDay ?? 0),
         `Dimension ${s.dimension}${s.biome ? `, biome ${s.biome}` : ''}, game mode ${s.gameMode}, difficulty ${s.difficulty}`,
         `Armor: ${guard.armor.length ? guard.armor.join(', ') : 'none'}; auto-defend ${guard.enabled ? 'on' : 'off'}` +
@@ -357,7 +403,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const inv = await call<Inventory>('inventory');
       if (!inv.items.length) return factory.createResponse('Inventory is empty');
       let text = `Found ${inv.items.length} items in inventory:\n\n`;
-      for (const i of inv.items) text += `- ${i.name} (x${i.count}) in slot ${mineflayerSlot(i.slot)}\n`;
+      for (const i of inv.items) text += `- ${i.name} (x${i.count}) in slot ${mineflayerSlot(i.slot)}${itemDetail(i)}\n`;
       return factory.createResponse(text);
     },
 
@@ -1705,10 +1751,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       if (!have) return factory.createErrorResponse(`No ${name} in the inventory`);
       const block = await call<{ name?: string }>('world.block', { ...at });
       if (!/chest|barrel/.test(block.name ?? '')) return factory.createErrorResponse(`No chest at ${fmt(at)} (found ${block.name ?? 'nothing'})`);
-      type Chest = { slots: number; free: number; items: Record<string, number>; moved?: number };
       try {
-        await openChest<Chest>(at);
-        const r = await call<Chest>('chest.deposit', { name, ...(count ? { count } : {}) });
+        await openChest<ChestContents>(at);
+        const r = await call<ChestContents>('chest.deposit', { name, ...(count ? { count } : {}) });
         const holds = Object.entries(r.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing';
         const short = (r.moved ?? 0) < Math.min(count ?? have, have) ? ' (the chest is full)' : '';
         return factory.createResponse(`Stored ${r.moved} ${name} in the chest at ${fmt(at)}${short}. It holds: ${holds}; ${r.free}/${r.slots} slots free.`);
@@ -1726,23 +1771,29 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       y: z.coerce.number().describe('Y of the chest'),
       z: z.coerce.number().describe('Z of the chest'),
       item: z.string().describe("Item to take, e.g. 'iron_ingot'"),
-      count: z.coerce.number().int().positive().optional().describe('How many (default: all of them)')
+      count: z.coerce.number().int().positive().optional().describe('How many (default: all of them)'),
+      slot: z.coerce.number().int().min(0).optional().describe("The chest's slot to take from (0 the top left): that stack, then only stacks the same as it (the same enchantments, the same potion). If it no longer holds the item, the first stack of it")
     },
-    async ({ x, y, z: zz, item, count }: { x: number; y: number; z: number; item: string; count?: number }) => {
+    async ({ x, y, z: zz, item, count, slot }: { x: number; y: number; z: number; item: string; count?: number; slot?: number }) => {
       const at = floorPos({ x, y, z: zz });
       const name = item.replace(/^minecraft:/, '');
       const block = await call<{ name?: string }>('world.block', { ...at });
       if (!/chest|barrel/.test(block.name ?? '')) return factory.createErrorResponse(`No chest at ${fmt(at)} (found ${block.name ?? 'nothing'})`);
-      type Chest = { slots: number; free: number; items: Record<string, number>; moved?: number };
       try {
-        let opened: Chest;
-        opened = await openChest<Chest>(at);
-        const inside = opened.items[name] ?? 0;
+        const opened = await openChest<ChestContents>(at);
+        let inside = opened.items[name] ?? 0;
         if (!inside) return factory.createErrorResponse(`The chest at ${fmt(at)} has no ${name}. It holds: ${Object.entries(opened.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing'}`);
-        const r = await call<Chest>('chest.withdraw', { name, ...(count ? { count } : {}) });
+        // `slot`: one stack (the enchanted book with mending, the potion of fire resistance), not the first of the name
+        const r = await call<ChestContents>('chest.withdraw', { name, ...(count ? { count } : {}), ...(slot === undefined ? {} : { slot }) });
+        const took = slot !== undefined && r.from !== undefined && r.from >= 0 ? r.from : undefined;
+        // what that stack held (the same ones after it may add more): the rest of the name was never asked for
+        const stack = took === undefined ? undefined : opened.stacks?.find(st => st.slot === took);
+        if (stack) inside = stack.count;
         const holds = Object.entries(r.items).map(([n, c]) => `${n} x${c}`).join(', ') || 'nothing';
         const short = (r.moved ?? 0) < Math.min(count ?? inside, inside) ? ' (the inventory is full)' : '';
-        return factory.createResponse(`Took ${r.moved} ${name} from the chest at ${fmt(at)}${short}. It holds: ${holds}.`);
+        const from = took === undefined ? '' : ` slot ${took} of`;
+        const stale = took !== undefined && took !== slot ? ` (slot ${slot} held no ${name})` : '';
+        return factory.createResponse(`Took ${r.moved} ${name} from${from} the chest at ${fmt(at)}${stale}${short}. It holds: ${holds}.`);
       } finally {
         await call('container.close').catch(() => undefined);
       }

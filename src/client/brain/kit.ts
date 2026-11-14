@@ -61,8 +61,26 @@ export function isWorn(item: InventoryItem): boolean {
   return left(item) < WORN;
 }
 
-/** Best first: higher tier, then more durability left. */
-const better = (a: InventoryItem, b: InventoryItem) => tier(b.name) - tier(a.name) || left(b) - left(a);
+/**
+ * What a piece's enchantments are worth when choosing between two of a tier: the sum of their levels, a curse's
+ * against (as the Guardian's Combat.armorRank counts them, so the kit keeps the piece the Guardian wears). An older
+ * jar says only `enchanted`: that counts as one level. Curse of binding is below any plain piece: once worn it never
+ * comes off again (for the table, the anvil, the smithing table), and the Guardian never puts one on (Combat.bound).
+ */
+export function enchantLevels(item: Pick<InventoryItem, 'enchantments' | 'enchanted'>): number {
+  if (!item.enchantments?.length) return item.enchanted ? 1 : 0;
+  if (item.enchantments.some(e => e.name === 'binding_curse')) return -1000;
+  return item.enchantments.reduce((n, e) => n + (/curse/.test(e.name) ? -e.level : e.level), 0);
+}
+
+/**
+ * Best first: higher tier, then more enchantment levels, then more durability left. An enchanted piece beats a plain
+ * one of its tier even a little worn: the table spent levels on it. And it is the one the stash leaves carried: of a
+ * fresh plain diamond chestplate worn and an enchanted one carried, durability alone kept the worn one as the best and
+ * put the enchanted one away.
+ */
+export const better = (a: InventoryItem, b: InventoryItem) =>
+  tier(b.name) - tier(a.name) || enchantLevels(b) - enchantLevels(a) || left(b) - left(a);
 
 /**
  * The kit items carried (anywhere, worn armour and off-hand included): the best of each kind, and the spare pickaxe

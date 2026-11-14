@@ -147,6 +147,30 @@ test('an LLM tool call stops the running goal and keeps the brain out until it h
   brain.setEnabled(false);
 });
 
+test('the snapshot carries the effects on the bot and whether it burns; an older jar sends neither', async (t) => {
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 1000 };
+  const { rt } = fakeRuntime(state);
+  const seen: Snapshot[] = [];
+  const look: Goal = { name: 'look', priority: 10, wants: s => { seen.push(s); return null; }, run: async () => 'looked', timeoutMs: 1000, retryMs: 1000 };
+  const effects = [{ name: 'fire_resistance', amplifier: 0, seconds: 160 }, { name: 'strength', amplifier: 1, seconds: -1 }];
+  let extra: Record<string, unknown> = { onFire: true, effects };
+  const brain = new Brain({ ...rt, status: async () => ({ ...(await rt.status()), ...extra }) }, { tickMs: 1e9, goals: [look] });
+  brain.setEnabled(true);
+  await brain.tick();
+  t.deepEqual(seen.at(-1)?.effects, effects);
+  t.true(seen.at(-1)?.onFire);
+  // the old jar: no such fields
+  extra = {};
+  await brain.tick();
+  t.deepEqual(seen.at(-1)?.effects, []);
+  t.false(seen.at(-1)?.onFire);
+  // a malformed list is not trusted item by item
+  extra = { effects: [{ name: 'haste', amplifier: 1, seconds: 30 }, null, { amplifier: 0 }] };
+  await brain.tick();
+  t.deepEqual(seen.at(-1)?.effects, [{ name: 'haste', amplifier: 1, seconds: 30 }]);
+  brain.setEnabled(false);
+});
+
 test('stuck away from home at night: wall in and wait for morning', async (t) => {
   const state = { pos: { x: 80, y: 64, z: 0 }, time: 14_000 };
   const { rt, calls } = fakeRuntime(state);
