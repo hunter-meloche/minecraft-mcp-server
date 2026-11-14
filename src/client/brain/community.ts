@@ -9,7 +9,8 @@ import { tripDecline, diamondsWanted } from './deep.js';
 // (both come back to this file through their own imports: what they give is used inside functions only)
 import { tierOf } from './work.js';
 import { workKeeps } from './worktasks.js';
-import { walkHome } from './homeward.js';
+import { goHome, walkHome } from './homeward.js';
+import { leaveYard } from './yardgates.js';
 
 /**
  * The community chests: chests on a shared server where players and bots leave surplus for each other (a friend put
@@ -192,6 +193,8 @@ async function handOver(ctx: GoalContext, chest: string, items: Record<string, n
   const at = community(ctx.world).chests[chest];
   if (!at) throw new Error(`no community chest called ${chest}`);
   ctx.progress(`to the ${chest} chest at ${fmt(at)}`);
+  // out of the yard by the gate on the way, and home in by one: not over the fence (yardgates.ts)
+  await leaveYard(ctx, at);
   await ctx.call('goto', { ...at, range: 3, timeoutMs: 240_000 }, 255_000).catch(() => undefined);
   const put: Record<string, number> = {};
   const fails: string[] = [];
@@ -202,7 +205,7 @@ async function handOver(ctx: GoalContext, chest: string, items: Record<string, n
     if (got) put[item] = got;
     if (!got || /chest is full/.test(r.text)) fails.push(`${item}: ${r.text.split('\n')[0].slice(0, 100)}`);
   }
-  const back = await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+  const back = await goHome(ctx, 300_000);
   if (!Object.keys(put).length) throw new Error(`nothing went into ${chest}: ${fails.join('; ')}`);
   if (fails.length) ctx.progress(`${chest}: ${fails.join('; ')}`);
   if (!back.ok) ctx.progress(`could not get home: ${back.text.slice(0, 100)}`);
@@ -259,13 +262,14 @@ async function gather(ctx: GoalContext, m: Mission, src: Source): Promise<string
     if (!from) throw new Error("every side of the yard has someone else's build by it: no trip under ground from here");
     (ctx.world.zones ??= {}).mine = [from];
     ctx.progress(`#${m.id} ${m.item} for ${m.chest}: out to the mine at (${from.x}, ${from.z})`);
+    await leaveYard(ctx, from);
     await ctx.call('goto', { ...from, xz: true, range: 4, timeoutMs: 180_000 }, 195_000);
     const here = (await ctx.call<{ position?: Pos }>('status').catch(() => undefined))?.position ?? from;
     upAt = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
     const near = nearestZone(upAt, zones, true);
     if (near.distance < MINE_FROM_BUILDS) {
       delete ctx.world.zones.mine;
-      await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 });
+      await goHome(ctx, 300_000);
       return `someone else's build ${Math.round(near.distance)} blocks from the mine site: the next trip sets out from another side`;
     }
   } else {
@@ -273,6 +277,8 @@ async function gather(ctx: GoalContext, m: Mission, src: Source): Promise<string
     if (budget < 60_000) throw new Error('too late in the day');
   }
   ctx.progress(`#${m.id}: mining ${src.mine} for ${want} ${src.gives} (${Math.round(budget / MINUTE)} min)`);
+  // (from the yard, out by the nearest gate first: the miner mines nothing in the home area)
+  await leaveYard(ctx);
   const r = await ctx.act('mine-blocks', { block: src.mine, count: start + want, timeoutMs: budget });
   const got = Math.min(want, Math.max(0, (await carried(ctx, src.gives)) - start));
   m.gathered += got;

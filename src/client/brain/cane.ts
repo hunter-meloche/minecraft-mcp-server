@@ -7,6 +7,8 @@ import { toTheWoods, WOODS_DIRS } from './chores.js';
 import { makeRoom, noRoom, room } from './pockets.js';
 import { WILD_DISTANCE, YARD_FROM_BUILDS, nearestZone, type Zone } from './courtesy.js';
 import { alongSide } from './work.js';
+import { goHome } from './homeward.js';
+import { inFence, leaveYard } from './yardgates.js';
 import { regionOf, standSpots, type Box } from '../structures/tidy.js';
 
 /**
@@ -197,9 +199,16 @@ async function standing(ctx: Pick<GoalContext, 'status'>, then: Pos): Promise<Po
   }
 }
 
-/** A careful walk onto a stand cell: true once the bot stands on it. */
+/**
+ * A careful walk onto a stand cell: true once the bot stands on it. From inside the yard's fence to one outside it
+ * (the patch is on the lake shore, east of the yard) it goes out by a gate first: yardgates.ts.
+ */
 async function walkTo(ctx: GoalContext, s: Pos, here: { at: Pos }): Promise<boolean> {
   if (same(here.at, s)) return true;
+  if (inFence(ctx.world, here.at) && !inFence(ctx.world, s)) {
+    const out = await leaveYard(ctx, s);
+    if (out.at) here.at = blockOf(out.at);
+  }
   const g = await ctx.call<{ arrived?: boolean; at?: Pos }>('goto', { ...s, range: 0, careful: true, timeoutMs: 30_000 }, 45_000)
     .catch(() => ({ arrived: false, at: undefined }));
   if (ctx.signal.aborted) throw new Error('aborted');
@@ -353,8 +362,10 @@ export function caneMilestone(prereqs: string[]): Milestone {
           const looked = Number(st.data.caneLooked ?? 0);
           const side = WOODS_DIRS[looked % WOODS_DIRS.length];
           const wild = await toTheWoods(ctx, ['sugar_cane'], false, { zone: 'wildcane', what: 'sugar cane', dirs: [side] });
+          // (Baritone's miner cuts none in the home area: out by the nearest gate first, and home in by one)
+          if (wild.ok) await leaveYard(ctx);
           let r = wild.ok ? await ctx.act('mine-blocks', { block: 'sugar_cane', count: 6, timeoutMs: 4 * MINUTE }) : undefined;
-          await ctx.act('go-home', { name: 'home', timeoutMs: 180_000 }).catch(() => undefined);
+          await goHome(ctx, 180_000).catch(() => undefined);
           if ((await caneCount(ctx)) >= 1) return ok((r?.text ?? wild.text).split('\n')[0].slice(0, 100));
           if (wild.ok && wild.text) delete ctx.world.zones?.wildcane; // seen, but none came of it: look elsewhere next time
           st.data.caneLooked = looked + 1;
@@ -433,6 +444,8 @@ export async function cutStand(ctx: GoalContext, at: Pos, wild: (p: Pos) => bool
   const visit: StandVisit = { got: 0, cut: 0, bases: 0 };
   const here = (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
   if (horiz(here, at) > 5) {
+    // (a stand out in the wild: out of the yard by the gate on the way, not over the fence: yardgates.ts)
+    await leaveYard(ctx, at);
     try {
       await ctx.act('move-to-position', { ...at, range: 3, timeoutMs: 150_000 });
     } catch (e) {

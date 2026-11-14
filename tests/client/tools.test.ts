@@ -238,6 +238,24 @@ test('attack-entity reports kills, landed hits, gear and threats like the minefl
   t.is((await none.run('attack-entity', { target: 'zombie' })).text, 'No zombie within 16 blocks');
 });
 
+test('attack-entity with collect: false leaves the drops for the caller (the pens round picks them up from the pen\'s inside cells); without it, it walks to them', async (t) => {
+  // the fight's own pick-up walked at a drop by the cow pen's corner post and pressed the bot into it (Nov 13)
+  const given = {
+    fight: { outcome: 'done', kills: ['cow'], vanished: [], unreachable: [], hits: 2, landed: 2, swungWith: { diamond_sword: 2 }, seconds: 1,
+      wore: [], target: 'cow', dropsAt: { x: -557, y: 63, z: 2170 }, threats: '', health: 20 },
+    'protect.set': {},
+    'world.entities': { entities: [{ id: 9, name: 'item', category: 'misc', position: { x: -557.2, y: 63, z: 2171.2 }, distance: 1 }] },
+    goto: { arrived: true }
+  };
+  const after = (calls: { args: unknown[] }[]) => calls.map(c => String(c.args[0])).slice(calls.findIndex(c => c.args[0] === 'fight') + 1);
+  const off = setup(given);
+  t.regex((await off.rt.actions['attack-entity']({ target: '#311', collect: false })).content[0].text, /^Killed cow/);
+  t.deepEqual(after(off.request.getCalls()).filter(m => ['world.entities', 'goto', 'steer'].includes(m)), []);
+  const on = setup(given);
+  await on.rt.actions['attack-entity']({ target: '#311' });
+  t.deepEqual(after(on.request.getCalls()).filter(m => ['world.entities', 'goto', 'steer'].includes(m)), ['world.entities', 'goto']);
+});
+
 test('wall-in and set-auto-defend', async (t) => {
   const { run } = setup({ wallin: { at: { x: 1, y: 64, z: 2 }, placed: 9, alreadySolid: 1, gaps: [] }, 'guardian.set': { enabled: false } });
   t.is((await run('wall-in')).text, "Walled in at (1, 64, 2) (9 block(s) placed). Dig out with dig-block when it's safe.");

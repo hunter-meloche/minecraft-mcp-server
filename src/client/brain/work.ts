@@ -19,7 +19,11 @@ import { clock } from './idlelog.js';
 import { LADDER, tierStep } from './worktasks.js';
 import { ZONE_MARGIN, underYard } from './underyard.js';
 import { walkHome } from './homeward.js';
+import { SIDE_STEP, outByGate, type HomeSide } from './yardgates.js';
 import { brainRun } from '../tools.js';
+
+// (the yard's gates and the walks through them live in yardgates.ts: the walk home comes in by a gate too)
+export { CLEAR, gatesBetween, inFence, outByGate, type HomeSide, type YardGate } from './yardgates.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -361,9 +365,6 @@ export function notePen(world: WorldMemory, kind: string, count: { adults: numbe
   writes++;
 }
 
-/** A side of home, and its step on the map. */
-export type HomeSide = 'north' | 'east' | 'south' | 'west';
-const SIDE_STEP: Record<HomeSide, [number, number]> = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
 /** the stops out along a side, blocks apart */
 const SIDE_LEG = 32;
 /** the last stop this far inside the leash: what is seen round it is within reach, and the walk back with it too */
@@ -376,105 +377,6 @@ const SIDE_MARGIN = 16;
  */
 export const byYard = (world: WorldMemory, ...ps: { x: number; z: number }[]): boolean =>
   !!world.yard && ps.some(p => outsideBy(world.yard!, p) <= YARD_EDGE);
-
-/**
- * Strictly inside the yard's fence (the fence line itself is not inside: the gates stand on it). The walks into the
- * yard (a fetch with its animal, pens.ts) and out of it (the side walks, the fetch's walk to an animal) go by this.
- */
-export function inFence(world: WorldMemory, q: { x: number; z: number }): boolean {
-  const y = world.yard;
-  return !!y && Math.floor(q.x) > y.x1 && Math.floor(q.x) < y.x2 && Math.floor(q.z) > y.z1 && Math.floor(q.z) < y.z2;
-}
-
-/** A gate in the yard's fence as a walk through it goes: the side it is on, and the cells 2 inside and 2 outside it. */
-export interface YardGate { gate: Pos; side: HomeSide; inner: Pos; outer: Pos }
-
-const mid = (c: { x: number; z: number }) => ({ x: c.x + 0.5, z: c.z + 0.5 });
-
-/**
- * The yard's gates (world memory's `fence:gate`), by the way each makes between a place inside the fence and one
- * outside it, the shortest first: to its cell on the near side, through it, and on from its cell on the far side (the
- * same either way round: a fetch walks in by it, a side walk out).
- */
-export function gatesBetween(world: WorldMemory, inside: { x: number; z: number }, outside: { x: number; z: number }): YardGate[] {
-  const yard = world.yard;
-  if (!yard) return [];
-  const ways: { len: number; g: YardGate }[] = [];
-  for (const g of world.zones?.['fence:gate'] ?? []) {
-    const side: HomeSide | undefined = g.z === yard.z1 ? 'north' : g.z === yard.z2 ? 'south' : g.x === yard.x1 ? 'west' : g.x === yard.x2 ? 'east' : undefined;
-    if (!side) continue;
-    const [dx, dz] = SIDE_STEP[side];
-    const outer = { x: g.x + 2 * dx, y: g.y, z: g.z + 2 * dz }, inner = { x: g.x - 2 * dx, y: g.y, z: g.z - 2 * dz };
-    ways.push({ len: horiz(outside, mid(outer)) + 4 + horiz(mid(inner), inside), g: { gate: { x: g.x, y: g.y, z: g.z }, side, inner, outer } });
-  }
-  return ways.sort((a, b) => a.len - b.len).map(w => w.g);
-}
-
-/** What a body stands in and walks through: the air, and what grows on the ground or hangs on a wall. */
-export const CLEAR = /^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|large_fern|dead_bush|bush|leaf_litter|dandelion|poppy|\w+_tulip|cornflower|oxeye_daisy|azure_bluet|allium|blue_orchid|lily_of_the_valley|snow|torch|wall_torch)(\[|$)/;
-const WET = /^(minecraft:)?(flowing_)?(water|lava)(\[|$)/;
-
-/**
- * Where to stand at a cell by a gate: on its own floor within 3 of the gate's level, the nearest to that level first
- * (the ground outside a gate is not always the yard's: outside the live yard's west gate it is 3 higher, outside its
- * north gate a hill); the gate's level where the look fails or finds none.
- */
-async function floorAt(ctx: GoalContext, cell: Pos): Promise<Pos> {
-  const box = { x: cell.x, y: cell.y - 4, z: cell.z, width: 1, height: 9, length: 1 };
-  const col = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box).catch(() => undefined))?.blocks;
-  if (!col || col.length < box.height) return cell;
-  const clear = (b: string | null | undefined) => !!b && CLEAR.test(b);
-  const floor = (b: string | null | undefined) => !!b && !CLEAR.test(b) && !WET.test(b);
-  for (const dy of [0, 1, -1, 2, -2, 3, -3]) {
-    const i = 4 + dy;
-    if (floor(col[i - 1]) && clear(col[i]) && clear(col[i + 1])) return { ...cell, y: cell.y + dy };
-  }
-  return cell;
-}
-
-/**
- * Out of the yard by one of its gates, from strictly inside the fence toward `to` outside it: a careful walk (walk
- * only) to the cell 2 inside the gate that makes the shortest way, then through it to the cell 2 outside, each on
- * its own floor. Never "any height at this x and z" from in here: a cave under the yard answers that as
- * well as the gate does. Live on Nov 13 the cows' walk from 32 out north (inside the yard) to 64 out (the north gate
- * itself) went down three times in 20 min, 30 to 41 under the lawn: in front of the gate the way on foot was shut
- * (cells Baritone keeps out of), and the gate's column was there to be had in the cave 30 under it, by the pit at the
- * gap in the east fence. Out from under dug it out each time. `sides`: only the gates on these sides of the fence
- * (a side walk's own: from another side's gate its walk on to "any height" at the stop goes round the fence, or back
- * across the yard, by the same caves). Each walk is to within 1 of its cell: still a block on the ground, which no
- * cave far below answers, and one a bot on a dirt path (its block is the path's own, under the cell) or in a plant
- * floorAt took for a floor (pink petals, a sapling, a carpet) gets to; to the block itself it "did not arrive".
- * `{}`: nothing to do (the bot not inside the fence, `to` not outside it, or no gate known); `shut`: no gate let it
- * out (one gone or blocked: the next is tried), or none on those sides; `gate` and `at` once out.
- */
-export async function outByGate(ctx: GoalContext, to: { x: number; z: number }, sides?: HomeSide[]): Promise<{ gate?: Pos; at?: Pos; shut?: string }> {
-  const me = (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
-  if (!inFence(ctx.world, me) || inFence(ctx.world, to)) return {};
-  const all = gatesBetween(ctx.world, me, to);
-  if (!all.length) return {};
-  const gates = sides ? all.filter(g => sides.includes(g.side)) : all;
-  if (!gates.length) return { shut: `no gate in the yard's ${sides!.join(' or ')} fence` };
-  const tried: string[] = [];
-  for (const g of gates) {
-    if (ctx.signal.aborted) throw new Error('aborted');
-    ctx.progress(`out of the yard by its ${g.side} gate (${g.gate.x}, ${g.gate.y}, ${g.gate.z})`);
-    let arrived = true;
-    for (const c of [g.inner, g.outer]) {
-      const at = await floorAt(ctx, c);
-      const r = await ctx.call<{ arrived?: boolean }>('goto', { ...at, range: 1, careful: true, timeoutMs: 90_000 }, 105_000).catch(() => ({ arrived: false }));
-      if (ctx.signal.aborted) throw new Error('aborted');
-      if (r?.arrived === false) { arrived = false; break; }
-    }
-    const now = (await ctx.status().catch(() => undefined))?.position;
-    // out: within the walk's 1 of the cell outside, or at it or past it however the walk ended; never in the gateway
-    // itself (the fence line is not inside, but a walk to "any height" from there is the one this way keeps from)
-    const [dx, dz] = SIDE_STEP[g.side];
-    const past = (p: { x: number; z: number }) => (Math.floor(p.x) - g.gate.x) * dx + (Math.floor(p.z) - g.gate.z) * dz;
-    if (now ? past(now) >= (arrived ? 1 : 2) : arrived) return { gate: g.gate, at: now ?? g.outer };
-    tried.push(`the ${g.side} gate (${g.gate.x}, ${g.gate.y}, ${g.gate.z})`);
-  }
-  return { shut: `no way out of the yard by ${tried.join(' or ')}` };
-}
 
 /** How far from home across the ground a walk may go, and what the words call that bound (`the leash`). */
 export interface Bound { blocks: number; name: string }

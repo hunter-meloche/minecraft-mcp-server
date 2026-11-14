@@ -5,6 +5,8 @@ import { Brain, decide, wedgedOut } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
 import { closeDoors, returnIdle, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
 import { out as afield } from '../../src/client/brain/pockets.js';
+import { getOut, ownThin, stepsOut, type WedgeRuntime } from '../../src/client/brain/wedge.js';
+import type { WorldMemory } from '../../src/client/brain/memory.js';
 
 const reply = (text: string, isError = false) => ({ content: [{ type: 'text' as const, text }], ...(isError ? { isError } : {}) });
 
@@ -351,6 +353,213 @@ test('a walk with an animal on its lead that is wedged in a shut gate is stepped
   t.regex(brain.status(), /leading is wedged in the oak_fence_gate at 0,64,0: stepping out/);
   t.is(afield.ledBy, undefined);
   brain.setEnabled(false);
+});
+
+/**
+ * The live corner (Nov 13): the cow pen's south-west post at (-558, 63, 2171) with a torch on it, the pen's west fence
+ * running north from it and its south fence east, the pen's inside corner cell (-557, 63, 2170) across the corner, an
+ * oak log past the post to the south-west. The 3x2x3 round the post from (-559, 63, 2170).
+ */
+const POST = { x: -558, y: 63, z: 2171 };
+const corner3 = () => {
+  const b = new Array<string>(18).fill('air');
+  const put = (dx: number, dy: number, dz: number, v: string) => { b[(dx + 1) + (dz + 1) * 3 + dy * 9] = v; };
+  put(0, 0, -1, 'oak_fence[east=false,north=true,south=true,waterlogged=false,west=false]');
+  put(0, 0, 0, 'oak_fence[east=true,north=true,south=false,waterlogged=false,west=false]');
+  put(1, 0, 0, 'oak_fence[east=true,north=false,south=false,waterlogged=false,west=true]');
+  put(1, 0, -1, 'short_grass');
+  put(-1, 0, 1, 'oak_log[axis=y]');
+  put(-1, 1, 1, 'oak_log[axis=y]');
+  put(0, 1, 0, 'torch');
+  return b;
+};
+/** pressed into that corner from inside the pen: the bot's middle 0.075 into the post's cell both ways */
+const IN_CORNER = { x: -557.075, y: 63, z: 2171.075 };
+
+test('wedgedOut: pressed into a pen\'s corner from inside, the step is across the corner into the pen, not through the post; against it from outside, the open side the bot is on', (t) => {
+  t.deepEqual(wedgedOut(IN_CORNER, corner3()), { block: 'oak_fence', to: { x: -556.5, y: 63, z: 2170.5 } });
+  // (then the other open sides, the nearest first: through the post from here)
+  t.deepEqual(stepsOut(IN_CORNER, corner3()), [{ x: -556.5, y: 63, z: 2170.5 }, { x: -558.5, y: 63, z: 2171.5 }, { x: -557.5, y: 63, z: 2172.5 }]);
+  t.deepEqual(wedgedOut({ x: -557.95, y: 63, z: 2171.6 }, corner3())?.to, { x: -558.5, y: 63, z: 2171.5 });
+  t.deepEqual(wedgedOut({ x: -557.6, y: 63, z: 2171.95 }, corner3())?.to, { x: -557.5, y: 63, z: 2172.5 });
+  // in the outside corner, the log on the diagonal: the side cell
+  t.deepEqual(wedgedOut({ x: -557.95, y: 63, z: 2171.95 }, corner3())?.to, { x: -558.5, y: 63, z: 2171.5 });
+});
+
+test('live, Nov 13: wedged in its own pen\'s corner post where no step gets it out, the bot digs the post out, steps out and puts it back, the torch on it too', async (t) => {
+  let now = 0;
+  const state = { pos: { ...IN_CORNER }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const call = rt.call;
+  const steered: unknown[] = [];
+  let dug = false;
+  rt.call = (async (method: string, params: Record<string, unknown> = {}) => {
+    if (method === 'world.region' && params.width === 3) return { blocks: dug ? corner3().map((b, i) => (i === 4 || i === 13 ? 'air' : b)) : corner3() };
+    if (method === 'steer') {
+      steered.push({ x: params.x, z: params.z });
+      // with the post standing, every straight walk out goes into it (live: 142 step-outs); dug out, the bot goes
+      if (!dug) return { reached: false, distance: 1.49, at: { ...POST } };
+      state.pos = { x: Number(params.x), y: 63, z: Number(params.z) };
+      return { reached: true, distance: 0.1, at: { x: Math.floor(state.pos.x), y: 63, z: Math.floor(state.pos.z) } };
+    }
+    if (method === 'dig.here') { dug = true; return { dug: true, block: 'oak_fence', tool: 'diamond_axe' }; }
+    return call(method, params);
+  }) as ClientRuntime['call'];
+  // the post and its torch in the bot's record of what it built
+  rt.builtNear = () => [{ at: { ...POST }, state: 'oak_fence' }, { at: { ...POST, y: 64 }, state: 'torch' }];
+  const restored: string[] = [];
+  rt.restoreBlock = async (at, item) => { restored.push(`${item} ${at.x},${at.y},${at.z}`); return undefined; };
+  const round: Goal = { name: 'pens', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [round], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 5000; await brain.tick(); await settle();
+  now += 20_000; await brain.tick(); await settle();
+  now += 15_000; await brain.tick(); await settle();
+  t.true(calls.includes('cancel'));
+  // the plain step across the corner into the pen, then the next way out: neither gets past the post
+  t.deepEqual(steered.slice(0, 2), [{ x: -556.5, z: 2170.5 }, { x: -558.5, z: 2171.5 }]);
+  t.true(dug);
+  // out the way it came, into the pen's corner cell, and the post and the torch back from there
+  t.deepEqual(steered.slice(2), [{ x: -556.5, z: 2170.5 }]);
+  t.deepEqual(restored, ['oak_fence -558,63,2171', 'torch -558,64,2171']);
+  t.regex(brain.status(), /stopping pens: pens is wedged in the oak_fence at -558,63,2171: stepping out/);
+  t.regex(brain.status(), /wedged in the oak_fence at \(-558, 63, 2171\): dug it out, stepped out, put it back/);
+  t.regex(brain.status(), /Blocked: pens held until [\d:]+ \(wedged\)/);
+  brain.setEnabled(false);
+});
+
+/**
+ * getOut over a client where no plain step gets the bot out, and the dig's reply is `dig`: what it called and put
+ * back (`log`), and what it put in the record of the bot's builds (`recorded`).
+ */
+function wedgeRt(built: { at: { x: number; y: number; z: number }; state?: string }[], dig: Record<string, unknown>, restore: (item: string) => string | undefined = () => undefined) {
+  const log: string[] = [];
+  const recorded: string[] = [];
+  let pos = { ...IN_CORNER };
+  let dug = false;
+  const rt = {
+    call: async (method: string, params: Record<string, unknown> = {}) => {
+      log.push(method);
+      if (method === 'dig.here') { dug = !!dig.dug; return dig; }
+      if (method === 'steer') {
+        if (!dug) return { reached: false, at: { ...POST } };
+        pos = { x: Number(params.x), y: 63, z: Number(params.z) };
+        return { reached: true };
+      }
+      return {};
+    },
+    status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...pos } }),
+    builtNear: () => built,
+    restoreBlock: async (_at: unknown, item: string) => { const why = restore(item); log.push(`restore ${item}${why ? `: ${why}` : ''}`); return why; },
+    protectBuilt: (blocks: { at: { x: number; y: number; z: number }; state: string }[]) => { for (const b of blocks) recorded.push(`${b.state} ${b.at.x},${b.at.y},${b.at.z}`); }
+  } as unknown as WedgeRuntime;
+  return { rt, log, recorded };
+}
+const bare = (over: Partial<WorldMemory> = {}): WorldMemory => ({ landmarks: { chests: [], farmland: [] }, leash: 96, ...over });
+
+test('getOut: a thin block not the bot\'s own is never dug; one on a pen\'s ring is its own without a record; the client\'s refusal and what did not go back are said', async (t) => {
+  const own = [{ at: { ...POST }, state: 'oak_fence' }, { at: { ...POST, y: 64 }, state: 'torch' }];
+  // nobody's record, no ring of the bot's there: left as it is
+  const a = wedgeRt([], { dug: true });
+  t.deepEqual(await getOut(a.rt, bare(), IN_CORNER, corner3()), { out: false, line: 'wedged in the oak_fence at (-558, 63, 2171): could not step out, and it is not the bot\'s own to dig out' });
+  t.deepEqual(a.log, ['steer', 'steer']);
+  // the post on the cow pen's ring (posts one over the zone's ground), no record: dug, and put back as it stood
+  const b = wedgeRt([], { dug: true });
+  const pen = bare({ zones: { 'pen:cow': [{ x: -558, y: 62, z: 2165, width: 7, length: 7 }] } });
+  t.deepEqual(await getOut(b.rt, pen, IN_CORNER, corner3()), { out: true, line: 'wedged in the oak_fence at (-558, 63, 2171): dug it out, stepped out, put it back' });
+  t.deepEqual(b.log.filter(l => l !== 'steer'), ['dig.here', 'restore oak_fence', 'restore torch']);
+  // and into the record as it stood, the torch on it too, once dug: the repair round puts back only what that holds
+  t.deepEqual(b.recorded, ['oak_fence[east=true,north=true,south=false,waterlogged=false,west=false] -558,63,2171', 'torch -558,64,2171']);
+  // in a build the client knows for someone's: it refuses the dig, and nothing else is done
+  const c = wedgeRt(own, { dug: false, reason: 'someone else\'s build (force: true to dig it anyway)', block: 'oak_fence' });
+  t.deepEqual(await getOut(c.rt, bare(), IN_CORNER, corner3()), { out: false, line: 'wedged in the oak_fence at (-558, 63, 2171): could not step out or dig it out (someone else\'s build)' });
+  t.false(c.log.some(l => l.startsWith('restore')));
+  t.deepEqual(c.recorded, []);
+  // the post back, the torch not (none picked up, after a second try): said, for the repair round; both were in the
+  // record already, so nothing goes in it
+  const d = wedgeRt(own, { dug: true }, item => (item === 'torch' ? 'no torch in the inventory' : undefined));
+  t.deepEqual(await getOut(d.rt, bare(), IN_CORNER, corner3()), { out: true, line: 'wedged in the oak_fence at (-558, 63, 2171): dug it out, stepped out, put it back, but not the torch on it (no torch in the inventory)' });
+  t.deepEqual(d.log.filter(l => l.startsWith('restore')), ['restore oak_fence', 'restore torch: no torch in the inventory', 'restore torch: no torch in the inventory']);
+  t.deepEqual(d.recorded, []);
+});
+
+test('getOut: a put-back the pick-up came too late for (or a cow stood in the gap) is tried once more, and goes back', async (t) => {
+  const own = [{ at: { ...POST }, state: 'oak_fence' }, { at: { ...POST, y: 64 }, state: 'torch' }];
+  let tries = 0;
+  const late = wedgeRt(own, { dug: true }, item => (item === 'oak_fence' && tries++ === 0 ? 'no oak_fence in the inventory' : undefined));
+  t.deepEqual(await getOut(late.rt, bare(), IN_CORNER, corner3()), { out: true, line: 'wedged in the oak_fence at (-558, 63, 2171): dug it out, stepped out, put it back' });
+  t.deepEqual(late.log.filter(l => l.startsWith('restore')), ['restore oak_fence: no oak_fence in the inventory', 'restore oak_fence', 'restore torch']);
+});
+
+test('getOut: one of the bot\'s own panes is never dug (it breaks to nothing, and a window would keep the hole)', async (t) => {
+  const pane = corner3().map((b, i) => (i === 4 ? 'glass_pane[east=true,north=true,south=false,waterlogged=false,west=false]' : b));
+  const w = wedgeRt([{ at: { ...POST }, state: 'glass_pane' }], { dug: true });
+  t.deepEqual(await getOut(w.rt, bare(), IN_CORNER, pane), { out: false, line: 'wedged in the glass_pane at (-558, 63, 2171): could not step out, and a glass_pane dug out would not come back (not dug)' });
+  t.deepEqual(w.log, ['steer', 'steer']);
+});
+
+test('getOut: once the autopilot no longer has the bot (the LLM took over, or autonomy off) it digs, steps and puts back nothing more', async (t) => {
+  const own = [{ at: { ...POST }, state: 'oak_fence' }, { at: { ...POST, y: 64 }, state: 'torch' }];
+  // stopped during the plain steps: no dig
+  const a = wedgeRt(own, { dug: true });
+  t.deepEqual(await getOut(a.rt, bare(), IN_CORNER, corner3(), () => false), { out: false, line: 'wedged in the oak_fence at (-558, 63, 2171): could not step out; left to the one who took over' });
+  t.deepEqual(a.log, ['steer', 'steer']);
+  // stopped during the dig: no step after it, nothing put back
+  let asked = 0;
+  const b = wedgeRt(own, { dug: true });
+  t.deepEqual(await getOut(b.rt, bare(), IN_CORNER, corner3(), () => asked++ === 0), { out: false, line: 'wedged in the oak_fence at (-558, 63, 2171): dug it out; left for the repair round to put back (the autopilot was stopped)' });
+  t.deepEqual(b.log, ['steer', 'steer', 'dig.here']);
+  // stopped after the step out: the put-back left for the repair round
+  asked = 0;
+  const c = wedgeRt(own, { dug: true });
+  t.deepEqual(await getOut(c.rt, bare(), IN_CORNER, corner3(), () => asked++ < 2), { out: true, line: 'wedged in the oak_fence at (-558, 63, 2171): dug it out, stepped out, could not put it back (the autopilot was stopped): left for the repair round' });
+  t.false(c.log.some(l => l.startsWith('restore')));
+});
+
+test('the wedge watch: the LLM takes over while the bot steps out of its pen\'s corner post: the post is not dug', async (t) => {
+  let now = 0;
+  const state = { pos: { ...IN_CORNER }, time: 6000 };
+  const { rt } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const call = rt.call;
+  let steers = 0, dug = false;
+  const the: { brain?: Brain } = {};
+  rt.call = (async (method: string, params: Record<string, unknown> = {}) => {
+    if (method === 'world.region' && params.width === 3) return { blocks: corner3() };
+    // every step out goes into the post; at the second, the LLM runs a tool of its own
+    if (method === 'steer') { if (++steers === 2) await the.brain!.manual('move-to-position'); return { reached: false, distance: 1.49, at: { ...POST } }; }
+    if (method === 'dig.here') { dug = true; return { dug: true }; }
+    return call(method, params);
+  }) as ClientRuntime['call'];
+  rt.builtNear = () => [{ at: { ...POST }, state: 'oak_fence' }, { at: { ...POST, y: 64 }, state: 'torch' }];
+  rt.restoreBlock = async () => undefined;
+  const round: Goal = { name: 'pens', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = the.brain = new Brain(rt, { tickMs: 1e9, goals: [round], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 5000; await brain.tick(); await settle();
+  now += 20_000; await brain.tick(); await settle();
+  now += 15_000; await brain.tick(); await settle();
+  t.is(steers, 2);
+  t.false(dug);
+  t.regex(brain.status(), /wedged in the oak_fence at \(-558, 63, 2171\): could not step out; left to the one who took over/);
+  brain.setEnabled(false);
+});
+
+test('ownThin: in the record, or a fence, gate or wall on the yard\'s ring or a pen\'s, one over its ground; nothing else', (t) => {
+  const w = bare({ zones: { fence: [{ x: -565, y: 62, z: 2119, width: 33, length: 97 }], 'pen:cow': [{ x: -558, y: 62, z: 2165, width: 7, length: 7 }] } });
+  t.true(ownThin(w, [], { x: -565, y: 63, z: 2150 }, 'oak_fence[north=true,south=true]'));
+  t.true(ownThin(w, [], { x: -549, y: 63, z: 2119 }, 'oak_fence_gate[facing=north,open=false]'));
+  t.true(ownThin(w, [], { x: -555, y: 63, z: 2165 }, 'cobblestone_wall'));
+  t.false(ownThin(w, [], { x: -555, y: 64, z: 2165 }, 'oak_fence'));
+  t.false(ownThin(w, [], { x: -556, y: 63, z: 2167 }, 'oak_fence'));
+  t.false(ownThin(w, [], { x: -565, y: 63, z: 2150 }, 'glass_pane'));
+  t.true(ownThin(bare(), [{ at: { x: 3, y: 64, z: 4 }, state: 'iron_bars' }], { x: 3, y: 64, z: 4 }, 'iron_bars'));
+  t.false(ownThin(bare(), [], { x: 3, y: 64, z: 4 }, 'oak_fence'));
 });
 
 test('decide uses a goal\'s urgency when it has one', (t) => {

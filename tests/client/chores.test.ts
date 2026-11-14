@@ -515,8 +515,10 @@ test('toTheWoods: a tree in sight is enough; else the remembered woods; else eac
     const world = { zones: {} as Record<string, { x: number; y: number; z: number }[]>, leash: 96 };
     return {
       acts, world,
+      // (the look, the run's snapshot and its signal are for the walks through the yard's gates: none is known here)
       ctx: {
-        world: world as unknown as WorldMemory, progress: () => undefined,
+        world: world as unknown as WorldMemory, progress: () => undefined, s: snap([]), signal: new AbortController().signal,
+        status: async () => ({ inWorld: true, username: 'b', screen: null, position: { x: 0, y: 64, z: 0 } }),
         call: (async (m: string) => (m === 'world.findBlocks' ? { positions: sight[look++] ? [{ x: 1, y: 64, z: 1 }] : [] } : {})) as GoalContext['call'],
         act: async (tool: string, a: Record<string, unknown> = {}) => {
           acts.push(tool === 'explore' ? `explore ${a.direction}` : tool);
@@ -568,7 +570,8 @@ test('toTheWoods: a log on the site of a milestone set aside midway is its own, 
     progress: { done: [], journal: [], current: { id: 'fence-clear', step: 0, data: {} }, aside: { enchanting: { step: 2, data: { site: { x: 0, z: 0, width: 7, length: 7, y: 64 } } } } }
   } as unknown as WorldMemory;
   const ctx = {
-    world: w, progress: () => undefined,
+    world: w, progress: () => undefined, s: snap([]), signal: new AbortController().signal,
+    status: async () => ({ inWorld: true, username: 'b', screen: null, position: { x: 0, y: 64, z: 0 } }),
     // at home only a log on the site; at the woods a tree
     call: (async () => ({ positions: [looks++ === 0 ? { x: 3, y: 65, z: 3 } : { x: 11, y: 70, z: 121 }] })) as GoalContext['call'],
     act: async (tool: string) => { acts.push(tool); return { ok: true, text: 'ok' }; }

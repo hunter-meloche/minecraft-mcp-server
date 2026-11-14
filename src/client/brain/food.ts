@@ -8,7 +8,8 @@ import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.
 import { someones, type Creature } from './courtesy.js';
 import { placeNearHome } from './firsts.js';
 import { underNow } from './underyard.js';
-import { walkHome } from './homeward.js';
+import { goHome, walkHome } from './homeward.js';
+import { EXPLORE_MIN, exploreReach, leaveYard } from './yardgates.js';
 
 /** How far round the bot the hunt looks for game. */
 const HUNT_RANGE = 64;
@@ -262,9 +263,12 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
         const sides = ['north', 'east', 'south', 'west'] as const;
         for (let i = 0; i < sides.length && !ctx.signal.aborted; i++) {
           const target = GAME[i % GAME.length];
-          const r = await ctx.act('explore', { target, direction: sides[i], maxDistance: Math.min(ctx.world.leash ?? 96, 128), step: 32, timeoutMs: 90_000 });
+          // (out of the yard by the gate on that side, and in by one between the sides: not over the fence, yardgates.ts;
+          // the explore from the gate no further than the leash is from home)
+          const left = await exploreReach(ctx, await leaveYard(ctx, sides[i]), Math.min(ctx.world.leash ?? 96, 128));
+          const r = left >= EXPLORE_MIN ? await ctx.act('explore', { target, direction: sides[i], maxDistance: left, step: 32, timeoutMs: 90_000 }) : { ok: false, text: '' };
           if (/^Found /.test(r.text)) { say(`found ${target} to the ${sides[i]}`); break; }
-          await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+          await goHome(ctx, 300_000).catch(() => undefined);
         }
       }
     }
@@ -285,10 +289,13 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
           .sort((a, b) => a.distance - b.distance)[0];
         if (!far) break;
         say(`walking over to a ${far.name} ${Math.round(far.distance)} blocks off`);
+        await leaveYard(ctx, far.position);
         await ctx.call('goto', { x: Math.floor(far.position.x), y: Math.floor(far.position.y), z: Math.floor(far.position.z), range: 12, timeoutMs: 90_000 }, 100_000).catch(() => undefined);
         kills--;
         continue;
       }
+      // the chase is Baritone's walk to the animal: from in the yard to one outside it, out by a gate first
+      await leaveYard(ctx, prey.position);
       const r = await ctx.act('attack-entity', { target: `#${prey.id}`, maxDistance: HUNT_RANGE, timeoutMs: 45_000 });
       if (!r.ok) { say(`could not hunt a ${kind}`); break; }
       hunted.set(kind, (hunted.get(kind) ?? 0) + 1);

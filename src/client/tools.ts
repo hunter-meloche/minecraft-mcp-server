@@ -898,7 +898,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
     // ---- phase 3: combat (the fight loop and reflexes run in the game client, on the tick)
 
-    'attack-entity': async ({ target, maxDistance = 16, timeoutMs = 30_000, minHealth = 6, retreat = true }) => {
+    // collect: false leaves the drops where they fell, for the caller to pick up its own way (the pens round, from the
+    // pen's inside cells: this walk to them took the bot into its cow pen's corner post, pens.ts dropsIn)
+    'attack-entity': async ({ target, maxDistance = 16, timeoutMs = 30_000, minHealth = 6, retreat = true, collect = true }) => {
       const r = await call<FightResult>('fight', { target: String(target), maxDistance, timeoutMs, minHealth, retreat }, Number(timeoutMs) + 60_000);
       if (r.outcome === 'none') return factory.createResponse(`No ${target} within ${maxDistance} blocks`);
       const swings = r.hits
@@ -920,7 +922,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       // pick up the drops unless a hostile is close: at night there is always one within 16 blocks, which left the
       // wool of 3 of 4 sheep on the ground (the defend process handles ones further off)
       const nearest = Math.min(...[...(r.threats ?? '').matchAll(/(\d+) blocks away/g)].map(m => Number(m[1])));
-      if (r.kills.length && r.outcome !== 'low_health' && !(nearest <= 6)) await collectDropsNear(r.dropsAt).catch(() => undefined);
+      if (collect !== false && r.kills.length && r.outcome !== 'low_health' && !(nearest <= 6)) await collectDropsNear(r.dropsAt).catch(() => undefined);
       return factory.createResponse(lines.join(' '));
     },
 

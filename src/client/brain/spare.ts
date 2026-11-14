@@ -4,6 +4,7 @@ import { freeChestTotals, key } from './chests.js';
 import { toTheWoods } from './chores.js';
 import { daylightLeft } from './schedule.js';
 import { walkHome } from './homeward.js';
+import { leaveYard } from './yardgates.js';
 
 /**
  * Spare time by day: with nothing else to do, stockpile what the home will want, instead of standing about till
@@ -73,6 +74,8 @@ export const spareGoal: Goal = {
       if (woods.text) ctx.progress(woods.text);
     }
     ctx.progress(`spare time: mining ${t.mine.split(',')[0]} for up to ${want} (${Math.round(budget / 1000)} s)`);
+    // (out of the yard by the nearest gate first: the miner mines nothing in the home area, yardgates.ts)
+    await leaveYard(ctx);
     const r = await ctx.act('mine-blocks', { block: t.mine, count: carried + want, timeoutMs: budget });
     const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
     const after = inv.items.filter(i => i.slot < 36 && t.counts.test(i.name)).reduce((a, i) => a + i.count, 0);

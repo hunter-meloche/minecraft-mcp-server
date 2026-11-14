@@ -13,16 +13,18 @@ import net.minecraft.world.level.block.state.BlockState;
 import static claudebridge.Json.intParam;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
  * Blocks the bot built (sent by the MCP server). Baritone has no per-position protection, and it walked through a
  * cabin wall rather than use the door; so once a second this sets Baritone's blocksToDisallowBreaking to the types of
  * the protected blocks within RADIUS of the bot. Our own dig and build processes lift the rule while they run, since
- * they break blocks on purpose.
+ * they break blocks on purpose. It also keeps Baritone's paths from placing blocks by the yard fence (fenceScaffold).
  */
 public final class Protection {
     private static final int RADIUS = 24;
@@ -197,6 +199,107 @@ public final class Protection {
         }
     }
 
+    /** Baritone's cost of what can't be done (ActionCosts.COST_INF). */
+    public static final double COST_INF = 1_000_000;
+    /** How far across the ground from the yard's fence ring, inside or outside, Baritone's paths place nothing. */
+    private static final int FENCE_BAND = 2;
+    /** and up to how far over the fence (its posts): the scaffold found east of the north gate went up to 4 over it */
+    private static final int FENCE_OVER = 4;
+    /**
+     * At least this share of the ring's cells must hold something of the bot's at the fence's height: a stray block on
+     * the line (a path, a lamp) is no fence. While the ring is rebuilt round a grown yard, its old three sides lie on
+     * the new line and are enough.
+     */
+    private static final int FENCE_SHARE = 4;
+
+    /** The fence's band: x1..x2, z1..z2 the ring (the zone's rectangle), y1..y2 the heights (the yard's ground and up). */
+    record Band(int x1, int z1, int x2, int z2, int y1, int y2) {
+        boolean has(int x, int y, int z) {
+            if (y < y1 || y > y2 || x < x1 - FENCE_BAND || x > x2 + FENCE_BAND || z < z1 - FENCE_BAND || z > z2 + FENCE_BAND) return false;
+            // inside the yard only as deep as the band: past it the lawn is the yard's own
+            return x <= x1 + FENCE_BAND || x >= x2 - FENCE_BAND || z <= z1 + FENCE_BAND || z >= z2 - FENCE_BAND;
+        }
+
+        @Override public String toString() {
+            return "x " + x1 + ".." + x2 + ", z " + z1 + ".." + z2 + " (" + FENCE_BAND + " either side), y " + y1 + ".." + y2;
+        }
+    }
+
+    /** null: no ring known (no rectangle, or nothing of the bot's on its line yet). Read on Baritone's path thread. */
+    private static volatile Band band;
+    private static volatile boolean scaffoldAsked;
+    /** places refused since the client log last said how many */
+    private static final java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
+    private static long refusedSaid;
+
+    /**
+     * Whether the place each thread's path search is costing lies in the fence's band (placingAt, from the start of
+     * the cost; fenceScaffold reads it at its returns). Each thread its own: Baritone's path thread costs the next
+     * path while the client thread checks the one it walks, with the same context.
+     */
+    private static final ThreadLocal<boolean[]> BY_THE_FENCE = ThreadLocal.withInitial(() -> new boolean[1]);
+
+    /** Where a block Baritone weighs placing while it paths would go (FenceScaffoldMixin, as the cost starts). */
+    public static void placingAt(int x, int y, int z) {
+        Band b = band;
+        BY_THE_FENCE.get()[0] = b != null && b.has(x, y, z);
+    }
+
+    /**
+     * Whether that block (a pillar, a bridge, a step up) is ruled out: one in the yard fence's band. Climbing over the
+     * fence on cobblestone was cheaper than the walk round to a gate, so the bot left stairs over the gates and pillars
+     * along the fence. `cost` is what Baritone made of it: never stays never, and 0 is the builder's own block (what
+     * its schematic wants there, and the bot carries; a plain path never costs a block 0), which it still places.
+     * Called for every place a path search weighs: on Baritone's path thread, and on the client's as it checks the path
+     * it walks.
+     */
+    public static boolean fenceScaffold(double cost) {
+        if (!scaffoldAsked) { scaffoldAsked = true; System.out.println("[claudebridge] path: no throwaway blocks within " + FENCE_BAND + " of the yard fence"); }
+        boolean[] by = BY_THE_FENCE.get();
+        if (!by[0]) return false;
+        by[0] = false;
+        if (cost <= 0 || cost >= COST_INF) return false;
+        refused.incrementAndGet();
+        return true;
+    }
+
+    /**
+     * The band, from the zone's rectangle (its edge is the fence ring) and the bot's own blocks on that line: the height
+     * most of them stand at is the fence's (its posts and gates; torches stand on some, the ground was filled under a
+     * few), and the yard's ground is one under it. Node sends the rectangle without a height, and the record holds the
+     * fence whether or not its chunks are loaded. No rectangle or no fence on its line: no band.
+     */
+    static Band bandOf(boolean rect, int x1, int z1, int x2, int z2, java.util.Collection<Long> positions) {
+        if (!rect || x2 < x1 || z2 < z1) return null;
+        Map<Integer, Integer> at = new HashMap<>();
+        for (long l : positions) {
+            int x = BlockPos.getX(l), z = BlockPos.getZ(l);
+            boolean line = ((z == z1 || z == z2) && x >= x1 && x <= x2) || ((x == x1 || x == x2) && z >= z1 && z <= z2);
+            if (line) at.merge(BlockPos.getY(l), 1, Integer::sum);
+        }
+        int fence = 0, most = 0;
+        // (a tie goes to the lower: a torch on every post is no fence a block higher)
+        for (var e : at.entrySet()) if (e.getValue() > most || (e.getValue() == most && e.getKey() < fence)) { fence = e.getKey(); most = e.getValue(); }
+        int cells = 2 * (x2 - x1) + 2 * (z2 - z1);
+        if (most == 0 || most * FENCE_SHARE < cells) return null;
+        return new Band(x1, z1, x2, z2, fence - 1, fence + FENCE_OVER);
+    }
+
+    /** The band again after the zone or the bot's blocks changed (the client log says when it moves). */
+    private static void bandAgain() {
+        Band b = zoneSet ? bandOf(zoneRect, zoneX1, zoneZ1, zoneX2, zoneZ2, POSITIONS) : null;
+        if (java.util.Objects.equals(b, band)) return;
+        band = b;
+        System.out.println("[claudebridge] path: " + (b == null ? "no yard fence known: paths may place anywhere again" : "paths place nothing by the yard fence: " + b));
+    }
+
+    /** Once a minute at most, how many places by the fence the path searches had refused (each search weighs many). */
+    private static void sayRefused() {
+        if (refused.get() == 0 || System.currentTimeMillis() - refusedSaid < 60_000) return;
+        refusedSaid = System.currentTimeMillis();
+        System.out.println("[claudebridge] path: " + refused.getAndSet(0) + " place(s) by the yard fence refused in path searches");
+    }
+
     private static int idleWhileSuspended = 0;
 
     /**
@@ -221,6 +324,7 @@ public final class Protection {
     }
 
     private static void tick(Minecraft mc) {
+        sayRefused();
         // a process that ended without its end handler (its call was dropped) must not leave the rule lifted for good
         if (suspended > 0) {
             idleWhileSuspended = Processes.active() == null ? idleWhileSuspended + 1 : 0;
@@ -265,6 +369,7 @@ public final class Protection {
                     POSITIONS.add(BlockPos.asLong(a.get(0).getAsInt(), a.get(1).getAsInt(), a.get(2).getAsInt()));
                 }
             }
+            bandAgain();
             JsonObject r = new JsonObject();
             r.addProperty("count", POSITIONS.size());
             return r;
@@ -282,6 +387,7 @@ public final class Protection {
                 zoneSet = zoneRadius > 0;
                 if (zoneSet) { zoneX = intParam(p, "x", 0); zoneZ = intParam(p, "z", 0); }
             }
+            bandAgain();
             JsonObject r = new JsonObject();
             r.addProperty("set", zoneSet);
             return r;
@@ -291,6 +397,8 @@ public final class Protection {
             r.addProperty("zone", !zoneSet ? null : zoneRect ? zoneX1 + "," + zoneZ1 + ".." + zoneX2 + "," + zoneZ2 : zoneX + "," + zoneZ + " r" + zoneRadius);
             r.addProperty("count", POSITIONS.size());
             r.addProperty("suspended", suspended);
+            Band fence = band;
+            r.addProperty("fenceBand", fence == null ? null : fence.toString());
             JsonArray types = new JsonArray();
             for (Block b : BaritoneAPI.getSettings().blocksToDisallowBreaking.value) {
                 types.add(Names.strip(b.builtInRegistryHolder().getRegisteredName()));

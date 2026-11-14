@@ -36,6 +36,10 @@ import { spareGoal } from './spare.js';
 import { clearOut, dryBlocked, ladderOf, pick, releaseOldestDry, shareHolds, skippedLine, taskOf, workGoals, workLine, workTick } from './work.js';
 import { NEAR_HOME, out as afield } from './pockets.js';
 import { statusAnswer } from './chatstatus.js';
+import { getOut, wedgedOut } from './wedge.js';
+
+// (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
+export { wedgedOut };
 
 /**
  * The bot's own low-level AI for the client backend, built like a mob's goal selector on a villager's schedule: every
@@ -66,30 +70,6 @@ interface Running {
   goal: Goal; reason: string; started: number; abort: AbortController; done: Promise<void>;
   /** the counted daytime it has used and what it has brought in so far: booked on the idle tally when it ends */
   used: { ms: number; gain: number };
-}
-
-/** Blocks the bot can stand partly inside of (thin ones): a fence, wall, pane, bars, a shut gate. */
-const THIN = /(fence|_wall(\[|$)|pane|iron_bars|chain(\[|$))/;
-/** What the bot can step into: air and the small plants and lights that don't block a walk. */
-const OPEN = /^(minecraft:)?(air|cave_air|short_grass|tall_grass|fern|large_fern|dandelion|poppy|\w+_tulip|cornflower|oxeye_daisy|azure_bluet|allium|blue_orchid|lily_of_the_valley|torch|wall_torch|snow\[layers=1\])(\[|$)/;
-
-/**
- * Wedged: the bot's feet cell (floored) holds a thin block it stands against, so Baritone plans from inside the
- * fence and walks into it for ever. Three times one night at the south fence (-547, 63, 2199), right after hunts
- * outside it: food, shelter and every retry "looks stuck" for half an hour, hungry, out of bed. `blocks` is the
- * 3x2x3 region from (x-1, y, z-1) round the floored position, x fastest, then z, then y. Returns the thin block and
- * the centre of the open side cell nearest the bot to step to, or undefined when it isn't wedged (or can't step out).
- */
-export function wedgedOut(pos: Pos, blocks: (string | null)[]): { block: string; to: Pos } | undefined {
-  const at = (dx: number, dy: number, dz: number) => (blocks[(dx + 1) + (dz + 1) * 3 + dy * 9] ?? '').replace(/^minecraft:/, '');
-  const feet = at(0, 0, 0);
-  if (!THIN.test(feet) || /open=true/.test(feet)) return undefined;
-  const fx = Math.floor(pos.x), fy = Math.floor(pos.y), fz = Math.floor(pos.z);
-  const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-    .filter(([dx, dz]) => OPEN.test(at(dx, 0, dz)) && OPEN.test(at(dx, 1, dz)))
-    .map(([dx, dz]) => ({ x: fx + dx + 0.5, y: fy, z: fz + dz + 0.5 }))
-    .sort((a, b) => Math.hypot(a.x - pos.x, a.z - pos.z) - Math.hypot(b.x - pos.x, b.z - pos.z));
-  return sides.length ? { block: feet.replace(/\[.*$/, ''), to: sides[0] } : undefined;
 }
 
 /**
@@ -297,7 +277,12 @@ export class Brain {
           const out = wedgedOut(s.position, blocks ?? []);
           if (out) {
             await this.stopRunning(`${r.goal.name} is wedged in the ${out.block} at ${here}: stepping out`);
-            await this.rt.call('steer', { ...out.to, within: 0.25, timeoutMs: 2000 }, 5000).catch(() => undefined);
+            // a step to the open cell on the bot's side of it, twice; then one of its own fences is dug out, stepped
+            // out of and put back (live, Nov 13: 1 h 45 min in the cow pen's corner post, every step-out into the post).
+            // Up to 20 s with no run to stop: it asks before each dig, step and put-back whether the bot is still the
+            // autopilot's (the LLM's tool, or autonomy off, would otherwise run beside it)
+            const got = await getOut(this.rt, world, s.position, blocks ?? [], () => this.enabled && this.now() >= this.leaseUntil).catch(() => undefined);
+            if (got?.line) this.note(got.line);
             this.holdFor(r.goal.name, this.now() + 5000, 'wedged');
             return;
           }

@@ -101,21 +101,115 @@ const cell = (p: Pos): Pos => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math
 const at = (p: Pos) => `(${Math.floor(p.x)}, ${Math.floor(p.y)}, ${Math.floor(p.z)})`;
 
 /**
- * Walk up to an animal and use `item` on it; true when the client says it was used. `inside`: the bot is in the pen
- * with it, the gate shut behind (penVisit), and walks up carefully; else Baritone's own way, as before (a pen with no
- * gate known).
+ * The pen's inside cell nearest a point (the point's own when it is inside): the only cells a walk in the pen goes to.
+ * Pressed against the fence from inside, the bot's middle lies in the fence's own cell (its box is 0.6 wide, the
+ * post 0.25), and a bot whose block is a fence is wedged: every walk Baritone plans from there goes into the post.
  */
-async function useOn(ctx: GoalContext, id: number, item: string, inside = false): Promise<boolean> {
+const innerCell = (p: Pen, q: { x: number; z: number }, y: number): Pos => ({
+  x: Math.min(Math.max(Math.floor(q.x), p.x1 + 1), p.x2 - 1), y, z: Math.min(Math.max(Math.floor(q.z), p.z1 + 1), p.z2 - 1)
+});
+
+/**
+ * Where to stand in the pen by an animal at `q`: of the inside cells round its own (innerCell), the nearest the bot,
+ * not the one it stands in. Never a cell of the fence ring: a walk to within 2 of the animal could end in the gateway.
+ */
+function standIn(p: Pen, y: number, me: { x: number; z: number }, q: { x: number; z: number }): Pos {
+  const c = innerCell(p, q, y);
+  let best = c, d = Infinity;
+  for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+    const x = c.x + dx, z = c.z + dz;
+    if ((!dx && !dz) || x <= p.x1 || x >= p.x2 || z <= p.z1 || z >= p.z2) continue;
+    const e = horiz(mid({ x, z }), me);
+    if (e < d) { d = e; best = { x, y, z }; }
+  }
+  return best;
+}
+
+/** In the pen with the gate shut behind (penVisit): the pen, and the height of its inside cells (the gate's). */
+interface Inside { p: Pen; y: number }
+
+/**
+ * Walk up to an animal and use `item` on it; true when the client says it was used. `inside`: the bot is in the pen
+ * with it (penVisit), and walks carefully to an inside cell by it (standIn); else Baritone's own way, as before (a
+ * pen with no gate known).
+ */
+async function useOn(ctx: GoalContext, id: number, item: string, inside?: Inside): Promise<boolean> {
   for (let i = 0; i < 3; i++) {
     const e = await find(ctx, id);
     if (!e) return false;
     if (e.distance > 3.5) {
-      if (inside) await ctx.call('goto', { ...cell(e.position), range: 2, careful: true, timeoutMs: 15_000 }, 25_000).catch(() => undefined);
+      if (inside) await ctx.call('goto', { ...standIn(inside.p, inside.y, await here(ctx), e.position), range: 0, careful: true, timeoutMs: 15_000 }, 25_000).catch(() => undefined);
       else await ctx.act('move-to-position', { ...e.position, range: 2, timeoutMs: 45_000 });
     }
     try { await ctx.call('entity.use', { id, item }); return true; } catch { /* it moved: again */ }
   }
   return false;
+}
+
+/**
+ * How far past the pen's inside cells (onto the fence's) a drop is still picked up from the inside cell by it: the
+ * game picks up what is within a block of the bot's box and the item's, 1.425 of its middle across the ground (0.3 +
+ * 1 + 0.125). A drop 0.75 into the fence's cell (the far edge of one on a post's top) is 1.25 off the inside cell's
+ * middle, and the step there ends within DROP_STEER of it: 1.35 at most.
+ */
+const DROP_REACH = 0.75;
+/** How near the inside cell's middle the step for a drop on the fence's cells ends (sneaking: it stops, not overshoots). */
+const DROP_STEER = 0.1;
+
+type Drop = { id: number; position: Pos };
+
+/** The items lying round the pen, within 2 of its fence across the ground and 3 of its inside cells' height. */
+async function dropsBy(ctx: GoalContext, { p, y }: Inside): Promise<Drop[]> {
+  const near = (d: Drop) => d.position.x >= p.x1 - 2 && d.position.x < p.x2 + 3 && d.position.z >= p.z1 - 2 && d.position.z < p.z2 + 3 && Math.abs(d.position.y - y) <= 3;
+  return (await ctx.call<{ entities: Drop[] }>('world.entities', { maxDistance: 16, type: 'item' })
+    .catch(() => ({ entities: [] as Drop[] }))).entities.filter(near);
+}
+
+/**
+ * The drops round the pen picked up from its inside cells only: a careful walk (range 0) to the inside cell nearest
+ * each, and for one on the fence's cells a straight step to that cell's middle, within it. What lies further out (past
+ * the fence, or on top of the far side of it) is left. The cull's drops were picked up the way attack-entity does it,
+ * Baritone's own walk to the drop's cell and, with no way there, a straight walk at it: on Nov 13 one by the cow pen's
+ * corner post took the bot into the corner, its middle into the post's cell, and the brain's wedge watch then stopped
+ * every job for 1 h 45 min. `left`: this cull's drops still lying round the pen; `before`, the ids of what lay there
+ * before the fight, is not counted (an earlier cull's leather past the fence lies there 5 minutes, and a round culls
+ * several in a visit: each line would say it again).
+ */
+async function dropsIn(ctx: GoalContext, inside: Inside, before: Set<number>): Promise<{ left: number }> {
+  const { p, y } = inside;
+  const reachable = (q: Pos) => q.x >= p.x1 + 1 - DROP_REACH && q.x < p.x2 + DROP_REACH && q.z >= p.z1 + 1 - DROP_REACH && q.z < p.z2 + DROP_REACH &&
+    q.y >= y - 1 && q.y < y + 2;
+  const look = () => dropsBy(ctx, inside);
+  let lying = await look();
+  const tried = new Set<number>();
+  for (let i = 0; i < 6 && !ctx.signal.aborted; i++) {
+    const me = await here(ctx);
+    const next = lying.filter(d => reachable(d.position) && !tried.has(d.id)).sort((a, b) => horiz(a.position, me) - horiz(b.position, me))[0];
+    if (!next) break;
+    tried.add(next.id);
+    const to = innerCell(p, next.position, y);
+    await ctx.call('goto', { ...to, range: 0, careful: true, timeoutMs: 15_000 }, 25_000).catch(() => undefined);
+    // (a walk ends anywhere in the cell: from its middle the fence's cell by it is in reach)
+    if (!within(p, next.position)) await ctx.call('steer', { ...mid(to), y, within: DROP_STEER, sneak: true, timeoutMs: 1500 }, 5000).catch(() => undefined);
+    lying = await look();
+  }
+  return { left: lying.filter(d => !before.has(d.id)).length };
+}
+
+/**
+ * A cull from inside the pen: a careful walk to an inside cell by the animal first (standIn), so the fight starts
+ * within reach and its own chase (Baritone's walk to within 2) has little or nothing to do; then the fight, its drops
+ * left to dropsIn, not picked up the fight's way. The fight's text, and how many drops were left by the fence.
+ */
+async function cullIn(ctx: GoalContext, inside: Inside, id: number): Promise<{ ok: boolean; text: string; left: number }> {
+  const e = await find(ctx, id);
+  if (e && e.distance > 2.5) {
+    await ctx.call('goto', { ...standIn(inside.p, inside.y, await here(ctx), e.position), range: 0, careful: true, timeoutMs: 15_000 }, 25_000).catch(() => undefined);
+  }
+  const before = new Set((await dropsBy(ctx, inside)).map(d => d.id));
+  const r = await ctx.act('attack-entity', { target: `#${id}`, maxDistance: 24, timeoutMs: 30_000, collect: false });
+  const { left } = await dropsIn(ctx, inside, before);
+  return { ...r, left };
 }
 
 /** The pen's gate, the cells just outside it and two in, and the last row in before the far fence (`deep`). */
@@ -1104,7 +1198,8 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
  * them. The herd is bred to MAX_HERD, calves counted, and the adults above MAX_ADULTS culled: from the bot's own
  * pen only (the count is of the adults inside its fence), never a calf, never someone's (named, tamed or on a lead,
  * or by their builds outside the yard), never below the pair. Feeding, culling and shearing are done from inside the
- * pen, the gate shut behind the bot (penVisit); the cull's drops are picked up there (attack-entity).
+ * pen, the gate shut behind the bot (penVisit), every walk in there to the pen's inside cells (standIn); the cull's
+ * drops are picked up from those cells (dropsIn), and what fell past the fence is left.
  */
 export const pens: Goal = {
   name: 'pens',
@@ -1135,6 +1230,8 @@ export const pens: Goal = {
       if (!food.some(f => (ctx.s.counts.get(f) ?? 0) >= 2)) for (const f of food) if (await takeFromChests(ctx, f, 16)) break;
       if (kind === 'sheep' && !ctx.s.counts.get('shears')) await prepareBill(ctx, { shears: 1 }).catch(() => undefined);
       const visit = way ? penVisit(ctx, p, way) : undefined;
+      // (every walk in the pen goes to its inside cells, at the gate's height)
+      const inside: Inside | undefined = way ? { p, y: way.gate.y } : undefined;
       try {
         for (let i = 0; i < 3 && !ctx.signal.aborted; i++) {
           const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
@@ -1162,14 +1259,15 @@ export const pens: Goal = {
             break;
           } else if (a.kind === 'breed') {
             let fed = 0;
-            for (const id of a.ids) if (await useOn(ctx, id, a.food, !!visit)) { fed++; fedAt.set(id, Date.now()); ctx.gain(1); }
+            for (const id of a.ids) if (await useOn(ctx, id, a.food, inside)) { fed++; fedAt.set(id, Date.now()); ctx.gain(1); }
             out.push(`${kind}: fed ${fed} to breed`);
           } else if (a.kind === 'cull') {
-            const r = await ctx.act('attack-entity', { target: `#${a.id}`, maxDistance: 24, timeoutMs: 30_000 });
+            const r = inside ? await cullIn(ctx, inside, a.id)
+              : { ...await ctx.act('attack-entity', { target: `#${a.id}`, maxDistance: 24, timeoutMs: 30_000 }), left: 0 };
             if (r.ok) ctx.gain(1);
-            out.push(`${kind}: culled one (${r.text.split('\n')[0].slice(0, 60)})`);
+            out.push(`${kind}: culled one (${r.text.split('\n')[0].slice(0, 60)})${r.left ? `, ${r.left} drop(s) left by the fence` : ''}`);
           } else {
-            out.push(`${kind}: ${(await useOn(ctx, a.id, 'shears', !!visit)) ? 'sheared one' : 'could not shear'}`);
+            out.push(`${kind}: ${(await useOn(ctx, a.id, 'shears', inside)) ? 'sheared one' : 'could not shear'}`);
           }
           ctx.progress(out.at(-1)!);
         }

@@ -578,6 +578,35 @@ test('the patch and the round walk the shore carefully, onto stand cells on the 
   t.true(cells.every(c => land.name(c) === 'sugar_cane'), 'the bases stay');
 });
 
+test('with the yard\'s gates known, the patch and the round go out to the shore by the east gate, its cell inside and then the one outside, and the walk home comes in by it: no walk over the fence', async (t) => {
+  // the lake is east of the yard: Baritone's way to it from home was over the east fence, and its scaffold stood on
+  // the posts there (Nov 13). Every walk is careful from the yard to the shore; home over the lake's slope, then
+  // through the gate carefully (yardgates.ts)
+  const gates = [{ x: -549, y: 63, z: 2119 }, { x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 }];
+  const land = liveLand();
+  const world = liveWorld({ zones: { cane: DEAD.map(p => ({ ...p })), plot: [{ x: -545, y: 62, z: 2161, width: 9, length: 9 }], 'fence:gate': gates.map(g => ({ ...g })) } });
+  const inside = (p: { x: number; z: number }) => p.x > YARD.x1 && p.x < YARD.x2 && p.z > YARD.z1 && p.z < YARD.z2;
+  /** the walks that go from one side of the fence to the other, from where the walk before ended */
+  const crossings = (walks: { to: string }[]) => walks.map(w => w.to.split(',').map(Number)).map(([x, , z]) => ({ x, z }))
+    .flatMap((p, i, all) => (i > 0 && inside(all[i - 1]) !== inside(p) ? [`${all[i - 1].x},${all[i - 1].z} -> ${p.x},${p.z}`] : []));
+  const patch = botIn(land, world, [...KIT, { slot: 2, name: 'sugar_cane', count: 30 }]);
+  t.regex(await goalOf(rung('cane patch'), { now: T0 }).run(patch.ctx), /planted \d+ cane on the shore .*; back home$/);
+  t.deepEqual(patch.me.walks.slice(0, 2), [{ to: '-535,63,2183', careful: true, range: 1 }, { to: '-531,63,2183', careful: true, range: 1 }]);
+  t.deepEqual(patch.me.walks.slice(-2), [{ to: '-531,63,2183', careful: false, range: 1 }, { to: '-535,63,2183', careful: true, range: 1 }]);
+  t.deepEqual(crossings([{ to: k(HOME) }, ...patch.me.walks]), ['-535,2183 -> -531,2183', '-531,2183 -> -535,2183']);
+  t.deepEqual(patch.me.said.filter(l => /the yard by/.test(l)), ['out of the yard by its east gate (-533, 63, 2183)', 'into the yard by its east gate (-533, 63, 2183)']);
+  t.is(patch.me.acts.at(-1), 'go-home');
+  t.deepEqual(patch.me.baritone, []);
+  // grown: the round goes out by the same gate (the walk home is the next goal's)
+  const cells = world.zones!.cane!;
+  for (const c of cells) stalk(land, { ...c, y: c.y + 1 }, 1);
+  const round = botIn(land, world, KIT);
+  t.is(await caneRound.run(round.ctx), `cut ${cells.length} stalk(s) (${cells.length} cane)`);
+  t.deepEqual(round.me.walks.slice(0, 2), [{ to: '-535,63,2183', careful: true, range: 1 }, { to: '-531,63,2183', careful: true, range: 1 }]);
+  t.deepEqual(crossings([{ to: k(HOME) }, ...round.me.walks]), ['-535,2183 -> -531,2183']);
+  t.true(round.me.walks.slice(2).every(w => w.careful && w.range === 0), JSON.stringify(round.me.walks));
+});
+
 test('cane goes in only from where the bridge\'s place reaches it, wherever in its block the careful walk left the bot', async (t) => {
   // the place reaches 4.5 from the real eye to the top of the ground, and a walk ends on the block, not in its middle:
   // from the stand for the first cell, the second is 3.95 from the eye over that block's middle, 4.5 and more from

@@ -4,6 +4,7 @@ import type { Pos } from './memory.js';
 import { activityAt } from './schedule.js';
 import { boxMeetsZone, type Zone } from './courtesy.js';
 import { UNDER_BY, columnAbove, fillShaft, homeColumn, inColumn, underYard, type Column } from './underyard.js';
+import { inByGate, type WalkContext } from './yardgates.js';
 
 /**
  * Home from wherever the bot is. go-home is Baritone's walk in legs toward home "at any height": from down a mine it
@@ -23,7 +24,8 @@ import { UNDER_BY, columnAbove, fillShaft, homeColumn, inColumn, underYard, type
  * the morning's walk home climbs out). In water or lava, at any hour, getting out of it is go-home's walk, as it was
  * (walled in there, the bot would stay in it). No climb made (or one that does not get it up) leaves the rest to
  * go-home as before, which says where it stopped; after a trip, toward where it went down first however far, as
- * every walk home after one did. On the surface, or on the yard's level in its column, it is go-home as it always was.
+ * every walk home after one did. On the surface, or on the yard's level in its column, it is go-home as it always was,
+ * and from outside the yard's fence in by one of its gates first (goHome below: never over the fence).
  */
 
 const MINUTE = 60_000;
@@ -147,6 +149,23 @@ async function climbOut(ctx: GoalContext, feet: Pos, above: Above, home: Pos, co
 }
 
 /**
+ * go-home, and from outside the yard's fence in by one of its gates first (yardgates.ts inByGate): to the cell 2
+ * outside the gate on the way home, through it carefully, then go-home from inside the yard as it always went.
+ * go-home's own way from out there went straight for home at "any height", and over the fence where that was
+ * cheapest (the stair Baritone left over the north gate, the scaffold along the east fence). `timeoutMs` is the whole
+ * walk's: the gate takes what it needs of it, go-home the rest (HOME_MIN_MS at least). With no gate known, or none
+ * that lets it in (said in the run's progress), go-home as it was. Every walk home goes by this: walkHome below, and
+ * the trips' own go-home between their legs.
+ */
+export async function goHome(ctx: WalkContext & Pick<GoalContext, 'act'>, timeoutMs: number): Promise<{ ok: boolean; text: string }> {
+  const began = Date.now();
+  const gate = await inByGate(ctx, timeoutMs - HOME_MIN_MS);
+  if (gate.shut) ctx.progress(`${gate.shut}: home by go-home's own way`);
+  const walked = !!(gate.gate || gate.shut);
+  return ctx.act('go-home', { name: 'home', timeoutMs: walked ? Math.max(HOME_MIN_MS, timeoutMs - (Date.now() - began)) : timeoutMs });
+}
+
+/**
  * Walk home from where the bot is (see above): what go-home answered, or why it did not walk (`ok` false: under the
  * yard, or deep down at night or too late in the evening to climb out before dark: `night`, for the shelter to wall
  * in). `upAt`: where the run went down, when it knows. `timeoutMs`: the walk's whole time, go-home's as before when
@@ -156,30 +175,29 @@ export async function walkHome(ctx: GoalContext, opts: { timeoutMs: number; upAt
   const began = Date.now();
   const stopped = () => { if (ctx.signal.aborted) throw new Error('aborted'); };
   const look = async () => { const st = await attempt(() => ctx.status()); stopped(); return st; };
-  /** go-home, as every walk home was; after the way up (`spent`), with what is left of the walk's time */
-  const goHome = (spent = false) =>
-    ctx.act('go-home', { name: 'home', timeoutMs: spent ? Math.max(HOME_MIN_MS, opts.timeoutMs - (Date.now() - began)) : opts.timeoutMs });
+  /** go-home, as every walk home was (in by a gate from outside the fence); after the way up (`spent`), with what is left of the walk's time */
+  const toHome = (spent = false) => goHome(ctx, spent ? Math.max(HOME_MIN_MS, opts.timeoutMs - (Date.now() - began)) : opts.timeoutMs);
   const home = ctx.s.home;
   const yard = ctx.world.yard;
   const st = await look();
   // no home, another dimension, or no look at where it stands: nothing to climb from, the walk as it was
-  if (!home || !st?.position || (st.dimension ?? home.dimension) !== home.dimension) return goHome();
+  if (!home || !st?.position || (st.dimension ?? home.dimension) !== home.dimension) return toHome();
   let feet = floored(st.position);
   const under = (p: Pos) => ({ ok: false, text: `under the yard at ${fmt(p)}: out from under digs out to the side first` });
   if (underYard(feet, home, yard)) return under(feet);
   const col = homeColumn(home, yard);
   // in the column on the yard's level or over it (the lawn, the paths, a tower): the walk as it was
-  if (inColumn(col, feet)) return goHome();
+  if (inColumn(col, feet)) return toHome();
   let above = await seeAbove(ctx, feet);
   stopped();
   // (no look over its head: below home's level is all that can be told)
   const deep = (p: Pos, a: Above) => p.y < home.y - BELOW_HOME || (a.ground !== undefined && a.ground - p.y > UNDER_BY);
-  if (!deep(feet, above)) return goHome();
+  if (!deep(feet, above)) return toHome();
   // in water or lava, by day or night: getting out of it is go-home's walk (the wall-in leaves the bot's own cells as
   // they are: walled in there, it would stay in the lava, or under the water with a roof over its head)
   if (st.inLava || st.underWater) {
     ctx.progress(`${depthOf(feet, above, home)}, in ${st.inLava ? 'lava' : 'water'}: no climb from there, the walk home as it goes`);
-    return goHome();
+    return toHome();
   }
   // the hour as the bot sees it now (the run's snapshot may be from the morning it set out in)
   let hour = { timeOfDay: st.timeOfDay ?? ctx.s.timeOfDay, thundering: st.thundering ?? ctx.s.thundering };
@@ -191,17 +209,17 @@ export async function walkHome(ctx: GoalContext, opts: { timeoutMs: number; upAt
     ctx.progress(back.words);
     const walk = await attempt(() => ctx.call<{ arrived?: boolean }>('goto', { ...back.to, range: 1, timeoutMs: WALK_BACK_MS }, WALK_BACK_MS + 15_000));
     stopped();
-    if (walk?.arrived === true) return goHome(true);
+    if (walk?.arrived === true) return toHome(true);
     // not got there (the start gone, a build in the way): up from wherever it stands now, at the hour it is now
     const again = await look();
-    if (!again?.position) return goHome(true);
+    if (!again?.position) return toHome(true);
     if (again.timeOfDay !== undefined) hour = { timeOfDay: again.timeOfDay, thundering: again.thundering ?? hour.thundering };
     feet = floored(again.position);
     if (underYard(feet, home, yard)) return under(feet);
-    if (inColumn(col, feet)) return goHome(true);
+    if (inColumn(col, feet)) return toHome(true);
     above = await seeAbove(ctx, feet);
     stopped();
-    if (!deep(feet, above)) return goHome(true);
+    if (!deep(feet, above)) return toHome(true);
   }
   const climb = await climbOut(ctx, feet, above, home, col, hour);
   if (climb === 'late') return { ok: false, night: true, text: `${depthOf(feet, above, home)}: no climb to the surface this late (it would come up after dark: the walk home climbs out by day)` };
@@ -213,5 +231,5 @@ export async function walkHome(ctx: GoalContext, opts: { timeoutMs: number; upAt
     await attempt(() => ctx.call('goto', { ...upAt, range: 1, timeoutMs: WALK_BACK_MS }, WALK_BACK_MS + 15_000));
     stopped();
   }
-  return goHome(true);
+  return toHome(true);
 }

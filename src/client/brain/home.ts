@@ -6,6 +6,7 @@ import { chestTotals } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { buildStep, siteStep } from './milestones.js';
 import { prepare } from './project.js';
+import { leaveYard } from './yardgates.js';
 
 /**
  * The first home: a bed under a roof. On a new server the bot had none: nothing crafted or placed a bed, and the plan
@@ -49,6 +50,8 @@ async function huntSheep(ctx: GoalContext): Promise<number> {
     const { entities } = await ctx.call<{ entities: (Creature & { position: Pos })[] }>('world.entities', { maxDistance: 64 });
     const sheep = entities.filter(e => e.name === 'sheep' && !someones(e, ctx.world.yard)).sort((a, b) => a.distance - b.distance)[0];
     if (!sheep) break;
+    // (the chase is Baritone's walk to it: from in the yard to one outside, out by a gate first, yardgates.ts)
+    await leaveYard(ctx, sheep.position);
     const r = await ctx.act('attack-entity', { target: `#${sheep.id}`, maxDistance: 64, timeoutMs: 45_000 });
     if (!r.ok) break;
     await ctx.act('collect-items', { radius: 6, timeoutMs: 30_000 }).catch(() => undefined);

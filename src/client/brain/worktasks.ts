@@ -25,6 +25,7 @@ import type { Zone } from './courtesy.js';
 import { PEN_FOOD } from './animals.js';
 import { IN_SIGHT, cowRange, fetchForPens, penAt } from './pens.js';
 import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult, type WorkTask } from './work.js';
+import { leaveYard } from './yardgates.js';
 
 const MINUTE = 60_000;
 
@@ -498,6 +499,9 @@ const surface: WorkTask = {
       if (left < SURFACE_LAST) break;
       const slice = Math.min(SURFACE_SLICE, left);
       ctx.progress(`mining ${block} for up to ${want - got} (${Math.round(slice / 1000)} s)`);
+      // where the coal is, Baritone's miner knows, outside the home area: out of the yard by the nearest gate first,
+      // not over the fence to it (yardgates.ts)
+      await leaveYard(ctx);
       // the mine tool counts what is carried of the ore's own drop: up to that and the want, the want is met
       const r = await ctx.act('mine-blocks', { block, count: carried(items, [f.items[0]]) + want - got, timeoutMs: slice, maxFromHome: ctx.world.leash });
       said = r.text.split('\n')[0].slice(0, 100);

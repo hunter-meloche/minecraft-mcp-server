@@ -985,9 +985,11 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   // rounds run after the farm, all before the tree round, so every draw after falls differently. Over seeds 20261112
   // to 20261151 the week's idle went from 19.0% to 20.0%, sd 5.5 (seed by seed 1.1 points more, give or take 0.9):
   // within the seeds' own spread. Nine trips since the cows go out to their range, 256, past the leash: each side is
-  // walked to 240 before it is given up, and where a cow was found and lost, out there, is `in sight` next)
+  // walked to 240 before it is given up, and where a cow was found and lost, out there, is `in sight` next. Eight
+  // since every walk out of the yard and home into it goes by a gate (yardgates.ts): the walks round to the gates take
+  // their time, and the week's last, east, no longer fits)
   const cows = step5Week(t, { lines, runs, game, world }, account);
-  t.deepEqual(cows, ['north', 'in sight', 'east', 'in sight', 'south', 'west', 'north', 'in sight', 'east'], account);
+  t.deepEqual(cows, ['north', 'in sight', 'east', 'in sight', 'south', 'west', 'north', 'in sight'], account);
   // the coal fills the afternoons while it is short of 128, its dry marks let go after 30 s of standing idle (the
   // full shore's never: it is written down, and the patch asks no more)
   t.true(lines.some(l => l.text.endsWith('on dry marks: let go of surface:coal')), account);
@@ -1000,6 +1002,7 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   // all of it hold, late and away. Since the cows go out to their range (the sides' walks to 240 fill what was the
   // evening's and the probation's): days 2 to 4 0%, 8.4% and 0% (late), days 5 to 7 15.5% together, and day 7 13.6%,
   // late 75 s alone (its morning, held on the deep rung's probation before, goes to the cows' walk north to 240).
+  // With the walks by the gates: days 2 to 4 the same, days 5 to 7 15.3% together, day 7 14.6%, late 80 s alone.
   // The empty time is the cow fetch at its measured rate (517 s, all of it, since it goes out to 240: a side where one
   // was found and lost comes round again after 20 min), the tree and light rounds' empty rounds, and a deep trip that
   // finds nothing (3 of 12)
@@ -1132,12 +1135,15 @@ test.serial('a game day on the live homestead, the step-5 rungs and the cane rou
   // the round: nothing grown at its first visit, all 20 cut at its next, never a walk to a dry cell
   t.deepEqual(said(/^done cane in /).map(l => l.replace(/ in \d+s/, '')), ['done cane: cut 0 stalk(s) (0 cane)', 'done cane: cut 20 stalk(s) (20 cane)']);
   // the first morning's deep trip ends 102 under the ground north of the yard with no way back known (the stand-in
-  // leaves no `upAt`): its walk home climbs out where it stands first (homeward.ts), and smelt cuts the walk over the
-  // surface as it comes near home with the raw gold it brought; its line is said all the same
-  t.deepEqual(said(/^work: deep: (\d+ under|climbed|\[)/), [
+  // leaves no `upAt`): its walk home climbs out where it stands first (homeward.ts), and comes in by the north gate,
+  // the one on its way (yardgates.ts), home before smelt cuts in (straight for home over the fence, as it walked
+  // before the gates, smelt cut the walk as it came near home: the timing of the walks, nothing more); its line is
+  // said either way
+  t.deepEqual(said(/^(done )?work: deep(: | in \d+s: )(\d+ under|climbed|into the yard|\[)/).map(l => l.replace(/ in \d+s/, '')), [
     'work: deep: 102 under the ground at (-549, -40, 2079): up to the surface at (-549, 63, 2079) before the walk home',
     'work: deep: climbed to (-549, 63, 2079)',
-    'work: deep: [gold] +6 raw_gold; stopped on the walk home (its marks are written)'
+    'work: deep: into the yard by its north gate (-549, 63, 2119)',
+    'done work: deep: [gold] +6 raw_gold; back home'
   ]);
   // the cows rung: each side walked to the cow range less 16 (240: past the leash) and looked round, and none there;
   // two leads taken for it (two kept on hand). East set out on the second morning by its gate and came home (the gold

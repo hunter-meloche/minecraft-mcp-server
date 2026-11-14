@@ -13,6 +13,7 @@ import { mineDrops } from './chores.js';
 import { deathNow, deepEnd, deepHold, deepStart, markDry, type WorkResult } from './work.js';
 import { underYard } from './underyard.js';
 import { walkHome } from './homeward.js';
+import { leaveYard } from './yardgates.js';
 import type { InventoryItem } from '../tools.js';
 
 /**
@@ -288,6 +289,8 @@ export async function oreTrip(ctx: GoalContext, opts: {
   }
   (ctx.world.zones ??= {}).mine = [start];
   ctx.progress(`out to the mine at (${start.x}, ${start.z})`);
+  // out of the yard by the gate on the way (the east one, to the live start), not over the fence: yardgates.ts
+  await leaveYard(ctx, start);
   const walk = await ctx.call<{ arrived?: boolean }>('goto', { ...start, xz: true, range: 4, timeoutMs: 180_000 }, 195_000);
   // a walk that stopped short (the storage house door has held the bot) leaves it where it is, maybe in the yard:
   // nothing is thrown away or dug there, and the mine start is as good as it was

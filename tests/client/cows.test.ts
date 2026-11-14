@@ -100,6 +100,10 @@ class Pasture {
   farthest = 0;
   /** where it stood under the yard, if a walk took it down there */
   under?: Pos;
+  /** every place the bot stood, after each walk */
+  stood: Pos[] = [];
+  /** how each straight step (steer) was to end: how near its point, and sneaking */
+  steers: { within?: number; sneak: boolean }[] = [];
   /** where the bot stood at each look while an animal was on its lead (the waits for it are looks) */
   ledLooks: Pos[] = [];
   private nextDrop = 900;
@@ -152,6 +156,8 @@ class Pasture {
       follow?: number;
       /** doors of a build world memory does not know: a walk through one opens it (Baritone), the closer shuts it behind */
       doors?: Pos[];
+      /** where a culled cow's drops fall (default: a leather and two beef where it died) */
+      cullDrops?: (c: Cow) => { item: string; position: Pos }[];
     } = {}) {
     this.items = items.map(i => ({ ...i }));
     this.chests = structuredClone(world.chestItems ?? {});
@@ -267,6 +273,7 @@ class Pasture {
       if (through && !this.isOpen(d)) { this.open.set(k(d), true); this.opened.add(k(d)); this.log.push(`baritone opens ${k(d)}`); }
     }
     this.me = { ...to };
+    this.stood.push({ ...this.me });
     this.farthest = Math.max(this.farthest, horiz(this.me, HOME));
     // the client's closer shuts what the bot opened as it gets 2.2 past it, while it is on
     if (this.gatesAuto) {
@@ -307,6 +314,18 @@ class Pasture {
 
   drop(at: Pos) {
     if (!this.opts.dropsLost) this.drops.push({ id: this.nextDrop++, item: 'lead', position: { ...at } });
+  }
+
+  /**
+   * A straight walk from inside the pen at a point past its fence: the bot ends pressed against the fence, its middle
+   * as near the point as the posts let it, 0.075 into the fence's own cells (its box 0.6 wide, a post 0.25), and picks
+   * up what is within 1.5 of it there.
+   */
+  press(to: Pos) {
+    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+    this.me = { x: clamp(to.x, PEN.x + 0.925, PEN.x + PEN.width - 1 + 0.075), y: this.me.y, z: clamp(to.z, PEN.z + 0.925, PEN.z + PEN.length - 1 + 0.075) };
+    this.stood.push({ ...this.me });
+    for (const d of [...this.drops]) if (horiz(d.position, this.me) <= 1.5) { this.drops = this.drops.filter(x => x !== d); this.add(d.item, 1); this.log.push(`picks up a ${d.item}`); }
   }
 
   ctx(world: WorldMemory, signal: AbortSignal = new AbortController().signal, said: string[] = []): GoalContext {
@@ -404,6 +423,13 @@ class Pasture {
           if (hold && this.led.size && horiz(this.me, mid(HOME)) <= hold.within) { this.opts.holdNear = undefined; hold.at?.(); await hold.until; }
           return { arrived: true };
         }
+        if (method === 'steer') {
+          // straight at the point, no pathfinding (the stand-in knows no fence in the way of one)
+          this.steers.push({ within: p.within === undefined ? undefined : Number(p.within), sneak: p.sneak === true });
+          this.walk({ x: Number(p.x), y: Number(p.y), z: Number(p.z) }, 'steer');
+          this.log.push(`steer ${Math.floor(Number(p.x))},${Math.floor(Number(p.z))}`);
+          return { reached: true };
+        }
         if (method === 'entity.use') {
           if (p.item) {
             if (!this.count(String(p.item))) throw new Error(`no ${p.item} in inventory`);
@@ -483,15 +509,24 @@ class Pasture {
           return { ok: true, text: `Took ${n} ${item} from the chest at ${fmt(at(a))}. It holds: ${holds}.` };
         }
         if (tool === 'attack-entity') {
-          // the fight: Baritone's own walk up to it (through what it passes, opening gates), the kill, the drops
-          // picked up where it fell
+          // the fight: Baritone's own walk up to it (through what it passes, opening gates), the kill, the drops where
+          // it fell (opts.cullDrops); then, unless `collect: false`, picked up as tools.ts does it: a walk to each, and
+          // to one in a fence's cell, from inside the pen, the straight walk at it that ends pressed into the fence
           const c = this.cows.find(x => `#${x.id}` === a.target && horiz(x.position, this.me) <= Number(a.maxDistance ?? 16));
           if (!c) return { ok: true, text: `No ${a.target} within ${a.maxDistance ?? 16} blocks` };
           this.walk({ ...c.position }, 'fight');
           this.cows = this.cows.filter(x => x !== c);
           this.log.push(`killed #${c.id}`);
-          this.add('leather', 1);
-          this.add('beef', 2);
+          const fell = this.opts.cullDrops?.(c) ?? ['leather', 'beef', 'beef'].map(item => ({ item, position: { ...c.position } }));
+          const dropped = fell.map(f => ({ id: this.nextDrop++, item: f.item, position: { ...f.position } }));
+          this.drops.push(...dropped);
+          if (a.collect !== false) {
+            for (const d of dropped) {
+              if (!this.drops.includes(d) || horiz(d.position, c.position) > 3) continue;
+              if (this.fenceAt(Math.floor(d.position.x), Math.floor(d.position.z)) && this.inPenBox(this.me)) this.press(d.position);
+              else this.walk({ ...d.position }, 'drop');
+            }
+          }
           return { ok: true, text: 'Killed cow with 2 swing(s), 2 landed (diamond_sword x2) in 1s. Health 20/20, food 20/20.' };
         }
         if (tool === 'craft-item' && a.outputItem === 'lead') {
@@ -1556,11 +1591,12 @@ test.serial('the pens round breeds its pair from inside the pen: fed with wheat,
   t.deepEqual(pa.log.filter(l => l.startsWith('entity.use') || l === 'a calf is born'), ['entity.use #52 wheat', 'entity.use #51 wheat', 'a calf is born']);
   t.deepEqual(workOf(world).pen.cow, { adults: 2, babies: 1, at: T0 });
   // in by the gate and shut behind, out again and shut behind, the client's closer off meanwhile; every walk careful:
-  // up to the far one, and back to the gate from the corner before the click (out of reach, it walks there plain)
+  // up to the far one (to the inside cell by it nearest the bot, not onto its own), and back to the gate from the
+  // corner before the click (out of reach, it walks there plain)
   t.deepEqual(gateLog(pa), ['gates.auto off', ...Array.from({ length: 4 }, () => `use-item-on-block ${k(GATE)}`), 'gates.auto on']);
   t.false(pa.isOpen(GATE));
   t.true(pa.careful.every(c => c));
-  t.true(pa.log.includes('goto careful -557,2166'), pa.log.join('\n'));
+  t.true(pa.log.includes('goto careful -556,2167'), pa.log.join('\n'));
   t.false(pa.log.some(l => l === 'move-to-position' || /^goto -/.test(l)), pa.log.join('\n'));
   t.true(outOfPen(pa.me), JSON.stringify(pa.me));
   // the wheat away (a sword in hand) before the gate opened to go out: the herd stayed in, the calf with it
@@ -1703,6 +1739,47 @@ test('the pens round culls above 6 adults only, from inside the pen: never a cal
   t.is(await pens.run(pb.ctx(w2)), 'cow: the pen is full (6 adults, 4 babies)');
   t.false(pb.log.some(l => l.startsWith('killed') || l.startsWith('entity.use')));
   t.false(pb.log.some(l => l.startsWith('use-item-on-block')), 'nobody went in');
+});
+
+test('live, Nov 13: a cull in the cow pen\'s corner by its corner post, the drops in the post\'s cell, on top of it and past it: every walk of the visit on the pen\'s inside cells, never the fence\'s; what fell past the fence left', async (t) => {
+  // seven adults: the one alone in the south-west corner, by the post at (-558, 63, 2171), is the one culled. Live
+  // the fight's own pick-up walked at a drop by that post and pressed the bot into the corner, its block the post's
+  // (-558, 63, 2171), and the wedge watch stopped every job there for 1 h 45 min
+  const row = [[-557, 2166], [-556, 2166], [-555, 2166], [-554, 2166], [-553, 2166], [-553, 2167]].map(([x, z], i) => cow(301 + i, x, z));
+  const corner = cow(311, -557, 2170);
+  const world = liveWorld();
+  const pa = new Pasture([...row, corner], world, KIT, {
+    cullDrops: c => (c.id !== corner.id ? [] : [
+      { item: 'leather', position: { x: -557.2, y: 63, z: 2171.2 } }, // in the post's cell, inside the corner
+      { item: 'beef', position: { x: -557.5, y: 64.5, z: 2171.5 } }, // on top of the post
+      { item: 'beef', position: { x: -558.6, y: 63, z: 2172.4 } } // past it, outside the pen
+    ])
+  });
+  // an earlier cull's leather past the west fence, lying there before this fight: not this cull's to count
+  const old = { x: -559.6, y: 63, z: 2168.5 };
+  pa.drops.push({ id: 4000, item: 'leather', position: { ...old } });
+  const text = await pens.run(pa.ctx(world));
+  t.true(text.startsWith('cow: culled one (Killed cow with 2 swing(s), 2 landed (diamond_sword x2) in 1), 1 drop(s) left by the fence; '), text);
+  t.true(pa.log.includes(`killed #${corner.id}`));
+  // the bot's block never a cell of the pen's fence ring (its gateway's included), every walk careful
+  const ring = (q: Pos) => {
+    const x = Math.floor(q.x), z = Math.floor(q.z), x2 = PEN.x + PEN.width - 1, z2 = PEN.z + PEN.length - 1;
+    return ((x === PEN.x || x === x2) && z >= PEN.z && z <= z2) || ((z === PEN.z || z === z2) && x >= PEN.x && x <= x2);
+  };
+  t.deepEqual(pa.stood.filter(ring), []);
+  t.true(pa.careful.every(c => c));
+  // the two in reach of the corner's inside cell picked up from its middle; the one past the fence where it lies
+  t.true(pa.log.includes('goto careful -557,2170'), pa.log.join('\n'));
+  t.true(pa.log.includes('steer -557,2170'), pa.log.join('\n'));
+  // the step ends within 0.1 of the cell's middle, sneaking: a drop on the post's far edge is 1.25 off it on the
+  // axis, and the game picks up to 1.425 (the bot's box and the item's, and a block)
+  t.deepEqual(pa.steers, [{ within: 0.1, sneak: true }]);
+  t.is(pa.count('leather'), 1);
+  t.is(pa.count('beef'), 1);
+  t.deepEqual(pa.drops.map(d => d.position), [old, { x: -558.6, y: 63, z: 2172.4 }]);
+  // out by the gate, shut behind
+  t.false(pa.isOpen(GATE));
+  t.true(outOfPen(pa.me));
 });
 
 // ---- the rung

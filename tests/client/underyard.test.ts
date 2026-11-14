@@ -967,6 +967,9 @@ test.serial('a night walled in under the yard: once out from under has dug it ou
  * margin) with go-home as Baritone walked it that day: from more than 8 below home's level its legs "at any height"
  * run under the ground straight for home into the yard's column (the live end of that walk, 'Stopped 57 blocks'),
  * from the surface it gets home; Baritone's own goto (not careful) gets to the block asked for, or as `lost` says not.
+ * From the surface outside the fence the walk home comes in by a gate first (yardgates.ts): to the cell outside it and
+ * through it to the cell inside, over the surface, careful by the yard (walk only), and these get there as well (or
+ * not, with `lost`). A careful walk is written down as one.
  */
 const FAR: Pos = { x: -517, y: -45, z: 2089 };
 /** The mine start the live trips set out from, east of the yard. */
@@ -996,8 +999,8 @@ function walkingHome(rock: Rock, over: Partial<Snapshot> = {}, world: WorldMemor
       if (opts.zones === 'fail') throw new Error('timeout');
       return { zones: opts.zones ?? [] };
     }
-    if (method !== 'goto' || p.careful) return call(method, p);
-    walks.push(`goto ${p.x},${p.y},${p.z} range ${p.range}`);
+    if (method !== 'goto') return call(method, p);
+    walks.push(`goto ${p.x},${p.y},${p.z} range ${p.range}${p.careful ? ' careful' : ''}`);
     if (opts.lost) return { arrived: false };
     rock.bot = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
     stood.push({ ...rock.bot });
@@ -1014,16 +1017,18 @@ test.serial('the walk back to the yard from deep under ground climbs out where i
   const before = walkingHome(deepAt(FAR), {}, world);
   await before.ctx.act('go-home');
   t.deepEqual(underIt(before.stood, world), [{ x: -536, y: 9, z: 2179 }]);
-  // now: up through the hill where it stands (past the margin, where Baritone may dig), then home over the surface.
+  // now: up through the hill where it stands (past the margin, where Baritone may dig), then home over the surface,
+  // in by the north gate, the one on its way (yardgates.ts: to the cell 2 outside it, through to the one 2 inside).
   // The mine start is 97 off across the ground: straight up, not the walk back to it
   const rock = deepAt(FAR);
   const r = walkingHome(rock, {}, world);
   t.is(await returnIdle.run(r.ctx), 'back home');
   t.deepEqual(r.tools, ['move-to-position', 'go-home']);
   t.deepEqual(rock.climbed, [{ x: -517, y: 69, z: 2089 }]);
-  t.deepEqual(r.said, ['113 under the ground at (-517, -45, 2089): up to the surface at (-517, 69, 2089) before the walk home', 'climbed to (-517, 69, 2089)']);
-  t.deepEqual(r.walks, []);
-  t.deepEqual(r.stood, [{ x: -517, y: 69, z: 2089 }, { ...HOME }]);
+  t.deepEqual(r.said, ['113 under the ground at (-517, -45, 2089): up to the surface at (-517, 69, 2089) before the walk home', 'climbed to (-517, 69, 2089)',
+    'into the yard by its north gate (-549, 63, 2119)']);
+  t.deepEqual(r.walks, ['goto -549,63,2117 range 1', 'goto -549,63,2121 range 1 careful']);
+  t.deepEqual(r.stood, [{ x: -517, y: 69, z: 2089 }, { x: -549, y: 63, z: 2117 }, { x: -549, y: 63, z: 2121 }, { ...HOME }]);
   t.deepEqual(underIt(r.stood, world), []);
   // the retreat's walk home (hurt, the same place) climbs out the same way
   const hurt = deepAt(FAR);
@@ -1066,15 +1071,18 @@ test.serial('the climb out comes up before dark or is not made: from 113 under a
   t.deepEqual(lost.tools, []);
 });
 
-test.serial('on the surface the walk home is go-home as it always was, and so it is a little under it', async (t) => {
+test.serial('on the surface the walk home is go-home as it always was (in by a gate from outside the fence), and so it is a little under it', async (t) => {
   const world = deepWorld();
-  // out on the hill east of the yard, on the lawn, and in a hollow 5 under the hill on home's level
-  for (const at of [{ x: -460, y: 69, z: 2183 }, { x: -540, y: 63, z: 2150 }, { x: -460, y: 63, z: 2183 }]) {
+  // out on the hill east of the yard, on the lawn, and in a hollow 5 under the hill on home's level. From out east:
+  // toward the east gate at any height to 32 from its outer cell, to that cell, through to the one inside, then
+  // go-home (yardgates.ts); on the lawn, inside the fence, go-home alone
+  const east = ['goto -499,63,2183 range 8', 'goto -531,63,2183 range 1', 'goto -535,63,2183 range 1 careful'];
+  for (const [at, walks] of [[{ x: -460, y: 69, z: 2183 }, east], [{ x: -540, y: 63, z: 2150 }, []], [{ x: -460, y: 63, z: 2183 }, east]] as const) {
     const r = walkingHome(deepAt(at), {}, world);
     t.deepEqual(await walkHome(r.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' }, `${at.x}, ${at.y}, ${at.z}`);
     t.deepEqual(r.tools, ['go-home']);
-    t.deepEqual(r.said, []);
-    t.deepEqual(r.walks, []);
+    t.deepEqual(r.said, walks.length ? ['into the yard by its east gate (-533, 63, 2183)'] : []);
+    t.deepEqual(r.walks, walks);
   }
   // 9 under the hill's top, though on home's level, is under ground: up where it stands (73 from the mine start)
   const under = walkingHome(deepAt({ x: -420, y: 59, z: 2183 }), {}, world);
@@ -1086,20 +1094,22 @@ test.serial('on the surface the walk home is go-home as it always was, and so it
 test.serial('within 64 of where it went down, the way back is the way it came: to the mine start, or the block the trip stood on there; never across the yard\'s column', async (t) => {
   // 24 from the mine start across the ground, 88 under the hill: up the way it came, the block over the ground there
   const world = deepWorld();
+  // (and from there home over the surface, in by the east gate: its cell 2 outside, through to the one 2 inside)
   const near = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), {}, world);
   t.deepEqual(await walkHome(near.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
-  t.deepEqual(near.walks, ['goto -493,69,2183 range 1']);
-  t.deepEqual(near.said, ['back to the mine start (-493, 69, 2183) before the walk home']);
+  const byEast = ['goto -531,63,2183 range 1', 'goto -535,63,2183 range 1 careful'];
+  t.deepEqual(near.walks, ['goto -493,69,2183 range 1', ...byEast]);
+  t.deepEqual(near.said, ['back to the mine start (-493, 69, 2183) before the walk home', 'into the yard by its east gate (-533, 63, 2183)']);
   t.deepEqual(near.tools, ['go-home']);
   // the trip's own `upAt` when the run knows it, within 64
   const trip = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), {}, world);
   await walkHome(trip.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } });
-  t.deepEqual(trip.walks, ['goto -492,69,2184 range 1']);
-  t.deepEqual(trip.said, ['up where it went down, (-492, 69, 2184), before the walk home']);
+  t.deepEqual(trip.walks, ['goto -492,69,2184 range 1', ...byEast]);
+  t.deepEqual(trip.said, ['up where it went down, (-492, 69, 2184), before the walk home', 'into the yard by its east gate (-533, 63, 2183)']);
   // further than 64 (the live case's 97): straight up where it stands, the trip's `upAt` or not
   const far = walkingHome(deepAt(FAR), {}, world);
   await walkHome(far.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } });
-  t.deepEqual(far.walks, []);
+  t.deepEqual(far.walks, ['goto -549,63,2117 range 1', 'goto -549,63,2121 range 1 careful']);
   t.deepEqual(far.tools, ['move-to-position', 'go-home']);
   // and where no climb can be made (water over its head), toward where the trip went down all the same, as every walk
   // home after a trip did, before go-home's walk; never across the yard's column (a way down west of the yard, 80 off)
@@ -1107,9 +1117,10 @@ test.serial('within 64 of where it went down, the way back is the way it came: t
   wet.set({ x: FAR.x, y: 64, z: FAR.z }, 'water');
   const toward = walkingHome(wet, {}, world);
   t.deepEqual(await walkHome(toward.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } }), { ok: true, text: 'Home' });
-  t.deepEqual(toward.walks, ['goto -492,69,2184 range 1']);
+  t.deepEqual(toward.walks, ['goto -492,69,2184 range 1', ...byEast]);
   t.deepEqual(toward.tools, ['go-home']);
-  t.deepEqual(toward.said, ['no climb from (-517, -45, 2089): water over its head at (-517, 64, 2089); the walk home as it goes', 'up where it went down, (-492, 69, 2184), before the walk home']);
+  t.deepEqual(toward.said, ['no climb from (-517, -45, 2089): water over its head at (-517, 64, 2089); the walk home as it goes', 'up where it went down, (-492, 69, 2184), before the walk home',
+    'into the yard by its east gate (-533, 63, 2183)']);
   t.deepEqual(underIt(toward.stood, world), []);
   const east = deepAt({ x: -520, y: -20, z: 2160 });
   east.set({ x: -520, y: 64, z: 2160 }, 'water');
@@ -1124,13 +1135,16 @@ test.serial('within 64 of where it went down, the way back is the way it came: t
   for (let y = 10; y <= 70; y++) shaft.set({ x: MINE.x, y, z: MINE.z }, 'air');
   const pit = walkingHome(shaft, {}, world);
   t.deepEqual(await walkHome(pit.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
-  t.deepEqual(pit.walks, []);
+  t.deepEqual(pit.walks, byEast);
   t.deepEqual(pit.tools, ['move-to-position', 'go-home']);
   t.deepEqual(underIt(pit.stood, world), []);
-  // the way back not found: up from where it stands
+  // the way back not found: up from where it stands. (Up there Baritone gets to no gate either: the one on its way,
+  // east, and the next, west, its straight way across the yard walked by no leg at any height; then go-home's own way)
   const lost = walkingHome(deepAt({ x: -500, y: -20, z: 2160 }), {}, world, { lost: true });
   t.deepEqual(await walkHome(lost.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
-  t.deepEqual(lost.walks, ['goto -493,69,2183 range 1']);
+  t.deepEqual(lost.walks, ['goto -493,69,2183 range 1', 'goto -531,63,2183 range 1', 'goto -567,63,2183 range 1']);
+  t.deepEqual(lost.said.slice(-3), ['into the yard by its east gate (-533, 63, 2183)', 'into the yard by its west gate (-565, 63, 2183)',
+    'no way into the yard by the east gate (-533, 63, 2183) or the west gate (-565, 63, 2183): home by go-home\'s own way']);
   t.deepEqual(lost.tools, ['move-to-position', 'go-home']);
   t.deepEqual(underIt(lost.stood, world), []);
   // a mine start whose straight way runs under the yard (west of it, the bot 7 past its east margin): straight up
@@ -1138,7 +1152,7 @@ test.serial('within 64 of where it went down, the way back is the way it came: t
   west.zones!.mine = [{ x: -578, y: 63, z: 2160 }];
   const across = walkingHome(deepAt({ x: -520, y: -20, z: 2160 }), {}, west);
   await walkHome(across.ctx, { timeoutMs: 600_000 });
-  t.deepEqual(across.walks, []);
+  t.deepEqual(across.walks, byEast);
   t.deepEqual(across.tools, ['move-to-position', 'go-home']);
   t.deepEqual(underIt(across.stood, west), []);
 });
@@ -1228,7 +1242,9 @@ test.serial('by the yard the climb out fills the top of the stair it came up by,
   // (in the margin, x -527 and on, the ground is the lawn's at 62: the hill's 68 is open air there)
   t.deepEqual(waysDown(by, { x: -526, z: 2120 }, 68).filter(p => !by.inZone(p)), []);
   t.true(by.placed.length > 0 && by.placed.every(p => !by.inZone(p.at) && p.item === 'dirt'));
-  t.is(r.said.at(-1), 'filled the top of its shaft with dirt: (-525, 67, 2120), (-525, 68, 2120), (-525, 67, 2119), (-525, 68, 2119)');
+  // (then home by the east gate, the one on its way: yardgates.ts)
+  t.deepEqual(r.said.slice(-2), ['filled the top of its shaft with dirt: (-525, 67, 2120), (-525, 68, 2120), (-525, 67, 2119), (-525, 68, 2119)',
+    'into the yard by its east gate (-533, 63, 2183)']);
   t.deepEqual(r.tools, ['move-to-position', ...by.placed.map(() => 'place-block'), 'go-home']);
   // the live spot, 10 past the margin: the same stair is left as it is, nothing placed and nothing said of it
   const far = deepAt(FAR);
@@ -1238,5 +1254,5 @@ test.serial('by the yard the climb out fills the top of the stair it came up by,
   t.true(left.before.length > 0);
   t.deepEqual(far.placed, []);
   t.deepEqual(f.tools, ['move-to-position', 'go-home']);
-  t.is(f.said.length, 2);
+  t.deepEqual(f.said.slice(1), ['climbed to (-517, 69, 2089)', 'into the yard by its north gate (-549, 63, 2119)']);
 });

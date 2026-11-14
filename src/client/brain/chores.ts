@@ -21,7 +21,8 @@ import { farmCentre, type Pos, type WorldMemory } from './memory.js';
 import type { Box } from '../survey.js';
 // (work.ts reaches this file through pockets.ts: its roundDue is asked inside the rounds' gates only)
 import { roundDue, roundFrom, toRound } from './work.js';
-import { walkHome } from './homeward.js';
+import { goHome, walkHome } from './homeward.js';
+import { EXPLORE_MIN, exploreReach, leaveYard } from './yardgates.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -371,6 +372,8 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
     let there = false;
     for (const dump of dumps) {
       if (ctx.signal.aborted) break;
+      // (the spot is outside the fence: out by the gate on the way to it, not over the fence: yardgates.ts)
+      await leaveYard(ctx, dump);
       try {
         await ctx.act('move-to-position', { ...dump, range: 2, timeoutMs: 60_000 });
         there = true;
@@ -391,7 +394,7 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
       note = 'no dump spot outside the fence it could get to';
       ctx.progress(`${note}: the junk stays carried`);
     }
-    await ctx.act('go-home', { name: 'home', timeoutMs: 120_000 }).catch(() => undefined);
+    await goHome(ctx, 120_000).catch(() => undefined);
   }
   ctx.progress(`stored ${stored}, dropped ${dropped}`);
   return note ? { stored, dropped, note } : { stored, dropped };
@@ -697,7 +700,7 @@ export const WOODS_DIRS = ['north', 'east', 'south', 'west'] as const;
  * the plains had no tree within 96 blocks once its first few were felled: every trip found nothing and the storage
  * house waited for its logs all day. `text` says what it did; ok false when there are no woods within reach.
  */
-export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress'>, kinds: string[], ownOnly = false,
+export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world' | 'progress' | 'status' | 'signal' | 's'>, kinds: string[], ownOnly = false,
   opts: { zone?: string; what?: string; dirs?: readonly (typeof WOODS_DIRS)[number][] } = {}): Promise<{ ok: boolean; text: string }> {
   // the same search for other wild things (sugar cane), remembered under their own zone, a side or two per call
   const { zone = 'woods', what = 'woods', dirs = WOODS_DIRS } = opts;
@@ -720,6 +723,8 @@ export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world'
   const known = zones[zone]?.[0];
   if (known) {
     ctx.progress?.(`no ${thing} in sight: to the ${what} at (${known.x}, ${known.z})`);
+    // (out of the yard by the gate on the way, and home in by one between the sides: yardgates.ts)
+    await leaveYard(ctx, known);
     await ctx.act('move-to-position', { ...known, range: 6, timeoutMs: 150_000 });
     if (await inSight()) return { ok: true, text: `off to the ${what} at (${known.x}, ${known.z})` };
     delete zones[zone]; // felled, or not there after all: look again
@@ -727,7 +732,9 @@ export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world'
   const reach = Math.min(Math.max(ctx.world.leash ?? 96, 48), 160);
   for (const direction of dirs) {
     ctx.progress?.(`no ${thing} in sight: looking ${direction} for ${kinds[0]}`);
-    const r = await ctx.act('explore', { target: kinds[0], direction, maxDistance: reach, step: 32, timeoutMs: 90_000 });
+    // out by that side's gate, and from there no further than the reach is from home (explore counts from the gate)
+    const left = await exploreReach(ctx, await leaveYard(ctx, direction), reach);
+    const r = left >= EXPLORE_MIN ? await ctx.act('explore', { target: kinds[0], direction, maxDistance: left, step: 32, timeoutMs: 90_000 }) : { ok: false, text: '' };
     const m = /^Found [a-z_]+ at \((-?\d+), (-?\d+), (-?\d+)\)/.exec(r.text);
     if (m) {
       const at = { x: Number(m[1]), y: Number(m[2]), z: Number(m[3]) };
@@ -736,7 +743,7 @@ export async function toTheWoods(ctx: Pick<GoalContext, 'call' | 'act' | 'world'
       await ctx.act('move-to-position', { ...at, range: 6, timeoutMs: 150_000 });
       return { ok: true, text: `found ${what} ${direction} at (${at.x}, ${at.z})` };
     }
-    await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+    await goHome(ctx, 300_000).catch(() => undefined);
   }
   return { ok: false, text: `no ${kinds[0]} within ${reach} blocks of home ${dirs.length === WOODS_DIRS.length ? 'on any side' : dirs.join(', ')}` };
 }
@@ -795,12 +802,15 @@ export const stock: Goal = {
       const woods = await toTheWoods(ctx, t.mine.split(','));
       if (!woods.ok) {
         done(ctx.world, `fruitless:${t.name}`, ctx.s.now);
-        await ctx.act('go-home', { name: 'home', timeoutMs: 300_000 }).catch(() => undefined);
+        await goHome(ctx, 300_000).catch(() => undefined);
         return woods.text;
       }
       if (woods.text) ctx.progress(woods.text);
     }
     ctx.progress(`mining ${t.mine.split(',')[0]} for ${Math.round(budget / 1000)}s`);
+    // Baritone's miner mines nothing in the home area: out of the yard by the nearest gate first, not over the fence
+    // to whatever it finds nearest (yardgates.ts)
+    await leaveYard(ctx);
     // as much as the trip's time allows (a build job's whole bill, not a stack at a time)
     let r = await ctx.act('mine-blocks', { block: t.mine, count: carried + Math.min(t.short, 256), timeoutMs: budget });
     ctx.progress(r.text.slice(0, 160));
@@ -841,9 +851,11 @@ const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
  * The dark spots (block light 0, where monsters spawn since 1.18) a mob could stand on around a point, and with
  * `place`, torches for them as the plan puts them, each one checked against the real light: the plan's light model
  * goes through walls, and the daily round kept putting two torches by an enclosed air pocket that they never lit,
- * every day. A torch that lights no dark spot is taken back up. `ignore` holds spots to leave out ("x,y,z").
+ * every day. A torch that lights no dark spot is taken back up. `ignore` holds spots to leave out ("x,y,z"); `before`
+ * goes before each torch (the band's: out of the yard by a gate first, as place-block's own walk to it went over the
+ * fence).
  */
-export async function lightArea(io: Io, centre: Pos, radius: number, opts: { place: boolean; max: number; ignore: Set<string>; only?: (p: Pos) => boolean }): Promise<LightReport> {
+export async function lightArea(io: Io, centre: Pos, radius: number, opts: { place: boolean; max: number; ignore: Set<string>; only?: (p: Pos) => boolean; before?: (t: Pos) => Promise<unknown> }): Promise<LightReport> {
   const box = yardBox(centre, radius);
   const mask = (p: Pos) => !opts.ignore.has(key(p)) && (opts.only?.(p) ?? true);
   // in slabs of whole layers: one region call holds at most 65536 blocks, and the square round an 82 x 26 yard is
@@ -868,6 +880,7 @@ export async function lightArea(io: Io, centre: Pos, radius: number, opts: { pla
   const plan = planTorches(box, now.blocks, now.block, { prefer: centre, max: opts.max, mask });
   for (const t of plan.torches) {
     if (!now.dark.length) break;
+    await opts.before?.(t);
     const r = await io.act('place-block', { ...t, faceDirection: 'down', item: 'torch' });
     if (!/^Placed/.test(r.text)) { io.progress?.(`torch at ${key(t)}: ${r.text}`); continue; }
     await pause(500); // the client relights a moment after the block update
@@ -953,9 +966,11 @@ export const lights: Goal = {
     // the band outside the fence (not remembered as left out: there's always more of it than a day's torches)
     if (torches > TORCH_RESERVE) {
       ctx.progress('lighting the band outside the fence');
+      // (place-block walks into reach by Baritone's own way: from the yard, out by the gate on the way first)
       const b = await lightArea(ctx, centre, Math.min(radius + BAND.to, 34), {
         place: true, max: Math.min(BAND_PER_DAY, torches - TORCH_RESERVE), ignore,
-        only: p => { const d = outsideBy(yard, p); return d >= BAND.from && d <= BAND.to; }
+        only: p => { const d = outsideBy(yard, p); return d >= BAND.from && d <= BAND.to; },
+        before: t => leaveYard(ctx, t)
       });
       torches -= b.placed.length;
       ctx.gain(b.placed.length);
@@ -970,7 +985,7 @@ export const lights: Goal = {
         if (lit >= PATH_PER_DAY || torches <= TORCH_RESERVE || tried >= 3 * PATH_PER_DAY || ctx.signal.aborted) break;
         tried++;
         const y = Math.floor(ctx.s.position.y);
-        const p = await lightArea(ctx, { x: spot.x, y: Math.min(y, yard.y + 1), z: spot.z }, 3, { place: true, max: 1, ignore });
+        const p = await lightArea(ctx, { x: spot.x, y: Math.min(y, yard.y + 1), z: spot.z }, 3, { place: true, max: 1, ignore, before: t => leaveYard(ctx, t) });
         if (p.placed.length) { lit++; torches--; ctx.gain(1); ctx.progress(`a torch on the route at (${spot.x}, ${spot.z})`); }
       }
       if (tried) out.push(`routes: ${lit} torch(es) (${tried} of ${spots.length} spot(s) looked at)`);
