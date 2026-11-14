@@ -31,17 +31,28 @@ const ORES = /^raw_|_ingot$|_nugget$|_ore$|^(diamond|emerald|lapis_lazuli|redsto
 const WOOD = /_log$|_wood$|_planks$|_stem$|_hyphae$|^stripped_|^(stick|bamboo_block)$/;
 const STONE = /^(cobblestone|mossy_cobblestone|cobbled_deepslate|stone|smooth_stone|andesite|diorite|granite|tuff|deepslate|calcite|dripstone_block|sand|red_sand|gravel|dirt|coarse_dirt|rooted_dirt|mud|clay|clay_ball|brick|bricks|netherrack|blackstone|basalt|smooth_basalt|end_stone|sandstone|red_sandstone|terracotta|flint)$|^polished_|_bricks$/;
 
+/**
+ * Each item's category, once worked out: the stash's plan is read on every tick it would run (F2: whether anything
+ * can go anywhere), and minecraft-data's food list looked up afresh for every name made one plan 4 ms of the bot's
+ * core on the live storage house.
+ */
+const categoryCache = new Map<string, Category>();
+
 /** The category an item is stored under. */
 export function categoryOf(name: string): Category {
   const n = bare(name);
-  if (GEAR.test(n)) return 'gear';
-  if (MOBDROPS.has(n)) return 'mobdrops';
-  if (FARMING.test(n)) return 'farming';
-  if (foodsFor26()[n]) return 'food';
-  if (ORES.test(n)) return 'ores';
-  if (WOOD.test(n)) return 'wood';
-  if (STONE.test(n)) return 'stone';
-  return 'misc';
+  let c = categoryCache.get(n);
+  if (c) return c;
+  if (GEAR.test(n)) c = 'gear';
+  else if (MOBDROPS.has(n)) c = 'mobdrops';
+  else if (FARMING.test(n)) c = 'farming';
+  else if (foodsFor26()[n]) c = 'food';
+  else if (ORES.test(n)) c = 'ores';
+  else if (WOOD.test(n)) c = 'wood';
+  else if (STONE.test(n)) c = 'stone';
+  else c = 'misc';
+  categoryCache.set(n, c);
+  return c;
 }
 
 let stacks: Record<string, { stackSize: number }> | undefined;
@@ -51,19 +62,35 @@ export function stackSize(name: string): number {
   return stacks[bare(name)]?.stackSize ?? 64;
 }
 
-/** Slots a chest's contents take (each item packed into full stacks, as a chest's "store" merges them). */
-function slotsUsed(items: Record<string, number>): number {
+/**
+ * Slots a chest's contents take (each item packed into full stacks, as a chest's "store" merges them): never more
+ * than the game's, whose stacks of a name can be more than its count packed (things that do not stack together).
+ */
+export function packedSlots(items: Record<string, number>): number {
   let n = 0;
   for (const [name, count] of Object.entries(items)) n += Math.ceil(count / stackSize(name));
   return n;
 }
 
-/** How many more of an item fit: the free slots plus the rest of its last partial stack. */
+/**
+ * Slots the plans count a home chest as holding: a double chest's second half is room to spare. One seen with every
+ * slot used is counted as holding none (chests.ts chestSlots): only the room left in its own stacks is counted then.
+ */
+export const CHEST_SLOTS = 27;
+/** The slots each chest ("x,y,z") is counted as holding: one number for all, or each its own. */
+export type ChestSlots = number | ((chest: string) => number);
+const slotsOf = (slots: ChestSlots, chest: string) => (typeof slots === 'number' ? slots : slots(chest));
+
+/**
+ * How many more of an item fit: the free slots plus the rest of its last partial stack. With no free slot (a chest
+ * seen full: `slots` 0) only that rest, which is never more than the game's: the stacks of a name in a chest are
+ * never fewer than its count packed.
+ */
 export function roomFor(items: Record<string, number>, name: string, slots: number): number {
   const stack = stackSize(name);
   const have = items[name] ?? 0;
   const partial = have % stack ? stack - (have % stack) : 0;
-  return Math.max(0, slots - slotsUsed(items)) * stack + partial;
+  return Math.max(0, slots - packedSlots(items)) * stack + partial;
 }
 
 /** The item count per category in some chests. */
@@ -166,14 +193,17 @@ export interface DepositPlan {
  * What to put in which chest when the bot gets home. Each item goes to its category's chests (one already holding
  * it first, so stacks merge), then to the misc chest, and a category that ran out of room is reported as full.
  * `keep` is the items to keep all of, or how many of an item (counted over all its stacks) to keep carried. Only
- * the 36 pack slots are considered: worn armour and the off-hand stay on the bot.
+ * the 36 pack slots are considered: worn armour and the off-hand stay on the bot. `slotsPerChest`: the slots each
+ * chest is counted as holding, none for one seen with every slot used (live on Nov 14 the misc chest held 19 kinds in
+ * all its 27 slots, 23 of them packed, and the plan sent what fit nowhere else there, run after run: "nothing could be
+ * put away").
  */
 export function depositPlan(
   items: { name: string; count: number; slot: number }[],
   keep: Set<string> | ((item: { name: string; count: number }) => number),
   assign: ChestAssign,
   contents: ChestContents = {},
-  slotsPerChest = 27
+  slotsPerChest: ChestSlots = CHEST_SLOTS
 ): DepositPlan {
   const carried = new Map<string, number>();
   for (const it of items) if (it.slot >= 0 && it.slot <= 35) carried.set(it.name, (carried.get(it.name) ?? 0) + it.count);
@@ -193,7 +223,7 @@ export function depositPlan(
     const put = (targets: string[]) => {
       for (const k of targets) {
         if (left <= 0) return;
-        const n = Math.min(left, roomFor(work[k], name, slotsPerChest));
+        const n = Math.min(left, roomFor(work[k], name, slotsOf(slotsPerChest, k)));
         if (n <= 0) continue;
         work[k][name] = (work[k][name] ?? 0) + n;
         moves.push({ chest: k, name, count: n });
@@ -215,9 +245,10 @@ export interface Move { from: string; to: string; name: string; count: number }
 /**
  * Moves that sort the chests: items sitting in another category's chest go to their own category's chest, when it
  * has one with room. Items whose category has no chest stay put (the misc chest is their home until one is built).
- * At most `limit` moves per call, so a big sort spreads over several trips home.
+ * At most `limit` moves per call, so a big sort spreads over several trips home. Room is counted as depositPlan counts
+ * it (`slotsPerChest`): into a chest seen full, only what its own stacks still take.
  */
-export function misplaced(assign: ChestAssign, contents: ChestContents, limit = 8, slotsPerChest = 27): Move[] {
+export function misplaced(assign: ChestAssign, contents: ChestContents, limit = 8, slotsPerChest: ChestSlots = CHEST_SLOTS): Move[] {
   const work: ChestContents = {};
   for (const k of Object.keys(assign)) work[k] = { ...(contents[k] ?? {}) };
   const moves: Move[] = [];
@@ -230,7 +261,7 @@ export function misplaced(assign: ChestAssign, contents: ChestContents, limit = 
         .sort((a, b) => Number((work[b][name] ?? 0) > 0) - Number((work[a][name] ?? 0) > 0));
       for (const to of targets) {
         if (left <= 0 || moves.length >= limit) break;
-        const n = Math.min(left, roomFor(work[to], name, slotsPerChest));
+        const n = Math.min(left, roomFor(work[to], name, slotsOf(slotsPerChest, to)));
         if (n <= 0) continue;
         work[to][name] = (work[to][name] ?? 0) + n;
         work[from][name] -= n;

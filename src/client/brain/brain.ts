@@ -16,7 +16,7 @@ import { signsGoal } from './signs.js';
 import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { compile } from '../structures/format.js';
-import { LoopWatch, type Outcome, type Run } from './loops.js';
+import { LoopWatch, sameResult, type Outcome, type Run } from './loops.js';
 import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
 /** Staying alive: never backed off by the loop watch. */
@@ -64,6 +64,8 @@ export interface BrainOptions {
   now?: () => number;
 }
 
+/** A real day (the goals' once-a-day lines go by the UTC day). */
+const DAY_MS = 24 * 60 * 60_000;
 /** The idle watchdog: standing still by day this long with nothing to do, every hold is let go. */
 const IDLE_FIRST = 3 * 60_000;
 /** ...and once it has stood this long, the count starts afresh (the next let-go comes IDLE_FIRST after that). */
@@ -169,10 +171,23 @@ export class Brain {
   private holdIdle = 0;
   /** the same for idle time while any rung of the work queue declines `dry` (its marks) */
   private dryIdle = 0;
-  /** the goals let go early: not a second time until a hold on them has run its full time (or the morning, or the idle watchdog) */
+  /**
+   * the goals let go early: not a second time until a hold on them has run its full time (or the morning, or the idle
+   * watchdog, unless that goal is backed off or failing the same way over and over: letGoAll)
+   */
   private freedEarly = new Set<string>();
+  /**
+   * each goal's failures in a row with the same result (its text, numbers aside, as the loop watch reads them): a
+   * goal that failed so twice is not let go early (releaseHold), and the let-go of every hold leaves its early
+   * release's mark on it (letGoAll). A run that ends well ends the row; nothing else does, the morning and the idle
+   * watchdog included (live on Nov 14 the watchdog's let-go undid the early release's mark, the next early release
+   * freed the stash again, and it failed "nothing could be put away" four times in 246 s: a LOOP)
+   */
+  private sameFails = new Map<string, { result: string; n: number }>();
   /** what has gone wrong in the measuring and been noted (each kind once) */
   private mishaps = new Set<string>();
+  /** each goal's `daily` line, by the (UTC) day it was last said: in this process only, so a restart says it again */
+  private saidOn = new Map<string, number>();
   private worldId?: string;
   private readonly now: () => number;
   private readonly tickMs: number;
@@ -266,6 +281,7 @@ export class Brain {
       }
       this.idleTrack(s);
       this.workQueue(s, world);
+      this.measure('daily', () => this.dailyLines(s, world));
       const r = this.running;
       if (r) {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
@@ -379,11 +395,7 @@ export class Brain {
       // letting them go only sent the bot straight back to where there was nothing (2026-11-08: "spare time: 0 iron
       // ... Unable to find any path" every 3.5 min for an hour; 2026-11-10: "let go of fruitless:sugar_cane" every 10
       // to 20 min all day, each one more fruitless cane walk); they lapse by themselves
-      this.retryAt.clear();
-      this.keepLoopHolds();
-      this.fails.clear();
-      this.morningHold.clear();
-      this.freedEarly.clear();
+      this.letGoAll();
       this.note(`idle ${mins} min by day: let go of ${held.join(', ') || 'nothing (nothing was held)'}`);
       return;
     }
@@ -495,11 +507,7 @@ export class Brain {
       // the morning comes a minute after dusk, and the food goal sat out a 5 minute retry, hungry, in daylight
       const waiting = [...this.retryAt].filter(([g, t]) => t > this.now() && !this.looping(g)).map(([g]) => g);
       if (waiting.length) this.note(`morning: ${waiting.join(', ')} may try again`);
-      this.retryAt.clear();
-      this.keepLoopHolds();
-      this.fails.clear();
-      this.morningHold.clear();
-      this.freedEarly.clear();
+      this.letGoAll();
     }
     this.tod = s.timeOfDay;
   }
@@ -717,6 +725,7 @@ export class Brain {
         this.retryAt.delete(goal.name);
         this.holdWhy.delete(goal.name);
         this.fails.delete(goal.name);
+        this.sameFails.delete(goal.name);
         this.note(`done ${goal.name} in ${Math.round((this.now() - started) / 1000)}s: ${text}`);
         this.loopCheck(run, 'done', text);
       })
@@ -724,6 +733,9 @@ export class Brain {
         // stopped for something more urgent (or the LLM) is no failure: it may go again as soon as it's wanted
         if (!abort.signal.aborted) {
           this.holdFor(goal.name, this.now() + goal.retryMs, `failed: ${String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 60)}`);
+          const result = sameResult(String(e?.message ?? e));
+          const row = this.sameFails.get(goal.name);
+          this.sameFails.set(goal.name, { result, n: row?.result === result ? row.n + 1 : 1 });
           // three failures in a row: something is in the way today; leave it until the next morning
           const n = (this.fails.get(goal.name) ?? 0) + 1;
           this.fails.set(goal.name, n);
@@ -811,6 +823,23 @@ export class Brain {
 
   private looping = (goal: string) => (this.loopHold.get(goal) ?? 0) > this.now();
 
+  /** It failed with the same result twice in a row or more (sameFails), and has not run well since. */
+  private repeating = (goal: string) => (this.sameFails.get(goal)?.n ?? 0) >= 2;
+
+  /**
+   * Every hold let go (the morning, the idle watchdog's 3 minutes): the holds, the failures counted, "until morning",
+   * and the early releases' marks. Not the loop watch's back-offs (put back: keepLoopHolds), and not the early
+   * release's mark on a goal backed off or failing the same way over and over: the next early release would free it
+   * again a minute later, and the loop it was held for goes round once more (the stash, 10:40-10:43Z on Nov 14).
+   */
+  private letGoAll(): void {
+    this.retryAt.clear();
+    this.keepLoopHolds();
+    this.fails.clear();
+    this.morningHold.clear();
+    for (const g of [...this.freedEarly]) if (!this.looping(g) && !this.repeating(g)) this.freedEarly.delete(g);
+  }
+
   /** After every hold was let go: the loop watch's back-offs still running are put back. */
   private keepLoopHolds(): void {
     // the whys went with the holds; a loop hold put back says again what it is
@@ -875,11 +904,12 @@ export class Brain {
    * with something to do waits out a back-off (five minutes after a walk that failed, three after one that stuck)
    * and nothing else wants to run meanwhile. One hold goes: the first, in the order the goals are tried, that is an
    * ordinary one (wedged, stuck, timed out, failed) on a goal that wants to run now. Never the loop watch's (that
-   * goal went round in circles: its 10 minutes are the point) and never "until morning" (three failures in a row:
-   * something is in the way today). The count of failures stays, so a third in a row still means the morning. A goal
-   * let go early and held again is not let go early a second time until a hold on it has run its full time (start),
-   * or the morning or the idle watchdog let everything go: without that a goal that fails at once would be tried
-   * again every minute, all day. The minute starts again after each release.
+   * goal went round in circles: its 10 minutes are the point), never "until morning" (three failures in a row:
+   * something is in the way today), and never a goal that failed with the same result twice in a row (sameFails: a
+   * third try would say the same, and it waits its hold out). The count of failures stays, so a third in a row still
+   * means the morning. A goal let go early and held again is not let go early a second time until a hold on it has
+   * run its full time (start), or the morning or the idle watchdog let everything go (letGoAll): without that a goal
+   * that fails at once would be tried again every minute, all day. The minute starts again after each release.
    */
   private releaseHold(s: Snapshot, world: WorldMemory, lead: IdleCause, dt: number): void {
     if (lead !== 'hold') { this.holdIdle = 0; return; }
@@ -888,7 +918,7 @@ export class Brain {
     for (const g of inOrder(s, world, this.goals)) {
       const why = this.holdWhy.get(g.name) ?? '';
       if (!((this.retryAt.get(g.name) ?? 0) > s.now) || !ORDINARY_HOLD.test(why)) continue;
-      if (this.looping(g.name) || this.morningHold.has(g.name) || this.freedEarly.has(g.name)) continue;
+      if (this.looping(g.name) || this.repeating(g.name) || this.morningHold.has(g.name) || this.freedEarly.has(g.name)) continue;
       let wants: string | null = null;
       try { wants = g.wants(s, world); } catch { /* it cannot say what it would do: it stays held */ }
       if (!wants) continue;
@@ -943,6 +973,21 @@ export class Brain {
     const ladder = ladderOf(this.goals);
     if (!ladder.length) return;
     this.measure('work', () => { for (const line of workTick(s, world, () => this.rt.lastDeath(), ladder)) this.note(line); });
+  }
+
+  /**
+   * The goals' lines for once a day (Goal.daily: the farm waiting on a full larder), each the first time it holds on a
+   * (UTC) day. A goal that has said its line today is not asked again until the next.
+   */
+  private dailyLines(s: Snapshot, world: WorldMemory): void {
+    const day = Math.floor(this.now() / DAY_MS);
+    for (const g of this.goals) {
+      if (!g.daily || this.saidOn.get(g.name) === day) continue;
+      const line = g.daily(s, world);
+      if (!line) continue;
+      this.saidOn.set(g.name, day);
+      this.note(`${g.name}: ${line}`);
+    }
   }
 
   /** The idle streak is over (something runs, or the counted daytime stopped): say so when it was worth a line. */

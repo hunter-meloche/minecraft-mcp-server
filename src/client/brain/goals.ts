@@ -119,6 +119,12 @@ export interface Goal {
    * as ever. Asked on every tick a less urgent goal runs: a look only. The survival goals are never asked.
    */
   cuts?: (s: Snapshot, world: WorldMemory) => boolean;
+  /**
+   * A line for the log once a day while it holds, where nothing runs to say it: a round that waits because what it
+   * brings in would go to the dump (the farm on a full larder, the cane). A look only, asked on the ticks the brain
+   * decides; the brain says it as `<name>: <line>` the first time it holds each (UTC) day, in this process.
+   */
+  daily?: (s: Snapshot, world: WorldMemory) => string | null;
 }
 
 /**
@@ -167,18 +173,19 @@ const offLevel = (s: Pick<Snapshot, 'home' | 'position'>): string | undefined =>
 };
 
 /**
- * Why the stash cannot make the `free` slots a goal needs (pockets.ts noRoom): the chests have no room left, are too
- * far off to put anything in, the stash would empty only `loose` slots, or a put-away tried `failedMsAgo` and did not
- * make the room.
+ * Why the stash cannot make the `free` slots a goal needs (pockets.ts noRoom): the chests have no room left, no chest
+ * has room for the `stuck` kinds the stash would put away, the chests are too far off to put anything in, the stash
+ * would empty only `loose` slots, or a put-away tried `failedMsAgo` and did not make the room.
  */
-export interface PocketsLack { free: number; chestsFull?: boolean; outOfReach?: boolean; loose?: number; failedMsAgo?: number }
+export interface PocketsLack { free: number; chestsFull?: boolean; stuck?: string[]; outOfReach?: boolean; loose?: number; failedMsAgo?: number }
 
-/** the lack in words: the failed put-away first (it is what holds the goal back now), then where the chests are */
+/** the lack in words: the failed put-away first (it is what holds the goal back now), then the full storage, then where the chests are */
 function lacking(from: PocketsLack): string {
   if (from.failedMsAgo !== undefined) {
     const min = Math.floor(from.failedMsAgo / 60_000);
     return `the stash made no room ${min < 1 ? 'just now' : `${min} min ago`}`;
   }
+  if (from.stuck?.length) return `storage full: ${from.stuck.join(', ')}`;
   if (from.outOfReach) return 'the chests out of reach';
   return from.loose ? `only ${from.loose} more to put away` : 'nothing to put away';
 }
@@ -207,7 +214,8 @@ export const no = {
    * slots used). With the room rule's answer (pockets.ts noRoom, which knows the chests): the free slots the goal
    * needs and why the stash cannot make them, so the line says which thing to go and look at: pockets with nothing in
    * them to put away, or with `loose` slots the stash would empty and that still too few; chests too far off to put it
-   * in; chests with no room left; or a put-away `failedMsAgo` that did not make the room it was sent for.
+   * in; chests with no room left, or none with room for the `stuck` kinds (`storage full: raw_gold, wheat`); or a
+   * put-away `failedMsAgo` that did not make the room it was sent for.
    */
   pockets: (s: Snapshot, who: string, from: number | PocketsLack): Decline => ({
     cause: 'pockets',

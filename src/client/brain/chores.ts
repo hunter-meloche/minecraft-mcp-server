@@ -7,11 +7,11 @@ import { COOKS_TO } from './food.js';
 import { owedItems, ownItems } from './community.js';
 // (deep.ts comes in through community.ts already; its goal is asked inside a function only)
 import { deepTrip } from './deep.js';
-import { chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
-import { assignChests, CATEGORIES, depositPlan, misplaced, type ChestAssign, type Deposit } from './storage.js';
+import { chestSlots, chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests } from './chests.js';
+import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, type ChestAssign, type Deposit } from './storage.js';
 import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
-import { FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, makeRoom, noRoom, out as afield, room, type RoomKind } from './pockets.js';
+import { DUG, FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, makeRoom, noRoom, out as afield, room, stashReach, type RoomKind } from './pockets.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
 import { fuelFor } from './project.js';
@@ -150,49 +150,75 @@ function canFirstChest(s: Snapshot): boolean {
 export { firstChest } from './firsts.js';
 import { firstChest } from './firsts.js';
 
+/** Why the stash would run now (the pockets, a trip waiting on them, the time since the last), or null: before what can go. */
+function stashWants(s: Snapshot, world: WorldMemory): string | null {
+  if (s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
+  // no chest at home yet (a new bot, before its storage house): one put down beside home will do, if it has one
+  if (!world.landmarks.chests.length && !canFirstChest(s)) return null;
+  // a trip waiting for room is worth the walk home: the build job keeps the bot at its site, 24 blocks out, where
+  // it waited all day at 31 slots
+  // (not while a build job carries its load: those pockets are full on purpose)
+  const building = buildingLoad(world);
+  const tripWaits = building ? null : tripWaiting(s, world);
+  // really full in the yard is worth the walk too: the bed is 16 from the home point there, the bot woke and sat
+  // by it at 34/36 slots all day (live 2026-11-09), nothing stashed, and the cane round won't go out at 34
+  const fullAt = world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27;
+  // once in 10 min: what it carries for the project fills 31 slots, and a farm round's seeds took it back to 33 at
+  // once (the stash ran 6 times in 5 min, stopping the farm, the lights and the trees each time)
+  const fullOut = s.slotsUsed >= fullAt && !s.sleeping && nearHome(s, TRIP_STASH_RANGE) && !building &&
+    since(world, 'stash', s.now) > 10 * MINUTE;
+  if (!awakeAtHome(s) && !tripWaits && !fullOut) return null;
+  const plan = stashList(s, world);
+  if (!plan.deposit.length && !plan.drop.length) return null;
+  if (building) {
+    // a build job carrying its load fills the pockets on purpose and runs with them full: it is left alone until
+    // there is not a slot free, and then stopped once in 10 min (a dug block each station would have the stash stop
+    // it at every one). From 33 slots, as the rule was, the stash stopped the lookout's build at 35/36 to put away
+    // a handful of things, with a slot still free for what the next station dug
+    if (s.slotsUsed >= 36 && since(world, 'stash', s.now) > 10 * MINUTE) return `${s.slotsUsed}/36 slots used`;
+  } else if (s.slotsUsed >= fullAt) {
+    // a project carrying its materials fills the pockets on purpose: only stop it when really full
+    return `${s.slotsUsed}/36 slots used`;
+  }
+  // a trip waiting for room: make the room. Under the stash's own limit the bot sat idle all day at 31 slots, its
+  // build job waiting on 77 logs and the pockets full of seeds.
+  // Once in 10 min, as from out in the yard above: what this stash leaves carried for the project only the trip's
+  // own run puts away, so the trip still waits after it, and each new kind picked up would send the bot home again
+  // (the deep trip outranked all morning by the larder and the farm: a walk home after every one of their rounds)
+  if (tripWaits && since(world, 'stash', s.now) > 10 * MINUTE) return `${s.slotsUsed}/36 slots used, and ${tripWaits} waits for room`;
+  if (!awakeAtHome(s)) return null;
+  if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
+  return null;
+}
+
+/** How long a run of the stash that moved nothing, the storage full, keeps it from going again for the same things. */
+const STUCK_FOR = 30 * MINUTE;
+
+/**
+ * Something on the stash's list can go now: into a chest with room for it, or out to the dump. Not when the storage
+ * is full for all of it and nothing is to be thrown (live on Nov 14 the plan kept finding room the chests did not
+ * have, and the stash ran every few minutes to put nothing away: 44 failures in four hours, a LOOP at 10:43Z), nor
+ * for 30 min after a run that moved nothing with the storage full, while all it could move is what that run could
+ * not (the room it promised again was not there then either). Something else to put away, and it goes. With no chest
+ * at home yet its run puts one down first. A look only.
+ */
+function stashCanGo(s: Snapshot, world: WorldMemory): boolean {
+  if (!world.landmarks.chests.length) return true;
+  const { goes } = stashReach(s, world);
+  if (!goes.size) return false;
+  const stuck = world.stashStuck;
+  const ago = stuck ? s.now - stuck.at : -1;
+  return !(stuck && Array.isArray(stuck.kinds) && ago >= 0 && ago < STUCK_FOR && [...goes.keys()].every(k => stuck.kinds.includes(k)));
+}
+
 export const stash: Goal = {
   name: 'stash',
   priority: 60,
   timeoutMs: 6 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
-    if (s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
-    // no chest at home yet (a new bot, before its storage house): one put down beside home will do, if it has one
-    if (!world.landmarks.chests.length && !canFirstChest(s)) return null;
-    // a trip waiting for room is worth the walk home: the build job keeps the bot at its site, 24 blocks out, where
-    // it waited all day at 31 slots
-    // (not while a build job carries its load: those pockets are full on purpose)
-    const building = buildingLoad(world);
-    const tripWaits = building ? null : tripWaiting(s, world);
-    // really full in the yard is worth the walk too: the bed is 16 from the home point there, the bot woke and sat
-    // by it at 34/36 slots all day (live 2026-11-09), nothing stashed, and the cane round won't go out at 34
-    const fullAt = world.progress?.carry || activeJobs(world).some(j => j.carry?.length) ? 33 : 27;
-    // once in 10 min: what it carries for the project fills 31 slots, and a farm round's seeds took it back to 33 at
-    // once (the stash ran 6 times in 5 min, stopping the farm, the lights and the trees each time)
-    const fullOut = s.slotsUsed >= fullAt && !s.sleeping && nearHome(s, TRIP_STASH_RANGE) && !building &&
-      since(world, 'stash', s.now) > 10 * MINUTE;
-    if (!awakeAtHome(s) && !tripWaits && !fullOut) return null;
-    const plan = stashList(s, world);
-    if (!plan.deposit.length && !plan.drop.length) return null;
-    if (building) {
-      // a build job carrying its load fills the pockets on purpose and runs with them full: it is left alone until
-      // there is not a slot free, and then stopped once in 10 min (a dug block each station would have the stash stop
-      // it at every one). From 33 slots, as the rule was, the stash stopped the lookout's build at 35/36 to put away
-      // a handful of things, with a slot still free for what the next station dug
-      if (s.slotsUsed >= 36 && since(world, 'stash', s.now) > 10 * MINUTE) return `${s.slotsUsed}/36 slots used`;
-    } else if (s.slotsUsed >= fullAt) {
-      // a project carrying its materials fills the pockets on purpose: only stop it when really full
-      return `${s.slotsUsed}/36 slots used`;
-    }
-    // a trip waiting for room: make the room. Under the stash's own limit the bot sat idle all day at 31 slots, its
-    // build job waiting on 77 logs and the pockets full of seeds.
-    // Once in 10 min, as from out in the yard above: what this stash leaves carried for the project only the trip's
-    // own run puts away, so the trip still waits after it, and each new kind picked up would send the bot home again
-    // (the deep trip outranked all morning by the larder and the farm: a walk home after every one of their rounds)
-    if (tripWaits && since(world, 'stash', s.now) > 10 * MINUTE) return `${s.slotsUsed}/36 slots used, and ${tripWaits} waits for room`;
-    if (!awakeAtHome(s)) return null;
-    if (since(world, 'stash', s.now) > 30 * MINUTE && plan.deposit.length >= 3) return `${plan.deposit.length} kinds of things to put away`;
-    return null;
+    const why = stashWants(s, world);
+    return why && stashCanGo(s, world) ? why : null;
   },
   // Worth stopping a running goal for only when that goal would start losing what it picks up: fewer free slots than
   // a round in the yard needs (a build job carrying its load: none at all, as its own rule above says). With more
@@ -209,8 +235,19 @@ export const stash: Goal = {
       ctx.world.landmarks.chests.push(at);
       ctx.progress(`no chest at home yet: put one down at (${at.x}, ${at.y}, ${at.z})`);
     }
-    const { stored, dropped } = await putAway(ctx, ctx.s, stashKeep(ctx.world));
-    if (!stored && !dropped) throw new Error('nothing could be put away');
+    const list = stashList(ctx.s, ctx.world);
+    const { stored, dropped, note } = await putAway(ctx, ctx.s, stashKeep(ctx.world));
+    if (!stored && !dropped) {
+      // what has no room anywhere, by the chests as their replies just left them (a chest that said it was full is
+      // remembered so): said once, and not tried again for 30 min for the same things (stashCanGo), not "nothing
+      // could be put away" every few minutes (live on Nov 14: 44 times in four hours, the farm's produce in full chests)
+      const { stuck } = stashReach(ctx.s, ctx.world);
+      if (!stuck.length) throw new Error(`nothing could be put away${note ? `: ${note}` : ''}`);
+      ctx.world.stashStuck = { at: ctx.s.now, kinds: [...new Set([...list.deposit, ...list.drop].map(e => e.name))] };
+      const where = ctx.world.landmarks.chests.length >= 3 ? `the chests for ${[...new Set(stuck.map(categoryOf))].join(', ')}` : 'the chests';
+      throw new Error(`storage full: ${stuck.join(', ')} (${where} have no room)${note ? `; ${note}` : ''}`);
+    }
+    delete ctx.world.stashStuck;
     return `put ${stored} item(s) in the chests${dropped ? `, threw away ${dropped} junk` : ''}`;
   }
 };
@@ -253,6 +290,19 @@ function glutKinds(s: Snapshot, world: WorldMemory): Set<string> {
 }
 
 /**
+ * Every one of `names` is glut (the chests hold its cap or more, and no bill has a use for it): what more of them a
+ * round brought in would go to the dump. As `name stored/cap, ...` for the line that says why the round waits; null
+ * when any one is not (under its cap, never capped, a bill's), or with none given. A look only.
+ */
+export function atCaps(s: Snapshot, world: WorldMemory, names: string[]): string | null {
+  if (!names.length) return null;
+  const glut = glutKinds(s, world);
+  if (!names.every(n => glut.has(n))) return null;
+  const stored = chestTotals(world);
+  return names.map(n => `${n} ${stored[n] ?? 0}/${GLUT[n]}`).join(', ');
+}
+
+/**
  * What the stash would put away now and what it would throw away: the one list its trigger, its run and the room rule
  * (pockets.ts) all read, so the rule never promises room the run then does not make.
  */
@@ -271,7 +321,11 @@ export function stashList(s: Snapshot, world: WorldMemory, keep: StashOptions = 
   const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
   plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
   // enough of it in the chests already: thrown away with the junk, not stored (the storage house filled up with
-  // cobblestone, and then nothing had room). Like the junk it waits for the morning: by evening it stays carried
+  // cobblestone, then with the farm's carrots, cane and bread, and then nothing had room). Only what the plan would
+  // put away goes: the stack of each food it keeps carried, and the seeds, stay. The wheat left over from a pens
+  // round goes too (the stash never kept it: the round takes 16 out of the chests' plenty again, and kept, it held a
+  // slot for good, a yard round at 34/36 starved of its 2). Like the junk it waits for the morning: by evening it
+  // stays carried
   const glut = glutKinds(s, world);
   if (glut.size) {
     const over = plan.deposit.filter(e => e.slot === undefined && glut.has(e.name));
@@ -287,9 +341,11 @@ const THROWAWAY = new Set(['cobblestone', 'cobbled_deepslate', 'andesite', 'dior
 /**
  * What a trip down the mine throws away where it stands, between its rounds (deep.ts oreTrip): the stone digging
  * brings up by the stack beyond what it keeps of it (KIT.carryMax: one stack of throwaway stone together, cobblestone
- * first, the bridge scaffolds the climb with it; a stack of any other kind in GLUT), and the stash's own junk beyond
- * what the stash keeps of each. Nothing else: no ore, tool, food or torch is either. Never a kind a bill carries or is
- * short of, whatever the count: the stash spares those too (billKinds). It looks and never writes.
+ * first, the bridge scaffolds the climb with it; a stack of any other kind digging turns up, DUG), and the stash's own
+ * junk beyond what the stash keeps of each. Nothing else: no ore, tool, food or torch is either, nor the farm's
+ * produce or the mobs' drops GLUT caps at home (those are thrown at the dump spot, and only over what the chests
+ * hold). Never a kind a bill carries or is short of, whatever the count: the stash spares those too (billKinds). It
+ * looks and never writes.
  */
 export function mineDrops(items: InventoryItem[], s: Snapshot, world: WorldMemory): StashEntry[] {
   const billed = billKinds(s, world);
@@ -299,7 +355,7 @@ export function mineDrops(items: InventoryItem[], s: Snapshot, world: WorldMemor
   const listed = new Set(drop.map(e => e.name));
   const total = (n: string) => main.filter(i => i.name === n).reduce((a, i) => a + i.count, 0);
   let stone = KIT.carryMax.cobblestone;
-  for (const name of Object.keys(GLUT)) {
+  for (const name of DUG) {
     const n = total(name);
     if (!n || listed.has(name) || billed.has(name)) continue;
     const keep = Math.min(n, THROWAWAY.has(name) ? stone : KIT.carryMax.cobblestone);
@@ -329,7 +385,8 @@ export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = 
   assign ??= assignChests(world.landmarks.chests, CATEGORIES, world.chestItems ?? {}, world.chestAssign ?? {});
   const want = new Map(deposit.map(e => [e.name, e.count] as const));
   const total = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
-  const sorted = depositPlan(s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, world.chestItems ?? {});
+  const sorted = depositPlan(s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, world.chestItems ?? {},
+    chestSlots(world));
   return { moves: sorted.moves, rest: sorted.unplaced, drop, full: sorted.full };
 }
 
@@ -420,7 +477,7 @@ export const sortStorage: Goal = {
     if (s.activity !== 'work' || !awakeForRound(s, world) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
     // after 30 min, and then in the evening, or when no trip could go instead (or it has waited an hour)
     if (!roundDue(s, world, 'sort', 30 * MINUTE)) return null;
-    const moves = misplaced(chestAssignment(world), world.chestItems ?? {});
+    const moves = misplaced(chestAssignment(world), world.chestItems ?? {}, undefined, chestSlots(world));
     return moves.length ? `${moves.length} kind(s) of things in the wrong chest` : null;
   },
   // within 10 of home it cuts in as ever; from out in the yard it waits for what runs to end
@@ -431,7 +488,7 @@ export const sortStorage: Goal = {
     done(ctx.world, 'sort', ctx.s.now);
     await refreshChests(ctx, 0);
     let moved = 0;
-    for (const m of misplaced(chestAssignment(ctx.world), ctx.world.chestItems ?? {})) {
+    for (const m of misplaced(chestAssignment(ctx.world), ctx.world.chestItems ?? {}, undefined, chestSlots(ctx.world))) {
       const [fx, fy, fz] = m.from.split(',').map(Number);
       const [tx, ty, tz] = m.to.split(',').map(Number);
       const t = await ctx.act('take-from-chest', { x: fx, y: fy, z: fz, item: m.name, count: m.count });
@@ -1016,8 +1073,57 @@ export const lights: Goal = {
 // ------------------------------------------------------------------------------------------------ farm
 
 /**
+ * The crops farmland grows, by their block, and what each is stored as (GLUT caps those). The farm round bakes its
+ * wheat into bread, unless the bread is at its cap (then the wheat is stored): so the wheat is a full crop only with
+ * both at their caps. The seeds are left out: beyond a few they are junk.
+ */
+const CROP_YIELD: Record<string, string[]> = {
+  wheat: ['wheat', 'bread'], carrots: ['carrot'], potatoes: ['potato'], beetroots: ['beetroot'],
+  melon_stem: ['melon_slice'], attached_melon_stem: ['melon_slice'], pumpkin_stem: ['pumpkin'], attached_pumpkin_stem: ['pumpkin']
+};
+/** A crop's block on farmland: the ones above, and those whose yield no cap counts (never a full crop, then). */
+const CROP = /^(wheat|carrots|potatoes|beetroots|(attached_)?(melon|pumpkin)_stem|torchflower_crop|pitcher_crop)$/;
+
+/**
+ * What stands on the farmland now, a block above each cell (one region read over them all): the crops' block ids;
+ * undefined where it could not be read (no reply, or farmland spread too wide for one read).
+ */
+async function cropsOn(ctx: GoalContext, cells: Pos[]): Promise<string[] | undefined> {
+  if (!cells.length) return [];
+  const xs = cells.map(c => c.x), ys = cells.map(c => c.y + 1), zs = cells.map(c => c.z);
+  const box = { x: Math.min(...xs), y: Math.min(...ys), z: Math.min(...zs), width: Math.max(...xs) - Math.min(...xs) + 1,
+    height: Math.max(...ys) - Math.min(...ys) + 1, length: Math.max(...zs) - Math.min(...zs) + 1 };
+  const size = box.width * box.height * box.length;
+  if (size > 65_536) return undefined;
+  let blocks: (string | null)[] | undefined;
+  try { blocks = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box))?.blocks; } catch { return undefined; }
+  if (!Array.isArray(blocks) || blocks.length !== size) return undefined;
+  const crops = new Set<string>();
+  for (const c of cells) {
+    const b = (blocks[(c.x - box.x) + (c.z - box.z) * box.width + (c.y + 1 - box.y) * box.width * box.length] ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+    if (CROP.test(b)) crops.add(b);
+  }
+  return [...crops].sort();
+}
+
+/**
+ * The larder is full: every crop the plot grows (as a farm round last saw it standing on the farmland) is stored at
+ * its cap or over, and no bill has a use for it, so whatever a harvest brought in would go to the dump. As `carrot
+ * 3233/640, potato 330/320, ...`; null when one is under, or not capped at all, or the farm was not looked at yet or
+ * has more or less farmland since, or nothing grows on it (a round sows it). A look only.
+ */
+export function larderFull(s: Snapshot, world: WorldMemory): string | null {
+  const seen = world.farmCrops;
+  if (!seen || !Array.isArray(seen.crops) || !seen.crops.length || seen.cells !== world.landmarks.farmland.length) return null;
+  const yields = seen.crops.map(c => CROP_YIELD[c]);
+  if (yields.some(y => !y)) return null;
+  return atCaps(s, world, [...new Set(yields.flat())]);
+}
+
+/**
  * Harvest and replant every plot (the farm tool works around where the bot stands): each crop plot from its middle,
- * and the farmland outside the plots from its own middle.
+ * and the farmland outside the plots from its own middle. Then a look at what stands on the farmland (the crops
+ * replanted), for the farm round's gate: with every one of them stored over its cap, the round waits.
  */
 export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: string }> {
   const plots = ctx.world.zones?.plot ?? [];
@@ -1037,18 +1143,49 @@ export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: st
     out.push(r.text.slice(0, 100));
     ok &&= r.ok;
   }
+  // (a round stopped midway looked at part of it only: what it saw before stays)
+  const cells = ctx.world.landmarks.farmland;
+  const crops = spots.length && !ctx.signal.aborted ? await cropsOn(ctx, cells) : undefined;
+  if (crops) ctx.world.farmCrops = { crops, cells: cells.length, at: ctx.s.now };
   return { ok, text: out.join(' | ') || 'no farmland' };
 }
 
-/** Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat. */
+/**
+ * Run now? The "no" is said in this order: no farm, or nothing to harvest worth the round (the larder full); not due;
+ * then not at home; the hour last.
+ */
+const farmGate = (s: Snapshot, world: WorldMemory): Gate => {
+  if (!world.landmarks.farmland.length) return { cause: 'unneeded', text: 'no farmland' };
+  const full = larderFull(s, world);
+  if (full) return { cause: 'stocked', text: `the larder is full (${full})` };
+  const last = world.lastDone?.farm ?? 0;
+  if (!(s.now - last > 20 * MINUTE)) return no.notDue('farm', s.now, last, 20 * MINUTE);
+  // in the yard beyond NEAR_HOME (by the bed, 16 out) the farm waits for the bot to come by, and says so below a hold:
+  // "away" there led the idle line ahead of a hold, and an ordinary hold was no longer let go after its minute
+  // (brain.ts releaseHold), as it was before the farm had a gate. Out of the yard or off home's level, away.
+  if (!s.sleeping && !awakeAtHome(s)) {
+    return awakeForRound(s, world) ? { cause: 'unneeded', text: `${Math.round(s.distHome)} blocks from home (farm works within ${NEAR_HOME})` }
+      : no.away(s, 'farm', NEAR_HOME);
+  }
+  return no.late(s, 'farm') ?? { want: 'daily round: the farm' };
+};
+
+/**
+ * Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat. Not while every
+ * crop the plot grows is stored over its cap (larderFull): the harvest would go to the dump, and the stash's walks out
+ * there with it (live on Nov 14, 3233 carrots stored and every round's carrots carried with nowhere to go). It harvests
+ * again once one of them is under its cap; the ripe crops wait in the plot meanwhile.
+ */
 export const farm: Goal = {
   name: 'farm',
   priority: 47,
   timeoutMs: 6 * MINUTE,
   retryMs: 15 * MINUTE,
-  wants: (s, world) => {
-    if (s.activity !== 'work' || !awakeAtHome(s) || !world.landmarks.farmland.length) return null;
-    return since(world, 'farm', s.now) > 20 * MINUTE ? 'daily round: the farm' : null;
+  gate: farmGate,
+  ...fromGate(farmGate),
+  daily: (s, world) => {
+    const g = farmGate(s, world);
+    return 'cause' in g && g.cause === 'stocked' ? g.text : null;
   },
   run: async ctx => {
     done(ctx.world, 'farm', ctx.s.now);
@@ -1056,7 +1193,8 @@ export const farm: Goal = {
     const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
     const wheat = inv.items.filter(i => i.name === 'wheat').reduce((a, i) => a + i.count, 0);
     let baked = '';
-    if (wheat >= 3) {
+    // not into bread the chests hold enough of: that would go to the dump, the wheat itself to the chests
+    if (wheat >= 3 && !atCaps(ctx.s, ctx.world, ['bread'])) {
       const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(wheat / 3) });
       if (b.ok) baked = `; baked ${Math.floor(wheat / 3)} bread`;
     }

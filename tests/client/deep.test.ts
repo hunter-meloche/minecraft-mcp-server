@@ -236,10 +236,11 @@ test('30 used, kit ready, in the yard: the deep trip wants, and its run makes ro
   t.is(stale.lastDone?.deep, NOW - 60 * MIN);
   t.deepEqual(stale.zones?.mine, [{ x: -40, y: 64, z: 0 }]);
   // the put-away that fell short is written down, but it is not the reason given: the chest, now known to be full, is
-  // what says no, and will after the mark has run out
+  // what says no, and will after the mark has run out. Since F2 (Nov 14) in so many words: the storage is full for
+  // the logs, not "nothing to put away" (there were seven stacks to put away, and nowhere to put them)
   t.is(stale.lastDone?.['no room: deep'], NOW);
-  t.deepEqual(deepTrip.declines!(s, stale), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
-  t.deepEqual(deepTrip.declines!({ ...s, now: NOW + 11 * MIN }, stale), { cause: 'pockets', text: '30/36 slots, nothing to put away (deep trip needs 10 free)' });
+  t.deepEqual(deepTrip.declines!(s, stale), { cause: 'pockets', text: '30/36 slots, storage full: oak_log (deep trip needs 10 free)' });
+  t.deepEqual(deepTrip.declines!({ ...s, now: NOW + 11 * MIN }, stale), { cause: 'pockets', text: '30/36 slots, storage full: oak_log (deep trip needs 10 free)' });
 });
 
 // ---- one trip, several ores (oreTrip), and the rung and the old goal on it ----

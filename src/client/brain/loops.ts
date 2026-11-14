@@ -29,6 +29,8 @@ const SHORT = 60_000;
 
 /** Same text but for numbers (counts, coordinates, seconds). */
 const shape = (t?: string) => (t ?? '').replace(/-?\d+(\.\d+)?/g, '#').slice(0, 120);
+/** A run's result as the loop watch tells one from another (its numbers aside): the brain's count of failures alike reads it too. */
+export const sameResult = (text?: string): string => shape(text);
 
 /**
  * A run that brought something in got somewhere, however it ended and however short it was: a trip the stash cuts

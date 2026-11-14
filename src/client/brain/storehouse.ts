@@ -227,6 +227,8 @@ export const storageGoal: Goal = {
     for (const k of Object.keys(ctx.world.chestItems ?? {})) if (inHouse.has(k) && !standing.some(c => key(c) === k)) delete ctx.world.chestItems![k];
     // and its stacks: a slot remembered in a chest that is gone takes nothing
     for (const k of Object.keys(ctx.world.chestStacks ?? {})) if (inHouse.has(k) && !standing.some(c => key(c) === k)) delete ctx.world.chestStacks![k];
+    // and its size: one built again in that cell may be a single chest where a double stood
+    for (const k of Object.keys(ctx.world.chestSize ?? {})) if (inHouse.has(k) && !standing.some(c => key(c) === k)) delete ctx.world.chestSize![k];
     if (plan.add.length || plan.replace.length || found.length) delete ctx.world.storageFull; // the stash finds out again
     return did.join('; ') || `all ${standing.length} chest(s) in place`;
   }

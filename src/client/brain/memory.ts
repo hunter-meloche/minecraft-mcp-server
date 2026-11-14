@@ -122,6 +122,12 @@ export interface WorldMemory {
    * one) with this many live cells, and when: the patch rung waits till it has fewer, or a day (cane.ts, worktasks.ts)
    */
   caneFull?: { cells: number; at: number };
+  /**
+   * the crops standing on the farmland (block ids: wheat, carrots, potatoes ...) when a farm round last looked after
+   * its harvest, with how many farmland cells there were then and when: what the plot grows, which the farm round's
+   * gate holds against the larder's caps (chores.ts larderFull). More or less farmland since, and it says nothing
+   */
+  farmCrops?: { crops: string[]; cells: number; at: number };
   /** which home chest ("x,y,z") holds which kind of thing (storage.ts categories) */
   chestAssign?: Record<string, string>;
   /** the label on the sign over each chest ("x,y,z" -> "food1"), as put up or as found */
@@ -130,6 +136,23 @@ export interface WorldMemory {
   signTries?: Record<string, { label: string; tries: number }>;
   /** kinds of things with no room left in their chests: the storage needs another chest */
   storageFull?: string[];
+  /**
+   * the home chests ("x,y,z") a reply or a look in last saw with every slot used (chests.ts noteFree): the plans count
+   * no free slot in them, only the room left in their own stacks, until one is seen with a slot free again
+   */
+  fullChests?: string[];
+  /**
+   * each home chest's slots ("x,y,z" -> 27, or 54 for a double chest), as a look in or a reply last said (chests.ts
+   * noteSize): the stash's plan counts what the categories' chests leave over into the room the game has (storeSlots).
+   * The storage house is all double chests, and one whose first half was full looked full: its empty second half
+   * went uncounted, and the stash said "storage full" with 27 slots to spare
+   */
+  chestSize?: Record<string, number>;
+  /**
+   * the stash's last run that moved nothing with the storage full, and every kind it would have moved then: it does
+   * not go again for those for 30 min (chores.ts stash)
+   */
+  stashStuck?: { at: number; kinds: string[] };
   /** when the storage house was found full up (six double chests) with a kind still without room */
   storageMaxedAt?: number;
   /** built cells ("x,y,z") the repair round failed to put back, and how often */

@@ -2,6 +2,7 @@ import type { ChestContents, ChestStack } from '../tools.js';
 import type { GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { holdHarmless, isHazard } from './fluidpick.js';
+import { CHEST_SLOTS, packedSlots, roomFor } from './storage.js';
 
 /** The home chests as the brain last saw them (every open updates its memory). */
 
@@ -45,7 +46,7 @@ export async function freeLid(call: Call, at: Pos): Promise<Pos[]> {
 export async function peekChest(ctx: GoalContext, at: Pos): Promise<Record<string, number>> {
   try {
     const got = await openAt(ctx, at);
-    remember(ctx.world, at, got.items, got.stacks);
+    remember(ctx.world, at, got.items, got.stacks, got.free, got.slots);
     return got.items;
   } finally {
     await ctx.call('container.close').catch(() => undefined);
@@ -79,10 +80,13 @@ async function openAt(ctx: GoalContext, at: Pos): Promise<ChestContents> {
  * and deposit do; an older jar's don't). Without them (a tool's "It holds:" text) the stacks of every name whose
  * total changed are left out: the text says how many went, not from which slot, and a remembered slot that no longer
  * holds its stack would take another one (the book with unbreaking for the one with mending). The other names'
- * stacks stand where they were: a chest's stacks never move when others are taken or put in.
+ * stacks stand where they were: a chest's stacks never move when others are taken or put in. `free`: its empty slots,
+ * where the reply says (fullChests); `slots`: all of them, 27 or 54 (chestSize).
  */
-export function remember(world: WorldMemory, at: Pos, items: Record<string, number>, stacks?: ChestStack[]): void {
+export function remember(world: WorldMemory, at: Pos, items: Record<string, number>, stacks?: ChestStack[], free?: number, slots?: number): void {
   const k = key(at);
+  noteFree(world, k, free);
+  noteSize(world, k, slots);
   world.chestItems ??= {};
   const before = world.chestItems[k];
   world.chestItems[k] = { ...items };
@@ -122,7 +126,7 @@ export async function takeSlot(ctx: GoalContext, chest: Pos, slot: number, count
   if (!want) return 0;
   try {
     const opened = await openAt(ctx, chest);
-    remember(ctx.world, chest, opened.items, opened.stacks);
+    remember(ctx.world, chest, opened.items, opened.stacks, opened.free, opened.slots);
     // an older jar (the one kept for a rollback) sends no stacks and ignores `slot`: its withdraw takes the first of
     // the name, the book with unbreaking for the one with mending. Nothing then, and this chest's stacks forgotten,
     // so storedStacks stops offering them
@@ -139,7 +143,7 @@ export async function takeSlot(ctx: GoalContext, chest: Pos, slot: number, count
     // with a count always: without one chest.withdraw goes on to every stack the same as the first (Interact.sources),
     // both of two books with mending for the one asked for
     const r = await ctx.call<ChestContents>('chest.withdraw', { name: want.name, slot: now.slot, count: count && count > 0 ? count : now.count });
-    remember(ctx.world, chest, r.items, r.stacks);
+    remember(ctx.world, chest, r.items, r.stacks, r.free, r.slots);
     return r.moved ?? 0;
   } finally {
     await ctx.call('container.close').catch(() => undefined);
@@ -158,11 +162,11 @@ export async function storeStack(ctx: GoalContext, name: string, slot: number, c
     if (ctx.signal.aborted) break;
     try {
       const opened = await openAt(ctx, c);
-      remember(ctx.world, c, opened.items, opened.stacks);
+      remember(ctx.world, c, opened.items, opened.stacks, opened.free, opened.slots);
       if (opened.free <= 0) continue;
       // with the slot and a count of one: that stack, never another of its name (Interact.sources)
       const r = await ctx.call<ChestContents>('chest.deposit', { name, slot, count: 1 });
-      remember(ctx.world, c, r.items, r.stacks);
+      remember(ctx.world, c, r.items, r.stacks, r.free, r.slots);
       if ((r.moved ?? 0) > 0) return c;
     } catch (e) {
       ctx.progress(`the ${name} into the chest at ${fmt(c)}: ${(e as Error).message}`);
@@ -189,10 +193,20 @@ export function chestsWith(world: WorldMemory, item: string): Pos[] {
     .sort((a, b) => (world.chestItems![key(b)][item] ?? 0) - (world.chestItems![key(a)][item] ?? 0));
 }
 
-/** Parse the "It holds: a x1, b x2" tail of a chest tool's reply into the chest's memory. */
+/**
+ * Parse the "It holds: a x1, b x2" tail of a chest tool's reply into the chest's memory, and its room where the reply
+ * says: "N/M slots free" (store-in-chest's and take-from-chest's: the chest's empty slots and all of them) and
+ * store-in-chest's "(the chest is full)" (it took less than it was given). A take of whole stacks frees slots its
+ * reply now counts, and the chest's full mark goes. A reply without the count (an older build's) leaves the mark as it
+ * was: what it took left room in its own stacks, which the plans count anyway, and a slot freed is seen at the next
+ * look in.
+ */
 export function rememberReply(world: WorldMemory, at: Pos, text: string): void {
+  const room = /; (\d+)\/(\d+) slots free/.exec(text);
+  const free = room ? Number(room[1]) : /\(the chest is full\)/.test(text) ? 0 : undefined;
+  const slots = room ? Number(room[2]) : undefined;
   const m = /It holds: (.*?)(?:;|\.$|$)/.exec(text);
-  if (!m) return;
+  if (!m) { noteFree(world, key(at), free); noteSize(world, key(at), slots); return; }
   const items: Record<string, number> = {};
   if (m[1].trim() !== 'nothing') {
     for (const part of m[1].split(', ')) {
@@ -200,7 +214,76 @@ export function rememberReply(world: WorldMemory, at: Pos, text: string): void {
       if (e) items[e[1]] = Number(e[2]);
     }
   }
-  remember(world, at, items);
+  remember(world, at, items, undefined, free, slots);
+}
+
+/**
+ * Remember whether a chest ("x,y,z") has an empty slot, as a reply or a look in just said (`free`; undefined: it did
+ * not say, and what was known stands). Seen with every slot used, it is in `world.fullChests` until it is seen with
+ * one free again: the plans count no free slot in it, only what its own stacks still take (chestSlots). Live on Nov
+ * 14 the plan, counting each chest's things packed into whole stacks, kept finding four free slots in the misc chest
+ * (27 stacks, 23 packed) and the stash went to fill them every few minutes: "nothing could be put away", 44 times.
+ */
+function noteFree(world: WorldMemory, k: string, free: number | undefined): void {
+  if (free === undefined || !Number.isFinite(free)) return;
+  const full = fullChests(world);
+  const was = full.has(k);
+  if (free > 0) full.delete(k);
+  else full.add(k);
+  if (full.has(k) === was) return;
+  if (full.size) world.fullChests = [...full];
+  else delete world.fullChests;
+}
+
+/** The home chests seen with every slot used (noteFree), by key: none for a memory without the list, or with something else there. */
+export function fullChests(world: WorldMemory): Set<string> {
+  return new Set(Array.isArray(world.fullChests) ? world.fullChests.filter(k => typeof k === 'string') : []);
+}
+
+/**
+ * Remember how many slots a chest ("x,y,z") has, 27 or 54 (a double chest), as a look in or a reply just said
+ * (`slots`; undefined or no count: what was known stands). The memory of its things cannot tell: a double chest
+ * filled to its first half packs into 27 slots, the same as a single one full.
+ */
+function noteSize(world: WorldMemory, k: string, slots: number | undefined): void {
+  if (slots === undefined || !Number.isInteger(slots) || slots <= 0) return;
+  if (!world.chestSize || typeof world.chestSize !== 'object' || Array.isArray(world.chestSize)) world.chestSize = {};
+  world.chestSize[k] = slots;
+}
+
+/** A chest's slots as last seen (noteSize); undefined when none was seen, or brain.json holds something else there. */
+function sizeOf(world: WorldMemory, k: string): number | undefined {
+  const sizes = world.chestSize;
+  const n = sizes && typeof sizes === 'object' && !Array.isArray(sizes) ? sizes[k] : undefined;
+  return typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * The slots the plans count each home chest ("x,y,z") as holding (storage.ts depositPlan, misplaced; pockets.ts):
+ * CHEST_SLOTS, or none for one seen with every slot used, so that only the room left in its own stacks is counted.
+ */
+export function chestSlots(world: WorldMemory): (chest: string) => number {
+  const full = fullChests(world);
+  return k => (full.has(k) ? 0 : CHEST_SLOTS);
+}
+
+/**
+ * The slots storeInChests can fill in each home chest ("x,y,z"), for what the categories' own chests leave over
+ * (pockets.ts stashReach): none for one seen with every slot used, else its size as a look in or a reply last said
+ * (chestSize: 54 for a double chest). The plans count each chest as 27 (a double chest's second half room to spare),
+ * and storeInChests, which tries every chest not seen full, puts what is left over in that half: the storage house is
+ * all double chests. A chest whose size was never seen is a double one when its memory shows a stack past slot 26 or
+ * packs into more than 27 slots, else 27. Counted as 27, a double chest with its first half full looked full, and the
+ * stash stopped wanting with the storage "full" and its second half empty.
+ */
+export function storeSlots(world: WorldMemory): (chest: string) => number {
+  const full = fullChests(world);
+  const guess = (k: string) => {
+    const stacks = world.chestStacks?.[k];
+    const past = Array.isArray(stacks) && stacks.some(st => typeof st?.slot === 'number' && st.slot >= CHEST_SLOTS);
+    return past || packedSlots(world.chestItems?.[k] ?? {}) > CHEST_SLOTS ? 2 * CHEST_SLOTS : CHEST_SLOTS;
+  };
+  return k => (full.has(k) ? 0 : sizeOf(world, k) ?? guess(k));
 }
 
 /**
@@ -242,10 +325,18 @@ export async function takeFromChests(ctx: GoalContext, item: string, count: numb
   return got;
 }
 
-/** Store an item in the first home chest with room; returns how many went in. */
+/**
+ * Store an item in the first home chest with room; returns how many went in. Not a chest seen with every slot used
+ * whose own stacks of the item are full (fullChests): the plan counts no room there (pockets.ts stashReach), and the
+ * walk to it stores nothing. Any other is tried, whatever its memory packs into 27 slots: a double chest is one
+ * chest of 54 to the game, and its second half takes what the plan leaves out.
+ */
 export async function storeInChests(ctx: GoalContext, item: string, count?: number): Promise<number> {
   let stored = 0;
+  const slots = chestSlots(ctx.world);
   for (const c of ctx.world.landmarks.chests) {
+    const k = key(c);
+    if (!slots(k) && roomFor(ctx.world.chestItems?.[k] ?? {}, item, 0) <= 0) continue;
     const r = await ctx.act('store-in-chest', { ...c, item, ...(count ? { count: count - stored } : {}) });
     rememberReply(ctx.world, c, r.text);
     const m = /^Stored (\d+)/.exec(r.text);

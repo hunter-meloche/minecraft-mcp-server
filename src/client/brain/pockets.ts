@@ -1,6 +1,6 @@
 import type { InventoryItem } from '../tools.js';
 import { nearHome, no, onHomeLevel, outsideBy, type Decline, type GoalContext, type Snapshot } from './goals.js';
-import { key } from './chests.js';
+import { key, storeSlots } from './chests.js';
 import { roomFor } from './storage.js';
 import type { WorldMemory } from './memory.js';
 import { activityAt } from './schedule.js';
@@ -39,17 +39,42 @@ export const out: { trip: boolean; work: boolean; ledBy?: AbortSignal } = { trip
  */
 export const FOOD_CARRY = 64;
 /**
- * Enough of these in the chests (the stored total at or over the number) and the stash throws what it would store
- * away instead: with the storage house full of cobblestone (1205 stored) the pockets had nowhere to go. Only what
- * digging turns up by the hundred: never ore, tools, food, or a kind a bill carries or is short of.
+ * What digging turns up by the hundred, the stone and the dirt: a trip down the mine throws it where it stands beyond
+ * a stack (chores.ts mineDrops), and nothing else in GLUT is thrown down there (the produce waits for the dump spot).
+ */
+export const DUG = ['cobblestone', 'cobbled_deepslate', 'dirt', 'gravel', 'granite', 'diorite', 'andesite', 'tuff'] as const;
+/** The sixteen colours of wool: the sheep pen's shears bring in whichever the flock wears. */
+const WOOL = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue',
+  'brown', 'green', 'red', 'black'].map(c => `${c}_wool`);
+/**
+ * Enough of these in the chests (the stored total at or over the number) and the stash throws what more it would
+ * store at the dump spot instead, as junk is thrown. Two kinds come in by the hundred and never stop: what digging
+ * turns up (with the storage house full of cobblestone, 1205 stored, the pockets had nowhere to go), and what the
+ * farm, the trees, the pens and the mobs bring in day after day. Live on Nov 14 the produce had filled the storage
+ * house (3233 carrots, 1154 sugar cane, 991 bread, 310 wheat stored): the stash failed "nothing could be put away" 44
+ * times in four hours with 27-34 slots carried, every carried kind farm output or food, and no trip down the mine
+ * went for six hours (it wants 10 free). What the bot keeps carried stays carried (a stack of each food, FOOD_CARRY;
+ * seeds for the farm, the stash's own keep): only what the stash would put away beyond that goes.
+ *
+ * Never capped, whatever is stored: what the bot cannot grow back or has a use for that a count does not see. Leather
+ * and string (the books, the anvil's books, the leads), cooked meat and fish (the food goal keeps its own count),
+ * ores, ingots, gems, lapis and redstone, tools and armour, anything enchanted, potions, obsidian, blaze rods, nether
+ * wart, emeralds: none of them is listed here. And never a kind a bill carries or is short of, a build job's or a
+ * community mission's (chores.ts billKinds), whatever its count.
  */
 export const GLUT: Record<string, number> = {
-  cobblestone: 640, cobbled_deepslate: 320, dirt: 320, gravel: 128, granite: 128, diorite: 128, andesite: 128, tuff: 128
+  cobblestone: 640, cobbled_deepslate: 320, dirt: 320, gravel: 128, granite: 128, diorite: 128, andesite: 128, tuff: 128,
+  // the farm: its crops, and the bread its wheat is baked into (poisonous potatoes are worth none at all)
+  carrot: 640, potato: 320, poisonous_potato: 0, beetroot: 320, beetroot_seeds: 64, wheat: 256, wheat_seeds: 128, bread: 640,
+  melon_slice: 320, pumpkin: 64, sugar_cane: 512, kelp: 64, cactus: 64, bamboo: 64, sweet_berries: 64,
+  // the trees, and the pens' animals raw
+  apple: 128, beef: 256, porkchop: 128, chicken: 64, mutton: 128, egg: 32, feather: 128,
+  // what the mobs drop
+  rotten_flesh: 64, spider_eye: 32, bone: 192,
+  ...Object.fromEntries(WOOL.map(w => [w, 128]))
 };
 
 const SLOTS = 36;
-/** Slots the plans count a home chest as holding (storage.ts: a double chest's second half is room to spare). */
-const CHEST_SLOTS = 27;
 /**
  * How long a put-away that did not make a kind's room counts against asking for it again (the stash's own retry
  * time): the plan said the room could be made and the game said otherwise (no dump spot it could get to, a chest that
@@ -67,19 +92,34 @@ export interface Pockets {
   loose: number;
 }
 
+/** What the stash's body would do with some pockets, as its plan and the chests' memory have it (stashReach). */
+export interface StashReach {
+  /** how many of each kind it would move: put in a chest that has room for it, or thrown away */
+  goes: Map<string, number>;
+  /** the kinds it would put away that some or all of has no room in any chest, in the plan's order */
+  stuck: string[];
+  /** the slots that empties */
+  loose: number;
+}
+
 /**
- * Slots the stash's body would empty with these pockets: its own plan (the same list, the same chests), then the
- * chests' room as last seen (27 slots each, one not looked in yet counted empty, as the plan itself counts), then the
- * game's own order of taking things out of the pockets. `chest.deposit` and `item.drop` go through the slots from the
- * first, a whole stack while the count still covers it, then part of the next: 6 cobblestone to put away out of
- * stacks of 64 and 6 empty the second slot only if it comes first, and topping a kept stack down frees nothing.
+ * What the stash's body would move with these pockets, keeping what a goal of `kind` leaves carried: its own plan (the
+ * same list, the same chests), then the chests' room as last seen for what that leaves over (each chest's own size as
+ * a look in or a reply said, 54 for a double chest; one not looked in yet counted empty, as the plan itself counts;
+ * one seen with every slot used, only the room left in its own stacks: storeSlots), then the game's own order of
+ * taking things out of the pockets. `chest.deposit` and `item.drop` go through the slots from the first, a whole
+ * stack while the count still covers it, then part of the next: 6 cobblestone to put away out of stacks of 64 and 6
+ * empty the second slot only if it comes first, and topping a kept stack down frees nothing. What fits nowhere is `stuck`: the storage is
+ * full for it (with no chest at home, everything). A look only.
  */
-function looseSlots(s: Snapshot, world: WorldMemory, kind?: RoomKind): number {
+export function stashReach(s: Snapshot, world: WorldMemory, kind?: RoomKind): StashReach {
   const work = stashWork(s, world, stashKeep(world, kind));
   const chests = world.landmarks.chests.map(key);
+  const slots = storeSlots(world);
   const held: Record<string, Record<string, number>> = {};
   for (const k of chests) held[k] = { ...(world.chestItems?.[k] ?? {}) };
   const goes = new Map<string, number>();
+  const stuck: string[] = [];
   const add = (name: string, n: number) => { if (n > 0) goes.set(name, (goes.get(name) ?? 0) + n); };
   for (const m of work.moves) {
     held[m.chest] ??= {};
@@ -91,27 +131,31 @@ function looseSlots(s: Snapshot, world: WorldMemory, kind?: RoomKind): number {
     let left = e.count;
     for (const k of chests) {
       if (left <= 0) break;
-      const n = Math.min(left, roomFor(held[k], e.name, CHEST_SLOTS));
+      const n = Math.min(left, roomFor(held[k], e.name, slots(k)));
       if (n <= 0) continue;
       held[k][e.name] = (held[k][e.name] ?? 0) + n;
       left -= n;
     }
     add(e.name, e.count - left);
+    if (left > 0 && !stuck.includes(e.name)) stuck.push(e.name);
   }
   for (const e of work.drop) add(e.name, e.count);
   const main = s.items.filter(i => i.slot >= 0 && i.slot < SLOTS).sort((a, b) => a.slot - b.slot);
-  let emptied = 0;
+  let loose = 0;
   for (const [name, count] of goes) {
     let left = count;
     for (const i of main) {
       if (i.name !== name) continue;
       if (left < i.count) break;
       left -= i.count;
-      emptied++;
+      loose++;
     }
   }
-  return emptied;
+  return { goes, stuck, loose };
 }
+
+/** Slots the stash's body would empty with these pockets (stashReach). */
+const looseSlots = (s: Snapshot, world: WorldMemory, kind?: RoomKind): number => stashReach(s, world, kind).loose;
 
 /** The pockets now: used, free, and what the stash could empty (keeping what a goal of `kind` leaves carried). */
 export function pockets(s: Snapshot, world: WorldMemory, kind?: RoomKind): Pockets {
@@ -164,17 +208,23 @@ export function room(kind: RoomKind, s: Snapshot, world: WorldMemory): 'ok' | 's
 
 /**
  * What a goal says when its room is `no`, so the line never sends anyone looking for the wrong thing. A put-away that
- * just fell short is named first, where it alone is what says no (the plan would still make the room). Full chests
- * are named only when the storage house can take no more chests and nothing is loose (till then the storage goal is
- * adding one, or the stash has things to throw away); chests out of reach are told from pockets with too little to
- * put away, and those with some loose slots from those with none (the stash still runs for the first).
+ * just fell short is named first, where it alone is what says no (the plan would still make the room). Then what
+ * the stash would put away and no home chest has room for (`storage full: raw_gold, wheat`): the room is short for
+ * that, whatever the pockets hold besides (with no chest at all there is no storage to be full; live on Nov 14 the
+ * deep trip said "the stash made no room N min ago" for hours, the plan promising the room again each time that mark
+ * ran out, and nothing said the storage was full). Full chests are named only
+ * when the storage house can take no more chests and nothing is loose (till then the storage goal is adding one, or
+ * the stash has things to throw away); chests out of reach are told from pockets with too little to put away, and
+ * those with some loose slots from those with none (the stash still runs for the first).
  */
 export function noRoom(kind: RoomKind, who: string, s: Snapshot, world: WorldMemory): Decline {
-  const p = pockets(s, world, kind);
-  const enough = p.free + p.loose >= ROOM[kind];
+  const p = stashReach(s, world, kind);
+  const free = Math.max(0, SLOTS - s.slotsUsed);
+  const enough = free + p.loose >= ROOM[kind];
   const reach = chestsInReach(s, world);
   const tried = triedAgo(kind, s, world);
   if (enough && reach && tried !== undefined) return no.pockets(s, who, { free: ROOM[kind], failedMsAgo: tried });
+  if (!enough && p.stuck.length && world.landmarks.chests.length) return no.pockets(s, who, { free: ROOM[kind], stuck: p.stuck });
   if (world.storageMaxedAt && !p.loose) return no.pockets(s, who, { free: ROOM[kind], chestsFull: true });
   return no.pockets(s, who, { free: ROOM[kind], outOfReach: enough && !reach, loose: p.loose });
 }

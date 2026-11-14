@@ -1805,7 +1805,10 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const short = (r.moved ?? 0) < Math.min(count ?? inside, inside) ? ' (the inventory is full)' : '';
         const from = took === undefined ? '' : ` slot ${took} of`;
         const stale = took !== undefined && took !== slot ? ` (slot ${slot} held no ${name})` : '';
-        return factory.createResponse(`Took ${r.moved} ${name} from${from} the chest at ${fmt(at)}${stale}${short}. It holds: ${holds}.`);
+        // the slots, as store-in-chest says them: a take of whole stacks frees slots, and the brain's memory of a full
+        // chest goes by this (chests.ts rememberReply); a jar that sends no count says none
+        const room = Number.isFinite(r.free) && Number.isFinite(r.slots) ? `; ${r.free}/${r.slots} slots free` : '';
+        return factory.createResponse(`Took ${r.moved} ${name} from${from} the chest at ${fmt(at)}${stale}${short}. It holds: ${holds}${room}.`);
       } finally {
         await call('container.close').catch(() => undefined);
       }

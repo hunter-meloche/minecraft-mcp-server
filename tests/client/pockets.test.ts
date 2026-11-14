@@ -459,7 +459,16 @@ const glutLoad = (): InventoryItem[] => [...kit(), ...stacks('cobblestone', 3, 9
 const GLUTTED = { cobblestone: 640, gravel: 128, raw_iron: 320, bread: 320 };
 
 test('glut is dropped, not stored; a kind a bill needs is never glut', async t => {
-  t.deepEqual(GLUT, { cobblestone: 640, cobbled_deepslate: 320, dirt: 320, gravel: 128, granite: 128, diorite: 128, andesite: 128, tuff: 128 });
+  // what digging turns up; and since Nov 14 (the produce filled the storage house) the farm's, the trees', the pens'
+  // and the mobs' (caps.test.ts)
+  const wool = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'];
+  t.deepEqual(GLUT, {
+    cobblestone: 640, cobbled_deepslate: 320, dirt: 320, gravel: 128, granite: 128, diorite: 128, andesite: 128, tuff: 128,
+    carrot: 640, potato: 320, poisonous_potato: 0, beetroot: 320, beetroot_seeds: 64, wheat: 256, wheat_seeds: 128, bread: 640,
+    melon_slice: 320, pumpkin: 64, sugar_cane: 512, kelp: 64, cactus: 64, bamboo: 64, sweet_berries: 64,
+    apple: 128, beef: 256, porkchop: 128, chicken: 64, mutton: 128, egg: 32, feather: 128, rotten_flesh: 64, spider_eye: 32, bone: 192,
+    ...Object.fromEntries(wool.map(c => [`${c}_wool`, 128]))
+  });
   const s = snap(glutLoad());
   const w = (over: Partial<WorldMemory> = {}) => world({ chestItems: { [KEY]: { ...GLUTTED } }, ...over });
   const byName = (list: { name: string; count: number }[]): Record<string, number | undefined> => Object.fromEntries(list.map(e => [e.name, e.count]));

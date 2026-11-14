@@ -3,7 +3,7 @@ import { reservedSites, type Milestone, type StepResult } from './progress.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { addZone } from './milestones.js';
 import { key, takeFromChests } from './chests.js';
-import { toTheWoods, WOODS_DIRS } from './chores.js';
+import { atCaps, toTheWoods, WOODS_DIRS } from './chores.js';
 import { makeRoom, noRoom, room } from './pockets.js';
 import { WILD_DISTANCE, YARD_FROM_BUILDS, nearestZone, type Zone } from './courtesy.js';
 import { alongSide } from './work.js';
@@ -586,13 +586,19 @@ export function caneCellPlan(base: string, mid: string, haveCane: boolean): 'cut
 }
 
 /**
- * Run now? The "no" is said in this order: no cane to see to (no patch, no cell in it that can grow cane, or the round
- * is not due); then what keeps a round that is due from going (not in the yard, no room for the stalks); the hour last.
+ * Run now? The "no" is said in this order: no cane to see to (no patch, no cell in it that can grow cane, the chests
+ * holding enough cane, or the round is not due); then what keeps a round that is due from going (not in the yard, no
+ * room for the stalks); the hour last.
  */
 const gate = (s: Snapshot, world: WorldMemory): Gate => {
   const cells = world.zones?.cane?.length ?? 0;
   if (!cells) return { cause: 'unneeded', text: 'no cane patch' };
   if (!liveCells(world).length) return { cause: 'unneeded', text: `no cane cell that can grow cane (${cells} with no water beside them: the cane patch drops them)` };
+  // the stalks it would cut go to the dump while the chests hold the cap (pockets.ts GLUT: live on Nov 14, 1154 stored
+  // and 96 carried with nowhere to go); a bill short of cane lifts the cap. The cane stands meanwhile: it grows no
+  // higher than three, and nothing of it is lost
+  const full = atCaps(s, world, ['sugar_cane']);
+  if (full) return { cause: 'stocked', text: `enough cane in the chests (${full})` };
   const last = world.lastDone?.cane ?? 0;
   if (!(s.now - last > 20 * MINUTE)) return no.notDue('cane', s.now, last, 20 * MINUTE);
   if (!nearHome(s, 24)) return no.away(s, 'cane', 24);
@@ -616,6 +622,10 @@ export const caneRound: Goal = {
   retryMs: 30 * MINUTE,
   gate,
   ...fromGate(gate),
+  daily: (s, world) => {
+    const g = gate(s, world);
+    return 'cause' in g && g.cause === 'stocked' ? g.text : null;
+  },
   // a round that cuts nothing and plants nothing (the cells bare and no cane to plant) is busy time to no gain
   gains: true,
   run: async ctx => {

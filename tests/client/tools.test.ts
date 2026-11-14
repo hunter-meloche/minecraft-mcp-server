@@ -600,9 +600,18 @@ test('take-from-chest takes what was asked and says when the chest has none', as
     'chest.withdraw': { slots: 27, free: 26, items: { iron_ingot: 5 }, moved: 27 },
     'container.close': { ok: true }
   });
-  t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot', count: 27 })).text, 'Took 27 iron_ingot from the chest at (1, 64, 0). It holds: iron_ingot x5.');
+  // with the slots, as store-in-chest says them: the brain's memory of a full chest goes by them (F2)
+  t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot', count: 27 })).text, 'Took 27 iron_ingot from the chest at (1, 64, 0). It holds: iron_ingot x5; 26/27 slots free.');
   t.like(request.getCalls().find(c => c.args[0] === 'chest.withdraw')!.args[1], { name: 'iron_ingot', count: 27 });
   t.true((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'diamond' })).isError);
+  // a jar that sends no count: no slots said, never "undefined/undefined"
+  const bare = setup({
+    'world.block': { loaded: true, name: 'chest' },
+    'chest.open': { items: { iron_ingot: 32 } },
+    'chest.withdraw': { items: { iron_ingot: 5 }, moved: 27 },
+    'container.close': { ok: true }
+  });
+  t.is((await bare.run('take-from-chest', { x: 1, y: 64, z: 0, item: 'iron_ingot', count: 27 })).text, 'Took 27 iron_ingot from the chest at (1, 64, 0). It holds: iron_ingot x5.');
 });
 
 test('take-from-chest by slot takes that stack (the book with mending) and says so; a stale slot says what it took instead', async (t) => {
@@ -620,11 +629,11 @@ test('take-from-chest by slot takes that stack (the book with mending) and says 
     'container.close': { ok: true }
   });
   t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', slot: 7 })).text,
-    'Took 1 enchanted_book from slot 7 of the chest at (1, 64, 0). It holds: enchanted_book x1.');
+    'Took 1 enchanted_book from slot 7 of the chest at (1, 64, 0). It holds: enchanted_book x1; 26/27 slots free.');
   t.deepEqual(request.getCalls().find(c => c.args[0] === 'chest.withdraw')!.args[1], { name: 'enchanted_book', slot: 7 });
   // one of two taken from a stale slot is the whole of the stack it took from, not a full inventory
   t.is((await run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', slot: 5 })).text,
-    'Took 1 enchanted_book from slot 2 of the chest at (1, 64, 0) (slot 5 held no enchanted_book). It holds: enchanted_book x1.');
+    'Took 1 enchanted_book from slot 2 of the chest at (1, 64, 0) (slot 5 held no enchanted_book). It holds: enchanted_book x1; 26/27 slots free.');
   // an older jar ignores the slot and says nothing of it: the reply is the plain one
   const old = setup({
     'world.block': { loaded: true, name: 'chest' },
@@ -633,7 +642,7 @@ test('take-from-chest by slot takes that stack (the book with mending) and says 
     'container.close': { ok: true }
   });
   t.is((await old.run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', count: 1, slot: 7 })).text,
-    'Took 1 enchanted_book from the chest at (1, 64, 0). It holds: enchanted_book x1.');
+    'Took 1 enchanted_book from the chest at (1, 64, 0). It holds: enchanted_book x1; 26/27 slots free.');
 });
 
 test('list-inventory shows enchantments (a book\'s stored ones too) and potion contents; get-status shows effects and fire', async (t) => {
