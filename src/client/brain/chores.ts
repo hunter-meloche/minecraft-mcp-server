@@ -15,7 +15,7 @@ import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry,
 import { DUG, FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, makeRoom, noRoom, out as afield, room, stashReach, type RoomKind } from './pockets.js';
 import { planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
-import { fuelFor } from './project.js';
+import { fuelFor, oreOut, RAW_ORE_IN } from './project.js';
 import { daylightLeft } from './schedule.js';
 import { reservedSites, stepOf } from './progress.js';
 import { farmCentre, type Pos, type WorldMemory } from './memory.js';
@@ -709,7 +709,12 @@ export const smelt: Goal = {
       // enough to cook all of it (coal from the chests when what is carried falls short: fuelFor)
       const fuel = await fuelFor(ctx, {}, n);
       if (!fuel) continue;
-      const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: ore, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
+      const args = { ...ctx.world.landmarks.furnace!, inputItem: ore, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 };
+      let r = await ctx.act('smelt-item', args);
+      // a batch of another ore stopped midway (the night's shelter) cooks on in the lit furnace, where collectFurnace
+      // leaves it: its input blocked this ore, and the smelt held 10 min with the raw gold carried ("Furnace input slot
+      // is occupied by raw_iron", 4 times on Nov 14-15). Taken back, it is the next batch's
+      if (RAW_ORE_IN.test(r.text) && await oreOut(ctx)) r = await ctx.act('smelt-item', args);
       // smelted means the ore went: a reply like "input slot is occupied" is no error, and counted as done it had
       // the bot "smelt" the same 7 raw copper every 5 seconds
       const left = (await ctx.call<{ items: { name: string; count: number }[] }>('inventory')).items.filter(i => i.name === ore).reduce((a, i) => a + i.count, 0);

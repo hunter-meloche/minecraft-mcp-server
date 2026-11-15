@@ -560,6 +560,37 @@ test('smelt: ore still carried after the smelt is a failure, not "done" (the 7 r
   await t.throwsAsync(smelt.run(ctx as never), { message: /could not smelt raw_copper: Furnace input slot is occupied/ });
 });
 
+test('smelt: another ore\'s batch still cooking in the lit furnace is taken back, and this ore goes in (the raw gold held 10 min behind "input slot is occupied by raw_iron", Nov 15)', async (t) => {
+  const items = [{ slot: 0, name: 'raw_gold', count: 20 }, { slot: 1, name: 'coal', count: 5 }];
+  const s = snap(items);
+  let input: { name: string; count: number } | null = { name: 'raw_iron', count: 9 };
+  const calls: string[] = [];
+  const acts: Record<string, unknown>[] = [];
+  const ctx = {
+    s, world: world({ lastDone: { furnace: s.now } }), signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown>) => {
+      if (tool !== 'smelt-item') return { ok: true, text: '' };
+      acts.push(a);
+      if (input && input.name !== a.inputItem) return { ok: true, text: `Furnace input slot is occupied by ${input.name}` };
+      items[0].count -= Number(a.inputCount);
+      return { ok: true, text: `Smelted ${a.inputCount} gold_ingot` };
+    },
+    call: (async (m: string, a?: { slot?: string }) => {
+      calls.push(m);
+      if (m === 'inventory') return { items };
+      if (m === 'furnace.open') return { open: true, output: null, input, lit: true };
+      if (m === 'furnace.take' && a?.slot === 'input') { const took = input; input = null; return { took }; }
+      return {};
+    }) as never,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  };
+  t.is(await smelt.run(ctx as never), 'smelted 16 raw_gold, 4 for the next batch');
+  t.is(acts.length, 2);
+  t.true(calls.includes('furnace.take'));
+  t.true(input === null, 'the raw iron came back out');
+});
+
 test('toTheWoods: a tree in sight is enough; else the remembered woods; else each side of home in turn, and remembered', async t => {
   const io = (sight: boolean[], found: Record<string, string>) => {
     const acts: string[] = [];

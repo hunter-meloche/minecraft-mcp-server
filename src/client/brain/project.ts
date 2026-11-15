@@ -424,10 +424,10 @@ export const SMELTED: Record<string, string> = {
 /** Most to smelt in one go (about 4 minutes at the furnace): a bigger bill is smelted over several runs. */
 export const SMELT_BATCH = 24;
 /** smelt-item's reply when the furnace holds raw ore (the smelt goal's, chores.ts) where something else is to go in. */
-const RAW_ORE_IN = /^Furnace input slot is occupied by raw_(iron|gold|copper)$/;
+export const RAW_ORE_IN = /^Furnace input slot is occupied by raw_(iron|gold|copper)$/;
 
 /** Take the raw ore out of the home furnace's input (the bot stands at it after smelt-item); whether it came out. */
-async function oreOut(ctx: GoalContext): Promise<boolean> {
+export async function oreOut(ctx: GoalContext): Promise<boolean> {
   type Slot = { name: string; count: number } | null;
   try {
     const f = await ctx.call<{ input: Slot }>('furnace.open', { ...ctx.world.landmarks.furnace! });
