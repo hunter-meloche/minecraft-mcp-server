@@ -955,9 +955,20 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const needed = Math.ceil(Math.max(0, queued - stocked) / smeltsPerFuel(fuel));
         const addFuel = Math.min(needed, fuelCount === undefined ? needed : Number(fuelCount), counts.get(fuel) ?? 0);
         if (needed > 0 && !addFuel && !f.fuel && !f.lit) return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
-        if (addFuel > 0 && (!f.fuel || f.fuel.name === fuel)) await call('furnace.put', { slot: 'fuel', name: fuel, count: addFuel });
+        // the bridge's put moves one stack: a pocket of 16 planks ahead of the full ones was all the fuel that went in
+        // (24 of 64 raw iron cooked, the fire out): again from the next stack, till the slot holds what it should
+        const fill = async (slot: 'fuel' | 'input', name: string, count: number, had: number) => {
+          let inSlot = had;
+          for (let k = 0; k < 6 && inSlot < had + count; k++) {
+            const st = await call<Partial<Furnace>>('furnace.put', { slot, name, count: had + count - inSlot });
+            const now = st[slot]?.count;
+            if (now === undefined || now <= inSlot) return;
+            inSlot = now;
+          }
+        };
+        if (addFuel > 0 && (!f.fuel || f.fuel.name === fuel)) await fill('fuel', fuel, addFuel, f.fuel?.count ?? 0);
         const putCount = Math.min(Number(inputCount), counts.get(input) ?? 0);
-        if (putCount > 0) await call('furnace.put', { slot: 'input', name: input, count: putCount });
+        if (putCount > 0) await fill('input', input, putCount, f.input?.count ?? 0);
         if (!takeOutput) return factory.createResponse(`Started smelting ${putCount} ${input}${addFuel ? ` with ${addFuel} ${fuel}` : ''}`);
         const deadline = Date.now() + Math.max(Number(timeoutMs), queued * 10_500 + 5000);
         let taken = 0;

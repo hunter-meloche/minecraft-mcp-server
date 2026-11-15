@@ -1118,7 +1118,9 @@ test.serial('the gold chore\'s run: the raw gold out of the chests and into the 
   const run = async () => goldGoal.run({ ...f.ctx, s: lookAt(f.inv, 6000) });
   t.is(await run(), 'smelted 32 raw_gold into ingots for bartering (32/64 today; 21 ingots and 64 raw gold kept)');
   t.true(f.did.includes('take raw_gold x32'));
-  t.true(f.did.includes('smelt raw_gold x32 with oak_log'));
+  // the logs carried cook fewer than 32: coal from the chests for the batch (fuelFor; the fire went out with 43 raw gold in)
+  t.true(f.did.includes('take coal x4'));
+  t.true(f.did.includes('smelt raw_gold x32 with coal'));
   t.true(f.said.includes('gold: smelted 32 raw_gold into ingots for bartering (32/64 today; 21 ingots and 64 raw gold kept)'));
   t.like(peekNether(w).barter, { smelted: { day: 7, n: 32 } });
   // 32 carried: 11 short of a trip over the reserve; then the day's 64 is met

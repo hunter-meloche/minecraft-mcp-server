@@ -5,6 +5,7 @@ import {
   stillShort, STRING_KEEP, type Milestone
 } from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
+import { smeltsPerFuel } from '../../tools/furnace-tools.js';
 import { clock } from './idlelog.js';
 import { makeRoom, noRoom, room } from './pockets.js';
 
@@ -352,7 +353,7 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
       if (!ore) return Object.keys(sub).length ? sub : { [item]: want };
     }
     if (ore) {
-      const fuel = await fuelFor(ctx, reserve);
+      const fuel = await fuelFor(ctx, reserve, Math.min(ore, want, SMELT_BATCH));
       if (!fuel) return { coal: Math.max(1, Math.ceil(Math.min(ore, want, SMELT_BATCH) / 8)) };
       // a batch at a time (a stack of glass is 11 minutes at the furnace): the rest next run
       const k = Math.min(ore, want, SMELT_BATCH);
@@ -399,18 +400,41 @@ const FUEL = /^(coal|charcoal|(?!stripped_)[a-z_]+_log|[a-z_]+_planks)$/;
 /**
  * Something to burn: carried (coal first), else coal or logs from the chests. `keep` is what a bill places as it is: a
  * kind carried only that many times over isn't fuel (a build's logs went into the furnace that smelted its stone).
+ * `smelts` is how many items it is to cook: a kind carried short of that gives way to coal from the chests, fetched
+ * for the whole batch. The first kind carried was burnt as it came: 2 oak planks cooked 3 of 46 raw gold, the rest
+ * sat unlit in the furnace, and "smelted 64 raw_gold" was 6 (25 lots taken back uncooked on Nov 14).
  */
-export async function fuelFor(ctx: GoalContext, keep: Record<string, number> = {}): Promise<string | undefined> {
+export async function fuelFor(ctx: GoalContext, keep: Record<string, number> = {}, smelts = 0): Promise<string | undefined> {
   const inv = await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory');
   const carried = new Map<string, number>();
   for (const i of inv.items) if (i.slot < 36 && FUEL.test(i.name)) carried.set(i.name, (carried.get(i.name) ?? 0) + i.count);
-  const coalFirst = ([a]: [string, number], [b]: [string, number]) => Number(!/coal/.test(a)) - Number(!/coal/.test(b));
-  const spare = [...carried].filter(([n, k]) => k > (keep[n] ?? 0)).sort(coalFirst)[0]?.[0];
-  if (spare) return spare;
-  // what a build job has secured isn't fuel
-  const stored = Object.entries(chestTotals(ctx.world)).filter(([n, k]) => k > reservedCount(ctx.world, n) && FUEL.test(n)).sort(coalFirst)[0]?.[0];
-  if (stored && await takeFromChests(ctx, stored, 8)) return stored;
-  return undefined;
+  const stored = Object.fromEntries(Object.entries(chestTotals(ctx.world))
+    .map(([n, k]) => [n, k - reservedCount(ctx.world, n)] as const).filter(([n, k]) => k > 0 && FUEL.test(n)));
+  const pick = pickFuel(carried, keep, stored, smelts);
+  if (pick.fetch && await takeFromChests(ctx, pick.fetch.name, pick.fetch.count)) return pick.fetch.name;
+  return pick.fuel;
+}
+
+const coalFirst = ([a]: [string, number], [b]: [string, number]) => Number(!/coal/.test(a)) - Number(!/coal/.test(b));
+
+/**
+ * fuelFor's choice (pure): a kind carried beyond `keep` that cooks all `smelts` (coal first); else coal from the chests
+ * for the batch; else the best kind carried (some cooking is better than none); else some fetched from the chests.
+ */
+export function pickFuel(carried: Map<string, number>, keep: Record<string, number>, stored: Record<string, number>, smelts = 0): { fuel?: string; fetch?: { name: string; count: number } } {
+  const spare = [...carried].map(([n, k]) => [n, k - (keep[n] ?? 0)] as [string, number]).filter(([, k]) => k > 0).sort(coalFirst);
+  const enough = spare.find(([n, k]) => k * smeltsPerFuel(n) >= smelts);
+  if (enough) return { fuel: enough[0] };
+  if (smelts > 0) {
+    const coal = ['coal', 'charcoal'].find(n => (stored[n] ?? 0) > 0);
+    if (coal) {
+      const fetch = { name: coal, count: Math.min(stored[coal], Math.max(1, Math.ceil(smelts / 8) - (carried.get(coal) ?? 0))) };
+      return spare.length ? { fuel: spare[0][0], fetch } : { fetch };
+    }
+  }
+  if (spare.length) return { fuel: spare[0][0] };
+  const first = Object.entries(stored).sort(coalFirst)[0]?.[0];
+  return first ? { fetch: { name: first, count: 8 } } : {};
 }
 
 /** Planks of the kind of log carried most. */

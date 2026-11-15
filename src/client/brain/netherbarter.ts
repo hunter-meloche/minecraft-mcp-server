@@ -178,7 +178,7 @@ export const goldGoal: Goal = {
     if (carried(before, raw) < plan.n) await takeFromChests(ctx, raw, plan.n - carried(before, raw));
     const n = Math.min(carried(await inventory(ctx), raw), plan.n);
     if (!n) throw new Error(`no ${raw} came out of the chests`);
-    const fuel = await fuelFor(ctx);
+    const fuel = await fuelFor(ctx, {}, n);
     if (!fuel) throw new Error(`${n} ${raw} to smelt for bartering, and nothing to burn`);
     if (ctx.signal.aborted) throw new Error('aborted');
     const today = smeltedToday(ctx.world);

@@ -1140,3 +1140,31 @@ test('use-item-on-block too far with no item named: the hand the bridge reports 
   t.is((await run('use-item-on-block', { x: 4, y: 63, z: 2, face: 'west' })).text, 'Used water_bucket on stone at (4, 63, 2): poured at (3, 63, 2)');
   t.deepEqual(order, ['useOn with water_bucket', 'select iron_pickaxe', 'goto with iron_pickaxe', 'select water_bucket', 'useOn with water_bucket']);
 });
+
+test('smelt-item puts the fuel and the ore stack by stack: a small first stack is not all that goes in (16 planks cooked 24 of 64)', async (t) => {
+  // the bridge's furnace.put moves one stack and says what the slot holds then
+  const slots: Record<string, number> = { fuel: 0, input: 0 };
+  const stacks: Record<string, number[]> = { oak_planks: [16, 64], raw_iron: [17, 64] };
+  const { run, request } = setup({
+    'world.block': { loaded: true, name: 'furnace' },
+    'furnace.open': { open: true, input: null, fuel: null, output: null, lit: false },
+    inventory: { items: [{ slot: 4, name: 'raw_iron', count: 17 }, { slot: 5, name: 'raw_iron', count: 64 }, { slot: 6, name: 'oak_planks', count: 16 }, { slot: 7, name: 'oak_planks', count: 64 }], selectedSlot: 0, held: null },
+    'furnace.put': (p: Record<string, unknown>) => {
+      const name = String(p.name);
+      const k = Math.min(Number(p.count), stacks[name][0]);
+      stacks[name][0] -= k;
+      if (!stacks[name][0]) stacks[name].shift();
+      slots[String(p.slot)] += k;
+      const of = (sl: string, nm: string) => (slots[sl] ? { name: nm, count: slots[sl] } : null);
+      return { open: true, fuel: of('fuel', 'oak_planks'), input: of('input', 'raw_iron'), output: null, lit: false };
+    },
+    'furnace.status': { open: true, input: null, fuel: null, output: null, lit: false },
+    'container.close': { ok: true }
+  });
+  await run('smelt-item', { x: 1, y: 64, z: 1, inputItem: 'raw_iron', inputCount: 64, fuelItem: 'oak_planks', timeoutMs: 1000 });
+  t.is(slots.fuel, 43);
+  t.is(slots.input, 64);
+  const puts = request.getCalls().filter(c => c.args[0] === 'furnace.put').map(c => c.args[1]);
+  t.deepEqual(puts, [{ slot: 'fuel', name: 'oak_planks', count: 43 }, { slot: 'fuel', name: 'oak_planks', count: 27 },
+    { slot: 'input', name: 'raw_iron', count: 64 }, { slot: 'input', name: 'raw_iron', count: 47 }]);
+});

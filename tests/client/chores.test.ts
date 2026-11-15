@@ -797,3 +797,45 @@ test('kit: a run where every step came to nothing fails (held for the retry time
   } as unknown as GoalContext;
   await t.throwsAsync(() => kit.run(ctx), { message: /could not craft stone_axe/ });
 });
+
+test('pickFuel: what is carried short of the batch gives way to coal from the chests (2 planks cooked 3 of 46 raw gold)', async (t) => {
+  const { pickFuel } = await import('../../src/client/brain/project.js');
+  const carried = (o: Record<string, number>) => new Map(Object.entries(o));
+  // 2 planks are 3 smelts: coal for the whole batch is fetched, and burnt
+  t.deepEqual(pickFuel(carried({ oak_planks: 2 }), {}, { coal: 130 }, 46), { fuel: 'oak_planks', fetch: { name: 'coal', count: 6 } });
+  // coal carried short: the rest of it fetched
+  t.deepEqual(pickFuel(carried({ coal: 3 }), {}, { coal: 130 }, 46), { fuel: 'coal', fetch: { name: 'coal', count: 3 } });
+  // enough carried: nothing fetched (coal first; logs that cover it when no coal is carried)
+  t.deepEqual(pickFuel(carried({ oak_log: 40, coal: 6 }), {}, { coal: 130 }, 46), { fuel: 'coal' });
+  t.deepEqual(pickFuel(carried({ oak_log: 40 }), {}, { coal: 130 }, 46), { fuel: 'oak_log' });
+  // no coal stored: the best carried, some cooking over none; nothing carried: some fetched, as ever
+  t.deepEqual(pickFuel(carried({ oak_planks: 2 }), {}, { oak_log: 20 }, 46), { fuel: 'oak_planks' });
+  t.deepEqual(pickFuel(carried({}), {}, { oak_log: 20 }, 46), { fetch: { name: 'oak_log', count: 8 } });
+  // the bill's own planks are not fuel
+  t.deepEqual(pickFuel(carried({ oak_planks: 10 }), { oak_planks: 10 }, {}, 4), {});
+});
+
+test('smelt: ore with 2 planks carried fetches coal for it, and burns that', async (t) => {
+  const items = [{ slot: 9, name: 'raw_gold', count: 46 }, { slot: 10, name: 'oak_planks', count: 2 }];
+  const s = snap(items);
+  const acts: [string, Record<string, unknown>][] = [];
+  const ctx = {
+    s, world: (() => { const w = world({ lastDone: { furnace: s.now }, chestItems: { '1,64,1': { coal: 130 } } }); w.landmarks.chests = [{ x: 1, y: 64, z: 1 }]; return w; })(), signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown>) => {
+      acts.push([tool, a]);
+      if (tool === 'take-from-chest') { items.push({ slot: 11, name: 'coal', count: Number(a.count) }); return { ok: true, text: `Took ${a.count} coal` }; }
+      if (tool === 'smelt-item') items.splice(0, 1);
+      return { ok: true, text: 'Smelted 46 gold_ingot' };
+    },
+    call: (async (m: string) => {
+      if (m === 'inventory') return { items };
+      if (m === 'furnace.open') return { open: true, output: null, input: null, lit: false };
+      return {};
+    }) as never,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  };
+  await smelt.run(ctx as never);
+  t.like(acts.find(([n]) => n === 'take-from-chest')?.[1], { item: 'coal', count: 6 });
+  t.like(acts.find(([n]) => n === 'smelt-item')?.[1], { inputItem: 'raw_gold', fuelItem: 'coal' });
+});

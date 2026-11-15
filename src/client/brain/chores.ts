@@ -647,7 +647,7 @@ export const smelt: Goal = {
     if (fromChest > 0) {
       const got = await takeFromChests(ctx, 'raw_iron', fromChest);
       if (got) {
-        const fuel = await fuelFor(ctx);
+        const fuel = await fuelFor(ctx, {}, got);
         if (fuel) {
           const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: 'raw_iron', inputCount: got, fuelItem: fuel, takeOutput: true, timeoutMs: got * 10_500 + 15_000 });
           did.push(r.ok ? `smelted ${got} raw_iron from the chests` : `could not smelt raw_iron: ${r.text}`);
@@ -668,14 +668,18 @@ export const smelt: Goal = {
     }
     for (const ore of Object.keys(ORES)) {
       const n = ctx.s.counts.get(ore) ?? 0;
-      const fuel = FUELS.find(f => (ctx.s.counts.get(f) ?? 0) > 0);
-      if (!n || !fuel) continue;
+      if (!n) continue;
+      // enough to cook all of it (coal from the chests when what is carried falls short: fuelFor)
+      const fuel = await fuelFor(ctx, {}, n);
+      if (!fuel) continue;
       const r = await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace!, inputItem: ore, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
       // smelted means the ore went: a reply like "input slot is occupied" is no error, and counted as done it had
       // the bot "smelt" the same 7 raw copper every 5 seconds
       const left = (await ctx.call<{ items: { name: string; count: number }[] }>('inventory')).items.filter(i => i.name === ore).reduce((a, i) => a + i.count, 0);
       if (left >= n) throw new Error(`could not smelt ${ore}: ${r.text.slice(0, 120)}`);
-      did.push(r.ok ? `smelted ${n - left} ${ore}` : `could not smelt ${ore}: ${r.text}`);
+      // into the furnace is not cooked: a fire gone out leaves the rest in it unlit (collectFurnace takes it back)
+      const unlit = /ran out of fuel/.test(r.text) ? ` (${/^Smelted \d+/.exec(r.text)?.[0].replace('Smelted ', '') ?? 'none'} cooked: the fire went out)` : '';
+      did.push(r.ok ? `smelted ${n - left} ${ore}${unlit}` : `could not smelt ${ore}: ${r.text}`);
       ctx.progress(did.at(-1)!);
     }
     return did.join('; ') || 'nothing to smelt';

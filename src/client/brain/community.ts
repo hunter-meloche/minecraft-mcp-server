@@ -236,7 +236,7 @@ async function deliver(ctx: GoalContext, m: Mission): Promise<string> {
     const n = Math.min(ore, due - have);
     const furnace = ctx.world.landmarks.furnace;
     if (n > 0 && furnace) {
-      const fuel = await fuelFor(ctx);
+      const fuel = await fuelFor(ctx, {}, n);
       if (!fuel) throw new Error(`${n} ${raw} to smelt for the ${m.chest} chest, and nothing to burn`);
       ctx.progress(`smelting ${n} ${raw} for the ${m.chest} chest`);
       const r = await ctx.act('smelt-item', { ...furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
