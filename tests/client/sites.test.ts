@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { columns, keptSites, rankSites, siteMap } from '../../src/client/structures/site.js';
+import { columns, keptSites, rankSites, siteMap, structureSiteBoxes } from '../../src/client/structures/site.js';
 import { StructureStore } from '../../src/client/structures/store.js';
 import { driftGoal } from '../../src/client/structures/job.js';
 import type { Design } from '../../src/client/structures/format.js';
@@ -97,4 +97,18 @@ test('drift round: a structure that differs is noted, and with autoRepair gets a
   t.is(store.loadState('seed:1', 'post').drift?.changes, 1);
   t.is(world.buildJobs?.[0].mode, 'repair');
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('structureSiteBoxes: a whole homestead (homeStorage) keeps no box, the other builds and a broken one as before', (t) => {
+  // the homestead cleanup's record (2026-11-15) spans the whole yard: kept off, it left structure-site no spot inside
+  const box = (x: number, z: number, width: number, length: number) => ({ x, y: 60, z, width, height: 9, length });
+  const all = [
+    { name: 'homestead', homeStorage: true, b: box(-567, 2119, 35, 97) },
+    { name: 'windmill', b: box(-542, 2175, 5, 5) },
+    null,
+    { name: 'broken', b: undefined },
+    { name: 'lookout', homeStorage: false, b: box(-560, 2200, 4, 4) }
+  ];
+  const boxes = structureSiteBoxes(all, s => { if (!s.b) throw new Error('no design'); return s.b; });
+  t.deepEqual(boxes, [{ x: -542, z: 2175, width: 5, length: 5 }, { x: -560, z: 2200, width: 4, length: 4 }]);
 });

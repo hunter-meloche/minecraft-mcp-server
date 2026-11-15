@@ -52,6 +52,25 @@ export function keptSites(mem?: {
   return [...zones, ...reserved];
 }
 
+/**
+ * The boxes of the placed structures, for a site search to stay off, but not those of a whole homestead (homeStorage):
+ * its box is the yard itself. The homestead cleanup's record (2026-11-15, job #10) spans the whole fence ring, and
+ * with its box kept off, structure-site found no spot inside the yard for any later improvement, and the portal site
+ * (8 from every build) none either. What stands in the yard is still seen as built ground by the search, and each
+ * build's own record keeps its own box. A structure that won't compile has no box.
+ */
+export function structureSiteBoxes<S extends { homeStorage?: boolean }>(structures: (S | null | undefined)[], boxOf: (s: S) => Rect): Rect[] {
+  const out: Rect[] = [];
+  for (const s of structures) {
+    if (!s || s.homeStorage) continue;
+    try {
+      const b = boxOf(s);
+      out.push({ x: b.x, z: b.z, width: b.width, length: b.length });
+    } catch { /* no box */ }
+  }
+  return out;
+}
+
 const name = (s: string | null | undefined) => (s ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
 const AIRY = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|dead_bush|bush|firefly_bush|leaf_litter|snow|vine|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|lily_of_the_valley|pink_petals|wildflowers|sweet_berry_bush|.*_sapling|torch|wall_torch)$/;
 const TREE = /_(log|leaves|wood)$|^(mangrove_roots|bee_nest)$/;

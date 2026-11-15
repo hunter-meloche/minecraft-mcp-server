@@ -16,6 +16,7 @@ import { signsGoal } from './signs.js';
 import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { compile } from '../structures/format.js';
+import { structureSiteBoxes } from '../structures/site.js';
 import { LoopWatch, sameResult, type Outcome, type Run } from './loops.js';
 import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
@@ -561,21 +562,16 @@ export class Brain {
 
   /**
    * The boxes of the LLM's structures in this world, as structure-site keeps off them: the improvement runs' builds
-   * keep no zone, and the portal site keeps 8 from every build (portal.ts portalAvoid).
+   * keep no zone, and the portal site keeps 8 from every build (portal.ts portalAvoid). Not a whole homestead's box
+   * (site.ts structureSiteBoxes): that is the yard itself.
    */
   private structureBoxes(world: WorldMemory): { x: number; z: number; width: number; length: number }[] {
-    const out: { x: number; z: number; width: number; length: number }[] = [];
-    if (!world.id) return out;
-    for (const n of this.structures.listStructures(world.id)) {
-      try {
-        const s = this.structures.loadStructure(world.id, n);
-        if (!s) continue;
-        const b = compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box;
-        out.push({ x: b.x, z: b.z, width: b.width, length: b.length });
-      } catch { /* a structure that won't compile has no box */ }
-    }
-    return out;
+    if (!world.id) return [];
+    const id = world.id;
+    return structureSiteBoxes(this.structures.listStructures(id).map(n => { try { return this.structures.loadStructure(id, n); } catch { return undefined; } }),
+      s => compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box);
   }
+
 
   /** The memory of the world the bot is in (chests, zones, jobs), once it knows which world that is. */
   worldMemory(): WorldMemory | undefined {
