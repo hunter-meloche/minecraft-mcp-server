@@ -29,6 +29,8 @@ import { WORK_AT, daylightLeft } from './schedule.js';
  * anyone built (natural ground only), breaks nothing out in the world (what a rail replaces is grass), and opens only
  * the bot's own fence: it ends on its brake in the yard, by the hall's panel, so the hall stays shut through the long
  * job and the boat move's own last part (the boat against the villager, the panel dug from it) takes the villager in.
+ * Where the boat's way in is across the yard (boatroute.ts yardEntry), the line comes in by that panel of the fence, its
+ * brake just inside it, and the boat's way across the yard is the last part's.
  *
  * Pure: the ground comes in read (boatroute.ts Ground), the stores counted.
  */
@@ -152,9 +154,12 @@ export interface RailGround { state(x: number, y: number, z: number): string | n
 export interface RailOpts {
   /** the villagers that may be taken (the judge's candidates), nearest first */
   candidates: readonly { id: number; position?: Pos }[];
-  /** the boat move's way into the hall (boatroute.ts entryOf): the fence straight out from the panel, the hall's wall, the stops */
+  /**
+   * the boat move's way into the hall (boatroute.ts entryOf: the fence straight out from the panel, the hall's wall, the
+   * stops; or yardEntry: in by a panel of the fence elsewhere and across the yard, its `yard`)
+   */
   entry: Entry;
-  /** the hall's panel (its bottom cell): the line comes in along its column */
+  /** the hall's panel (its bottom cell), or the middle post of a way in across the yard: the line comes in along its column */
   panel: Pos;
   /** the yard's box: the search keeps out of it (the line comes in by the panel's column only) */
   yard: { x1: number; z1: number; x2: number; z2: number };
@@ -182,8 +187,10 @@ export interface RailOpts {
 export function planRails(g: RailGround, opts: RailOpts): RailResult {
   const { entry, panel, yard } = opts;
   const zones = opts.zones ?? [];
-  const inward = { dx: -entry.dir[0], dz: -entry.dir[1] };
-  const along = entry.side === 'north' || entry.side === 'south';
+  // (in by the fence the boat's way comes in by: straight out from the hall's panel, or by a panel elsewhere)
+  const fenceSide = entry.yard?.side ?? entry.side, fenceDir = entry.yard?.dir ?? entry.dir;
+  const inward = { dx: -fenceDir[0], dz: -fenceDir[1] };
+  const along = fenceSide === 'north' || fenceSide === 'south';
   const post = entry.fence.find(f => (along ? f.x === panel.x : f.z === panel.z));
   if (!post) return { ok: false, why: 'no fence post straight out from the hall\'s panel' };
   // dug for the line: the post and what stands on it (gone: air for the line's way)
@@ -191,9 +198,11 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
   const at = (x: number, y: number, z: number): string | null | undefined => (dug.has(key(x, y, z)) ? 'air' : g.state(x, y, z));
   const level = entry.level;
 
-  // the yard's stretch: the post's cell inward to two short of the hall's wall (the boat's `front` stop), level throughout
+  // the yard's stretch: the post's cell inward to two short of the hall's wall (the boat's `front` stop), level throughout;
+  // in by a panel of the fence elsewhere, the brake's own stretch in from the post (the boat's way across the yard takes
+  // the villager on from there)
   const wallLine = along ? entry.wall[0].z : entry.wall[0].x;
-  const fromPost = along ? Math.abs(wallLine - post.z) : Math.abs(wallLine - post.x);
+  const fromPost = entry.yard ? BRAKE + BRAKE_CLEAR + 2 : along ? Math.abs(wallLine - post.z) : Math.abs(wallLine - post.x);
   const yardCells: Pos[] = [];
   for (let i = 0; i <= fromPost - 2; i++) yardCells.push({ x: post.x + inward.dx * i, y: level, z: post.z + inward.dz * i });
   if (yardCells.length < BRAKE + BRAKE_CLEAR + 1) return { ok: false, why: `the yard between the fence and the hall is too short for the brake (${yardCells.length} rails)` };

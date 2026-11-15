@@ -131,6 +131,11 @@ export interface VillageSite {
   rails?: { at: number; ok: boolean; text: string };
   /** villagers brought home from it */
   moved?: number;
+  /**
+   * its area as the judge last saw it (the box round its bell, beds, job sites and villagers, grown by AREA_GROW): a
+   * sighting or a bell in it is this village, whatever its distance from the middle
+   */
+  area?: { x1: number; z1: number; x2: number; z2: number };
 }
 
 /** Kept in brain.json per world (world.villages). */
@@ -155,6 +160,120 @@ const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinit
 const isPos = (p: unknown): p is Pos => !!p && fin((p as Pos).x) && fin((p as Pos).y) && fin((p as Pos).z);
 const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 
+const areaOk = (a: VillageSite['area']): a is NonNullable<VillageSite['area']> => !!a && fin(a.x1) && fin(a.z1) && fin(a.x2) && fin(a.z2);
+const inArea = (a: VillageSite['area'], p: { x: number; z: number }) => areaOk(a) && p.x >= a.x1 && p.x <= a.x2 && p.z >= a.z1 && p.z <= a.z2;
+/**
+ * A place that is this village: within SAME_VILLAGE of its middle, or inside the area its judge saw. A site judged with
+ * no area (by the code before areas were kept, or someone's by a player seen: noteSeen) reaches SAME_VILLAGE +
+ * AREA_GROW, about the area a judge draws: live, the village judged someone's on Nov 15 has none and is never judged
+ * again, and its villagers stand 70 and more from its bell (a site made for them was a trip out for nothing).
+ */
+const covers = (s: VillageSite, p: { x: number; z: number }) => horiz(s, p) <= SAME_VILLAGE || inArea(s.area, p)
+  || (!!s.judged && !areaOk(s.area) && horiz(s, p) <= SAME_VILLAGE + AREA_GROW);
+
+/**
+ * The site a place belongs to (pure): the first within SAME_VILLAGE of it, else a judged one that covers it (a village
+ * is wider than SAME_VILLAGE: live on Nov 15 its villagers stood 40 and 60 from its bell).
+ */
+export function siteFor(sites: readonly VillageSite[], p: { x: number; z: number }): VillageSite | undefined {
+  return sites.find(q => horiz(q, p) <= SAME_VILLAGE) ?? sites.find(q => q.judged && covers(q, p));
+}
+
+type Box = NonNullable<VillageSite['area']>;
+/** Two boxes joined (pure): `a` (none: just `b`) grown to hold `b`. */
+export const joinAreas = (a: VillageSite['area'], b: Box): Box =>
+  (areaOk(a) ? { x1: Math.min(a.x1, b.x1), z1: Math.min(a.z1, b.z1), x2: Math.max(a.x2, b.x2), z2: Math.max(a.z2, b.z2) } : { x1: b.x1, z1: b.z1, x2: b.x2, z2: b.z2 });
+/**
+ * All the ground a site covers, as a box (pure): its area, and round its middle SAME_VILLAGE, or SAME_VILLAGE +
+ * AREA_GROW judged with no area. A site someone's that moves (to a bell) or takes an area keeps this as its area: the
+ * ground round where it stood stays someone's.
+ */
+export function reachOf(s: VillageSite): Box {
+  const r = s.judged && !areaOk(s.area) ? SAME_VILLAGE + AREA_GROW : SAME_VILLAGE;
+  return joinAreas(s.area, { x1: s.x - r, z1: s.z - r, x2: s.x + r, z2: s.z + r });
+}
+
+/**
+ * Which site each one a write folded went into (foldSites in place): the run that holds a site folded away reads its
+ * village's word from the one it went into, not from whichever site is nearest (one not judged, ahead of it in the list,
+ * would say nothing of someone's).
+ */
+const foldedTo = new WeakMap<VillageSite, VillageSite>();
+/** The site a write folded `s` into, or undefined (never folded). */
+export const foldedInto = (s: VillageSite): VillageSite | undefined => foldedTo.get(s);
+/**
+ * Where a site a run holds is now (pure but for the folds' record): itself while among `sites`, else the one a write
+ * folded it into (and on, where that one was folded in turn); undefined when it is gone (forgotten, trimmed).
+ */
+export function siteNow(sites: readonly VillageSite[], s: VillageSite): VillageSite | undefined {
+  const seen = new Set<VillageSite>();
+  for (let q: VillageSite | undefined = s; q && !seen.has(q); q = foldedTo.get(q)) {
+    if (sites.includes(q)) return q;
+    seen.add(q);
+  }
+  return undefined;
+}
+
+/**
+ * One village, one site (pure but for `inPlace`, the writes' own): a site within SAME_VILLAGE of a judged one, or inside
+ * its area, or with the judged one inside its own, is that village, and is folded into it: its counts kept (the most
+ * seen of each), its moves added, the newer of their boat and rails words kept, the areas joined, the position the
+ * bell's; a site someone's never covers less for it (reachOf: what it and a site someone's folded into it reached is
+ * its area). Someone's comes first (a village one site of which is someone's is someone's: the courteous side), then the
+ * newest verdict. Live on Nov 15 the look round a village noted two sites from its villagers (40 and 60 from its bell) a
+ * minute before the judge wrote the bell's site someone's, and the next run set out for one of them, 192 out. Each site
+ * is judged against the judged one as folded so far, both ways (a site someone's by a player seen has no area, and may
+ * lie in a newer free one's), and the fold goes round again until nothing more folds (one moved to a bell, or grown by
+ * an area, reaches a site it passed over): the gates' copy and the write fold alike. `inPlace`: the site kept is
+ * written itself (a run holds it across its awaits); else a copy is (the gates write nothing). Returns the sites kept,
+ * in their order, and which kept site each folded one went into.
+ */
+function foldSites(sites: VillageSite[], inPlace: boolean): { sites: VillageSite[]; into: Map<VillageSite, VillageSite> } {
+  const into = new Map<VillageSite, VillageSite>();
+  const judged = sites.filter(s => s.judged).sort((a, b) => Number(b.judged!.kind === 'theirs') - Number(a.judged!.kind === 'theirs') || b.judged!.at - a.judged!.at);
+  if (!judged.length) return { sites, into };
+  const rank = new Map(judged.map((s, i) => [s, i] as const));
+  const kept = new Map<VillageSite, VillageSite>();
+  // (a site as folded so far: the gates' copy, or the site itself)
+  const cur = (s: VillageSite) => kept.get(s) ?? s;
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const t of judged) {
+      if (into.has(t)) continue;
+      for (const s of sites) {
+        // (never into one that comes after it: someone's first, then the newest word)
+        if (s === t || into.has(s) || (rank.get(s) ?? judged.length) < rank.get(t)!) continue;
+        const c = cur(s);
+        if (!covers(cur(t), c) && !covers(c, cur(t))) continue;
+        let m = kept.get(t);
+        if (!m) { m = inPlace ? t : { ...t }; kept.set(t, m); }
+        // (the bell's place: a site from villagers seen takes the bell of one folded into it)
+        const moves = !m.bells && !!c.bells;
+        // (someone's keeps all the ground it covered: moved to the bell, or its reach with no area given up for one, the
+        // box round where it stood is its area first; a site someone's folded into it brings its own reach along. Else
+        // the ground round a site someone's by a player seen opened up to a new site the rung went to)
+        if (m.judged?.kind === 'theirs' && (moves || !areaOk(m.area))) m.area = reachOf(m);
+        if (moves) { m.x = c.x; m.y = c.y; m.z = c.z; }
+        for (const k of ['bells', 'beds', 'jobs', 'villagers'] as const) if (fin(c[k])) m[k] = Math.max(m[k] ?? 0, c[k]!);
+        m.seenAt = Math.max(m.seenAt, c.seenAt);
+        if (fin(c.moved) && c.moved > 0) m.moved = (m.moved ?? 0) + c.moved;
+        if (c.noBoat && fin(c.noBoat.at) && (!m.noBoat || c.noBoat.at > m.noBoat.at)) m.noBoat = c.noBoat;
+        if (c.rails && fin(c.rails.at) && (!m.rails || c.rails.at > m.rails.at)) m.rails = c.rails;
+        const add = c.judged?.kind === 'theirs' ? reachOf(c) : areaOk(c.area) ? c.area : undefined;
+        if (add) m.area = joinAreas(m.area, add);
+        into.set(s, t);
+        grew = true;
+      }
+    }
+  }
+  if (!into.size) return { sites, into };
+  // (a judged site folded into another after it took some in: those go on into that one)
+  const root = (s: VillageSite): VillageSite => { let t = into.get(s)!; while (into.has(t)) t = into.get(t)!; return t; };
+  const went = new Map([...into.keys()].map(s => [s, cur(root(s))] as const));
+  if (inPlace) for (const [s, t] of went) foldedTo.set(s, t);
+  return { sites: sites.filter(s => !went.has(s)).map(cur), into: went };
+}
+
 /** The sites kept (pure): every one judged someone's (the newest THEIRS_KEPT), and the newest SITES of the rest, in their order. */
 function trimSites(sites: VillageSite[]): VillageSite[] {
   const theirs = sites.filter(s => s.judged?.kind === 'theirs');
@@ -171,9 +290,9 @@ function trimPlayers<T extends { x: number; z: number; at: number }>(players: T[
   return near.filter(p => keep.has(p));
 }
 
-function clean(raw: unknown, yard?: WorldMemory['yard']): VillagesMemory {
+function clean(raw: unknown, yard?: WorldMemory['yard'], inPlace = false): VillagesMemory {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<VillagesMemory>;
-  const sites = Array.isArray(r.sites) ? trimSites(r.sites.filter(s => isPos(s) && fin(s.seenAt))) : [];
+  const sites = Array.isArray(r.sites) ? trimSites(foldSites(r.sites.filter(s => isPos(s) && fin(s.seenAt)), inPlace).sites) : [];
   const players = Array.isArray(r.players) ? trimPlayers(r.players.filter(p => isPos(p) && fin(p.at)), yard) : [];
   const out: VillagesMemory = { sites, players };
   if (r.hall && fin(r.hall.count) && fin(r.hall.at)) out.hall = { count: r.hall.count, at: r.hall.at };
@@ -188,10 +307,11 @@ function clean(raw: unknown, yard?: WorldMemory['yard']): VillagesMemory {
 
 /**
  * The villages' memory, made whole in the world (a write: runs only, never a gate). The same object every time, made
- * whole in place: a run holds it across its awaits, and a look round (noteSeen) may come in between.
+ * whole in place: a run holds it across its awaits, and a look round (noteSeen) may come in between. A village's sites
+ * are folded into its judged one here (foldSites), that site itself written.
  */
 export function villagesOf(world: WorldMemory): VillagesMemory {
-  const c = clean(world.villages, world.yard);
+  const c = clean(world.villages, world.yard, true);
   const v = world.villages && typeof world.villages === 'object' ? world.villages : (world.villages = c);
   if (v === c) return v;
   v.sites = c.sites;
@@ -216,9 +336,10 @@ export const movesOn = (world: WorldMemory): boolean => world.villagerMoves === 
 /**
  * What a look round (world.entities) saw, remembered: every player (where and when: a village within 64 of one is
  * someone's, whenever it was seen), and villagers out in the world (outside the yard, its hall's aside), as a village
- * site where none is known within SAME_VILLAGE (its count kept to the most seen). A village already known within
- * PLAYER_CLEAR + AREA_GROW of a player seen is judged someone's there and then, for good: the sighting itself may roll
- * off the list one day, the verdict stays. Overworld only. Returns whether anything was written.
+ * site where none is known within SAME_VILLAGE, nor a judged one whose area holds them (siteFor: its count kept to the
+ * most seen). A village already known within PLAYER_CLEAR + AREA_GROW of a player seen is judged someone's there and
+ * then, for good: the sighting itself may roll off the list one day, the verdict stays. Overworld only. Returns whether
+ * anything was written.
  */
 export function noteSeen(world: WorldMemory, seen: readonly Seen[], now: number, dimension = 'overworld'): boolean {
   if (dimension !== 'overworld') return false;
@@ -237,7 +358,7 @@ export function noteSeen(world: WorldMemory, seen: readonly Seen[], now: number,
   v.players = trimPlayers(v.players, yard);
   for (const e of villagers) {
     const p = e.position!;
-    const site = v.sites.find(q => horiz(q, p) <= SAME_VILLAGE);
+    const site = siteFor(v.sites, p);
     const here = villagers.filter(o => horiz(o.position!, p) <= SAME_VILLAGE).length;
     if (site) {
       site.villagers = Math.max(site.villagers ?? 0, here);
@@ -260,16 +381,18 @@ export function noteSeen(world: WorldMemory, seen: readonly Seen[], now: number,
 
 /**
  * A village's bell seen (and what is round it): its site, kept with the bell as its middle (a site from villagers seen
- * moves to its bell). Returns the site.
+ * moves to its bell); one inside a judged village's area is that village, which stays where it is. Returns the site.
  */
 export function noteVillage(world: WorldMemory, at: Pos, counts: { bells?: number; beds?: number; jobs?: number; villagers?: number }, now: number): VillageSite {
   const v = villagesOf(world);
   let site = v.sites.find(q => horiz(q, at) <= SAME_VILLAGE);
+  if (site && counts.bells) { site.x = at.x; site.y = at.y; site.z = at.z; }
+  site ??= siteFor(v.sites, at);
   if (!site) {
     site = { x: at.x, y: at.y, z: at.z, seenAt: now };
     v.sites.push(site);
     v.sites = trimSites(v.sites);
-  } else if (counts.bells) { site.x = at.x; site.y = at.y; site.z = at.z; }
+  }
   Object.assign(site, Object.fromEntries(Object.entries(counts).filter(([, n]) => fin(n))));
   site.seenAt = now;
   return site;
@@ -287,7 +410,7 @@ export function noteBells(world: WorldMemory, bells: readonly { x: number; y: nu
   for (const b of bells) {
     const p = { x: Math.floor(b.x), y: Math.floor(b.y), z: Math.floor(b.z) };
     if (!isPos(p) || horiz(p, home) > VILLAGE_RANGE || !out(p)) continue;
-    const known = (world.villages?.sites ?? []).some(q => horiz(q, p) <= SAME_VILLAGE);
+    const known = !!siteFor(peekVillages(world).sites, p);
     noteVillage(world, p, { bells: 1 }, now);
     if (!known) fresh++;
   }
@@ -295,12 +418,12 @@ export function noteBells(world: WorldMemory, bells: readonly { x: number; y: nu
 }
 
 /**
- * A village already judged (any word) or found with no boat way home, within SAME_VILLAGE of `p`: the side search walks
- * on past it, as it would past nothing (its own variant goes to it while it is open: a known village is never found
- * afresh). Pure.
+ * A village already judged (any word) or found with no boat way home, within SAME_VILLAGE of `p` or with `p` inside its
+ * area: the side search walks on past it, as it would past nothing (its own variant goes to it while it is open: a
+ * known village is never found afresh). Read as the gates read the sites (folded: siteOpen's), so the two agree. Pure.
  */
 export function knownVillage(world: WorldMemory, p: { x: number; z: number }): VillageSite | undefined {
-  return (world.villages?.sites ?? []).find(s => isPos(s) && (s.judged || s.noBoat) && horiz(s, p) <= SAME_VILLAGE);
+  return peekVillages(world).sites.find(s => (s.judged || s.noBoat) && covers(s, p));
 }
 
 /** The site of a variant (`village x,z`), or undefined. */

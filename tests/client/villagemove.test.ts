@@ -7,11 +7,12 @@ import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.j
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import type { Zone } from '../../src/client/brain/courtesy.js';
 import { Brain, decide } from '../../src/client/brain/brain.js';
-import { Ground, cellOf, checkLeg, entryOf, footprint, planRoute, settle, type Entry } from '../../src/client/brain/boatroute.js';
+import { Ground, cellOf, checkLeg, entryOf, footprint, keepOff, planRoute, settle, yardEntry, yardPanel, type Entry } from '../../src/client/brain/boatroute.js';
 import {
-  HALL_WANTS, VILLAGE_RANGE, judgeVillage, noteSeen, noteVillage, peekVillages, pennedIn, siteOpen, villagersLine, type Seen, type VillageLook
+  HALL_WANTS, VILLAGE_RANGE, foldedInto, judgeVillage, knownVillage, noteSeen, noteVillage, peekVillages, pennedIn, siteOpen, villagersLine, villagesOf, type Seen,
+  type VillageLook
 } from '../../src/client/brain/village.js';
-import { BOAT_PACE, MOVE_BUDGET, closeUpGoal, lastRailPlan, villagersTask } from '../../src/client/brain/villagemove.js';
+import { BOAT_PACE, MOVE_BUDGET, closeUpGoal, homeMs, lastRailPlan, villagersTask } from '../../src/client/brain/villagemove.js';
 import { railsText } from '../../src/client/brain/railroute.js';
 import { pick, workGoals } from '../../src/client/brain/work.js';
 import { LADDER } from '../../src/client/brain/worktasks.js';
@@ -35,6 +36,7 @@ import { liveWorld, lookAt, realGoals, KEPT, WORN } from '../helpers/homestead.j
  */
 
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const T0 = Date.UTC(2026, 10, 15, 14, 0, 0);
 const HOME: Pos = { x: -549, y: 63, z: 2183 };
 const YARD = { x1: -565, z1: 2119, x2: -533, z2: 2215, y: 62 };
@@ -46,6 +48,8 @@ const BELL: Pos = { x: -556, y: 63, z: 1880 };
 const SPAWN = { x: -352, y: 63, z: 194 };
 const FENCE = 'birch_fence[east=true,north=false,south=false,waterlogged=false,west=true]';
 const k = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
+/** The rung's searches when no village is open to it: the four sides, then the four bearings between them (Nov 15: the quarters between the sides went unseen). */
+const SEARCHES = ['north', 'east', 'south', 'west', 'north-east', 'south-east', 'south-west', 'north-west'];
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 
@@ -138,6 +142,12 @@ class Land {
     stopAt?: { leg: number; reason: string }; offBy?: { leg: number; dx: number }; looked?: number; noUnload?: boolean; houses?: { x1: number; z1: number; x2: number; z2: number }[];
     /** the brain stops the run as this drive (from 1) gets under way: its signal aborted, the bridge's cancel ends the drive halfway */
     abortAt?: { leg: number; abort: AbortController };
+    /**
+     * the drive ends as the bridge's does (Vehicle.java): "arrived" the tick the boat is within its `within` of the end
+     * (at once, unmoved, where it starts that near), at full speed, and it glides this much on: it stops `within - coast`
+     * short of the end, on its line. Unset, it stops on the end itself
+     */
+    coast?: number;
   } = {}) {
     this.items = KIT();
     this.villagers = VILLAGERS();
@@ -322,6 +332,18 @@ class Land {
         if (this.opts.stopAt?.leg === this.legs) { reason = this.opts.stopAt.reason; end = { x: (from.x + to.x) / 2, z: (from.z + to.z) / 2 }; }
         // (the brain stops the run as the boat goes: the bridge's cancel ends the drive where it is)
         if (this.opts.abortAt?.leg === this.legs) { this.opts.abortAt.abort.abort(); reason = 'cancelled'; end = { x: (from.x + to.x) / 2, z: (from.z + to.z) / 2 }; }
+        if (this.opts.coast !== undefined && reason === 'arrived' && d > 0) {
+          const within = Math.max(0.5, Number(p.within ?? 1.5));
+          const short = d <= within ? d : within - this.opts.coast;
+          end = { x: to.x - (to.x - from.x) / d * short, z: to.z - (to.z - from.z) / d * short };
+        }
+        // (the bridge's time limit: past timeoutMs the drive ends where the boat has got to at its pace, "timed out")
+        const went = horiz(from, end), limit = Math.max(1000, Number(p.timeoutMs ?? 120_000));
+        if (went / BOAT_PACE * 1000 > limit) {
+          const f = limit / 1000 * BOAT_PACE / went;
+          end = { x: from.x + (end.x - from.x) * f, z: from.z + (end.z - from.z) * f };
+          reason = 'timed out';
+        }
         // (arrived within the drive's half block, but that much off to one side)
         if (this.opts.offBy?.leg === this.legs) end = { x: end.x + this.opts.offBy.dx, z: end.z };
         this.boat.pos = { x: end.x, y: 63, z: end.z };
@@ -609,11 +631,12 @@ test('the way into the live hall: the panel and a column either side of it (3 wi
   t.deepEqual(e.inside, { x: -555.5, z: 2130.5 });
   t.deepEqual(e.gate, HALL_GATE);
   t.is(e.level, 63);
-  // no hall, no panel, a gate in the fence where the posts would come out: no way in, and why
+  // no hall, no panel, a gate in the fence where the posts would come out: no way in straight out, and why (the gate's:
+  // the fence's side, which leaves the way in across the yard)
   t.deepEqual(entryOf(hallWorld({ zones: {} })), { why: 'no villager hall built' });
   const w = hallWorld();
   w.zones!['fence:gate'] = [{ x: -556, y: 63, z: 2119 }];
-  t.deepEqual(entryOf(w), { why: 'the fence straight out from the panel holds a corner or a gate' });
+  t.deepEqual(entryOf(w), { why: 'the fence straight out from the panel holds a corner or a gate', fence: true });
 });
 
 // ------------------------------------------------------------------------------------------------ the rung's gates
@@ -640,7 +663,7 @@ test('the switch off: the rung offers nothing and says so, at any hour, with or 
   }
 });
 
-test('the rung\'s gates: no hall, the hall full (as counted under half an hour ago), rain, a move\'s openings not put back; else the villages known first, then the four sides to 384', (t) => {
+test('the rung\'s gates: no hall, the hall full (as counted under half an hour ago), rain, a move\'s openings not put back; else the villages known first, then the four sides and the four bearings between them to 384', (t) => {
   const s = snap(KIT());
   t.like(pick(villagersTask, s, hallWorld({ zones: {} })), { decline: { cause: 'unneeded', text: 'no villager hall yet' } });
   const full = hallWorld();
@@ -655,12 +678,12 @@ test('the rung\'s gates: no hall, the hall full (as counted under half an hour a
   t.like(pick(villagersTask, s, open), { decline: { text: '1 block(s) of the hall or the fence left open by a move: close up first' } });
   // the village known first (its distance the day it needs), then the sides out to the range
   t.deepEqual(villagersTask.variants(s, hallWorld()).map(v => `${v.id} ${v.dist}${v.first ? ' first' : ''}`),
-    ['village -556,1880 303 first', 'north 384', 'east 384', 'south 384', 'west 384']);
+    ['village -556,1880 303 first', ...SEARCHES.map(b => `${b} 384`)]);
   // someone's: never again; its boat way failed today: not until tomorrow; too small: in 6 hours; beyond the range: not at all
   const w = hallWorld();
   const site = w.villages!.sites[0];
   site.judged = { at: T0 - MINUTE, kind: 'theirs', why: 'a player was seen 20 from it' };
-  t.deepEqual(villagersTask.variants(s, w).map(v => v.id), ['north', 'east', 'south', 'west']);
+  t.deepEqual(villagersTask.variants(s, w).map(v => v.id), SEARCHES);
   site.judged = undefined;
   site.noBoat = { at: T0 - 60 * MINUTE, why: 'a hill' };
   t.deepEqual(villagersTask.variants(s, w).map(v => v.id)[0], 'north');
@@ -875,14 +898,14 @@ test('a village judged someone\'s at the look (a sign by it, a player seen near 
     t.regex(text, new RegExp(`^\\[village -556,1880\\] left the village at \\(-556, 63, 1880\\) alone: ${why.replace(/[()]/g, '\\$&').replace(/14:04/, '\\d\\d:\\d\\d')}; back home$`), what);
     t.false(land.log.some(l => l.startsWith('boat down')), what);
     t.like(peekVillages(world).sites[0].judged, { kind: 'theirs' }, what);
-    t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), ['north', 'east', 'south', 'west'], what);
+    t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES, what);
   }
 });
 
 test('the search: no village known, the north side walked out by the north gate, a bell in sight, walked over and judged; the move is the next run\'s', async (t) => {
   const world = hallWorld({ villages: { sites: [], players: [] } });
   const land = new Land(world);
-  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), ['north', 'east', 'south', 'west']);
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES);
   const text = await rung(land).run(land.ctx());
   t.is(text, '[north] found a village at (-556, 63, 1880): free (7 villagers, 2 unemployed adult(s) to take (2 employed, 1 babies, 1 nitwits, 1 by a job site)): the move next run; back home');
   t.like(peekVillages(world).sites[0], { x: -556, y: 63, z: 1880, judged: { kind: 'free' } });
@@ -1066,7 +1089,7 @@ test('no boat way home (a ridge across the way): the rails are planned on the gr
   // in full for the villager-moves tool: every block, the order back up
   t.regex(railsText(plan), /\nTaken back up walking home after the cart: the trigger torch/);
   // the village is not offered again today (the boat's way failed), nor anything laid on the next look
-  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['north', 'east', 'south', 'west']);
+  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
 });
 
 test('no boat way and no rails way either (a wall of two across the way): said and kept, still nothing touched', async (t) => {
@@ -1376,4 +1399,677 @@ test('fed for the ride home: short of ready food (under 40 points carried, none 
   land.items.find(i => i.name === 'bread')!.count = 6;
   await t.throwsAsync(rung(land).run(land.ctx()), { message: '[village -556,1880] not setting out: short of food (30 food points of ready food carried, 40 wanted for the ride home)' });
   t.false(land.log.some(l => l.startsWith('goto') && !/careful/.test(l)), 'never walked out');
+});
+
+// ------------------------------------------------------------------------------------------------ the first live run's fixes (F7)
+
+/**
+ * The village west of home as the first live run met it (Nov 15, 16:35Z): its bell 164 out at (-693, 69, 2262) (on
+ * the stand-in world's flat ground, at 63), its villagers in three knots, 37, 40 and 60 from it (the walk's looks
+ * noted a site at each a minute before the judge wrote the bell's), and by it a stable of hay (another build to the
+ * judge: someone's).
+ */
+const WEST_BELL: Pos = { x: -693, y: 63, z: 2262 };
+function westVillage(land: Land): Villager[] {
+  const knot = (x: number, y: number, z: number, n: number, id: number): Villager[] =>
+    Array.from({ length: n }, (_, i) => ({ id: id + i, name: 'villager', position: { x: x + (i % 3), y, z: z + Math.floor(i / 3) }, profession: i % 2 ? 'farmer' : 'none', level: 1, baby: false }));
+  land.villagers = [...knot(-659.5, 63, 2245.5, 2, 400), ...knot(-699.5, 63, 2301.5, 5, 410), ...knot(-751.5, 63, 2259.5, 4, 420)];
+  land.marks = [
+    { name: 'bell', at: { ...WEST_BELL } }, { name: 'white_bed', at: { x: -690, y: 63, z: 2280 } }, { name: 'white_bed', at: { x: -702, y: 63, z: 2290 } },
+    { name: 'white_bed', at: { x: -720, y: 63, z: 2262 } }, { name: 'lectern', at: { x: -695, y: 63, z: 2270 } }, { name: 'composter', at: { x: -725, y: 63, z: 2258 } }
+  ];
+  land.zones = [{ x1: -703, y1: 64, z1: 2315, x2: -670, y2: 75, z2: 2344, markers: 40, surface: true, sample: 'hay_block' }];
+  return land.villagers;
+}
+
+test('one village, one verdict: the live run of Nov 15 (its villagers noted at three places on the walk, then the judge at its bell: someone\'s) leaves one site, someone\'s, and no move sets out for it', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  const land = new Land(world, { houses: [] });
+  const vs = westVillage(land);
+  // (the looks on the walk, a minute before the judge: a site for each knot, none within 64 of another)
+  noteSeen(world, vs, T0 - MINUTE);
+  t.deepEqual(peekVillages(world).sites.map(s => `${s.x},${s.z} ${s.villagers}`), ['-660,2245 2', '-700,2301 5', '-752,2259 4']);
+  const r = await villagersTask.run(land.ctx(), 'west', MOVE_BUDGET, () => land.t);
+  t.is(r.text, 'found a village at (-693, 63, 2262): someone\'s, left alone: another build 0 from it (x -703..-670, z 2315..2344, hay_block)');
+  // one site: the bell's, someone's, the other two folded into it (their counts kept: the most seen), its area kept
+  const sites = peekVillages(world).sites;
+  t.is(sites.length, 1, JSON.stringify(sites));
+  t.like(sites[0], { x: -693, y: 63, z: 2262, bells: 1, beds: 3, jobs: 2, villagers: 11, judged: { kind: 'theirs' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  // no move sets out for it (live, the next run did: "start work: villagers: village -700,2301: 192 blocks out")
+  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
+  t.notRegex(String((pick(villagersTask, snap(KIT(), { now: land.t }), world) as { variant?: string }).variant), /^village /);
+  // and the west side walks on past it next time, as past any village judged
+  t.truthy(knownVillage(world, { x: -700, z: 2301 }));
+  t.truthy(knownVillage(world, { x: -760, z: 2300 }), 'inside its area, 77 from its bell');
+});
+
+test('one village, one verdict: the sites the live run left (the bell\'s someone\'s, two not judged 40 and 60 from it) read as one, and are written so by the next run; a villager or a bell seen in a judged village\'s area is that village; someone\'s outranks a newer word', async (t) => {
+  const theirs = { at: T0 - 5 * MINUTE, kind: 'theirs' as const, why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' };
+  const world = hallWorld({
+    villages: {
+      sites: [
+        { x: -693, y: 69, z: 2262, villagers: 7, bells: 1, beds: 10, jobs: 3, seenAt: T0 - 5 * MINUTE, judged: theirs },
+        { x: -700, y: 69, z: 2301, villagers: 5, seenAt: T0 - 6 * MINUTE }, { x: -752, y: 70, z: 2259, villagers: 4, seenAt: T0 - 6 * MINUTE }
+      ],
+      players: []
+    }
+  });
+  const before = JSON.stringify(world);
+  t.deepEqual(peekVillages(world).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-693,2262 theirs']);
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES, 'no move offered for either');
+  t.is(JSON.stringify(world), before, 'the gates write nothing');
+  const judged = world.villages!.sites[0];
+  villagesOf(world);
+  t.deepEqual(world.villages!.sites, [judged], 'made whole: the judged site itself kept (a run holds it across its awaits)');
+  t.like(judged, { x: -693, z: 2262, villagers: 7, beds: 10, seenAt: T0 - 5 * MINUTE, judged: theirs });
+  // its verdict from before areas were kept (it has none, and is never judged again): its villagers seen 73-75 from its
+  // bell, as the south-west search would pass them, are that village too (no site made for them: a trip out for nothing)
+  noteSeen(world, [1, 2, 3].map(i => ({ id: 10 + i, name: 'villager', position: { x: -765.5 - i, y: 69, z: 2262.5 } })), T0 - 4 * MINUTE);
+  t.deepEqual(world.villages!.sites, [judged], 'no site of their own');
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES);
+  t.truthy(knownVillage(world, { x: -768, z: 2262 }));
+  // seen again in its area (77 from its bell): no new site, the village's own is that
+  judged.area = { x1: -776, z1: 2235, x2: -636, z2: 2325 };
+  noteSeen(world, [{ id: 1, name: 'villager', position: { x: -760.5, y: 70, z: 2300.5 } }], T0);
+  t.is(peekVillages(world).sites.length, 1);
+  t.deepEqual(world.villages!.sites, [judged], 'none written for it (not only folded away on a read)');
+  t.is(noteVillage(world, { x: -770, y: 70, z: 2300 }, { bells: 1 }, T0), judged, 'a bell in its area: that village');
+  t.like(judged, { x: -693, z: 2262 }, 'and its middle stays at its own bell');
+  // out of its area and 64 off: a village of its own
+  noteSeen(world, [{ id: 2, name: 'villager', position: { x: -800.5, y: 70, z: 2380.5 } }], T0);
+  t.is(peekVillages(world).sites.length, 2);
+  // a free word 50 from a site judged someone's before: the village is someone's (the courteous side), its moves kept
+  const w2 = hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1830, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'a player was seen 20 from it, at (-560, 63, 1810) (13:00)' } },
+        { x: -556, y: 63, z: 1880, seenAt: T0, moved: 1, judged: { at: T0, kind: 'free', why: '7 villagers' } }],
+      players: []
+    }
+  });
+  t.like(peekVillages(w2).sites, [{ z: 1830, moved: 1, judged: { kind: 'theirs' } }]);
+  t.is(peekVillages(w2).sites.length, 1);
+});
+
+test('one village, one verdict: a move\'s fresh look that finds its village free, its bell 50 from a site of it judged someone\'s before, leaves it alone: nothing touched', async (t) => {
+  // (a site of villagers seen 70 north of the bell, offered; one 50 south of the bell judged someone's: a player by it)
+  const world = hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1950, villagers: 6, seenAt: T0 - HOUR }, { x: -556, y: 63, z: 1830, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'a player was seen 20 from it, at (-560, 63, 1810) (13:00)' } }],
+      players: []
+    }
+  });
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id)[0], 'village -556,1950');
+  const land = new Land(world);
+  const text = await rung(land).run(land.ctx());
+  t.is(text, '[village -556,1950] left the village at (-556, 63, 1880) alone: a player was seen 20 from it, at (-560, 63, 1810) (13:00); back home');
+  t.deepEqual(acted(land), []);
+  // (one site, someone's, at the bell the fresh look saw)
+  t.like(peekVillages(world).sites, [{ x: -556, z: 1880, bells: 1, judged: { kind: 'theirs', why: 'a player was seen 20 from it, at (-560, 63, 1810) (13:00)' } }]);
+  t.is(peekVillages(world).sites.length, 1);
+});
+
+
+test('one village, one verdict, folded both ways and to the end: a site someone\'s by a player seen (no area) inside the area of a newer word 98 off, and a site the fold reaches only once its judged one has moved to a bell; the gates and the write alike', (t) => {
+  // (someone's by a player seen by it: no area, no bell; its village's bell 98 south, judged too small 7 hours ago, its
+  // area holding the first: open again, and a look there may find it free with the sighting rolled off the list)
+  const theirs = { at: T0 - 8 * HOUR, kind: 'theirs' as const, why: 'a player was seen 20 from it, at (-556, 63, 1780) (06:00)' };
+  const both = () => hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1800, villagers: 3, seenAt: T0 - 8 * HOUR, judged: { ...theirs } },
+        { x: -556, y: 63, z: 1898, bells: 1, villagers: 4, seenAt: T0 - 7 * HOUR, judged: { at: T0 - 7 * HOUR, kind: 'wait', why: '4 villager(s) seen, 5 or more wanted' }, area: { x1: -590, z1: 1780, x2: -520, z2: 1930 } }],
+      players: []
+    }
+  });
+  const w1 = both();
+  t.deepEqual(peekVillages(w1).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1898 theirs'], 'one village: someone\'s, at its bell');
+  t.deepEqual(villagersTask.variants(snap(KIT()), w1).map(v => v.id), SEARCHES, 'no move offered for it');
+  const t1 = w1.villages!.sites[0], w = w1.villages!.sites[1];
+  t.deepEqual(villagesOf(w1).sites, [t1]);
+  // (its area: the bell's joined with the ground it covered where it stood, 88 round (-556, 1800) with no area of its own)
+  t.like(t1, { x: -556, z: 1898, bells: 1, villagers: 4, judged: theirs, area: { x1: -644, z1: 1712, x2: -468, z2: 1930 } });
+  t.is(foldedInto(w), t1, 'the write says which site it went into');
+  // (someone's with no bell; a knot of villagers 100 off it, ahead in the list; the bell 50 off it: the knot is that
+  // village once the site has moved to the bell, and the gates' copy reads it so as the write does)
+  const three = () => hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1800, seenAt: T0 - HOUR, judged: { ...theirs } }, { x: -556, y: 63, z: 1900, villagers: 4, seenAt: T0 - HOUR },
+        { x: -556, y: 63, z: 1850, bells: 1, seenAt: T0 - HOUR }],
+      players: []
+    }
+  });
+  const w2 = three();
+  const before = JSON.stringify(w2);
+  t.deepEqual(peekVillages(w2).sites.map(s => `${s.x},${s.z} ${s.judged?.kind ?? '-'}`), ['-556,1850 theirs']);
+  t.deepEqual(villagersTask.variants(snap(KIT()), w2).map(v => v.id), SEARCHES);
+  t.is(JSON.stringify(w2), before, 'the gates write nothing');
+  const knot = w2.villages!.sites[1];
+  t.deepEqual(villagesOf(w2).sites.map(s => `${s.x},${s.z} ${s.judged?.kind ?? '-'} ${s.villagers}`), ['-556,1850 theirs 4']);
+  t.is(foldedInto(knot), w2.villages!.sites[0]);
+});
+
+test('one village, one verdict, the run\'s word: its site folded after the judge into one judged someone\'s, the run reads that one\'s word (not a site nearer the bell, not judged); someone\'s written on its own site as the look went round stays: left alone, nothing touched', async (t) => {
+  // (the run's knot 12 from the bell; another knot 60 from the bell, outside the village's area; a site judged someone's
+  // 80 from the bell, its own bell there: the run's site, moved to the bell, is that village, the other knot not)
+  const theirs = { at: T0 - HOUR, kind: 'theirs' as const, why: 'a player was seen 20 from it, at (-556, 63, 1980) (13:00)' };
+  const world = hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1820, villagers: 3, seenAt: T0 - HOUR }, { x: -556, y: 63, z: 1868, villagers: 6, seenAt: T0 - HOUR },
+        { x: -556, y: 63, z: 1960, bells: 1, seenAt: T0 - HOUR, judged: { ...theirs } }],
+      players: []
+    }
+  });
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id).slice(0, 2), ['village -556,1868', 'village -556,1820']);
+  const land = new Land(world);
+  t.is(await rung(land).run(land.ctx()), `[village -556,1868] left the village at (-556, 63, 1880) alone: ${theirs.why}; back home`);
+  t.deepEqual(acted(land), []);
+  t.like(peekVillages(world).sites.find(s => s.z === 1960), { bells: 1, judged: theirs, area: { z1: 1842 } });
+  // a player seen 80 from the run's own site (148 from the bell) as the look goes round: someone's there and then, for
+  // good (noteSeen); the judge's own rule (a player within 64 of the village's area) says free, and does not undo it
+  const w2 = hallWorld({ villages: { sites: [{ x: -556, y: 63, z: 1812, villagers: 3, seenAt: T0 - HOUR }], players: [] } });
+  const l2 = new Land(w2);
+  l2.players.push({ id: 77, name: 'player', position: { x: -556, y: 63, z: 1732 } });
+  t.regex(await rung(l2).run(l2.ctx()), /^\[village -556,1812\] left the village at \(-556, 63, 1880\) alone: a player was seen 80 from it, at \(-556, 63, 1732\) \(\d\d:\d\d\); back home$/);
+  t.deepEqual(acted(l2), []);
+  t.like(peekVillages(w2).sites, [{ x: -556, z: 1880, bells: 1, judged: { kind: 'theirs' } }]);
+  t.is(peekVillages(w2).sites.length, 1);
+});
+
+test('one village, one verdict, at the run\'s start: a variant whose site has been folded into its village\'s judged one since it was offered (the hall not counted, so nothing else wrote the memory) is no village of its own: forgotten, nothing done', async (t) => {
+  // (written by hand, as they stood before a write folded them: the bell's site someone's, a knot 40 from it)
+  const world = hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1880, bells: 1, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it' } },
+        { x: -556, y: 63, z: 1920, villagers: 4, seenAt: T0 - HOUR }],
+      players: []
+    }
+  });
+  const land = new Land(world);
+  const call = land.call.bind(land);
+  land.call = (m, p = {}) => { if (m === 'world.entities') throw new Error('no reply'); return call(m, p); };
+  const r = await villagersTask.run(land.ctx(), 'village -556,1920', MOVE_BUDGET, () => land.t);
+  t.like(r, { gain: 0, text: 'no village -556,1920 known any more', mark: 'forget' });
+  t.deepEqual(land.log, []);
+  t.deepEqual(world.villages!.sites.map(s => `${s.x},${s.z} ${s.judged?.kind ?? '-'}`), ['-556,1880 theirs']);
+});
+
+test('one village, one verdict, as the look goes round: a player seen by another site of the village makes that one someone\'s and the fold takes the run\'s site into it: the run reads that word, never a free one at the bell; and a look that sees nothing there forgets no site someone\'s', async (t) => {
+  // (the run's site 50 north of the bell, where the bell's own villagers were seen; another 70 on, where 3 were; a player
+  // 25 past that one, seen as the look goes round. The judge's own rule, a player within 64 of the area round the bell
+  // and the villagers it sees, says free: 111 off)
+  const two = () => hallWorld({ villages: { sites: [{ x: -556, y: 63, z: 1930, villagers: 4, seenAt: T0 - HOUR }, { x: -556, y: 63, z: 2000, villagers: 3, seenAt: T0 - HOUR }], players: [] } });
+  const player: Seen = { id: 77, name: 'player', position: { x: -556, y: 63, z: 2025 } };
+  const world = two();
+  const land = new Land(world);
+  land.players.push({ ...player });
+  const r = await villagersTask.run(land.ctx(), 'village -556,1930', MOVE_BUDGET, () => land.t);
+  t.regex(r.text, /^left the village at \(-556, 63, 1930\) alone: a player was seen 25 from it, at \(-556, 63, 2025\) \(\d\d:\d\d\)$/);
+  t.deepEqual(acted(land), []);
+  // one site, someone's, at the bell, the ground round where its someone's site stood still its (the player's place)
+  t.deepEqual(peekVillages(world).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1880 theirs']);
+  t.truthy(knownVillage(world, { x: -556, z: 2025 }));
+  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
+  // nothing seen there at all (no villager, no bell: gone, or the look's calls not answered): the site someone's that the
+  // run's was folded into is kept, and the run's word is its
+  const w2 = two();
+  const l2 = new Land(w2);
+  l2.villagers = [];
+  l2.marks = [];
+  l2.players.push({ ...player });
+  t.regex((await villagersTask.run(l2.ctx(), 'village -556,1930', MOVE_BUDGET, () => l2.t)).text, /^left the village at \(-556, 63, 1930\) alone: a player was seen 25 from it/);
+  t.deepEqual(peekVillages(w2).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,2000 theirs']);
+  // and the run's own site, someone's by a player seen 60 from it in that same look
+  const w3 = hallWorld({ villages: { sites: [{ x: -556, y: 63, z: 1930, villagers: 4, seenAt: T0 - HOUR }], players: [] } });
+  const l3 = new Land(w3);
+  l3.villagers = [];
+  l3.marks = [];
+  l3.players.push({ ...player, position: { x: -556, y: 63, z: 1990 } });
+  t.regex((await villagersTask.run(l3.ctx(), 'village -556,1930', MOVE_BUDGET, () => l3.t)).text, /^left the village at \(-556, 63, 1930\) alone: a player was seen 60 from it/);
+  t.deepEqual(peekVillages(w3).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1930 theirs']);
+});
+
+test('one village, one verdict, its ground kept: a site someone\'s that a fold moves to its village\'s bell still covers the ground round where it stood (a villager seen there is that village: no site of its own, no move offered); so does one with no area that takes a free site\'s bell', (t) => {
+  // (the bell's site someone's, its area 40 round it; a villager 70 east of the bell makes a site of its own, and a
+  // player seen 30 east of that makes it someone's, for good; the next write folds the two, at the bell)
+  const world = hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1880, bells: 1, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it' }, area: { x1: -596, z1: 1840, x2: -516, z2: 1920 } }],
+      players: []
+    }
+  });
+  noteSeen(world, [{ id: 1, name: 'villager', position: { x: -485.5, y: 63, z: 1880.5 } }], T0 - 30 * MINUTE);
+  noteSeen(world, [{ id: 2, name: 'player', position: { x: -455.5, y: 63, z: 1880.5 } }], T0 - 20 * MINUTE);
+  t.deepEqual(world.villages!.sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1880 theirs', '-486,1880 theirs']);
+  t.deepEqual(villagesOf(world).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1880 theirs']);
+  // a villager 50 from where the site someone's by the player stood, 120 from the bell
+  noteSeen(world, [{ id: 3, name: 'villager', position: { x: -435.5, y: 63, z: 1880.5 } }], T0 - 10 * MINUTE);
+  t.is(world.villages!.sites.length, 1, JSON.stringify(world.villages!.sites));
+  t.truthy(knownVillage(world, { x: -436, z: 1880 }));
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES);
+  // someone's by a player seen (no area, no bell), a free site's bell 80 off it: kept at the bell, and a villager 50 the
+  // other way from where it stood (130 from the bell) is that village too
+  const w2 = hallWorld({
+    villages: {
+      sites: [{ x: -556, y: 63, z: 1880, villagers: 3, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'a player was seen 20 from it, at (-576, 63, 1880) (13:00)' } },
+        { x: -476, y: 63, z: 1880, bells: 1, villagers: 6, seenAt: T0 - 30 * MINUTE, judged: { at: T0 - 30 * MINUTE, kind: 'free', why: '6 villagers' }, area: { x1: -500, z1: 1856, x2: -452, z2: 1904 } }],
+      players: []
+    }
+  });
+  t.deepEqual(villagesOf(w2).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-476,1880 theirs']);
+  noteSeen(w2, [{ id: 4, name: 'villager', position: { x: -605.5, y: 63, z: 1880.5 } }], T0);
+  t.is(w2.villages!.sites.length, 1, JSON.stringify(w2.villages!.sites));
+  t.deepEqual(villagersTask.variants(snap(KIT()), w2).map(v => v.id), SEARCHES);
+});
+
+test('the search\'s bearings: the four sides, then the four between them (the quarters a side\'s line never sees), each out to 384 by a gate on its own sides, its dry mark written as a side\'s', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 });
+  const land = new Land(world, { houses: [] });
+  land.villagers = [];
+  land.marks = [];
+  const texts: string[] = [];
+  const logs: string[][] = [];
+  for (let i = 0; i < SEARCHES.length; i++) {
+    const from = land.log.length;
+    texts.push(await rung(land).run(land.ctx()));
+    logs.push(land.log.slice(from));
+  }
+  t.deepEqual(texts.map(x => /^\[([a-z-]+)\]/.exec(x)?.[1]), SEARCHES);
+  t.is(texts[4], '[north-east] no village north-east within the village range (384 from home); back home');
+  // each dry, its mark as a side's: once each, the turn on to the next
+  t.deepEqual(Object.keys(world.work!.dry).sort(), SEARCHES.map(b => `villagers:${b}`).sort());
+  for (const b of SEARCHES) t.like(world.work!.dry[`villagers:${b}`], { n: 1 }, b);
+  // the north-east's stops: 32 apart across the ground along its line, the last 16 inside the range (368 out), out of
+  // the yard by the east gate (of the north and east gates, the shorter way)
+  const stops = [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 368].map(d => `(${Math.round(HOME.x + d / Math.SQRT2)}, 63, ${Math.round(HOME.z - d / Math.SQRT2)})`);
+  t.deepEqual(logs[4].filter(l => stops.some(s => l.startsWith(`goto ${s}`))).map(l => /^goto (\([^)]*\))/.exec(l)![1]), stops);
+  t.is(Math.round(Math.hypot(Math.round(HOME.x + 368 / Math.SQRT2) - HOME.x, Math.round(HOME.z - 368 / Math.SQRT2) - HOME.z)), 368);
+  t.true(land.said.includes('out of the yard by its east gate (-533, 63, 2183)'), land.said.filter(l => /out of the yard/.test(l)).join(' | '));
+  t.true(land.said.includes('villagers: looking north-east for a village, out to 384'));
+  // and the south-west's by the south or west gate, its last stop 368 out to the south-west
+  t.true(logs[6].some(l => l.startsWith(`goto (${Math.round(HOME.x - 368 / Math.SQRT2)}, 63, ${Math.round(HOME.z + 368 / Math.SQRT2)})`)), logs[6].join(' | '));
+});
+
+/** The live yard's builds (brain.json, Nov 15) as zones, what a way across the yard keeps off, and its four gates. */
+const CANE: [number, number][] = [[-556, 2229], [-548, 2228], [-544, 2227], [-543, 2228], [-536, 2220], [-535, 2221], [-534, 2217], [-533, 2224], [-533, 2226], [-533, 2228],
+  [-533, 2230], [-531, 2216], [-528, 2216], [-527, 2208], [-525, 2211], [-525, 2217], [-524, 2218], [-523, 2210], [-522, 2219], [-521, 2220], [-520, 2204], [-520, 2212], [-519, 2208], [-518, 2206]];
+const PORTAL = { x1: -562, z1: 2146, x2: -557, z2: 2148 };
+const COW_PEN = { x1: -558, z1: 2165, x2: -552, z2: 2171 };
+const WORKSHOP = { x1: -546, z1: 2152, x2: -540, z2: 2158 };
+function liveZones(world: WorldMemory): WorldMemory {
+  const box = (b: { x1: number; z1: number; x2: number; z2: number }) => ({ x: b.x1, y: 62, z: b.z1, width: b.x2 - b.x1 + 1, length: b.z2 - b.z1 + 1 });
+  Object.assign(world.zones!, {
+    portal: [box(PORTAL)], 'pen:cow': [box(COW_PEN)], workshop: [box(WORKSHOP)], 'pen:sheep': [{ x: -542, y: 62, z: 2196, width: 7, length: 7 }],
+    storage: [{ x: -552, y: 62, z: 2178, width: 7, length: 9 }], plot: [{ x: -545, y: 62, z: 2161, width: 9, length: 9 }], trees: [{ x: -546, y: 62, z: 2133, width: 15, length: 11 }],
+    enchanting: [{ x: -547, y: 62, z: 2206, width: 7, length: 7 }], cane: CANE.map(([x, z]) => ({ x, y: 63, z })), 'obsidian:cast': [{ x: -556, y: 62, z: 2180 }],
+    'fence:gate': [{ ...NORTH_GATE }, { x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 }]
+  });
+  return world;
+}
+/**
+ * The boat's own box and a quarter block of the drive's slack, anywhere along a to b, meets the box's cells (the way's
+ * footprint, its box and the whole slack judged every half block, covers that much at every point between).
+ */
+function footMeets(a: { x: number; z: number }, b: { x: number; z: number }, box: { x1: number; z1: number; x2: number; z2: number }): boolean {
+  const half = 0.6875 + 0.25;
+  const n = Math.max(1, Math.ceil(horiz(a, b) / 0.05));
+  for (let i = 0; i <= n; i++) {
+    const p = { x: a.x + (b.x - a.x) * i / n, z: a.z + (b.z - a.z) * i / n };
+    if (p.x - half < box.x2 + 1 && p.x + half > box.x1 && p.z - half < box.z2 + 1 && p.z + half > box.z1) return true;
+  }
+  return false;
+}
+
+/**
+ * The live yard's ground as read on Nov 15 (top solid y), a stand-in: the yard at 62 (its fence round it at 63, the four
+ * gates, the hall's walls); north of the fence a cleared strip (z 2117-2118) then the hill (65); west a strip
+ * (x -567..-566) then the hill but for z 2151-2163 and 2187-2195 (63); east flat (63) from z 2135, the hill north of it;
+ * south flat (62). The yard's own builds stand only as zones (the way keeps off them by those alone).
+ */
+function liveYard(cells: Record<string, string> = {}): Ground {
+  const g = new Ground(58, 16);
+  const topOf = (x: number, z: number): number => {
+    if (x >= YARD.x1 && x <= YARD.x2 && z >= YARD.z1 && z <= YARD.z2) return 62;
+    if (z < YARD.z1) return z >= 2117 ? 62 : 65;
+    if (x < YARD.x1) return x >= -567 ? 62 : (z >= 2151 && z <= 2163) || (z >= 2187 && z <= 2195) ? 63 : 65;
+    if (x > YARD.x2) return z >= 2135 ? 63 : 65;
+    return 62;
+  };
+  const gates = [NORTH_GATE, { x: -533, z: 2183 }, { x: -549, z: 2215 }, { x: -565, z: 2183 }];
+  for (let x = -620; x <= -500; x++) for (let z = 2100; z <= 2240; z++) {
+    const top = topOf(x, z);
+    const ring = ((x === YARD.x1 || x === YARD.x2) && z >= YARD.z1 && z <= YARD.z2) || ((z === YARD.z1 || z === YARD.z2) && x >= YARD.x1 && x <= YARD.x2);
+    const inHall = x >= HALL.x && x < HALL.x + HALL.width && z >= HALL.z && z < HALL.z + HALL.length;
+    const edgeX = x === HALL.x || x === HALL.x + HALL.width - 1, edgeZ = z === HALL.z || z === HALL.z + HALL.length - 1;
+    for (let y = 58; y < 74; y++) {
+      let b = y < top ? 'dirt' : y === top ? 'grass_block[snowy=false]' : 'air';
+      if (y === 63 && ring) b = gates.some(q => q.x === x && q.z === z) ? 'birch_fence_gate[facing=north,in_wall=false,open=false,powered=false]' : FENCE;
+      if (inHall && y >= 63 && y <= 66) {
+        if (y === 66) b = 'oak_planks';
+        else if (x === HALL_GATE.x && z === HALL_GATE.z && y <= 64) b = y === 63 ? 'oak_fence_gate[facing=south,open=false]' : 'air';
+        else if (edgeX && edgeZ) b = 'oak_log[axis=y]';
+        else if (edgeX || edgeZ) b = 'oak_planks';
+      }
+      g.set(x, y, z, cells[`${x},${y},${z}`] ?? b);
+    }
+  }
+  return g;
+}
+
+test('the way into the hall across the yard (Nov 15: straight out from its panel, the hill): in by the west fence where the ground outside lets the boat by, the side toward the village, round the portal to a panel in the hall\'s yard-facing wall beside its gate', (t) => {
+  const world = liveZones(hallWorld());
+  const g = liveYard({ '-565,64,2152': 'torch' });
+  // straight out from the built panel: the hill
+  const straight = entryOf(world) as Entry;
+  t.like(footprint(g, straight.out.x, straight.out.z, straight.level + 2, false), { ok: false, why: 'a wall', at: { x: -557, y: 65, z: 2115 } });
+  // the hall's yard-facing wall is its south one (the gate's), the panel two along from the gate toward the yard's middle
+  t.deepEqual(yardPanel(world), { side: 'south', at: { x: -554, y: 63, z: 2134 } });
+  const e = yardEntry(g, world, { x: WEST_BELL.x, z: WEST_BELL.z });
+  if ('why' in e) return t.fail(e.why);
+  t.like(e, { side: 'south', dir: [0, 1], level: 63, gate: HALL_GATE, out: { x: -567.5, z: 2152.5 }, front: { x: -553.5, z: 2137 }, inside: { x: -553.5, z: 2130.5 } });
+  t.deepEqual(e.fence, [{ x: -565, y: 63, z: 2151 }, { x: -565, y: 63, z: 2152 }, { x: -565, y: 63, z: 2153 }]);
+  t.deepEqual(e.wall, [-555, -554, -553].map(x => ({ x, y: 63, z: 2134 })).concat([-555, -554, -553].map(x => ({ x, y: 64, z: 2134 }))));
+  t.like(e.yard, { side: 'west', dir: [-1, 0], through: { x: -561.5, z: 2152.5 }, post: { x: -565, y: 63, z: 2152 } });
+  // across the yard: round the portal (straight on, it is in the way), each leg judged whole, the last at the hall's stop;
+  // its footprint never on the portal, the cow pen or the workshop
+  const own = keepOff(g, world);
+  t.like(checkLeg(own, { ...e.yard!.through, level: 63 }, e.front), { ok: false, why: 'the bot\'s own portal' });
+  t.deepEqual(e.yard!.legs[e.yard!.legs.length - 1], e.front);
+  let at = { ...e.yard!.through, level: 63 };
+  for (const leg of e.yard!.legs) {
+    const c = checkLeg(own, at, leg);
+    t.true(c.ok, `${JSON.stringify(at)} -> ${JSON.stringify(leg)}: ${JSON.stringify(c)}`);
+    for (const z of [PORTAL, COW_PEN, WORKSHOP]) t.false(footMeets(at, leg, z), `${JSON.stringify(at)} -> ${JSON.stringify(leg)} meets ${JSON.stringify(z)}`);
+    at = { ...leg, level: 63 };
+  }
+  // a village to the south: in by the south fence, round the builds the length of the yard
+  const s = yardEntry(g, world, { x: -549, z: 2600 });
+  if ('why' in s) return t.fail(s.why);
+  t.like(s.yard, { side: 'south', dir: [0, 1] });
+  t.deepEqual(s.fence, [-554, -553, -552].map(x => ({ x, y: 63, z: YARD.z2 })));
+  let from = { ...s.yard!.through, level: 63 };
+  const zones = Object.entries(world.zones!).filter(([kind]) => !/^(fence|hall)/.test(kind)).flatMap(([, bs]) => bs.filter(b => b.width).map(b => ({ x1: b.x, z1: b.z, x2: b.x + b.width! - 1, z2: b.z + b.length! - 1 })));
+  for (const leg of s.yard!.legs) {
+    t.true(checkLeg(own, from, leg).ok);
+    for (const z of zones) t.false(footMeets(from, leg, z), `${JSON.stringify(from)} -> ${JSON.stringify(leg)} meets ${JSON.stringify(z)}`);
+    from = { ...leg, level: 63 };
+  }
+  // no panel with ground outside it (hills all round): none, and why
+  const hills = liveYard();
+  for (let z = 2151; z <= 2195; z++) for (let x = -620; x <= -568; x++) for (const y of [63, 64, 65]) hills.set(x, y, z, 'dirt');
+  for (let x = -620; x <= -500; x++) for (let z = 2218; z <= 2240; z++) for (const y of [63, 64, 65]) hills.set(x, y, z, 'dirt');
+  for (let x = -532; x <= -500; x++) for (let z = 2135; z <= 2240; z++) for (const y of [64, 65]) hills.set(x, y, z, 'dirt');
+  t.deepEqual(yardEntry(hills, world, { x: WEST_BELL.x, z: WEST_BELL.z }), { why: 'no panel of the yard\'s fence with ground outside it the boat can come in from' });
+});
+
+test('the way in across the yard, the fence\'s panels in turn: one with what stands on a post not read is passed over (it could not be put back), one by a cell of the bot\'s own cane just outside the fence too, and the searches go on to the sixth', (t) => {
+  const toward = { x: WEST_BELL.x, z: WEST_BELL.z };
+  // (the top of the west panel's middle post not read: on to the first panel clear of that post)
+  const g = liveYard();
+  g.set(-565, 64, 2152, null as unknown as string);
+  const e = yardEntry(g, liveZones(hallWorld()), toward);
+  if ('why' in e) return t.fail(e.why);
+  t.deepEqual(e.fence, [2153, 2154, 2155].map(z => ({ x: -565, y: 63, z })));
+  // (a cell of the cane patch 2 outside the south fence, by the panel a village to the south would take: past it)
+  const caned = liveZones(hallWorld());
+  caned.zones!.cane!.push({ x: -553, y: 63, z: 2217 });
+  const s = yardEntry(liveYard(), caned, { x: -549, z: 2600 });
+  if ('why' in s) return t.fail(s.why);
+  t.is(s.yard!.side, 'south');
+  t.notDeepEqual(s.fence.map(p => p.x), [-554, -553, -552]);
+  t.false(footMeets(s.out, s.yard!.through, { x1: -553, z1: 2217, x2: -553, z2: 2217 }), JSON.stringify(s.fence));
+  // (a pocket of the yard's builds round the inside of the west fence's gap: the five panels searched first find no way
+  // out of it, the sixth, past its end, does)
+  const pocket = liveZones(hallWorld());
+  pocket.zones!.trees!.push({ x: -559, y: 62, z: 2149, width: 1, length: 10 }, { x: -564, y: 62, z: 2149, width: 5, length: 1 }, { x: -564, y: 62, z: 2158, width: 5, length: 1 });
+  const p = yardEntry(liveYard(), pocket, toward);
+  if ('why' in p) return t.fail(p.why);
+  t.deepEqual(p.fence, [2159, 2160, 2161].map(z => ({ x: -565, y: 63, z })));
+  const five = yardEntry(liveYard(), pocket, toward, 5);
+  t.true('why' in five && /^no way across the yard \(from the west fence at \(-565, 63, 2152\): /.test(five.why), JSON.stringify(five));
+});
+
+test('a boat climbs nothing (26.3: AbstractBoat keeps Entity.maxUpStep\'s 0): across the yard a path two wide or more is a wall (its box would sink the 1/16 onto it and never climb off), one wide is crossed on the grass either side', (t) => {
+  const world = { yard: { x1: 0, z1: -20, x2: 40, z2: 20, y: 62 }, zones: {} } as unknown as WorldMemory;
+  const path = (xs: number[], zs = [-19, 19]) => {
+    const cells: Record<string, string> = {};
+    for (const x of xs) for (let z = zs[0]; z <= zs[1]; z++) cells[`${x},62,${z}`] = 'dirt_path';
+    return keepOff(flat(cells, { x1: -1, z1: -21, x2: 41, z2: 21 }), world);
+  };
+  const across = (g: Pick<Ground, 'cell'>) => checkLeg(g, { x: 5.5, z: 0.5, level: 63 }, { x: 35.5, z: 0.5 });
+  t.like(across(path([20])), { ok: true, level: 63 });
+  const two = across(path([20, 21]));
+  t.false(two.ok);
+  if (!two.ok) t.regex(two.why, /^a floor under a block high, two wide or more/);
+  t.like(across(path([20, 21, 22, 23])), { ok: false });
+  // (the boat's own box on it, as the settle has it: the grass beside a path a step up)
+  t.like(settle(y => cellOf(y === 62 ? 'grass_block' : 'air'), 62 + 15 / 16), { blocked: 'a step up (a boat climbs nothing)' });
+  // a way round the end of a wide one
+  const r = planRoute(path([20, 21, 22], [-19, 10]), { x: 5.5, z: 0.5, level: 63 }, { x: 35.5, z: 0.5 }, { bounds: { x1: 1, z1: -19, x2: 39, z2: 19 }, within: 1, corners: false });
+  t.true(r.ok, JSON.stringify(r));
+  if (r.ok) t.true(r.legs.some(l => l.z > 11), JSON.stringify(r.legs));
+});
+
+/** The live village's shape moved west of home, its bell at (-693, 63, 2262) (164 out, as the live one): free, as the north one is. */
+const WEST = { dx: -137, dz: 382 };
+function westFree(land: Land, by = WEST): void {
+  const move = (p: Pos): Pos => ({ x: p.x + by.dx, y: p.y, z: p.z + by.dz });
+  land.villagers = VILLAGERS().map(v => ({ ...v, position: move(v.position) }));
+  land.marks = MARKS().map(m => ({ name: m.name, at: move(m.at) }));
+  land.zones = VILLAGE_ZONES().map(z => ({ ...z, x1: z.x1 + by.dx, x2: z.x2 + by.dx, z1: z.z1 + by.dz, z2: z.z2 + by.dz }));
+}
+/**
+ * The live homestead's ground round the yard in the stand-in world: the hill north of the north fence from z 2116 (3
+ * high), the hill along the west fence from x -568 to -590 but for the gap at z 2151-2163 (the ground west of it flat),
+ * and the yard's builds on the way across it standing: the portal's frame, the cow pen's fence, the workshop's walls.
+ */
+function liveLand(land: Land): void {
+  const solid = (x: number, z: number, b = 'dirt', ys = [63, 64, 65]) => { for (const y of ys) land.blocks.set(`${x},${y},${z}`, b); };
+  for (let x = -600; x <= -500; x++) for (let z = 2095; z <= 2116; z++) solid(x, z);
+  for (let x = -590; x <= -568; x++) for (let z = 2095; z <= 2240; z++) if (z < 2151 || z > 2163) solid(x, z);
+  for (let x = PORTAL.x1; x <= PORTAL.x2; x++) solid(x, 2147, 'obsidian', [63, 64, 65, 66, 67]);
+  for (let x = COW_PEN.x1; x <= COW_PEN.x2; x++) for (let z = COW_PEN.z1; z <= COW_PEN.z2; z++) if (x === COW_PEN.x1 || x === COW_PEN.x2 || z === COW_PEN.z1 || z === COW_PEN.z2) solid(x, z, 'oak_fence', [63]);
+  for (let x = WORKSHOP.x1; x <= WORKSHOP.x2; x++) for (let z = WORKSHOP.z1; z <= WORKSHOP.z2; z++) if (x === WORKSHOP.x1 || x === WORKSHOP.x2 || z === WORKSHOP.z1 || z === WORKSHOP.z2) solid(x, z, 'oak_planks');
+  // a torch on the post the boat comes in by
+  land.blocks.set('-565,64,2152', 'torch');
+}
+const WEST_POSTS: Pos[] = [2151, 2152, 2153].map(z => ({ x: -565, y: 63, z }));
+const WEST_TORCH: Pos = { x: -565, y: 64, z: 2152 };
+const SOUTH_PANEL: Pos[] = [-555, -554, -553].flatMap(x => [63, 64].map(y => ({ x, y, z: 2134 })));
+
+test('the move with the way in across the yard (Nov 15: the hall\'s panel faces the hill): home by the west fence\'s gap in the hill, its panel dug from the boat, across the yard round the portal, into the hall by a panel beside its gate; nothing else dug, all put back', async (t) => {
+  const world = liveZones(hallWorld({ villages: { sites: [{ x: -693, y: 63, z: 2262, villagers: 6, seenAt: T0 - 60 * MINUTE }], players: [] } }));
+  const land = new Land(world, { houses: [{ x1: -712, z1: 2250, x2: -703, z2: 2258 }, { x1: -683, z1: 2264, x2: -675, z2: 2272 }] });
+  westFree(land);
+  liveLand(land);
+  const text = await rung(land).run(land.ctx());
+  t.is(text, '[village -693,2262] moved an unemployed villager from the village at (-693, 63, 2262) to the hall (1 in it now); back home');
+  // the villager in the room, the boat its item again, everything as it stood
+  // (of the two the judge allows, the nearer to the bot: 107)
+  t.deepEqual(land.villagers.filter(e => inHall({ x: Math.floor(e.position.x), y: 63, z: Math.floor(e.position.z) })).map(e => e.id), [107]);
+  t.is(land.boat, undefined);
+  t.deepEqual([...WEST_POSTS, WEST_TORCH, ...SOUTH_PANEL].map(p => land.block(p.x, p.y, p.z)), [FENCE, FENCE, FENCE, 'torch', ...SOUTH_PANEL.map(() => 'oak_planks')]);
+  t.deepEqual(asBuilt(land), BUILT, 'the built panel and the fence straight out from it never touched');
+  t.is(peekVillages(world).open, undefined);
+  t.is(peekVillages(world).boat, undefined);
+  // dug: the west fence's panel (the torch before its post) and the hall's south panel, nothing else; the gate never opened
+  t.deepEqual(land.log.filter(l => l.startsWith('dig ')), [
+    'dig birch_fence (-565, 63, 2151) from the boat', 'dig torch (-565, 64, 2152) from the boat', 'dig birch_fence (-565, 63, 2152) from the boat', 'dig birch_fence (-565, 63, 2153) from the boat',
+    ...SOUTH_PANEL.filter(p => p.y === 63).concat(SOUTH_PANEL.filter(p => p.y === 64)).map(p => `dig oak_planks ${fmt(p)} from the boat`)
+  ]);
+  t.is(land.block(HALL_GATE.x, HALL_GATE.y, HALL_GATE.z), 'oak_fence_gate[facing=south,open=false]');
+  // the way: told, and driven: home to 2.5 out from the west fence, through it, across the yard, into the room
+  const said = land.said.filter(l => l.startsWith('villagers: '));
+  t.true(said.includes('villagers: the boat\'s way into the hall: straight out from its panel a wall at (-557, 65, 2115); in by the yard\'s west fence at (-565, 63, 2151)..(-565, 63, 2153) instead, ' +
+    `across the yard in ${said.filter(l => /^villagers: across the yard/.test(l)).length} leg(s), into the hall by a panel in its south wall at (-555, 63, 2134)..(-553, 64, 2134)`), said.join(' | '));
+  t.true(said.some(l => /^villagers: to the yard's fence at \(-568, 2152\): there in \d+ s$/.test(l)), said.join(' | '));
+  t.true(said.some(l => /^villagers: through the fence into the yard at \(-562, 2152\): there in \d+ s$/.test(l)), said.join(' | '));
+  t.true(said.some(l => /^villagers: across the yard to the hall at \(-554, 2137\): there in \d+ s$/.test(l)), said.join(' | '));
+  t.true(said.includes('villagers: the hall\'s panel open at (-555, 63, 2134) (6 blocks)'));
+  const drives = land.log.filter(l => l.startsWith('drive '));
+  t.false(drives.some(l => /: /.test(l)), drives.join(' | '));
+  // across the yard: never on the portal, the cow pen or the workshop (each leg from where the last ended)
+  const pts = drives.map(l => /\((-?[\d.]+), (-?[\d.]+)\)/.exec(l)!).map(m => ({ x: Number(m[1]), z: Number(m[2]) }));
+  const inYard = pts.slice(pts.findIndex(p => p.x === -561.5 && p.z === 2152.5));
+  t.deepEqual(inYard[inYard.length - 1], { x: -553.5, z: 2130.5 });
+  for (let i = 1; i < inYard.length - 1; i++) for (const z of [PORTAL, COW_PEN, WORKSHOP]) t.false(footMeets(inYard[i - 1], inYard[i], z), `${JSON.stringify(inYard[i - 1])} -> ${JSON.stringify(inYard[i])}`);
+  // out of the hall by its gate, then the fence's panel back from inside the yard
+  const done = land.log.filter(l => /^(place|goto .* careful|go-home)/.test(l));
+  const outGate = done.indexOf('goto (-556, 63, 2136) careful');
+  t.true(outGate > 0, done.join(' | '));
+  t.deepEqual(done.slice(outGate).filter(l => l.startsWith('place')), [...WEST_POSTS.map(p => `place birch_fence ${fmt(p)}`), `place torch ${fmt(WEST_TORCH)}`]);
+  t.true(done.slice(0, outGate).filter(l => l.startsWith('place')).every(l => SOUTH_PANEL.some(p => l === `place oak_planks ${fmt(p)}`)));
+});
+
+test('the way across the yard as the boat goes: stopped off its line, judged again from there and planned again; blocked by what the read missed, a give-up in the yard puts the fence back, the hall never opened, the moves off', async (t) => {
+  const west = () => liveZones(hallWorld({ villages: { sites: [{ x: -693, y: 63, z: 2262, villagers: 6, seenAt: T0 - 60 * MINUTE }], players: [] } }));
+  const houses = [{ x1: -712, z1: 2250, x2: -703, z2: 2258 }, { x1: -683, z1: 2264, x2: -675, z2: 2272 }];
+  // the first leg across the yard ends 2 west of its stop, by the portal's corner: the leg on from there runs over the
+  // portal, so the rest is planned again from where the boat is
+  const w1 = west();
+  const off = new Land(w1, { houses, offBy: { leg: 4, dx: -2 } });
+  westFree(off);
+  liveLand(off);
+  t.is(await rung(off).run(off.ctx()), '[village -693,2262] moved an unemployed villager from the village at (-693, 63, 2262) to the hall (1 in it now); back home');
+  const drives = off.log.filter(l => l.startsWith('drive '));
+  t.deepEqual(drives.slice(drives.indexOf('drive to (-561.5, 2152.5)'), drives.indexOf('drive to (-561.5, 2152.5)') + 2), ['drive to (-561.5, 2152.5)', 'drive to (-554.5, 2150.5)']);
+  t.true(drives.length > 6 && drives[drives.length - 2] === 'drive to (-553.5, 2137)', drives.join(' | '));
+  t.deepEqual([...WEST_POSTS, WEST_TORCH, ...SOUTH_PANEL].map(p => off.block(p.x, p.y, p.z)), [FENCE, FENCE, FENCE, 'torch', ...SOUTH_PANEL.map(() => 'oak_planks')]);
+  // a wall across the yard put up after the read (as the fence comes out): the drive meets it, a give-up in the yard
+  const w2 = west();
+  const land = new Land(w2, { houses });
+  westFree(land);
+  liveLand(land);
+  const call = land.call.bind(land);
+  land.call = (m, p = {}) => {
+    if (m === 'dig.here' && Number(p.z) === 2153) for (let x = -556; x <= -534; x++) for (const y of [63, 64]) land.blocks.set(`${x},${y},2150`, 'cobblestone');
+    return call(m, p);
+  };
+  const text = await rung(land).run(land.ctx());
+  t.regex(text, /^\[village -693,2262\] gave up: the drive across the yard, leg 1 to \(-555, 2150\) stopped: a step up ahead \(a boat climbs nothing\) at \(-55\d, 63, 215\d\); the villager let out at \(-55\d, 63, 215\d\), the boat taken back up; put back 4 block\(s\); back home$/);
+  t.deepEqual([...WEST_POSTS, WEST_TORCH].map(p => land.block(p.x, p.y, p.z)), [FENCE, FENCE, FENCE, 'torch']);
+  t.deepEqual(SOUTH_PANEL.map(p => land.block(p.x, p.y, p.z)), SOUTH_PANEL.map(() => 'oak_planks'), 'the hall never opened');
+  t.false(land.log.some(l => l.startsWith('dig oak_planks')));
+  t.is(peekVillages(w2).open, undefined);
+  t.is(land.boat, undefined);
+  t.false(w2.villagerMoves, 'under way home: the moves wait for the lead');
+});
+
+/** The live village's shape west of home, free, and the live homestead's ground round the yard: the move comes in across the yard. */
+function westMove(): { world: WorldMemory; land: Land } {
+  const world = liveZones(hallWorld({ villages: { sites: [{ x: -693, y: 63, z: 2262, villagers: 6, seenAt: T0 - 60 * MINUTE }], players: [] } }));
+  const land = new Land(world, { houses: [{ x1: -712, z1: 2250, x2: -703, z2: 2258 }, { x1: -683, z1: 2264, x2: -675, z2: 2272 }] });
+  westFree(land);
+  liveLand(land);
+  return { world, land };
+}
+
+test('across the yard, the run\'s time is not given up on inside the fence (the villager let out there would be loose in the yard, by the bot\'s beds and doors): the hall a few legs on, it goes in', async (t) => {
+  const { world, land } = westMove();
+  // (the clock past the run's budget as the fence's last post comes out: a slow way home, its replans)
+  const call = land.call.bind(land);
+  land.call = (m, p = {}) => {
+    const r = call(m, p);
+    if (m === 'dig.here' && Number(p.x) === -565 && Number(p.y) === 63 && Number(p.z) === 2153) land.t += MOVE_BUDGET;
+    return r;
+  };
+  const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
+  t.is(r.text, 'moved an unemployed villager from the village at (-693, 63, 2262) to the hall (1 in it now)');
+  t.deepEqual(land.villagers.filter(e => inHall({ x: Math.floor(e.position.x), y: 63, z: Math.floor(e.position.z) })).map(e => e.id), [107]);
+  t.deepEqual([...WEST_POSTS, WEST_TORCH, ...SOUTH_PANEL].map(p => land.block(p.x, p.y, p.z)), [FENCE, FENCE, FENCE, 'torch', ...SOUTH_PANEL.map(() => 'oak_planks')]);
+  t.true(world.villagerMoves);
+});
+
+test('the time home counts the yard\'s part of a way in across it (through the fence and the legs across the yard): judged before a villager is taken', async (t) => {
+  const { land } = westMove();
+  // (as the judge says free, the run has 100 s left: the way home to the fence at the boat's pace is about that much)
+  let jumped = false;
+  const ctx = land.ctx({ progress: (text: string) => { land.said.push(text); if (!jumped && /is free to take from/.test(text)) { jumped = true; land.t = T0 + MOVE_BUDGET - 100_000; } } });
+  const r = await villagersTask.run(ctx, 'village -693,2262', MOVE_BUDGET, () => land.t);
+  const m = /^not enough of the run left to bring a villager home from \(-693, 63, 2262\) \(need (\d+) s, \d+ s left\)$/.exec(r.text);
+  if (!m) return t.fail(r.text);
+  // the least it can need, in straight lines from the villager taken (107) to the stop outside the west fence, through
+  // it, and on to the stop before the hall's panel
+  const least = homeMs({ x: -685.5, z: 2248.5 }, [{ x: -567.5, z: 2152.5 }, { x: -561.5, z: 2152.5 }, { x: -553.5, z: 2137 }]);
+  t.true(Number(m[1]) * 1000 >= least - 500, `${m[1]} s, ${least} ms at least`);
+  t.false(land.log.some(l => l.startsWith('boat down')));
+});
+
+test('the way in across the yard as the boat comes to the fence: stopped off its stop onto a cell of the bot\'s own (the cane patch reaches past the fence), its way through the fence judged with the yard\'s builds kept off, and given up before anything is dug', async (t) => {
+  const { world, land } = westMove();
+  world.zones!.cane!.push({ x: -571, y: 63, z: 2152 });
+  // (the drive to the stop outside the west fence ends 3 short of it, on that cell)
+  const call = land.call.bind(land);
+  land.call = (m, p = {}) => {
+    const to = p.to as { x: number; z: number } | undefined;
+    if (m === 'vehicle.drive' && to?.x === -567.5 && to.z === 2152.5) land.opts.offBy = { leg: land.legs + 1, dx: -3 };
+    return call(m, p);
+  };
+  const text = await rung(land).run(land.ctx());
+  t.regex(text, /^\[village -693,2262\] gave up: the boat stopped where its way through the fence does not hold, at \(-571, 63, 2152\): the bot's own cane at \(-571, \d+, 2152\); the villager let out at \(-571, 63, 2152\), the boat taken back up; back home$/);
+  t.false(land.log.some(l => l.startsWith('dig ')));
+  t.deepEqual([...WEST_POSTS, WEST_TORCH].map(p => land.block(p.x, p.y, p.z)), [FENCE, FENCE, FENCE, 'torch']);
+  t.is(peekVillages(world).open, undefined);
+  t.false(world.villagerMoves, 'under way home: the moves wait for the lead');
+});
+
+test('across the yard the boat stops short of each turn as the bridge\'s drive does (there within its reach, then a glide on): every leg driven to within the least reach, the legs round the yard\'s builds hold from where it stops, into the hall', async (t) => {
+  for (const coast of [0.15, 0.3]) {
+    const { world, land } = westMove();
+    land.opts.coast = coast;
+    const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
+    t.is(r.text, 'moved an unemployed villager from the village at (-693, 63, 2262) to the hall (1 in it now)', `a glide of ${coast}`);
+    t.deepEqual(land.villagers.filter(e => inHall({ x: Math.floor(e.position.x), y: 63, z: Math.floor(e.position.z) })).map(e => e.id), [107]);
+    t.deepEqual([...WEST_POSTS, WEST_TORCH, ...SOUTH_PANEL].map(p => land.block(p.x, p.y, p.z)), [FENCE, FENCE, FENCE, 'torch', ...SOUTH_PANEL.map(() => 'oak_planks')]);
+    t.true(world.villagerMoves);
+  }
+});
+
+test('from the fence on, each drive gets the time its way takes, not what is left of the run: a long leg across the yard, the run\'s budget spent by the time the fence is open, is not timed out with the villager loose in the yard', async (t) => {
+  // (the live village's shape south-west of home, its bell at (-600, 63, 2440): in by the south fence, the first leg
+  // across the yard the length of it, past the 40 blocks a drive's least time (20 s) takes at the boat's pace)
+  const SW = { dx: -44, dz: 560 };
+  const world = liveZones(hallWorld({ villages: { sites: [{ x: -600, y: 63, z: 2440, villagers: 6, seenAt: T0 - HOUR }], players: [] } }));
+  const land = new Land(world, { houses: [{ x1: -575 + SW.dx, z1: 1868 + SW.dz, x2: -566 + SW.dx, z2: 1876 + SW.dz }, { x1: -546 + SW.dx, z1: 1882 + SW.dz, x2: -538 + SW.dx, z2: 1890 + SW.dz }] });
+  westFree(land, SW);
+  liveLand(land);
+  const drives: { to: { x: number; z: number }; ms: number }[] = [];
+  const call = land.call.bind(land);
+  land.call = (m, p = {}) => {
+    // (the clock past the run's budget as the fence's first block comes out: a slow way home, its replans)
+    if (m === 'dig.here' && !drives.some(d => d.ms < 0)) { land.t += MOVE_BUDGET; drives.push({ to: { x: 0, z: 0 }, ms: -1 }); }
+    if (m === 'vehicle.drive') drives.push({ to: p.to as { x: number; z: number }, ms: Number(p.timeoutMs) });
+    return call(m, p);
+  };
+  const r = await villagersTask.run(land.ctx(), 'village -600,2440', MOVE_BUDGET, () => land.t);
+  t.is(r.text, 'moved an unemployed villager from the village at (-600, 63, 2440) to the hall (1 in it now)');
+  t.deepEqual(land.villagers.filter(e => inHall({ x: Math.floor(e.position.x), y: 63, z: Math.floor(e.position.z) })).map(e => e.id), [107]);
+  t.true(world.villagerMoves);
+  // the drives inside the fence: one of them over 40 blocks, each given its way's time
+  const inside = drives.slice(drives.findIndex(d => d.ms < 0) + 2);
+  let at = drives[drives.findIndex(d => d.ms < 0) + 1].to;
+  let longest = 0;
+  for (const d of inside) {
+    const dist = horiz(at, d.to);
+    longest = Math.max(longest, dist);
+    t.true(d.ms >= dist / BOAT_PACE * 1000, `${JSON.stringify(d)} from ${JSON.stringify(at)}`);
+    at = d.to;
+  }
+  t.true(longest > 40, String(longest));
+});
+
+test('a gate in the fence straight out from the hall\'s panel: the way in across the yard, as for a hill there; the gate never touched', async (t) => {
+  const { world, land } = westMove();
+  // (the north gate in line with the panel, where the torch's post stood)
+  const GATE = 'birch_fence_gate[facing=north,in_wall=false,open=false,powered=false]';
+  world.zones!['fence:gate'] = world.zones!['fence:gate']!.map(g => (g.x === NORTH_GATE.x && g.z === NORTH_GATE.z ? { x: -556, y: 63, z: 2119 } : g));
+  land.blocks.set('-556,63,2119', GATE);
+  land.blocks.set('-556,64,2119', 'air');
+  land.blocks.set(`${NORTH_GATE.x},63,${NORTH_GATE.z}`, FENCE);
+  const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
+  t.is(r.text, 'moved an unemployed villager from the village at (-693, 63, 2262) to the hall (1 in it now)');
+  t.true(land.said.some(l => l.startsWith('villagers: the boat\'s way into the hall: straight out from its panel the fence there holds a gate or a corner; in by the yard\'s west fence at (-565, 63, 2151)..(-565, 63, 2153) instead')),
+    land.said.filter(l => /way into the hall/.test(l)).join(' | '));
+  t.is(land.block(-556, 63, 2119), GATE);
+  t.deepEqual(land.villagers.filter(e => inHall({ x: Math.floor(e.position.x), y: 63, z: Math.floor(e.position.z) })).map(e => e.id), [107]);
 });

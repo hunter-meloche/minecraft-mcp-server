@@ -5,12 +5,14 @@ import { brainRun, type Status } from '../tools.js';
 import { alongSide, byYard, inFence, outByGate, roundFrom, type HomeSide, type WorkResult, type WorkTask } from './work.js';
 import { prepare } from './project.js';
 import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
-import { Ground, MAX_DROP, checkLeg, entryOf, footprint, planRoute, readBand, type BoatAt, type Entry } from './boatroute.js';
+import { Ground, MAX_DROP, checkLeg, entryOf, footprint, keepOff, planRoute, readBand, yardEntry, yardInside, type BoatAt, type Entry } from './boatroute.js';
+import type { Bearing } from './nether.js';
 import { planRails, railsLine, type RailPlan } from './railroute.js';
 import { chestTotals } from './chests.js';
 import {
-  HALL_FRESH, HALL_WANTS, JOB_SITE, MARKERS_NEAR, VILLAGE_MARK, VILLAGE_RANGE, byJobSite, judgeVillage, knownVillage, movesOn, noteSeen, noteVillage,
-  peekVillages, pennedIn, siteOf, siteOpen, variantOf, villageArea, villagesOf, type Seen, type Verdict, type VillageLook, type VillageSite
+  HALL_FRESH, HALL_WANTS, JOB_SITE, MARKERS_NEAR, VILLAGE_MARK, VILLAGE_RANGE, byJobSite, joinAreas, judgeVillage, knownVillage, movesOn, noteSeen,
+  noteVillage, peekVillages, pennedIn, reachOf, siteNow, siteOf, siteOpen, variantOf, villageArea, villagesOf, type Seen, type Verdict, type VillageLook,
+  type VillageSite
 } from './village.js';
 
 /**
@@ -22,11 +24,13 @@ import {
  * before the villager is taken (boatroute.ts: flat, downhill or water, 2 wide, 16 off every build of others), read as
  * the bot walks out to the village; at the yard, the fence's posts straight out from the hall's panel and the panel
  * itself (3 wide: the boat is 1.375 across) dug from the boat, driven through, the villager let out in the room, the
- * boat broken back into its item, the panel and the fence put back as they were. A move that runs past its budget, or
- * finds the way blocked, gives up: home without the villager, the boat taken back up, everything it opened put back;
- * one cut short (survival, its timeout, the LLM) gets out of the boat and breaks it all the same, outside the run, and
- * leaves what it opened in `villages.open` for the `close up` goal (and the brain gets a bot seated in a boat with no run
- * to steer it out first, a restart's among them: brain.ts outOfVehicle). Every step is said
+ * boat broken back into its item, the panel and the fence put back as they were; where the ground outside the fence
+ * there lets no boat by (or a gate stands in it), in by another panel of the fence and across the yard to a panel in
+ * the hall's yard-facing wall (boatroute.ts yardEntry). A move that runs past its budget, or finds the way blocked, gives up: home without the
+ * villager, the boat taken back up, everything it opened put back; one cut short (survival, its timeout, the LLM) gets
+ * out of the boat and breaks it all the same, outside the run, and leaves what it opened in `villages.open` for the
+ * `close up` goal (and the brain gets a bot seated in a boat with no run to steer it out first, a restart's among them:
+ * brain.ts outOfVehicle). Every step is said
  * (`villagers: ...`). With the switch off nothing of it runs: the rung offers nothing, the sightings are only remembered.
  * When no boat way home is found, the rails fallback (the user's) is planned on the same ground and said, a dry run:
  * nothing of it is laid, switch on or off (railroute.ts; the lead builds the laying if the boat move fails live).
@@ -61,10 +65,19 @@ const RAILS_ABOVE = 20;
 const PLACE_TRIES = 3;
 /** The yard's part of a move: the fence and the panel dug from the boat, the two short drives, out, the boat up, all put back. */
 const YARD_MS = 60_000;
+/** Read round the yard this far for a way in across it: the stop 2.5 out from its fence and the boat's footprint there. */
+const YARD_READ = 5;
 /** The boat's item: five oak planks at a table (26.3's oak_boat.json; progress.ts RECIPES). */
 export const BOAT_ITEM = 'oak_boat';
 const SIDES: HomeSide[] = ['north', 'east', 'south', 'west'];
-const isSide = (v: string): v is HomeSide => (SIDES as string[]).includes(v);
+/**
+ * The four bearings between the sides, searched after them (the Nether scout's eight, nether.ts BEARINGS): a side's line
+ * sees about 96 either side of it (render distance 6), and the quarters between went unseen. Live on Nov 15 north, east
+ * and south found nothing within 384, west a village 164 out.
+ */
+const DIAGONALS: Bearing[] = ['north-east', 'south-east', 'south-west', 'north-west'];
+const SEARCHES: Bearing[] = [...SIDES, ...DIAGONALS];
+const isSearch = (v: string): v is Bearing => (SEARCHES as string[]).includes(v);
 
 const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
 const fmt = (p: { x: number; y?: number; z: number }) => `(${Math.floor(p.x)}, ${p.y === undefined ? '' : `${Math.floor(p.y)}, `}${Math.floor(p.z)})`;
@@ -75,8 +88,8 @@ const yieldNow = () => new Promise<void>(res => setImmediate(res));
 
 /**
  * How long the boat takes home from `from` along `legs` (pure): at the boat's pace on land, a third more for its turns
- * and stops, and the yard's part after. Judged before a villager is taken: a drive timed out halfway home lets it out
- * in the wild, between its village and the hall.
+ * and stops, and the yard's part after (a way in across the yard: its legs among `legs`, yardLegs). Judged before a
+ * villager is taken: a drive timed out halfway home lets it out in the wild, between its village and the hall.
  */
 export function homeMs(from: { x: number; z: number }, legs: readonly { x: number; z: number }[]): number {
   let d = 0, at = from;
@@ -102,9 +115,9 @@ function hallWhy(s: Snapshot, world: WorldMemory): Decline | null {
  * The `villagers` rung (worktasks.ts LADDER, rank 4.4: above the Nether and the deep trips, whose mornings it would
  * otherwise never get; it is a few moves in all). Its variants: each village known and open to it (within the range,
  * not someone's, its boat way not failed today: `first`, tried ahead of the turn), then the four sides of home, searched
- * out to VILLAGE_RANGE as the cows' are (`alongSide`). Never in the rain (the plan's word), never at night (the shared
- * gates), never with a move's openings not put back. The way home with a villager is at the boat's pace on land
- * (`backPace`), so a move that sets out has the day to come home in.
+ * out to VILLAGE_RANGE as the cows' are (`alongSide`), then the four bearings between them (DIAGONALS). Never in the
+ * rain (the plan's word), never at night (the shared gates), never with a move's openings not put back. The way home
+ * with a villager is at the boat's pace on land (`backPace`), so a move that sets out has the day to come home in.
  */
 export const villagersTask: WorkTask = {
   name: 'villagers',
@@ -119,7 +132,7 @@ export const villagersTask: WorkTask = {
     if (hallWhy(s, world)) return [];
     const home = s.home ?? s.position;
     const sites = peekVillages(world).sites.filter(q => siteOpen(q, home, s.now)).sort((a, b) => horiz(a, home) - horiz(b, home));
-    return [...sites.map(q => ({ id: variantOf(q), dist: Math.round(horiz(q, home)), first: true as const })), ...SIDES.map(id => ({ id, dist: VILLAGE_RANGE }))];
+    return [...sites.map(q => ({ id: variantOf(q), dist: Math.round(horiz(q, home)), first: true as const })), ...SEARCHES.map(id => ({ id, dist: VILLAGE_RANGE }))];
   },
   none: (s, world) => hallWhy(s, world) ?? { cause: 'unneeded', text: 'villagers: nothing to do' },
   ready: (s, world) => {
@@ -135,7 +148,9 @@ export const villagersTask: WorkTask = {
     // full hall sent no one on a move but did send the side search out to 384
     const counted = await countHall(ctx, now());
     if (counted !== undefined && counted >= HALL_WANTS) return { gain: 0, text: `the hall has ${counted} villagers already: none moved`, mark: 'same' };
-    if (isSide(variant)) return searchSide(ctx, variant, enough, now);
+    if (isSearch(variant)) return searchSide(ctx, variant, enough, now);
+    // (made whole first: a site folded into its village's judged one since the variant was chosen is no village of its own)
+    villagesOf(ctx.world);
     const site = siteOf(ctx.world, variant);
     if (!site) return { gain: 0, text: `no ${variant} known any more`, mark: 'forget' };
     return moveFrom(ctx, site, { now, began, budgetMs, enough });
@@ -255,31 +270,52 @@ function split(at: { x: number; y: number; z: number; name: string }[]): Pick<Vi
 
 /**
  * The judge's word written on the site (a free one is judged again on every move: a fresh look is what counts), the
- * site moved to its bell; returns the site kept (none: no village there, forgotten).
+ * site moved to its bell, with the area the judge saw; the village's other sites (within SAME_VILLAGE of it, or in that
+ * area: noted from its villagers as the look went round) folded into it, one village one verdict (village.ts
+ * foldSites: a site of it judged someone's before keeps that word, and all the ground it covered). Returns the site
+ * kept (none: no village there, forgotten; but a site someone's is never forgotten, and is returned).
  */
 function noteVerdict(world: WorldMemory, site: VillageSite, look: VillageLook, v: Verdict, now: number): VillageSite | undefined {
   const counts = { bells: look.bells.length, beds: look.beds.length, jobs: look.jobs.length, villagers: look.seen.filter(e => e.name === 'villager').length };
   const w = villagesOf(world);
-  // (the site as it was, moved to its bell: not another one made beside it)
-  const kept = w.sites.find(q => q.x === site.x && q.z === site.z) ?? noteVillage(world, look.bells[0] ?? site, counts, now);
+  // (the run's own site, or the one a fold took it into as the look went round (a player seen by another site of the
+  // village makes that one someone's, and the fold takes this one into it): that one's word is this village's. Else
+  // the site as it was by its place, moved to its bell: not another one made beside it)
+  const own = siteNow(w.sites, site) ?? w.sites.find(q => q.x === site.x && q.z === site.z);
   if (v.kind === 'none') {
-    w.sites = w.sites.filter(q => q !== kept);
+    // (nothing seen there: forgotten, but never a site someone's, a word kept for good)
+    if (own?.judged?.kind === 'theirs') return own;
+    if (own) w.sites = w.sites.filter(q => q !== own);
     return undefined;
   }
+  const kept = own ?? noteVillage(world, look.bells[0] ?? site, counts, now);
+  // (someone's on it already stays someone's: a player seen as the look went round writes that for good (noteSeen), and
+  // a fold may have made the village's someone's site the one found here; the judge's narrower word does not undo it,
+  // and the ground it covered stays its as it moves to the bell and takes the judge's area)
+  const held = kept.judged?.kind === 'theirs' ? reachOf(kept) : undefined;
+  const was = held && v.kind !== 'theirs' ? kept.judged : undefined;
   const bell = look.bells[0];
   if (bell) { kept.x = bell.x; kept.y = bell.y; kept.z = bell.z; }
-  Object.assign(kept, counts, { seenAt: now, judged: { at: now, kind: v.kind, why: v.why.slice(0, 160) } });
-  return kept;
+  Object.assign(kept, counts, { seenAt: now, judged: was ?? { at: now, kind: v.kind, why: v.why.slice(0, 160) } });
+  const area = v.area ? { x1: v.area.x1, z1: v.area.z1, x2: v.area.x2, z2: v.area.z2 } : undefined;
+  if (area || held) kept.area = held ? joinAreas(area, held) : area;
+  // (made whole again: the fold, in place. Folded, the site it went into: not the nearest, which may be one not judged)
+  return siteNow(villagesOf(world).sites, kept);
 }
+
+/** The word on a village after the judge's (pure): the verdict, or someone's where a site of the village was judged so before. */
+const wordOn = (v: Verdict, kept: VillageSite | undefined): { kind: Verdict['kind']; why: string } =>
+  (kept?.judged?.kind === 'theirs' && v.kind !== 'theirs' ? { kind: 'theirs', why: kept.judged.why } : v);
 
 // ------------------------------------------------------------------------------------------------ the search
 
 /**
- * Along one side of home for a village, out to the range (the cows' way: stops 32 apart, by the side's own gate):
- * found, the bot walks to its middle and looks it over, and the judge's word is kept. The move is the next run's (from
- * the known site, `first`), which reads the boat's way home on its walk out.
+ * Along one side of home for a village, or one bearing between two sides, out to the range (the cows' way: stops 32
+ * apart, by the side's own gate, or one on either side of the bearing): found, the bot walks to its middle and looks it
+ * over, and the judge's word is kept. The move is the next run's (from the known site, `first`), which reads the boat's
+ * way home on its walk out.
  */
-async function searchSide(ctx: GoalContext, side: HomeSide, enough: () => boolean, now: () => number): Promise<WorkResult> {
+async function searchSide(ctx: GoalContext, side: Bearing, enough: () => boolean, now: () => number): Promise<WorkResult> {
   say(ctx, `looking ${side} for a village, out to ${VILLAGE_RANGE}`);
   const found = await alongSide(ctx, side, 'village', () => villageInSight(ctx, now()), enough, { blocks: VILLAGE_RANGE, name: 'the village range' });
   if (!found.found) return { gain: 0, text: found.text, ...(found.short ? { mark: 'same' as const } : {}) };
@@ -292,8 +328,8 @@ async function searchSide(ctx: GoalContext, side: HomeSide, enough: () => boolea
   const site = noteVillage(ctx.world, at, {}, now());
   const look = await lookVillage(ctx, at, now(), enough);
   const v = judgeVillage(look);
-  noteVerdict(ctx.world, site, look, v, now());
-  const text = `found a village at ${fmt(at)}: ${v.kind === 'free' ? `free (${v.why}): the move next run` : v.kind === 'theirs' ? `someone's, left alone: ${v.why}` : v.why}`;
+  const word = wordOn(v, noteVerdict(ctx.world, site, look, v, now()));
+  const text = `found a village at ${fmt(at)}: ${word.kind === 'free' ? `free (${word.why}): the move next run` : word.kind === 'theirs' ? `someone's, left alone: ${word.why}` : word.why}`;
   say(ctx, text);
   return { gain: 0, text, mark: 'first' };
 }
@@ -392,36 +428,43 @@ async function closeUp(ctx: GoalContext, which?: (o: Opened) => boolean): Promis
 async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<WorkResult> {
   const { now, enough } = clk;
   const world = ctx.world;
-  const entry = entryOf(world);
-  if ('why' in entry) return { gain: 0, text: `no way into the hall: ${entry.why}`, untried: true };
+  const straight = entryOf(world);
+  // (no hall, no panel, no room beside it: no way in at all. A gate or a corner in the fence straight out from the panel
+  // leaves the way in across the yard, as a hill there does)
+  if ('why' in straight && !straight.fence) return { gain: 0, text: `no way into the hall: ${straight.why}`, untried: true };
   // the ground: from under the yard's floor (the boat's lowest) to over the village's, with room for the rails' climbs
   // and dips (their dry run plans on the same reads when the boat finds no way)
-  const y0 = Math.min(entry.level - MAX_DROP - 3, Math.min(site.y, entry.level) - RAILS_BELOW);
-  const top = Math.max(site.y + 12, entry.level + 8, Math.max(site.y, entry.level) + RAILS_ABOVE);
+  const level = world.yard!.y + 1;
+  const y0 = Math.min(level - MAX_DROP - 3, Math.min(site.y, level) - RAILS_BELOW);
+  const top = Math.max(site.y + 12, level + 8, Math.max(site.y, level) + RAILS_ABOVE);
   const ground = new Ground(y0, Math.min(64, top - y0 + 1));
-  // the yard's part, read from here: the fence's posts and what stands on them, the hall's wall
-  const yardBox = boxOf([entry.out, entry.front, entry.inside, ...entry.fence, ...entry.wall], 4);
-  await ground.read(ctx, yardBox.x1, yardBox.z1, yardBox.x2, yardBox.z2);
-  // (what stands on a post first: a torch on it pops off as its post goes, and would never be put back)
-  const fence: Opened[] = [];
-  for (const p of entry.fence) {
-    const over = { x: p.x, y: p.y + 1, z: p.z };
-    const top = ground.state(over.x, over.y, over.z);
-    if (top && !/^(minecraft:)?(air|cave_air)(\[|$)/.test(top)) fence.push({ at: over, block: top });
-    fence.push({ at: p, block: ground.state(p.x, p.y, p.z) ?? '' });
-  }
-  const wall: Opened[] = entry.wall.map(p => ({ at: p, block: ground.state(p.x, p.y, p.z) ?? '' }));
-  const unread = [...fence, ...wall].find(o => !o.block);
-  if (unread) return { gain: 0, text: `the way into the hall not read at ${fmt(unread.at)}`, untried: true };
-  // what the yard's way will be once they are out: judged so (the posts and the wall as air)
-  for (const o of [...fence, ...wall]) ground.set(o.at.x, o.at.y, o.at.z, 'air');
-  // (from the ground the boat stands on outside the fence: the band there, cleared to the yard's level or not)
-  const outside = footprint(ground, entry.out.x, entry.out.z, entry.level + MAX_DROP, false);
-  const into = outside.ok ? checkLeg(ground, { ...entry.out, level: outside.level }, entry.front) : outside;
-  const inside = into.ok ? checkLeg(ground, { ...entry.front, level: into.level }, entry.inside) : into;
-  if (!inside.ok) {
-    for (const o of [...fence, ...wall]) ground.set(o.at.x, o.at.y, o.at.z, o.block);
-    return { gain: 0, text: `the boat's way into the hall is blocked: ${inside.why} at ${fmt(inside.at)}`, untried: true };
+  let entry: Entry, fence: Opened[], wall: Opened[];
+  if ('why' in straight) {
+    const r = await acrossYard(ctx, ground, site, 'the fence there holds a gate or a corner');
+    if (!('entry' in r)) return r;
+    ({ entry, fence, wall } = r);
+  } else {
+    entry = straight;
+    // the yard's part, read from here: the fence's posts and what stands on them, the hall's wall
+    const yardBox = boxOf([entry.out, entry.front, entry.inside, ...entry.fence, ...entry.wall], 4);
+    await ground.read(ctx, yardBox.x1, yardBox.z1, yardBox.x2, yardBox.z2);
+    ({ fence, wall } = openingsOf(ground, entry));
+    const unread = [...fence, ...wall].find(o => !o.block);
+    if (unread) return { gain: 0, text: `the way into the hall not read at ${fmt(unread.at)}`, untried: true };
+    // what the yard's way will be once they are out: judged so (the posts and the wall as air)
+    for (const o of [...fence, ...wall]) ground.set(o.at.x, o.at.y, o.at.z, 'air');
+    // (from the ground the boat stands on outside the fence: the band there, cleared to the yard's level or not)
+    const outside = footprint(ground, entry.out.x, entry.out.z, entry.level + MAX_DROP, false);
+    const into = outside.ok ? checkLeg(ground, { ...entry.out, level: outside.level }, entry.front) : outside;
+    const inside = into.ok ? checkLeg(ground, { ...entry.front, level: into.level }, entry.inside) : into;
+    if (!inside.ok) {
+      for (const o of [...fence, ...wall]) ground.set(o.at.x, o.at.y, o.at.z, o.block);
+      // straight out from the panel the ground outside lets no boat by (live on Nov 15 the hall's panel faced the hill
+      // the yard is cut into): in by another panel of the fence and across the yard
+      const r = await acrossYard(ctx, ground, site, `${inside.why} at ${fmt(inside.at)}`);
+      if (!('entry' in r)) return r;
+      ({ entry, fence, wall } = r);
+    }
   }
   // carried: the boat, and what goes back into the fence and the wall (the dug blocks drop, but may not all be picked up)
   const need = new Map<string, number>([[BOAT_ITEM, 1]]);
@@ -476,11 +519,15 @@ async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promis
   const look = await lookVillage(ctx, { x: site.x, y: site.y, z: site.z }, now(), enough);
   const v = judgeVillage(look);
   const kept = noteVerdict(world, site, look, v, now());
-  if (v.kind === 'none' || !kept) return { gain: 0, text: `no village at ${fmt(site)} any more: forgotten`, mark: 'forget' };
-  if (v.kind === 'theirs') {
-    say(ctx, `the village at ${fmt(site)} is someone's, left alone: ${v.why}`);
-    return { gain: 0, text: `left the village at ${fmt(site)} alone: ${v.why}`, mark: 'forget' };
+  const forgotten: WorkResult = { gain: 0, text: `no village at ${fmt(site)} any more: forgotten`, mark: 'forget' };
+  if (!kept) return forgotten;
+  // (nothing seen there now, but a site someone's kept for it: that word)
+  const word = wordOn(v, kept);
+  if (v.kind === 'theirs' || word.kind === 'theirs') {
+    say(ctx, `the village at ${fmt(site)} is someone's, left alone: ${word.why}`);
+    return { gain: 0, text: `left the village at ${fmt(site)} alone: ${word.why}`, mark: 'forget' };
   }
+  if (v.kind === 'none') return forgotten;
   if (v.kind === 'wait') return { gain: 0, text: `the village at ${fmt(site)}: ${v.why}` };
   say(ctx, `the village at ${fmt(site)} is free to take from: ${v.why}`);
   if (!v.candidates.length) return { gain: 0, text: `no villager to take at ${fmt(site)}: ${v.why}` };
@@ -529,7 +576,7 @@ async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promis
   }
   // the way home must fit in what is left of the run before the villager is taken (the walk out and the look may have
   // used most of it, and an afternoon's budget is the daylight left): a leg timed out halfway lets it out in the wild
-  const homeTakes = homeMs(chosen.e.position!, chosen.legs);
+  const homeTakes = homeMs(chosen.e.position!, [...chosen.legs, ...yardLegs(entry)]);
   const spare = clk.began + clk.budgetMs - now();
   if (spare < homeTakes) {
     const text = `not enough of the run left to bring a villager home from ${fmt(site)} (need ${Math.round(homeTakes / 1000)} s, ${Math.max(0, Math.round(spare / 1000))} s left)`;
@@ -555,16 +602,18 @@ export const lastRailPlan = (world: WorldMemory): RailPlan | undefined => railPl
 /**
  * The rails fallback when the boat finds no way home, as P5c has it: planned on the ground the walk out read and said,
  * NEVER laid (whatever the switch: the laying is not built; the lead builds it and turns it on if the boat move fails
- * live). From by the villagers the judge allows (the nearest to the bot first) to the yard's fence straight out from
- * the hall's panel, 16 off every build but the village's own: the route, the bill against the stores (the chests as last
- * seen and the pockets), every block it would put down and take back up (kept for the villager-moves tool), what it would
- * open. Its line is kept on the site. Returns what the run's result says of it.
+ * live). From by the villagers the judge allows (the nearest to the bot first) to the yard's fence the boat's way in
+ * comes by (straight out from the hall's panel, or the panel of a way in across the yard: the same entry), 16 off every
+ * build but the village's own: the route, the bill against the stores (the chests as last seen and the pockets), every
+ * block it would put down and take back up (kept for the villager-moves tool), what it would open. Its line is kept on
+ * the site. Returns what the run's result says of it.
  */
 function railsDryRun(ctx: GoalContext, t: {
   site: VillageSite; ground: Ground; entry: Entry; fence: Opened[]; zones: Zone[]; bounds: { x1: number; z1: number; x2: number; z2: number };
   candidates: Seen[]; me: Pos; at: number;
 }): string {
-  const panel = (ctx.world.zones?.['hall:panel'] ?? []).filter(p => p && typeof p.y === 'number').sort((a, b) => a.y - b.y)[0];
+  // (the line comes in by the fence the boat's way comes in by: straight out from the hall's panel, or across the yard)
+  const panel = t.entry.yard?.post ?? (ctx.world.zones?.['hall:panel'] ?? []).filter(p => p && typeof p.y === 'number').sort((a, b) => a.y - b.y)[0];
   const yard = ctx.world.yard;
   if (!panel || !yard) return 'no rails planned (no panel or yard known)';
   const stores: Record<string, number> = { ...chestTotals(ctx.world) };
@@ -582,6 +631,45 @@ function railsDryRun(ctx: GoalContext, t: {
   say(ctx, `rails: the route ${r.route}; it would open the fence at ${r.opens.map(o => `${idOf(o.block)} ${fmt(o.at)}`).join(', ')} and take every rail, torch${r.stop.placed ? ' and the stop' : ''} back up after`);
   return `rails home planned (a dry run, nothing laid): ${r.length} rails, ${r.bill.iron_ingot} iron, ${r.bill.gold_ingot} gold, about ${Math.round(r.seconds.total / 60)} min`;
 }
+
+/**
+ * What a way in digs out, read off the ground: the fence's posts, each after what stands on it (a torch on a post pops
+ * off as its post goes, and would never be put back), and the hall's wall. A block not read is ''.
+ */
+function openingsOf(ground: Ground, entry: Entry): { fence: Opened[]; wall: Opened[] } {
+  const fence: Opened[] = [];
+  for (const p of entry.fence) {
+    const over = { x: p.x, y: p.y + 1, z: p.z };
+    const top = ground.state(over.x, over.y, over.z);
+    if (top && !/^(minecraft:)?(air|cave_air)(\[|$)/.test(top)) fence.push({ at: over, block: top });
+    fence.push({ at: p, block: ground.state(p.x, p.y, p.z) ?? '' });
+  }
+  return { fence, wall: entry.wall.map(p => ({ at: p, block: ground.state(p.x, p.y, p.z) ?? '' })) };
+}
+
+/**
+ * The way in across the yard where straight out from the hall's panel will not do (`blocked`: why not), the whole yard
+ * read for it from here (boatroute.ts yardEntry): the entry, what it opens (judged as air on `ground` from here on), and
+ * said; or the run's result when there is none.
+ */
+async function acrossYard(ctx: GoalContext, ground: Ground, site: VillageSite, blocked: string): Promise<{ entry: Entry; fence: Opened[]; wall: Opened[] } | WorkResult> {
+  const yard = ctx.world.yard!;
+  await ground.read(ctx, yard.x1 - YARD_READ, yard.z1 - YARD_READ, yard.x2 + YARD_READ, yard.z2 + YARD_READ);
+  const entry = yardEntry(ground, ctx.world, site);
+  if ('why' in entry) return { gain: 0, text: `the boat's way into the hall is blocked: ${blocked}; and across the yard: ${entry.why}`, untried: true };
+  const { fence, wall } = openingsOf(ground, entry);
+  const notRead = [...fence, ...wall].find(o => !o.block);
+  if (notRead) return { gain: 0, text: `the way into the hall across the yard not read at ${fmt(notRead.at)}`, untried: true };
+  for (const o of [...fence, ...wall]) ground.set(o.at.x, o.at.y, o.at.z, 'air');
+  const way = entry.yard!;
+  const span = (ps: Pos[]) => `${fmt(ps[0])}..${fmt(ps[ps.length - 1])}`;
+  say(ctx, `the boat's way into the hall: straight out from its panel ${blocked}; in by the yard's ${way.side} fence at ${span(entry.fence)} instead, ` +
+    `across the yard in ${way.legs.length} leg(s), into the hall by a panel in its ${entry.side} wall at ${span(entry.wall)}`);
+  return { entry, fence, wall };
+}
+
+/** The yard's part of the way home past `out`, in order: in through the fence to `through`, the legs across the yard (none straight out). */
+const yardLegs = (entry: Entry): { x: number; z: number }[] => (entry.yard ? [entry.yard.through, ...entry.yard.legs] : []);
 
 /** A box round some points (x1..z2), grown by `by`. */
 function boxOf(ps: { x: number; z: number }[], by: number) {
@@ -699,20 +787,22 @@ async function boatHome(ctx: GoalContext, t: Trip): Promise<WorkResult> {
     if (!boat || !route || !pos) return await giveUp('the boat could not be put down against the villager');
     if (ctx.signal.aborted) throw new Error('aborted');
     // the time home judged again from where the boat is, the villager in it: too little, it is let out here, in its own village
-    const needHome = homeMs(pos, route);
+    const needHome = homeMs(pos, [...route, ...yardLegs(entry)]);
     if (left() < needHome) return await giveUp(`not enough of the run left to bring the villager home (need ${secs(needHome)} s, ${secs(left())} s left)`);
     const m = await ctx.call<Reply & { controlling?: boolean }>('vehicle.mount', { id: boat.id, uuid: boat.uuid }, 15_000).catch((x): Reply & { controlling?: boolean } => ({ ok: false, reason: (x as Error).message }));
     if (!m.ok) return await giveUp(`could not get into the boat: ${m.reason ?? 'no reply'}`);
     if (!m.controlling) return await giveUp('in the boat, but not in the front seat (not steering)');
     say(ctx, `in the boat with the villager (${e.id}): home in ${route.length} leg(s)`);
 
-    // the drive home, leg by leg, to the stop outside the fence
-    const drive = async (to: { x: number; z: number }, within: number, what: string): Promise<string | undefined> => {
+    // the drive home, leg by leg, to the stop outside the fence. `inside`: from the fence on (through it, across the
+    // yard, into the hall) a drive gets the time its way takes, whatever is left of the run's budget: timed out there,
+    // the villager let out would be loose in the yard (the run's own timeout still bounds the run)
+    const drive = async (to: { x: number; z: number }, within: number, what: string, inside = false): Promise<string | undefined> => {
       if (ctx.signal.aborted) throw new Error('aborted');
       const at = await ridingOf(ctx);
       const p = at?.position;
       const dist = p ? horiz(p, to) : 0;
-      const ms = Math.max(20_000, Math.min(15 * MINUTE, Math.round(dist / BOAT_PACE * 1500) + 10_000, Math.max(20_000, left())));
+      const ms = Math.max(20_000, Math.min(15 * MINUTE, Math.round(dist / BOAT_PACE * 1500) + 10_000, inside ? Infinity : Math.max(20_000, left())));
       drove = true;
       const r = await ctx.call<{ ok: boolean; reason?: string; at?: Pos; seconds?: number }>('vehicle.drive', { to, within, timeoutMs: ms, maxDrop: MAX_DROP, maxOff: 3 }, ms + 15_000)
         .catch(x => ({ ok: false, reason: (x as Error).message, at: undefined, seconds: undefined }));
@@ -748,22 +838,56 @@ async function boatHome(ctx: GoalContext, t: Trip): Promise<WorkResult> {
 
     // the yard: the fence's posts dug from the boat, through, the hall's wall dug, into the room. Each opening's leg
     // judged again from where the boat stopped (within half a block of its stop: off the opening's middle, it would catch
-    // a post of the 3-wide gap), before anything is dug
-    const throughFrom = async (to: { x: number; z: number }, what: string): Promise<string | undefined> => {
+    // a post of the 3-wide gap), before anything is dug. In by a panel of the fence elsewhere, the yard is crossed
+    // between the two, its own builds kept off (keepOff) as the way was planned
+    const own = keepOff(ground, world);
+    const throughFrom = async (to: { x: number; z: number }, what: string, g: Pick<Ground, 'cell'> = ground): Promise<string | undefined> => {
       const at = (await ridingOf(ctx))?.position;
       if (!at) return 'no longer in the boat';
-      const leg = checkLeg(ground, { x: at.x, z: at.z, level: at.y }, to);
+      const leg = checkLeg(g, { x: at.x, z: at.z, level: at.y }, to);
       return leg.ok ? undefined : `the boat stopped where its way ${what} does not hold, at ${fmt(at)}: ${leg.why} at ${fmt(leg.at)}`;
     };
-    const offFence = await throughFrom(entry.front, 'through the fence');
+    const yard = entry.yard;
+    const offFence = await throughFrom(yard?.through ?? entry.front, 'through the fence', yard ? own : ground);
     if (offFence) return await giveUp(offFence);
     for (const o of t.fence) {
       const why = await digOut(ctx, o.at, o.block);
       if (why) return await giveUp(`the fence did not come out: ${why}`);
     }
     say(ctx, `the fence open at ${t.fence.filter(o => o.at.y === entry.level).map(o => fmt(o.at)).join(', ')}`);
-    const through = await drive(entry.front, 0.5, `through the fence to the hall at ${fmt(entry.front)}`);
+    const through = yard ? await drive(yard.through, 0.5, `through the fence into the yard at ${fmt(yard.through)}`, true)
+      : await drive(entry.front, 0.5, `through the fence to the hall at ${fmt(entry.front)}`, true);
     if (through) return await giveUp(through);
+    if (yard) {
+      // across the yard leg by leg, each judged again from where the boat is, the rest planned again when it no longer
+      // holds; nothing in the yard dug on the way
+      let legs = [...yard.legs];
+      let k = 0, again = 0;
+      while (legs.length) {
+        // (no give-up for the run's time here, and no drive cut to what is left of it: inside the fence, the villager let
+        // out would be loose in the yard, by the bot's beds and doors; the hall is a few legs on, and the run's own
+        // timeout still bounds the run)
+        if (ctx.signal.aborted) throw new Error('aborted');
+        const at = await ridingOf(ctx);
+        if (!at?.position) return await giveUp('no longer in the boat');
+        const from: BoatAt = { x: at.position.x, z: at.position.z, level: at.position.y };
+        if (!checkLeg(own, from, legs[0]).ok) {
+          if (++again > 5) return await giveUp(`the way across the yard kept failing from ${fmt(at.position)}`);
+          await yieldNow();
+          const r = planRoute(own, from, entry.front, { bounds: yardInside(world.yard!), within: 1, corners: false });
+          if (!r.ok) return await giveUp(`no way across the yard from ${fmt(at.position)}: ${r.why}`);
+          legs = r.legs;
+          continue;
+        }
+        // (every leg to within the bridge's least, 0.5: the legs round the yard's builds hug them at the slack's edge, and
+        // from a stop 1.2 short of a turn the next leg cuts its corner, and the way planned again from there is that turn
+        // once more, the drive "there" at once: live round the portal it gave up in the yard)
+        const last = legs.length === 1;
+        const stopped = await drive(legs[0], 0.5, last ? `across the yard to the hall at ${fmt(legs[0])}` : `across the yard, leg ${++k} to ${fmt(legs[0])}`, true);
+        if (stopped) return await giveUp(stopped);
+        legs = legs.slice(1);
+      }
+    }
     const offWall = await throughFrom(entry.inside, 'into the hall');
     if (offWall) return await giveUp(offWall);
     for (const o of t.wall) {
@@ -771,7 +895,7 @@ async function boatHome(ctx: GoalContext, t: Trip): Promise<WorkResult> {
       if (why) return await giveUp(`the hall's wall did not come out: ${why}`);
     }
     say(ctx, `the hall's panel open at ${fmt(t.wall[0].at)} (${t.wall.length} blocks)`);
-    const into = await drive(entry.inside, 0.8, 'into the hall');
+    const into = await drive(entry.inside, 0.8, 'into the hall', true);
     if (into) return await giveUp(into);
     // out, the boat broken (the villager stands where it was), the wall put back from inside before it can wander out
     const deeper = { x: entry.inside.x - entry.dir[0] * 4, z: entry.inside.z - entry.dir[1] * 4 };

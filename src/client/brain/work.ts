@@ -19,9 +19,9 @@ import { clock } from './idlelog.js';
 import { LADDER, tierStep } from './worktasks.js';
 import { ZONE_MARGIN, underYard } from './underyard.js';
 import { walkHome } from './homeward.js';
-import { SIDE_STEP, outByGate, type HomeSide } from './yardgates.js';
+import { outByGate, type HomeSide } from './yardgates.js';
 import { brainRun } from '../tools.js';
-import { NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, netherUnstart, tripHold } from './nether.js';
+import { BEARINGS, NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, netherUnstart, tripHold, type Bearing } from './nether.js';
 
 // (the yard's gates and the walks through them live in yardgates.ts: the walk home comes in by a gate too)
 export { CLEAR, gatesBetween, inFence, outByGate, type HomeSide, type YardGate } from './yardgates.js';
@@ -408,13 +408,18 @@ export interface Bound { blocks: number; name: string }
  * (water, a cliff) is looked round from where the walk ended, and the side goes no further. Returns the first find, or
  * why there was none (`what` names it: `no wild cane east within the leash ...`, `no wild cane looked for north: no way
  * out of the yard by the north gate ...`); `short` when the run's time ran out before the side's end, so the side was
- * not looked along to the leash.
+ * not looked along to the leash. `side` may also be one of the four bearings between the sides (`north-east`...: the
+ * villages' search, villagemove.ts), its stops as far apart across the ground, its way out by a gate on either of its
+ * two sides.
  */
-export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: string, look: () => Promise<T | undefined>,
+export async function alongSide<T>(ctx: GoalContext, side: HomeSide | Bearing, what: string, look: () => Promise<T | undefined>,
   enough: () => boolean = () => false, bound: Bound = { blocks: ctx.world.leash, name: 'the leash' }): Promise<{ found?: T; text: string; short?: true }> {
   const home = ctx.s.home!;
   const last = bound.blocks - SIDE_MARGIN;
-  const [dx, dz] = SIDE_STEP[side];
+  // (a block across the ground a block out: a bearing between two sides goes 1/sqrt 2 along each)
+  const bearing = BEARINGS.find(b => b.name === side)!;
+  const dx = bearing.dx / Math.hypot(bearing.dx, bearing.dz), dz = bearing.dz / Math.hypot(bearing.dx, bearing.dz);
+  const gateSides = side.split('-') as HomeSide[];
   const stopAt = (d: number) => ({ x: Math.round(home.x + dx * d), y: home.y, z: Math.round(home.z + dz * d) });
   const yard = ctx.world.yard;
   const wild = (d: number) => !yard || outsideBy(yard, stopAt(d)) > ZONE_MARGIN;
@@ -438,7 +443,7 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide, what: strin
       // out by this side's own gate, or not at all. Shut, the side gets the dry mark a side with none gets (the turn
       // goes on to the next side, and a gate that stays shut waits the longer each time): as untried the same side
       // came first again, and three of those held the whole rung to the morning
-      const gate = await outByGate(ctx, stop, [side]);
+      const gate = await outByGate(ctx, stop, gateSides);
       if (gate.shut) return { text: `no ${what} looked for ${side}: ${gate.shut}` };
       if (gate.at) me = gate.at;
       const careful = byYard(ctx.world, me, stop);

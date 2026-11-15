@@ -296,10 +296,13 @@ const NEIGHBOURS: [number, number, number][] = [[1, 0, 1], [-1, 0, 1], [0, 1, 1]
  * A way for the boat from `from` to `to` over the ground read, in straight legs: a search over the columns (each step
  * the boat's footprint at the column's middle, as checkLeg judges it, and FROM_ZONES off `zones`), within `bounds`,
  * then pulled straight: from each turning point the farthest point of the search's way that one straight leg reaches,
- * as checkLeg judges it. `within`: the search ends this near the target. At most `maxNodes` columns looked at. Pure.
+ * as checkLeg judges it. `within`: the search ends this near the target. At most `maxNodes` columns looked at.
+ * `corners: false`: no diagonal step past a corner, its two straight steps beside it judged too (the footprints
+ * checkLeg judges along a diagonal step cover them: a step round the corner of a build kept off was found by the
+ * search, then refused straightened, "on the way the search found"); the way across the yard's, among its builds. Pure.
  */
 export function planRoute(g: Pick<Ground, 'cell'>, from: BoatAt, to: { x: number; z: number }, opts: {
-  zones?: readonly Zone[]; bounds?: { x1: number; z1: number; x2: number; z2: number }; maxNodes?: number; within?: number; maxDrop?: number;
+  zones?: readonly Zone[]; bounds?: { x1: number; z1: number; x2: number; z2: number }; maxNodes?: number; within?: number; maxDrop?: number; corners?: false;
 } = {}): Route {
   const zones = opts.zones ?? [];
   const maxDrop = opts.maxDrop ?? MAX_DROP;
@@ -357,6 +360,7 @@ export function planRoute(g: Pick<Ground, 'cell'>, from: BoatAt, to: { x: number
       const r = footprint(g, x + 0.5, z + 0.5, n.level, n.water, maxDrop);
       if (!r.ok) continue;
       if (zoneNear(zones, { x: x + 0.5, y: r.level, z: z + 0.5 })) continue;
+      if (opts.corners === false && dx && dz && (!footprint(g, n.x + dx + 0.5, n.z + 0.5, n.level, n.water, maxDrop).ok || !footprint(g, n.x + 0.5, n.z + dz + 0.5, n.level, n.water, maxDrop).ok)) continue;
       const gn = n.g + cost;
       const was = best.get(nk);
       if (was && was.g <= gn) continue;
@@ -412,7 +416,9 @@ export type WallSide = 'north' | 'south' | 'west' | 'east';
  * straight out from it, the same columns of it (its posts and what stands on them); and the boat's stops: `out` 2.5 out
  * from the fence, `front` 2 out from the hall's wall (both dug from there, from the boat), `inside` the middle of the
  * room. The boat drives out -> front -> inside along the opening's middle line. `level`: the yard's floor (its ground's
- * top). Undefined, with why, when the hall or its panel is not known, or the fence does not face the panel.
+ * top). Undefined, with why, when the hall or its panel is not known, or the fence does not face the panel; `fence`
+ * when only the fence straight out will not do (a gate or a corner in it). There, or where the ground outside the
+ * fence there lets no boat by, the way in is across the yard instead (yardEntry: `yard`).
  */
 export interface Entry {
   side: WallSide;
@@ -430,24 +436,40 @@ export interface Entry {
   level: number;
   /** the fence's line (z for north/south, x for west/east), and which way is out of the hall */
   dir: [number, number];
+  /** in by a panel of the fence elsewhere and across the yard (yardEntry), not straight out from the hall's wall */
+  yard?: YardWay;
 }
 
-const isPos = (p: unknown): p is Pos => !!p && typeof (p as Pos).x === 'number' && typeof (p as Pos).y === 'number' && typeof (p as Pos).z === 'number';
+/**
+ * A way in across the yard: the side of the yard's fence the boat comes in by and which way is out of the yard there,
+ * the stop 2.5 inside the fence (`through`: out -> through along the opening's middle line), the legs across the yard
+ * from it to the hall's `front` (the last is `front` itself), and the opening's middle post (the rails' dry run comes in
+ * by its column).
+ */
+export interface YardWay { side: WallSide; dir: [number, number]; through: { x: number; z: number }; legs: { x: number; z: number }[]; post: Pos }
 
-export function entryOf(world: WorldMemory): Entry | { why: string } {
-  const hall = world.zones?.hall?.[0];
-  const panel = (world.zones?.['hall:panel'] ?? []).filter(isPos).sort((a, b) => a.y - b.y);
-  const yard = world.yard;
-  if (!hall || !hall.width || !hall.length) return { why: 'no villager hall built' };
-  if (panel.length < 2) return { why: 'the hall\'s panel is not known' };
-  if (!yard) return { why: 'no yard' };
-  const box = { x: hall.x, y: hall.y, z: hall.z, width: hall.width, length: hall.length };
-  const p = panel[0];
-  const side: WallSide | undefined = p.z === box.z ? 'north' : p.z === box.z + box.length - 1 ? 'south' : p.x === box.x ? 'west' : p.x === box.x + box.width - 1 ? 'east' : undefined;
-  if (!side) return { why: `the panel at (${p.x}, ${p.y}, ${p.z}) is in no wall of the hall` };
-  const along: [number, number] = side === 'north' || side === 'south' ? [1, 0] : [0, 1];
-  const dir: [number, number] = side === 'north' ? [0, -1] : side === 'south' ? [0, 1] : side === 'west' ? [-1, 0] : [1, 0];
-  const gate = (world.zones?.['hall:gate'] ?? []).find(isPos);
+const isPos = (p: unknown): p is Pos => !!p && typeof (p as Pos).x === 'number' && typeof (p as Pos).y === 'number' && typeof (p as Pos).z === 'number';
+const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const at3 = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
+
+/** Along a wall or a fence on that side, and which way is out (the game's north being -z, east +x). */
+const ALONG = (side: WallSide): [number, number] => (side === 'north' || side === 'south' ? [1, 0] : [0, 1]);
+const OUTWARD: Record<WallSide, [number, number]> = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] };
+/** The point `by` out from a line across the way out (z for north/south, x for west/east), on the middle line `mid`; in for `by` under 0. */
+function outFrom(side: WallSide, line: number, mid: number, by: number): { x: number; z: number } {
+  const v = line + (side === 'north' || side === 'west' ? -by : by);
+  return side === 'north' || side === 'south' ? { x: mid, z: v } : { x: v, z: mid };
+}
+
+type HallBox = Entry['hall'];
+
+/**
+ * The hall's side of a way in (pure): the panel's column `p` and one either side of it in the side's wall (but a
+ * corner or the gate), two rows from `p.y`; the opening's middle line, the stop 2 out from the wall and the room's
+ * middle on it.
+ */
+function hallWay(box: HallBox, side: WallSide, p: Pos, gate: Pos | undefined): Pick<Entry, 'side' | 'wall' | 'front' | 'inside' | 'dir'> & { cols: { x: number; z: number }[]; mid: number } | { why: string } {
+  const along = ALONG(side);
   // the columns: the panel's, and one either side in the same wall, but a corner or the gate
   const corner = (x: number, z: number) => (x === box.x || x === box.x + box.width - 1) && (z === box.z || z === box.z + box.length - 1);
   const cols = [-1, 0, 1].map(k => ({ x: p.x + along[0] * k, z: p.z + along[1] * k }))
@@ -458,22 +480,211 @@ export function entryOf(world: WorldMemory): Entry | { why: string } {
   const lo = Math.min(...cols.map(c => c.x * along[0] + c.z * along[1]));
   const hi = Math.max(...cols.map(c => c.x * along[0] + c.z * along[1]));
   const mid = (lo + hi + 1) / 2;
+  // the wall's outer face (along dir), and the room's middle row
+  const wallLine = side === 'north' ? box.z : side === 'south' ? box.z + box.length : side === 'west' ? box.x : box.x + box.width;
+  const insideLine = side === 'north' || side === 'south' ? box.z + box.length / 2 : box.x + box.width / 2;
+  const inside = side === 'north' || side === 'south' ? { x: mid, z: insideLine } : { x: insideLine, z: mid };
+  return { side, wall, cols, mid, front: outFrom(side, wallLine, mid, 2), inside, dir: OUTWARD[side] };
+}
+
+export function entryOf(world: WorldMemory): Entry | { why: string; fence?: true } {
+  const hall = world.zones?.hall?.[0];
+  const panel = (world.zones?.['hall:panel'] ?? []).filter(isPos).sort((a, b) => a.y - b.y);
+  const yard = world.yard;
+  if (!hall || !hall.width || !hall.length) return { why: 'no villager hall built' };
+  if (panel.length < 2) return { why: 'the hall\'s panel is not known' };
+  if (!yard) return { why: 'no yard' };
+  const box = { x: hall.x, y: hall.y, z: hall.z, width: hall.width, length: hall.length };
+  const p = panel[0];
+  const side: WallSide | undefined = p.z === box.z ? 'north' : p.z === box.z + box.length - 1 ? 'south' : p.x === box.x ? 'west' : p.x === box.x + box.width - 1 ? 'east' : undefined;
+  if (!side) return { why: `the panel at (${p.x}, ${p.y}, ${p.z}) is in no wall of the hall` };
+  const gate = (world.zones?.['hall:gate'] ?? []).find(isPos);
+  const way = hallWay(box, side, p, gate);
+  if ('why' in way) return way;
   // the fence straight out from the wall: the yard's edge on that side
   const fenceAt = side === 'north' ? yard.z1 : side === 'south' ? yard.z2 : side === 'west' ? yard.x1 : yard.x2;
-  const fence = cols.map(c => (side === 'north' || side === 'south' ? { x: c.x, y: yard.y + 1, z: fenceAt } : { x: fenceAt, y: yard.y + 1, z: c.z }));
+  const fence = way.cols.map(c => (side === 'north' || side === 'south' ? { x: c.x, y: yard.y + 1, z: fenceAt } : { x: fenceAt, y: yard.y + 1, z: c.z }));
   const corners = (q: Pos) => (q.x === yard.x1 || q.x === yard.x2) && (q.z === yard.z1 || q.z === yard.z2);
   const gates = (world.zones?.['fence:gate'] ?? []).filter(isPos);
-  if (fence.some(q => corners(q) || gates.some(gt => gt.x === q.x && gt.z === q.z))) return { why: 'the fence straight out from the panel holds a corner or a gate' };
-  // the wall's outer face, the fence's outer face (along dir), and the room's middle row
-  const wallLine = side === 'north' ? box.z : side === 'south' ? box.z + box.length : side === 'west' ? box.x : box.x + box.width;
+  // (`fence`: the hall and its panel will do, only not straight out: the way in across the yard may, yardEntry)
+  if (fence.some(q => corners(q) || gates.some(gt => gt.x === q.x && gt.z === q.z))) return { why: 'the fence straight out from the panel holds a corner or a gate', fence: true };
+  // the fence's outer face (along dir)
   const fenceLine = side === 'north' ? fenceAt : side === 'south' ? fenceAt + 1 : side === 'west' ? fenceAt : fenceAt + 1;
-  const insideLine = side === 'north' || side === 'south' ? box.z + box.length / 2 : box.x + box.width / 2;
-  const at = (line: number, by: number) => {
-    const v = line + (side === 'north' || side === 'west' ? -by : by);
-    return side === 'north' || side === 'south' ? { x: mid, z: v } : { x: v, z: mid };
+  const out = outFrom(side, fenceLine, way.mid, 2.5);
+  return { side, hall: box, wall: way.wall, fence, out, front: way.front, inside: way.inside, ...(gate ? { gate } : {}), level: yard.y + 1, dir: way.dir };
+}
+
+// ------------------------------------------------------------------------------------------------ the way in across the yard
+
+/** The yard's inside, the fence's line left out: the box a way across it keeps within. */
+export const yardInside = (yard: NonNullable<WorldMemory['yard']>) => ({ x1: yard.x1 + 1, z1: yard.z1 + 1, x2: yard.x2 - 1, z2: yard.z2 - 1 });
+
+/** Of the zones round the yard, those this far out of it are kept off too (the cane patch reaches out past the south fence). */
+const KEEP_OFF_NEAR = 8;
+
+/**
+ * The ground as a boat's way in across the yard meets it (pure): every cell of the bot's own builds and the like, the
+ * zones (the pens, the portal, the workshop, the storage house, the enchanting room, the tree farm, the plot, the hall,
+ * the cane patch's cells, a cast's spot...), a wall in every column of it: the boat keeps off them by its footprint and
+ * the drive's slack, as off a wall (the plot's farmland and the cane by water have no wall a boat would stop at). Not
+ * the fence's own (its ring, gates and torches: its posts are walls as read, and the panel the boat comes in by is dug).
+ * Zones only: an improvement run's build keeps no zone (its box is no help: the lamp walk's runs the width of the
+ * yard's south half), and its blocks are in the ground as read. And in the yard a floor under a block high (a dirt
+ * path, farmland: 15/16) where the boat's own box (1.375 across: two columns each way) could sit wholly on such floors:
+ * it sinks the 1/16 and climbs nothing back out (26.3: a boat's maxUpStep is 0), so those are walls too. The footprint
+ * rests the boat on the highest column under its box and the drive's slack, which would carry it across a path two
+ * wide on the grass beside it; a path one wide it does cross, on the grass either side.
+ */
+export function keepOff(g: Pick<Ground, 'cell'>, world: WorldMemory): Pick<Ground, 'cell'> {
+  const yard = world.yard;
+  const inside = yard ? yardInside(yard) : undefined;
+  const low = new Map<string, boolean>();
+  const lowAt = (x: number, z: number): boolean => {
+    const k = `${x},${z}`;
+    let v = low.get(k);
+    if (v === undefined) {
+      const c = yard ? g.cell(x, yard.y, z) : UNKNOWN;
+      v = c.kind === 'solid' && c.bottom < EPS && c.top > EPS && c.top < 1 - EPS && g.cell(x, yard!.y + 1, z).kind === 'open';
+      low.set(k, v);
+    }
+    return v;
   };
-  const out = at(fenceLine, 2.5);
-  const front = at(wallLine, 2);
-  const inside = side === 'north' || side === 'south' ? { x: mid, z: insideLine } : { x: insideLine, z: mid };
-  return { side, hall: box, wall, fence, out, front, inside, ...(gate ? { gate } : {}), level: yard.y + 1, dir };
+  const sunk = (x: number, z: number) => !!inside && x >= inside.x1 && x <= inside.x2 && z >= inside.z1 && z <= inside.z2 && lowAt(x, z)
+    && [[0, 0], [-1, 0], [0, -1], [-1, -1]].some(([ox, oz]) => lowAt(x + ox, z + oz) && lowAt(x + ox + 1, z + oz) && lowAt(x + ox, z + oz + 1) && lowAt(x + ox + 1, z + oz + 1));
+  const cols = new Map<string, string>();
+  for (const [kind, boxes] of Object.entries(world.zones ?? {})) {
+    if (kind === 'fence' || kind.startsWith('fence:') || !Array.isArray(boxes)) continue;
+    for (const b of boxes) {
+      if (!b || !fin(b.x) || !fin(b.z)) continue;
+      const w = fin(b.width) && b.width > 0 ? b.width : 1, l = fin(b.length) && b.length > 0 ? b.length : 1;
+      for (let x = b.x; x < b.x + w; x++) for (let z = b.z; z < b.z + l; z++) {
+        if (yard && (x < yard.x1 - KEEP_OFF_NEAR || x > yard.x2 + KEEP_OFF_NEAR || z < yard.z1 - KEEP_OFF_NEAR || z > yard.z2 + KEEP_OFF_NEAR)) continue;
+        if (!cols.has(`${x},${z}`)) cols.set(`${x},${z}`, kind);
+      }
+    }
+  }
+  return {
+    cell: (x, y, z) => {
+      const kind = cols.get(`${x},${z}`);
+      if (kind) return { kind: 'hazard', what: `the bot's own ${kind}` };
+      if (sunk(x, z)) return { kind: 'hazard', what: 'a floor under a block high, two wide or more (a path, farmland: the boat would sink onto it and climb nothing back out)' };
+      return g.cell(x, y, z);
+    }
+  };
+}
+
+/** The ground with these cells open (what a move digs out: the way as it will be once they are). Pure. */
+function opened(g: Pick<Ground, 'cell'>, cells: readonly Pos[]): Pick<Ground, 'cell'> {
+  const open = new Set(cells.map(c => `${c.x},${c.y},${c.z}`));
+  return { cell: (x, y, z) => (open.has(`${x},${y},${z}`) ? OPEN : g.cell(x, y, z)) };
+}
+
+/**
+ * The hall's panel for a way in across the yard (pure): in the wall that faces the yard's middle (the axis it is
+ * further off along, scaled to the hall's sizes, as villagers.ts sideToward has it), the panel P5b built where it is in
+ * that wall; else that wall's middle column, or the column two along from the gate, toward the yard's middle, where the
+ * gate stands within one of it (the blueprint's own place for a panel in the gate's wall). A panel, not the gate: the
+ * gate is one block wide and the boat 1.375 across (the planks either side of it would come out as well), and an open
+ * gate the bot is 2.2 from is shut by the bridge (Gates.java) as the boat goes through with the villager in its back
+ * seat. Beside it, the gate stays shut and untouched throughout, and the bot leaves the room by it as from the built
+ * panel. (26.3: an open gate has no collision, FenceGateBlock.getCollisionShape; a villager opens only doors,
+ * InteractWithDoor's #mob_interactable_doors, and paths round a shut gate, WalkNodeEvaluator's FENCE.)
+ */
+export function yardPanel(world: WorldMemory): { side: WallSide; at: Pos } | { why: string } {
+  const hall = world.zones?.hall?.[0];
+  const yard = world.yard;
+  if (!hall || !hall.width || !hall.length) return { why: 'no villager hall built' };
+  if (!yard) return { why: 'no yard' };
+  const box = { x: hall.x, y: hall.y, z: hall.z, width: hall.width, length: hall.length };
+  const m = { x: (yard.x1 + yard.x2 + 1) / 2, z: (yard.z1 + yard.z2 + 1) / 2 };
+  const dx = (m.x - (box.x + box.width / 2)) / box.width, dz = (m.z - (box.z + box.length / 2)) / box.length;
+  const side: WallSide = Math.abs(dx) > Math.abs(dz) ? (dx < 0 ? 'west' : 'east') : (dz < 0 ? 'north' : 'south');
+  const ns = side === 'north' || side === 'south';
+  const line = side === 'north' ? box.z : side === 'south' ? box.z + box.length - 1 : side === 'west' ? box.x : box.x + box.width - 1;
+  const inWall = (q: Pos) => (ns ? q.z === line && q.x > box.x && q.x < box.x + box.width - 1 : q.x === line && q.z > box.z && q.z < box.z + box.length - 1);
+  const built = (world.zones?.['hall:panel'] ?? []).filter(isPos).sort((a, b) => a.y - b.y)[0];
+  if (built && inWall(built)) return { side, at: { ...built } };
+  const gate = (world.zones?.['hall:gate'] ?? []).find(isPos);
+  let c = ns ? box.x + Math.floor((box.width - 1) / 2) : box.z + Math.floor((box.length - 1) / 2);
+  if (gate && inWall(gate)) {
+    const g = ns ? gate.x : gate.z;
+    if (Math.abs(g - c) <= 1) c = g + 2 * ((ns ? m.x : m.z) >= g + 0.5 ? 1 : -1);
+  }
+  return { side, at: ns ? { x: c, y: box.y + 1, z: line } : { x: line, y: box.y + 1, z: c } };
+}
+
+/** Ways across the yard searched at most (the cheapest panels of the fence the boat can come in by, one search over the yard each). */
+export const YARD_TRIES = 6;
+
+/**
+ * The way in across the yard (pure; the ground read round the whole yard), where straight out from the hall's panel
+ * the ground outside the fence lets no boat by: live on Nov 15 the hall stood in the yard's north-west corner, cut into
+ * a hillside on the north and the west, and its panel faced the hill ("a wall at (-557, 65, 2115)"). In through a
+ * panel of the yard's own fence (3 plain posts in a row: no corner, no gate; what stands on them goes back too) where
+ * the ground outside lets the boat stand 2.5 out (`out`, its stop at the end of the way home) and on through the
+ * opening to 2.5 inside (`through`), then across the yard to the hall's yard-facing panel (yardPanel) on a way planned
+ * as the way home is (planRoute, checkLeg), its own builds kept off (keepOff), nothing in the yard dug but the one
+ * panel of its fence. The fence's panels tried the cheapest first: from `toward` (the village) to `out`, then from
+ * `through` to the hall's `front`, straight (the side toward the village, and the shortest way), at most YARD_TRIES of
+ * them searched across. A boat steps up nothing (26.3: AbstractBoat keeps Entity.maxUpStep's 0, and Entity.collide
+ * steps up only over 0): not the 1/16 from a dirt path onto the grass beside it (settle), so a way all on a path
+ * (15/16 high) for the boat's whole footprint has no way off it, and the search goes round.
+ */
+export function yardEntry(g: Pick<Ground, 'cell' | 'state'>, world: WorldMemory, toward: { x: number; z: number }, tries = YARD_TRIES): Entry | { why: string } {
+  const hall = world.zones?.hall?.[0];
+  const yard = world.yard;
+  if (!hall || !hall.width || !hall.length) return { why: 'no villager hall built' };
+  if (!yard) return { why: 'no yard' };
+  const box = { x: hall.x, y: hall.y, z: hall.z, width: hall.width, length: hall.length };
+  const level = yard.y + 1;
+  const panel = yardPanel(world);
+  if ('why' in panel) return panel;
+  const gate = (world.zones?.['hall:gate'] ?? []).find(isPos);
+  const way = hallWay(box, panel.side, panel.at, gate);
+  if ('why' in way) return way;
+  // into the room by it, the panel as air (judged on the ground as it is: the hall is not the yard's way)
+  const room = checkLeg(opened(g, way.wall), { ...way.front, level }, way.inside);
+  if (!room.ok) return { why: `into the hall by a panel in its ${way.side} wall: ${room.why} at ${at3(room.at)}` };
+  const gates = (world.zones?.['fence:gate'] ?? []).filter(isPos);
+  type Panel = { side: WallSide; posts: Pos[]; out: { x: number; z: number }; through: { x: number; z: number } };
+  const panels: { p: Panel; cost: number }[] = [];
+  for (const side of ['north', 'south', 'west', 'east'] as WallSide[]) {
+    const ns = side === 'north' || side === 'south';
+    const line = side === 'north' ? yard.z1 : side === 'south' ? yard.z2 : side === 'west' ? yard.x1 : yard.x2;
+    // the fence block's outer and inner faces
+    const outer = side === 'south' || side === 'east' ? line + 1 : line;
+    const inner = side === 'south' || side === 'east' ? line : line + 1;
+    const [a1, a2] = ns ? [yard.x1, yard.x2] : [yard.z1, yard.z2];
+    for (let c = a1 + 2; c <= a2 - 2; c++) {
+      const posts = [c - 1, c, c + 1].map(v => (ns ? { x: v, y: level, z: line } : { x: line, y: level, z: v }));
+      if (posts.some(q => gates.some(gt => gt.x === q.x && gt.z === q.z))) continue;
+      const p: Panel = { side, posts, out: outFrom(side, outer, c + 0.5, 2.5), through: outFrom(side, inner, c + 0.5, -2.5) };
+      panels.push({ p, cost: Math.hypot(toward.x - p.out.x, toward.z - p.out.z) + Math.hypot(p.through.x - way.front.x, p.through.z - way.front.z) });
+    }
+  }
+  panels.sort((a, b) => a.cost - b.cost);
+  const own = keepOff(g, world);
+  const bounds = yardInside(yard);
+  const fenceId = /^(minecraft:)?[a-z_]+_fence(\[|$)/;
+  let searched = 0, why = '';
+  for (const { p } of panels) {
+    // its posts plain fence, read, and what stands on them read (it goes back after)
+    if (p.posts.some(q => !fenceId.test(g.state(q.x, q.y, q.z) ?? '') || !g.state(q.x, q.y + 1, q.z))) continue;
+    const view = keepOff(opened(g, p.posts.flatMap(q => [q, { x: q.x, y: q.y + 1, z: q.z }])), world);
+    // the boat outside it, from the ground there (at most MAX_DROP over the yard's floor), through the opening
+    const stand = footprint(view, p.out.x, p.out.z, level + MAX_DROP, false);
+    if (!stand.ok) continue;
+    const into = checkLeg(view, { ...p.out, level: stand.level }, p.through);
+    if (!into.ok || !footprint(own, p.through.x, p.through.z, into.level, false).ok) continue;
+    if (searched++ >= tries) break;
+    const r = planRoute(own, { ...p.through, level: into.level }, way.front, { bounds, within: 1, corners: false });
+    if (r.ok) {
+      return {
+        side: way.side, hall: box, wall: way.wall, fence: p.posts, out: p.out, front: way.front, inside: way.inside, ...(gate ? { gate } : {}), level, dir: way.dir,
+        yard: { side: p.side, dir: OUTWARD[p.side], through: p.through, legs: r.legs, post: { ...p.posts[1] } }
+      };
+    }
+    why ||= `from the ${p.side} fence at ${at3(p.posts[1])}: ${r.why}`;
+  }
+  return { why: why ? `no way across the yard (${why})` : 'no panel of the yard\'s fence with ground outside it the boat can come in from' };
 }

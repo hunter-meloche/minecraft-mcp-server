@@ -306,3 +306,20 @@ test('no rails way, and why: the yard\'s stretch blocked, no pickup by a village
   t.deepEqual(short.bill.short, ['iron (43 more)', 'gold (12 more)', 'redstone (4 more)', 'cobblestone (1)']);
   t.like(billOf({ rail: 600, powered_rail: 40, redstone_torch: 25, minecart: 1, cobblestone: 0 }, STORES), { iron_ingot: 233, gold_ingot: 42, redstone: 32, stick: 70, short: [] });
 });
+
+test('the boat\'s way in across the yard (boatroute.ts yardEntry: its panel of the fence elsewhere): the line comes in by that panel\'s column, its brake just inside the fence, the post and what stands on it all it opens; never into the yard but by that stretch', (t) => {
+  // in by the west fence at (-565, 63, 2124..2126), a torch on its middle post; the boat across the yard from 2.5 inside it
+  const entry: Entry = {
+    ...ENTRY, fence: [2124, 2125, 2126].map(z => ({ x: -565, y: 63, z })), out: { x: -567.5, z: 2125.5 },
+    yard: { side: 'west', dir: [-1, 0], through: { x: -561.5, z: 2125.5 }, legs: [{ ...ENTRY.front }], post: { x: -565, y: 63, z: 2125 } }
+  };
+  const p = plan(planRails(land({ [k(-565, 64, 2125)]: 'torch' }), opts({ entry, panel: entry.yard!.post })));
+  // the yard's stretch: the post's cell and the four in from it, east, the brake the last two
+  t.is(p.yard, 5);
+  t.deepEqual(p.cells.slice(-p.yard).map(c => `${c.x},${c.y},${c.z} ${c.kind} ${c.shape}`), [-565, -564, -563, -562, -561].map(x => `${x},63,2125 ${x >= -562 ? 'brake' : 'rail'} east_west`));
+  t.deepEqual(p.opens, [{ at: { x: -565, y: 63, z: 2125 }, block: FENCE }, { at: { x: -565, y: 64, z: 2125 }, block: 'torch' }]);
+  // (the north fence straight out from the hall's panel untouched: in at the west fence only)
+  const inYard = (c: Pos) => c.x >= YARD.x1 && c.x <= YARD.x2 && c.z >= YARD.z1 && c.z <= YARD.z2;
+  t.deepEqual(p.cells.filter(inYard).map(c => `${c.x},${c.z}`), [-565, -564, -563, -562, -561].map(x => `${x},2125`));
+  t.is(p.cells[p.cells.length - p.yard - 1].x, -566, 'the cell outside the fence, last before it');
+});
