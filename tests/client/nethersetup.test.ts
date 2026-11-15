@@ -817,6 +817,40 @@ test.serial('F3: the setup\'s kit eaten to full before its food is counted: a me
   t.true(bread * 5 >= 40, `${bread} bread`);
 });
 
+test.serial('the setup fed again just before it goes: the room\'s walks cost the points the first meal gave (live, Nov 15: "not setting out: food 17 < 18", twice), so it eats again and makes up the 40 points', async (t) => {
+  const w = setupWorld();
+  const items = AT_THE_SETUP.filter(i => i.name !== 'bread').concat({ slot: 15, name: 'bread', count: 64 });
+  const f = game(w, { items });
+  // full at the start; every walk of the room (a store, a throw at the dump spot) costs a point of food
+  const state = { food: 20 };
+  const status = f.ctx.status;
+  const act = f.ctx.act;
+  (f.ctx as { status: GoalContext['status'] }).status = (async () => ({ ...(await status()), food: state.food })) as GoalContext['status'];
+  (f.ctx as { act: GoalContext['act'] }).act = (async (tool: string, a: Record<string, unknown> = {}) => {
+    if (tool === 'eat') {
+      const bread = f.inv.find(i => i.slot < 36 && i.name === 'bread');
+      if (!bread || state.food >= 20) return { ok: true, text: 'Not hungry' };
+      bread.count -= 1;
+      if (!bread.count) f.inv.splice(f.inv.indexOf(bread), 1);
+      state.food = Math.min(20, state.food + 5);
+      f.did.push('eat bread');
+      return { ok: true, text: 'Ate bread' };
+    }
+    if (tool === 'store-in-chest' || tool === 'drop-item') { state.food = Math.max(17, state.food - 1); f.did.push(`room walk: ${tool}`); }
+    if (tool !== 'drop-item') return act(tool, a);
+    let left = Number(a.count);
+    for (const i of f.inv.filter(x => x.slot < 36 && x.name === a.item)) { const n = Math.min(left, i.count); i.count -= n; left -= n; }
+    for (let i = f.inv.length - 1; i >= 0; i--) if (f.inv[i].count <= 0) f.inv.splice(i, 1);
+    return { ok: true, text: `Dropped ${Number(a.count) - left} ${a.item}` };
+  }) as GoalContext['act'];
+  // nothing short (the kit's check counts the 40 food points too), and the meal came after the room's walks
+  t.is(await fetchSetupKit(f.ctx), undefined);
+  const meal = f.did.indexOf('eat bread');
+  t.true(meal >= 0, f.did.join(' | '));
+  t.true(f.did.slice(0, meal).some(d => /^room walk:/.test(d)), 'the meal after the room');
+  t.true(state.food >= 18, `food ${state.food}`);
+});
+
 test('F3: the ground judged whole: lava in the ring round a hut that the read did not cover (the old re-plan read 2 round it, the ring goes 4 under) is never taken for clear; read as wide as the judgement, the lava itself', (t) => {
   const hut = hutOf({ x: 0, y: 70, z: 0, axis: 'x', side: 1, door: 0 });
   const have = { cobblestone: 64, obsidian: 10 };

@@ -7,7 +7,7 @@ import { portal } from './blueprints.js';
 import { layoutSpec } from '../schematic.js';
 import { prepare } from './project.js';
 import { obsidianStep } from './cast.js';
-import { key, spareHeld, storedStacks, storeStackAt, takeFromChests, type SparePiece } from './chests.js';
+import { key, oneSpareSet, peekChest, spareHeld, sparePieces, storedStacks, storeStackAt, takeFromChests, type SparePiece } from './chests.js';
 import { bookChests } from './enchant.js';
 import { carriedKit, gearKind, type GearKind } from './kit.js';
 import { holdHarmless, isFloor, isPassable } from './fluidpick.js';
@@ -471,6 +471,34 @@ export function spareStored(world: WorldMemory, name: string): SparePiece | unde
 }
 
 /**
+ * The home chests of the spare set's recorded pieces that the chests' memory no longer holds there, looked into again
+ * (peekChest) before anything is made: a reply can leave a chest's memory without what is in it, and it is the look
+ * that says whether the piece is gone. Live on Nov 15 the gear chest's memory lost the six pieces in its slots 12 to
+ * 17 for a moment, and the nether spares chore crafted a second set from 29 diamonds while the first lay there. The
+ * chests looked into, in the record's order, and those the look could not get into (not reached, not opened: brain.log
+ * has both for the storage house), which show nothing gone.
+ */
+async function lookAgain(ctx: GoalContext): Promise<{ looked: Pos[]; failed: Pos[] }> {
+  const home = new Set(ctx.world.landmarks.chests.map(key));
+  const held = spareHeld(ctx.world);
+  const chests = new Map<string, Pos>();
+  for (const p of sparePieces(ctx.world)) if (!held.includes(p) && home.has(key(p.chest))) chests.set(key(p.chest), p.chest);
+  const looked: Pos[] = [];
+  const failed: Pos[] = [];
+  for (const at of chests.values()) {
+    if (ctx.signal.aborted) break;
+    try {
+      await peekChest(ctx, at);
+      looked.push({ ...at });
+    } catch (e) {
+      ctx.progress(`the spare set's chest at ${fmt(at)}: ${(e as Error).message}`);
+      if (!ctx.signal.aborted) failed.push({ ...at });
+    }
+  }
+  return { looked, failed };
+}
+
+/**
  * The spare set: a plain diamond helmet, chestplate, leggings, boots, pickaxe and sword in a home chest, for the
  * regear after a death in the Nether (P2b). A piece at a time: a plain one carried that the kit is not using
  * (spareCandidate: one a run stopped midway left in the pockets), else one already lying in a home chest (spareStored:
@@ -478,14 +506,22 @@ export function spareStored(world: WorldMemory, name: string): SparePiece | unde
  * by its pocket slot (storeStackAt) in the gear's chests, where the sort leaves gear alone. Each is remembered by its
  * chest and the chest's slot (`world.spareSet`): reserved there (chests.ts reservedCount) so the kit, the trip kit,
  * the donations and every take by name leave it, and the sort moves none of it. The anvil and the enchant chore work
- * on what is carried and worn only. Never crafted twice: what the chests' memory still shows is the set's.
+ * on what is carried and worn only. Never crafted twice: what the chests' memory still shows is the set's, and a piece
+ * the record holds that the memory does not is looked for in its chest first (lookAgain); one set only (oneSpareSet).
  */
 export const spareSetStep: Step = {
   name: 'the spare diamond set',
   run: async ctx => {
+    oneSpareSet(ctx.world);
     const missing = () => SPARE_SET.filter(piece => !spareHeld(ctx.world).some(p => p.name === piece.name));
     const kept = () => SPARE_SET.length - missing().length;
-    if (!missing().length) return ok(`the spare diamond set is in the chests (${SPARE_SET.length} pieces)`);
+    const again = missing().length ? await lookAgain(ctx) : { looked: [], failed: [] };
+    const looked = again.looked.length ? `; the chest at ${again.looked.map(fmt).join(', ')} looked into again` : '';
+    if (!missing().length) return ok(`the spare diamond set is in the chests (${SPARE_SET.length} pieces${looked})`);
+    // a look that failed has shown nothing gone: the recorded pieces there count as there, and nothing is made (one set
+    // in the record, a piece a name: a chest not looked into holds a missing one). Made anyway, the record would let the
+    // set there go for the new pieces, and the diamonds would be spent on a set that lies in its chest
+    if (again.failed.length) return blocked(`the spare set's chest at ${again.failed.map(fmt).join(', ')} could not be looked into: nothing made`);
     const made: string[] = [];
     for (const piece of missing()) {
       if (ctx.signal.aborted) return going(`${kept()}/${SPARE_SET.length} spare pieces stored`);
@@ -516,7 +552,7 @@ export const spareSetStep: Step = {
       made.push(`${piece.name} (slot ${at.slot})`);
     }
     const left = missing();
-    const line = `stored ${made.join(', ')} as the spare set`;
+    const line = `stored ${made.join(', ')} as the spare set${looked}`;
     return left.length ? going(`${line}; ${left.map(p => p.name).join(', ')} still to come`) : ok(`${line}: all ${SPARE_SET.length} pieces in the chests`);
   }
 };

@@ -1,8 +1,12 @@
 import test from 'ava';
-import type { ChestContents, ChestStack, InventoryItem } from '../../src/client/tools.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import type { ChestContents, ChestStack, ClientRuntime, InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
-import { decide } from '../../src/client/brain/brain.js';
+import { Brain, decide } from '../../src/client/brain/brain.js';
+import type { BrainMemory } from '../../src/client/brain/memory.js';
 import {
   NETHER, NETHER_STAGES, OVERWORLD, netherEnd, netherLine, netherOf, netherTick, peekNether, portalCells, tripsForStage, type DeathSeen, type PortalShape
 } from '../../src/client/brain/nether.js';
@@ -13,7 +17,7 @@ import {
 } from '../../src/client/brain/regear.js';
 import { ANVIL_ORDER } from '../../src/client/brain/anvil.js';
 import { SPARE_SET } from '../../src/client/brain/portal.js';
-import { spareHeld } from '../../src/client/brain/chests.js';
+import { freeChestTotals, key, oneSpareSet, remember, spareHeld, sparePieces } from '../../src/client/brain/chests.js';
 import { LADDER, NETHER_WORK } from '../../src/client/brain/worktasks.js';
 import { workGoals, workTick, type WorkResult, type WorkTask } from '../../src/client/brain/work.js';
 import { out as afield } from '../../src/client/brain/pockets.js';
@@ -692,6 +696,183 @@ test.serial('after a death on the setup trip (the frame\'s obsidian lost with it
   netherOf(w).portal = { x: -79, y: 70, z: 266 };
   t.like(sparesShort(lookAt(BARE, 1000), w), { obsidian: 0 });
   t.is(sparesWant(lookAt(BARE, 1000), w), null);
+});
+
+// ------------------------------------------------------------------------------------------------ F4: the kit's things
+
+const ORES2 = '-547,63,2180';
+const STONE5 = '-549,65,2185';
+/** Diamonds in the ores chest, by their stacks: enough for a whole new set over those kept (as live: 1441). */
+function diamonds(w: WorldMemory): void {
+  w.chestItems![ORES2].diamond = 200;
+  w.chestStacks![ORES2].push({ slot: 40, name: 'diamond', count: 64 }, { slot: 41, name: 'diamond', count: 64 }, { slot: 42, name: 'diamond', count: 64 }, { slot: 43, name: 'diamond', count: 8 });
+}
+/** The gear chest's memory as a reply that held none of the set left it (live, Nov 15 02:39Z): the chest itself still holds it. */
+function setForgotten(w: WorldMemory): void {
+  const items = { ...w.chestItems![GEAR2] };
+  for (const p of SPARE_SET) delete items[p.name];
+  remember(w, GEAR_AT, items);
+}
+const SLOTS_12_17 = SPARE_SET.map((p, i) => `${p.name} ${GEAR2} ${12 + i}`);
+const where = (w: WorldMemory) => sparePieces(w).map(p => `${p.name} ${key(p.chest)} ${p.slot}`);
+
+test.serial('F4: the nether spares chore never crafts the set again while the record holds it: the gear chest\'s memory without the six pieces, the chest is looked into first, they are there, nothing crafted', async (t) => {
+  const w = afterDeath();
+  netherOf(w).deaths = [];
+  diamonds(w);
+  const h = storehouse(w, [...BARE, ...WORN.map(i => ({ ...i }))]);
+  setForgotten(w);
+  t.regex(sparesWant(lookAt(h.inv, 1000), w) ?? '', /^for the nether trips: the spare diamond_helmet, diamond_chestplate, diamond_leggings, diamond_boots, diamond_pickaxe, diamond_sword \(29 of /);
+  const text = await netherSparesGoal.run(h.ctx);
+  t.is(text, 'the spare diamond set is in the chests (6 pieces; the chest at (-547, 64, 2182) looked into again)');
+  t.true(h.did.includes(`chest.open ${GEAR2}`));
+  t.false(h.did.some(d => /^craft /.test(d)), h.did.join(' | '));
+  t.deepEqual(where(w), SLOTS_12_17);
+  t.is(spareHeld(w).length, 6);
+  t.is(w.chestItems![ORES2].diamond, 200, 'not a diamond spent');
+  t.is(sparesWant(lookAt(h.inv, 1000), w), null);
+});
+
+test.serial('F4: a piece that is truly gone (the look into its chest shows its slot empty): only that piece crafted, the rest kept where they are', async (t) => {
+  const w = afterDeath();
+  netherOf(w).deaths = [];
+  diamonds(w);
+  const h = storehouse(w, [...BARE, ...WORN.map(i => ({ ...i }))]);
+  // the chestplate taken by hand, then a reply without the set
+  h.chests.set(GEAR2, h.chests.get(GEAR2)!.filter(st => st.slot !== 13));
+  setForgotten(w);
+  const text = await netherSparesGoal.run(h.ctx);
+  t.regex(text, /^stored diamond_chestplate \(slot \d+\) as the spare set; the chest at \(-547, 64, 2182\) looked into again: all 6 pieces in the chests$/);
+  t.deepEqual(h.did.filter(d => /^craft /.test(d)), ['craft diamond_chestplate']);
+  t.deepEqual(where(w).filter(x => !x.startsWith('diamond_chestplate')), SLOTS_12_17.filter(x => !x.startsWith('diamond_chestplate')));
+  t.is(spareHeld(w).length, 6);
+});
+
+test.serial('F4: a look into the set\'s chest that fails (not reached, not opened) shows nothing gone: nothing crafted, not a diamond spent, the record as it was, and the run fails to its retry time', async (t) => {
+  const w = afterDeath();
+  netherOf(w).deaths = [];
+  diamonds(w);
+  const h = storehouse(w, [...BARE, ...WORN.map(i => ({ ...i }))]);
+  setForgotten(w);
+  const inner = h.ctx.call;
+  h.ctx.call = (async (m: string, p: Record<string, unknown> = {}, ms?: number) => {
+    if (m === 'chest.open' && `${p.x},${p.y},${p.z}` === GEAR2) throw new Error('bridge call chest.open timed out');
+    return inner(m, p, ms);
+  }) as GoalContext['call'];
+  await t.throwsAsync(netherSparesGoal.run(h.ctx), { message: 'the spare set\'s chest at (-547, 64, 2182) could not be looked into: nothing made' });
+  t.false(h.did.some(d => /^craft /.test(d)), h.did.join(' | '));
+  t.is(w.chestItems![ORES2].diamond, 200, 'not a diamond spent');
+  t.deepEqual(where(w), SLOTS_12_17);
+  t.true(h.said.some(l => l.startsWith('the spare set\'s chest at (-547, 64, 2182): ')), h.said.join(' | '));
+});
+
+test('F4: two spare sets in the record (live, Nov 15: twelve pieces in three chests): one set, the one in its slots, the other six plain stock the kit and the regear may take', (t) => {
+  const w = afterDeath();
+  netherOf(w).deaths = [];
+  const STONE2 = '-547,64,2180';
+  const second = SPARE_SET.map((p, i) => ({ name: p.name, chest: { x: -547, y: 64, z: 2180 }, slot: 30 + i }));
+  for (const p of second) { w.chestStacks![STONE2].push({ slot: p.slot, name: p.name, count: 1, damage: 0, maxDamage: MAXD[p.name] }); w.chestItems![STONE2][p.name] = 1; }
+  w.spareSet!.pieces.push(...second);
+  t.is(sparePieces(w).length, 12);
+  // one of each, read as one set at once: the second set is reserved no more
+  t.deepEqual(spareHeld(w).map(p => `${p.name} ${key(p.chest)} ${p.slot}`), SLOTS_12_17);
+  t.is(freeChestTotals(w).diamond_chestplate, 1, 'the second chestplate is stock');
+  t.is(freeChestTotals(w).diamond_helmet, 2, 'the second helmet and the enchanted one of old');
+  // the record made one set: the second let go
+  const lost = structuredClone(w);
+  t.deepEqual(oneSpareSet(w).map(p => `${p.name} ${key(p.chest)} ${p.slot}`), second.map(p => `${p.name} ${STONE2} ${p.slot}`));
+  t.deepEqual(where(w), SLOTS_12_17);
+  t.deepEqual(oneSpareSet(w), [], 'once: one set is left as it is');
+  // a first-set piece seen gone (its slot empty at a look), the second's of that name is the set's
+  remember(lost, GEAR_AT, { ...lost.chestItems![GEAR2], diamond_chestplate: 0 }, lost.chestStacks![GEAR2].filter(st => st.slot !== 13));
+  oneSpareSet(lost);
+  t.deepEqual(where(lost).find(x => x.startsWith('diamond_chestplate')), `diamond_chestplate ${STONE2} 31`);
+  t.is(sparePieces(lost).length, 6);
+});
+
+test.serial('F4: on the brain\'s tick the two-set record is made one set and said once in the log', async (t) => {
+  const w = afterDeath();
+  netherOf(w).deaths = [];
+  w.spareSet!.pieces.push(...SPARE_SET.map((p, i) => ({ name: p.name, chest: { x: -547, y: 64, z: 2180 }, slot: 30 + i })));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spares-'));
+  const file = path.join(dir, 'brain.json');
+  const logFile = path.join(dir, 'brain.log');
+  fs.writeFileSync(file, JSON.stringify({ 'seed:1': w }));
+  const rt = {
+    actions: {},
+    call: (async (method: string) => (method === 'inventory' ? { items: KIT.map(i => ({ ...i })) } : method === 'world.region' ? { blocks: [] } : {})) as ClientRuntime['call'],
+    status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...HOME }, block: { ...HOME }, timeOfDay: 1000, hashedSeed: '1', dimension: OVERWORLD,
+      sleeping: false, health: 20, food: 20 }),
+    home: () => ({ ...HOME, dimension: OVERWORLD }),
+    lastDeath: () => undefined, setManualHook: () => undefined, builtNear: () => [], setHomeZone: () => undefined,
+    restoreBlock: async () => undefined, adoptStates: () => undefined, protectBuilt: () => undefined
+  } as unknown as ClientRuntime;
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => T0, goals: [], logFile, memoryFile: file });
+  brain.setEnabled(true);
+  await brain.tick();
+  await brain.tick();
+  brain.setEnabled(false);
+  const mem = (brain as unknown as { memory: BrainMemory }).memory.world('seed:1');
+  t.deepEqual(where(mem), SLOTS_12_17);
+  const said = fs.readFileSync(logFile, 'utf8').split('\n').filter(l => l.includes('spare set:'));
+  t.is(said.length, 1);
+  t.true(said[0].endsWith('spare set: one set kept, 6 pieces of a second let go as plain stock (diamond_helmet in slot 30 of (-547, 64, 2180), diamond_chestplate in slot 31 of (-547, 64, 2180), diamond_leggings in slot 32 of (-547, 64, 2180), diamond_boots in slot 33 of (-547, 64, 2180), diamond_pickaxe in slot 34 of (-547, 64, 2180), diamond_sword in slot 35 of (-547, 64, 2180))'), said[0]);
+});
+
+test.serial('F4: a golden helmet and a flint and steel the chests\' memory has none of are looked for in the chests before the chore crafts them: found, nothing crafted, nothing spent', async (t) => {
+  const w = afterDeath();
+  netherOf(w).deaths = [];
+  w.chestItems![ORES2].gold_ingot = 41;
+  // the stash put them in a stone chest (the gear chests full); the memory of it lost them
+  const gear = w.chestStacks![GEAR2];
+  const moved = gear.filter(st => st.name === 'golden_helmet' || st.name === 'flint_and_steel');
+  w.chestStacks![GEAR2] = gear.filter(st => !moved.includes(st));
+  w.chestStacks![STONE5].push(...moved.map((st, i) => ({ ...st, slot: 20 + i })));
+  const h = storehouse(w, [...BARE, ...WORN.map(i => ({ ...i }))]);
+  delete w.chestItems![GEAR2].golden_helmet;
+  delete w.chestItems![GEAR2].flint_and_steel;
+  const s = lookAt(h.inv, 1000);
+  t.is(sparesWant(s, w), 'for the nether trips: a golden helmet, a flint and steel');
+  const text = await netherSparesGoal.run(h.ctx);
+  t.is(text, 'a golden helmet in the chest at (-549, 65, 2185) after all; a flint and steel in the chest at (-549, 65, 2185) after all');
+  t.false(h.did.some(d => /^craft /.test(d)), h.did.join(' | '));
+  // the gear chests looked into first
+  t.deepEqual(h.did.filter(d => d.startsWith('chest.open')).slice(0, 2), [`chest.open ${GEAR2}`, 'chest.open -551,63,2181']);
+  t.is(w.chestItems![ORES2].gold_ingot, 41);
+  t.is(sparesWant(lookAt(h.inv, 1000), w), null);
+});
+
+test('F4: the golden helmet down there is watched a look at a time: gone at a later look with no death since, it broke, said once; home with it, or a death, says nothing', (t) => {
+  const w = linkedWorld();
+  const worn = (damage: number): InventoryItem[] => [...KIT.filter(i => i.slot !== 39), { slot: 39, name: 'golden_helmet', count: 1, damage, maxDamage: 77 }];
+  const bare = KIT.filter(i => i.slot !== 39);
+  const down = (items: InventoryItem[], now: number, d?: DeathSeen) => netherTick(lookAt(items, 1000, { now, dimension: NETHER, distHome: Infinity }), w, d);
+  t.deepEqual(down(worn(60), T0), []);
+  t.deepEqual(down(worn(70), T0 + 5000), []);
+  t.like(peekNether(w).helmet, { left: 7, max: 77 });
+  t.deepEqual(down(bare, T0 + 10_000), ['nether: the golden helmet broke down there (7/77 left at the last look, 16:40): the nether spares chore makes another']);
+  t.deepEqual(down(bare, T0 + 15_000), [], 'said once');
+  t.is(peekNether(w).helmet, undefined);
+  // home with it: nothing said, the watch let go of
+  down(worn(10), T0 + 20_000);
+  t.deepEqual(netherTick(lookAt(worn(10), 1000, { now: T0 + 25_000 }), w, undefined), []);
+  t.is(peekNether(w).helmet, undefined);
+  // a death down there takes it with the rest: no break
+  down(worn(10), T0 + 30_000);
+  t.deepEqual(netherTick(lookAt(bare, 1000, { now: T0 + 40_000 }), w, { at: { x: -70, y: 70, z: 270 }, time: T0 + 35_000, dimension: NETHER }).filter(l => /helmet/.test(l)), []);
+  t.is(peekNether(w).helmet, undefined);
+  // the look that first tells of a death still down there and still showing the helmet (the slots not cleared yet,
+  // the death a second before the look): the first look home says nothing either
+  down(worn(10), T0 + 50_000);
+  const death: DeathSeen = { at: { x: -70, y: 70, z: 270 }, time: T0 + 54_000, dimension: NETHER };
+  t.deepEqual(down(worn(10), T0 + 55_000, death).filter(l => /helmet/.test(l)), []);
+  t.deepEqual(netherTick(lookAt(bare, 1000, { now: T0 + 60_000 }), w, death).filter(l => /helmet/.test(l)), []);
+  t.is(peekNether(w).helmet, undefined);
+  // the next trip, that death still told on every tick (as the runtime does while Node runs): watched again, and a
+  // break said
+  down(worn(70), T0 + 100_000, death);
+  t.like(peekNether(w).helmet, { left: 7, at: T0 + 100_000 });
+  t.deepEqual(down(bare, T0 + 105_000, death), ['nether: the golden helmet broke down there (7/77 left at the last look, 16:41): the nether spares chore makes another']);
 });
 
 // ------------------------------------------------------------------------------------------------ the switch off

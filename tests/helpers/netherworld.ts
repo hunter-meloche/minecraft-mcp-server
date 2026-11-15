@@ -269,6 +269,16 @@ export function game(world: WorldMemory, opts: {
       const at = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
       if (m === 'inventory') return { items: inv.map(i => ({ ...i })), held: { name: state.held, count: 1 } };
       if (m === 'item.select') { state.held = String(p.name); return {}; }
+      // a look into a home chest (chests.ts peekChest): what it really holds, a stack a slot
+      if (m === 'chest.open') {
+        const key = k(at);
+        did.push(`look in ${key}`);
+        const stacks = (chests.get(key) ?? []).filter(x => x.count > 0).map((x, slot) => ({ slot, name: x.name, count: x.count }));
+        const items: Record<string, number> = {};
+        for (const st of stacks) items[st.name] = (items[st.name] ?? 0) + st.count;
+        return { items, stacks, free: 54 - stacks.length, slots: 54 };
+      }
+      if (m === 'container.close') return {};
       if (m === 'world.region') {
         const blocks: string[] = [];
         for (let y = 0; y < Number(p.height); y++) for (let z = 0; z < Number(p.length); z++) for (let x = 0; x < Number(p.width); x++) blocks.push(`minecraft:${get(state.dim, { x: at.x + x, y: at.y + y, z: at.z + z })}`);

@@ -1,8 +1,8 @@
 import test from 'ava';
-import { chestTotals, peekChest, remember, rememberReply, sameStack, storedStacks, takeFromChests, takeSlot } from '../../src/client/brain/chests.js';
+import { chestTotals, peekChest, remember, rememberReply, sameStack, storedStacks, storeStackAt, takeFromChests, takeSlot } from '../../src/client/brain/chests.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
-import type { ChestStack } from '../../src/client/tools.js';
+import { brainRun, type ChestStack } from '../../src/client/tools.js';
 
 const A = { x: 1, y: 64, z: 0 };
 const B = { x: 2, y: 64, z: 0 };
@@ -189,4 +189,45 @@ test('F1: takeFromChests puts a full bucket out of the hand after each take (a c
   // out of the hand before the walk to the next chest, and after the last
   t.deepEqual(lava.calls, ['take-from-chest 1', 'inventory', 'select diamond_sword', 'take-from-chest 2', 'inventory', 'select diamond_sword']);
   t.deepEqual((await run('bread')).calls, ['take-from-chest 1', 'take-from-chest 2']);
+});
+
+test('F4: a run the brain gives up with a chest open still closes it, outside the run (as the anvil is): else the next open answers with that chest\'s contents', async (t) => {
+  // the runtime refuses every call of a run the brain gave up (tools.ts); live on Nov 15 the enchant chore was cut
+  // while it stored a book in the gear chest, and the gear chest's memory lost the spare set and the Nether kit
+  const cut = (stacks: ChestStack[]) => {
+    const c = chest(stacks);
+    const abort = new AbortController();
+    const inner = c.ctx.call;
+    Object.assign(c.ctx, {
+      signal: abort.signal,
+      call: async (m: string, p?: Record<string, unknown>, ms?: number) => {
+        if (brainRun.getStore()?.signal.aborted) throw new Error('aborted: the brain gave this job up');
+        const r = await inner(m, p, ms);
+        if (m === 'chest.open') abort.abort(); // something more urgent, the chest just opened
+        return r;
+      }
+    });
+    const run = <T>(fn: () => Promise<T>) => brainRun.run({ signal: abort.signal }, fn);
+    return { ...c, run };
+  };
+  const methods = (c: ReturnType<typeof chest>) => c.calls.map(x => x.m);
+  // a look: it read the chest, and the close goes out all the same
+  const peek = cut([LOGS]);
+  t.deepEqual(await peek.run(() => peekChest(peek.ctx, A)), { oak_log: 64 });
+  t.deepEqual(methods(peek), ['chest.open', 'container.close']);
+  // a take by slot: the withdraw refused, the chest closed
+  const slot = cut([LOGS, MENDING]);
+  remember(slot.world, A, totals([LOGS, MENDING]), [LOGS, MENDING]);
+  await t.throwsAsync(slot.run(() => takeSlot(slot.ctx, A, 7)), { message: /aborted/ });
+  t.deepEqual(methods(slot), ['chest.open', 'container.close']);
+  // a store by pocket slot (the enchant chore's book, live): the deposit refused, the chest closed, no other chest tried
+  const store = cut([LOGS]);
+  t.is(await store.run(() => storeStackAt(store.ctx, 'enchanted_book', 9)), undefined);
+  t.deepEqual(methods(store), ['chest.open', 'container.close']);
+  // a take around the spare set's piece of that name: the withdraw refused, the chest closed
+  const around = cut([LOGS, { ...LOGS, slot: 1 }]);
+  remember(around.world, A, totals([LOGS, { ...LOGS, slot: 1 }]), [LOGS, { ...LOGS, slot: 1 }]);
+  around.world.spareSet = { pieces: [{ name: 'oak_log', chest: { ...A }, slot: 0 }] };
+  await t.throwsAsync(around.run(() => takeFromChests(around.ctx, 'oak_log', 10)), { message: /aborted/ });
+  t.deepEqual(methods(around), ['chest.open', 'container.close']);
 });

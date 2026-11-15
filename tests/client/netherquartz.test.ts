@@ -168,6 +168,28 @@ test.serial('an ore the bridge will not dig (out of sight after all): said once,
   t.regex(f.said.find(l => l.startsWith('quartz: could not dig'))!, /: out of reach or out of sight$/);
 });
 
+test.serial('F4: the quartz fetches its kit before it checks it: a golden helmet and a flint and steel not where the chests\' memory has them (a stone chest holds them) are looked for in the chests, the gear chests first, and taken; then it sets out', async (t) => {
+  const GEAR2 = '-547,64,2182', STONE5 = '-549,65,2185';
+  const w = setupWorld();
+  const first = game(w);
+  await rung().run(first.ctx);
+  Object.assign(netherOf(w), { stage: 1, stageTrips: 2, cleanTrips: 3 });
+  w.idle = { today: { day: 7 } as never, days: [] };
+  const stone = { ...w.chestItems![STONE5] };
+  Object.assign(w.chestItems![STONE5], { golden_helmet: 1, flint_and_steel: 1 });
+  const later = T0 + 2 * HOUR;
+  const changed = [...first.changed, ...QUARTZ_FIELD.map(([p, to]) => ({ dim: NETHER as typeof NETHER, at: p, to, how: 'test' }))];
+  const f = game(w, { items: first.inv.filter(i => i.name !== 'golden_helmet' && i.name !== 'flint_and_steel'), after: { changed, lit: first.lit }, now: later });
+  // (the fake's chests are made: the memory has the kit in the gear chest, which holds neither)
+  w.chestItems![STONE5] = stone;
+  Object.assign(w.chestItems![GEAR2], { golden_helmet: 1, flint_and_steel: 1 });
+  const r = await quartzRun(f.ctx, HOUR, () => later);
+  t.regex(r.text, /^mined 3 quartz ore: 6 quartz/);
+  t.deepEqual(f.did.filter(d => d.startsWith('look in ')), [GEAR2, '-551,63,2181', '-551,63,2183', '-547,63,2182', '-547,63,2184', STONE5].map(c => `look in ${c}`));
+  const portal = f.did.findIndex(d => d.startsWith('portal '));
+  for (const name of ['golden_helmet', 'flint_and_steel']) t.true(f.did.indexOf(`take ${name} x1`) >= 0 && f.did.indexOf(`take ${name} x1`) < portal, name);
+});
+
 // ------------------------------------------------------------------------------------------------ the stop rules
 
 test.serial('a hoglin near stops it: back to its portal and through at once, the quartz it has kept, no hold', async (t) => {

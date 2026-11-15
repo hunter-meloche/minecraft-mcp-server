@@ -117,7 +117,15 @@ export interface NetherMemory {
   sites: { kind: string; x: number; y: number; z: number; at?: number }[];
   /** the barter work's hold, the gold chore's day, how the gold is given (P3a: netherbarter.ts) */
   barter?: BarterMemory;
+  /**
+   * the golden helmet as the last look down there saw it, carried or worn: its durability left of all of it, and when.
+   * Gone at a later look with no death since, it broke (netherTick says so); let go of once it is seen home with it
+   */
+  helmet?: { left: number; max: number; at: number };
 }
+
+/** A golden helmet's durability (26.3's ArmorMaterials.GOLD: 7 x 11 for a helmet), where the inventory says none. */
+const GOLDEN_HELMET_DURABILITY = 77;
 
 /** Spots of its own portal refused, kept (the oldest let go). */
 export const REFUSED_SPOTS = 16;
@@ -274,6 +282,8 @@ function clean(raw: unknown): NetherMemory {
     }
     if (Object.keys(seen).length) m.seen = seen;
   }
+  const h = r.helmet;
+  if (isObj(h) && fin(h.left) && fin(h.max) && fin(h.at)) m.helmet = { left: h.left, max: h.max, at: h.at };
   return m;
 }
 
@@ -678,7 +688,37 @@ export function netherTick(s: Snapshot, world: WorldMemory, d: DeathSeen | undef
     }
     n.seenIn = s.dimension;
   }
+  const broke = helmetWatch(s, n, d);
+  if (broke) lines.push(broke);
   return lines;
+}
+
+/**
+ * The golden helmet down there, a look at a time: its wear kept while it is carried or worn in the Nether; gone at a
+ * later look (down there, or the first one home) with no death since, it broke: golden armour has 77 of durability,
+ * and the Guardian wears it whatever comes at it. Said once, the line for the log; the nether spares chore makes
+ * another (regear.ts), which is then right to. Live on Nov 15 the first one was in no chest and not carried, and
+ * nothing said where it went. Seen home with it, the watch is let go of.
+ */
+function helmetWatch(s: Snapshot, n: NetherMemory, d: DeathSeen | undefined): string | undefined {
+  // (the one worn first: the armour slots come last)
+  const gold = s.items.filter(i => i.name === 'golden_helmet').sort((a, b) => b.slot - a.slot)[0];
+  const was = n.helmet;
+  // (a death since takes it with everything else: no break)
+  const diedSince = (at: number) => n.deaths.some(x => x.at >= at) || (d !== undefined && fin(d.time) && d.time >= at);
+  if (s.dimension === NETHER && gold) {
+    // the look that first tells of a death may still show what the bot carried as it died (work.ts): the watch keeps
+    // the look before it, which the first look home then finds the death after
+    if (was && diedSince(was.at)) return undefined;
+    const max = fin(gold.maxDamage) && gold.maxDamage > 0 ? gold.maxDamage : GOLDEN_HELMET_DURABILITY;
+    n.helmet = { left: Math.max(0, max - (fin(gold.damage) ? gold.damage : 0)), max, at: s.now };
+    return undefined;
+  }
+  if (!was) return undefined;
+  delete n.helmet;
+  if (gold) return undefined;
+  if (diedSince(was.at)) return undefined;
+  return `nether: the golden helmet broke down there (${was.left}/${was.max} left at the last look, ${clock(was.at)}): the nether spares chore makes another`;
 }
 
 /** A Nether trip sets out (work.ts runTask): stamped for the probation, counted for the day. */

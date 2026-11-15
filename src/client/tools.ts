@@ -1848,7 +1848,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const short = (r.moved ?? 0) < Math.min(count ?? have, have) ? ' (the chest is full)' : '';
         return factory.createResponse(`Stored ${r.moved} ${name} in the chest at ${fmt(at)}${short}. It holds: ${holds}; ${r.free}/${r.slots} slots free.`);
       } finally {
-        await call('container.close').catch(() => undefined);
+        // outside the brain's run (chests.ts closeChest): a run given up refuses every call, and the chest stayed open
+        await brainRun.exit(() => call('container.close')).catch(() => undefined);
       }
     }
   );
@@ -1888,7 +1889,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         const room = Number.isFinite(r.free) && Number.isFinite(r.slots) ? `; ${r.free}/${r.slots} slots free` : '';
         return factory.createResponse(`Took ${r.moved} ${name} from${from} the chest at ${fmt(at)}${stale}${short}. It holds: ${holds}${room}.`);
       } finally {
-        await call('container.close').catch(() => undefined);
+        // (outside the brain's run, as store-in-chest's)
+        await brainRun.exit(() => call('container.close')).catch(() => undefined);
       }
     }
   );

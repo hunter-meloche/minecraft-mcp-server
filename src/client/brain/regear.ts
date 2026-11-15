@@ -25,7 +25,7 @@ import { holdHarmless } from './fluidpick.js';
 import { OBSIDIAN_BATCH, SPARE_SET, spareSetStep, tripsOn } from './portal.js';
 import { obsidianStep } from './cast.js';
 import { netherOf, peekNether, type NetherDeath } from './nether.js';
-import { setupObsidian, setupOpen } from './nethersetup.js';
+import { findKit, setupObsidian, setupOpen } from './nethersetup.js';
 
 const MINUTE = 60_000;
 
@@ -191,10 +191,12 @@ export function sparesWant(s: Snapshot, world: WorldMemory): string | null {
 /**
  * The Nether's things made whole again (32: a chore that can always wait; it stops nothing and takes over at the
  * hand-over): the spare set's missing pieces by the portal milestone's own step (crafted, stored by their slots,
- * remembered as the set) once the diamonds over those kept pay for them all; a golden helmet and a flint and steel
- * when none is carried or stored; the obsidian its own portal's frame still needs, OBSIDIAN_BATCH a run, by the
- * portal milestone's own obsidian step (dug where no portal owns it, else cast at home from lava). A run that made
- * none of it fails (its retry time).
+ * remembered as the set) once the diamonds over those kept pay for them all, never a piece the record holds before its
+ * chest is looked into again (the step's); a golden helmet and a flint and steel when none is carried or stored, the
+ * chests looked into first (nethersetup.ts findKit: live on Nov 15 it crafted both again 3 s after the barter's takes
+ * found neither where the memory had them); the obsidian its own portal's frame still needs, OBSIDIAN_BATCH a run, by
+ * the portal milestone's own obsidian step (dug where no portal owns it, else cast at home from lava). A run that made
+ * or found none of it fails (its retry time).
  */
 export const netherSparesGoal: Goal = {
   name: 'nether spares',
@@ -205,13 +207,21 @@ export const netherSparesGoal: Goal = {
   cuts: () => false,
   wants: (s, world) => sparesWant(s, world),
   run: async ctx => {
-    const k = sparesShort({ items: await inventory(ctx) }, ctx.world);
+    let k = sparesShort({ items: await inventory(ctx) }, ctx.world);
     const did: string[] = [];
     let made = 0;
     if (sparesDue(k).length) {
       const r = await spareSetStep.run(ctx, { step: 0, data: {} });
       did.push(r.text);
       if (r.status !== 'blocked') made++;
+    }
+    // what the chests' memory has none of may yet be in them: looked for before anything is crafted
+    const lost = [...(k.helmet ? ['golden_helmet'] : []), ...(k.flint ? ['flint_and_steel'] : [])];
+    if (lost.length && !ctx.signal.aborted) {
+      const seen = await findKit(ctx, lost);
+      for (const f of seen) did.push(`${f.name === 'golden_helmet' ? 'a golden helmet' : 'a flint and steel'} in the chest at (${f.chest.x}, ${f.chest.y}, ${f.chest.z}) after all`);
+      made += seen.length;
+      k = sparesShort({ items: await inventory(ctx) }, ctx.world);
     }
     for (const [want, item, what] of [[k.helmet, 'golden_helmet', 'a golden helmet'], [k.flint, 'flint_and_steel', 'a flint and steel']] as const) {
       if (!want || ctx.signal.aborted) continue;

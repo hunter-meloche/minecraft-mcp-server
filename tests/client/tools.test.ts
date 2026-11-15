@@ -8,7 +8,7 @@ import nbt from 'prismarine-nbt';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { MessageStore } from '../../src/message-store.js';
-import { blockDrops, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor, offServer, itemDetail, effectsText } from '../../src/client/tools.js';
+import { blockDrops, brainRun, missingIngredients, packSlotsUsed, processName, registerClientTools, setFarmSettle, setStallTiming, mineflayerSlot, entityKind, pausedFor, offServer, itemDetail, effectsText } from '../../src/client/tools.js';
 import { mineflayerToolDefinitions } from '../../src/tools/register-all.js';
 import type { ProtectionStore } from '../../src/build-protection.js';
 import type { BridgeClient } from '../../src/client/bridge-client.js';
@@ -644,6 +644,22 @@ test('take-from-chest by slot takes that stack (the book with mending) and says 
   });
   t.is((await old.run('take-from-chest', { x: 1, y: 64, z: 0, item: 'enchanted_book', count: 1, slot: 7 })).text,
     'Took 1 enchanted_book from the chest at (1, 64, 0). It holds: enchanted_book x1; 26/27 slots free.');
+});
+
+test('F4: store-in-chest and take-from-chest in a run the brain gives up with the chest open still close it (outside the run): else the next open answers with that chest\'s contents', async (t) => {
+  for (const [tool, args] of [['take-from-chest', { item: 'iron_ingot', count: 5 }], ['store-in-chest', { item: 'iron_ingot' }]] as const) {
+    const abort = new AbortController();
+    const { rt, request } = setup({
+      inventory: { items: [{ slot: 3, name: 'iron_ingot', count: 32 }], selectedSlot: 0, held: null },
+      'world.block': { loaded: true, name: 'chest' },
+      // something more urgent, the chest just opened: every further call of the run is refused
+      'chest.open': () => { abort.abort(); return { slots: 27, free: 26, items: { iron_ingot: 32 } }; },
+      'container.close': { ok: true }
+    });
+    await t.throwsAsync(brainRun.run({ signal: abort.signal }, () => rt.actions[tool]({ x: 1, y: 64, z: 0, ...args })), { message: /aborted/ }, tool);
+    t.false(request.getCalls().some(c => /^chest\.(withdraw|deposit)$/.test(c.args[0] as string)), tool);
+    t.is(request.lastCall.args[0], 'container.close', tool);
+  }
 });
 
 test('list-inventory shows enchantments (a book\'s stored ones too) and potion contents; get-status shows effects and fire', async (t) => {

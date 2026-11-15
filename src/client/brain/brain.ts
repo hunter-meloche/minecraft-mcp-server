@@ -45,6 +45,7 @@ import { penFences } from './yardgates.js';
 import { holdHarmless, unsafeInHand } from './fluidpick.js';
 import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 import { netherSparesGoal, regearGoal } from './regear.js';
+import { oneSpareSet } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
@@ -287,6 +288,9 @@ export class Brain {
       seen = s;
       const world = this.memory.world(this.worldId);
       world.id = this.worldId;
+      // the spare set's record as one set (chests.ts oneSpareSet): two were stored on Nov 15, the second is plain stock
+      const loose = oneSpareSet(world);
+      if (loose.length) this.note(`spare set: one set kept, ${loose.length} pieces of a second let go as plain stock (${loose.map(p => `${p.name} in slot ${p.slot} of (${p.chest.x}, ${p.chest.y}, ${p.chest.z})`).join(', ')})`);
       await this.discover(s, world);
       this.countDay(s);
       this.walked(s, world);

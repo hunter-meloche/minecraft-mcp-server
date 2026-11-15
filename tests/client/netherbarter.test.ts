@@ -14,6 +14,7 @@ import {
 import { KEEP } from '../../src/client/brain/community.js';
 import { LADDER, NETHER_WORK } from '../../src/client/brain/worktasks.js';
 import { workGoals } from '../../src/client/brain/work.js';
+import { stashKeep, stashWork } from '../../src/client/brain/chores.js';
 import { MINUTE, T0, liveWorld, lookAt, realGoals } from '../helpers/homestead.js';
 import { KIT, ROOM_ZONE, game, gridOf, k, netherGround, setupWorld, type Loot, type Mob } from '../helpers/netherworld.js';
 
@@ -126,6 +127,80 @@ test.serial('the loot in the log: every kind it picked up, the most first, a pot
   t.true(f.said.includes('nether: bartered 5 gold: 16 soul_sand, 12 gravel, 3 leather, 1 potion of fire_resistance'), f.said.join(' | '));
   t.like(r, { gain: 32, cameBack: true });
   t.is(lootWords(new Map([['b', 2], ['a', 2], ['c', 5], ['d', 0]])), '5 c, 2 a, 2 b');
+});
+
+// ------------------------------------------------------------------------------------------------ the kit (F4)
+
+const GEAR2 = '-547,64,2182';
+const STONE5 = '-549,65,2185';
+const HOME_CHESTS = setupWorld().landmarks.chests.map(k);
+
+/**
+ * The setup run through and stage 1 open (as afterSetup), the Nether kit's golden helmet and flint and steel not
+ * carried but in a stone chest (`there`: what that chest really holds of them; the gear chests full, the stash put
+ * them in the first chest with room, as live on Nov 15), while the chests' memory has them in the gear chest, which
+ * holds neither.
+ */
+async function kitAstray(there: Record<string, number> = { golden_helmet: 1, flint_and_steel: 1 }) {
+  const w = setupWorld();
+  const first = game(w);
+  await rung().run(first.ctx);
+  Object.assign(netherOf(w), { stage: 1, stageTrips: 2, cleanTrips: 3 });
+  w.idle = { today: { day: 7 } as never, days: [] };
+  w.chestItems![ORES].gold_ingot = 60;
+  const items = first.inv.filter(i => i.name !== 'golden_helmet' && i.name !== 'flint_and_steel');
+  const stone = { ...w.chestItems![STONE5] };
+  Object.assign(w.chestItems![STONE5], there);
+  const later = T0 + 2 * HOUR;
+  const f = game(w, { items, after: first, now: later, mobs: [P1], loot: [{ name: 'soul_sand', count: 8 }] });
+  // (the fake's chests are made: the memory from here on is the bot's, and wrong)
+  w.chestItems![STONE5] = stone;
+  Object.assign(w.chestItems![GEAR2], { golden_helmet: 1, flint_and_steel: 1 });
+  return { w, first, later, f };
+}
+
+test.serial('F4: the barter fetches its kit before it checks it: a golden helmet and a flint and steel not where the chests\' memory has them are looked for in the chests, the gear chests first, and taken from where they are; then it sets out', async (t) => {
+  const { w, later, f } = await kitAstray();
+  onlySoulSand(w, f.inv);
+  const r = await barterRun(f.ctx, HOUR, () => later);
+  t.regex(r.text, /^bartered 2 gold with 1 piglin: 16 soul_sand/);
+  // the takes where the memory said found nothing; the chests looked into, the gear chests first, up to the stone one
+  t.deepEqual(f.did.filter(d => d.startsWith('look in ')), [GEAR2, '-551,63,2181', '-551,63,2183', '-547,63,2182', '-547,63,2184', STONE5].map(c => `look in ${c}`));
+  const portal = f.did.findIndex(d => d.startsWith('portal '));
+  t.true(f.did.indexOf('take flint_and_steel x1') >= 0 && f.did.indexOf('take flint_and_steel x1') < portal, f.did.join(' | '));
+  t.true(f.did.indexOf('take golden_helmet x1') >= 0 && f.did.indexOf('take golden_helmet x1') < portal);
+  t.like(w.chestItems![STONE5], { diorite: 37 });
+  t.false('golden_helmet' in w.chestItems![STONE5], 'taken');
+});
+
+test.serial('F4: neither anywhere: every home chest looked into once, and only then what is short said; it does not set out', async (t) => {
+  const { later, f } = await kitAstray({});
+  const r = await barterRun(f.ctx, HOUR, () => later);
+  t.deepEqual(r, { gain: 0, text: 'not setting out: no golden helmet; no flint and steel', untried: true });
+  t.deepEqual(f.did.filter(d => d.startsWith('look in ')).map(d => d.slice(8)).sort(), [...HOME_CHESTS].sort());
+  t.false(f.did.some(d => d.startsWith('portal ')));
+});
+
+test.serial('F4: after a trip the stash puts the Nether kit\'s golden helmet and flint and steel in a gear chest (never thrown), where the next fetch takes them', async (t) => {
+  const { w, first, later, f } = await afterSetup({ mobs: [P1] });
+  onlySoulSand(w, f.inv);
+  await barterRun(f.ctx, HOUR, () => later);
+  const s = lookAt(f.inv, 1000, { now: later });
+  const work = stashWork(s, w, stashKeep(w));
+  const kit = ['golden_helmet', 'flint_and_steel'];
+  for (const name of kit) {
+    t.true(work.moves.some(m => m.name === name && w.chestAssign![m.chest] === 'gear'), name);
+    t.false(work.drop.some(e => e.name === name), `${name} never thrown`);
+  }
+  // put away so, the next trip's fetch takes them back out of that chest
+  for (const m of work.moves.filter(x => kit.includes(x.name))) w.chestItems![m.chest][m.name] = (w.chestItems![m.chest][m.name] ?? 0) + m.count;
+  const next = later + HOUR;
+  const g = game(w, { items: f.inv.filter(i => !kit.includes(i.name)), after: { changed: [...first.changed, ...f.changed], lit: f.lit }, now: next, mobs: [P1] });
+  const r = await barterRun(g.ctx, HOUR, () => next);
+  const portal = g.did.findIndex(d => d.startsWith('portal '));
+  t.true(portal > 0, r.text);
+  for (const name of kit) t.true(g.did.indexOf(`take ${name} x1`) >= 0 && g.did.indexOf(`take ${name} x1`) < portal, name);
+  t.false(g.did.some(d => d.startsWith('look in ')), 'found where the memory has them: no look needed');
 });
 
 // ------------------------------------------------------------------------------------------------ the stop rules

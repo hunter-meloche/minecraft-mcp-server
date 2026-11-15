@@ -33,7 +33,7 @@ import type { Zone } from './courtesy.js';
 import type { WorkResult } from './work.js';
 import { clock } from './idlelog.js';
 import { readBox } from './milestones.js';
-import { freeChestTotals, takeFromChests } from './chests.js';
+import { freeChestTotals, peekChest, takeFromChests } from './chests.js';
 import { COOKS_TO, readyFoodPoints } from './food.js';
 import { holdHarmless } from './fluidpick.js';
 import { look } from './pockets.js';
@@ -740,29 +740,71 @@ const freeSlots = (items: InventoryItem[]) => 36 - new Set(items.filter(i => i.s
 /** the stored pickaxes the kit may take, the best first */
 const PICKS = ['diamond_pickaxe', 'iron_pickaxe', 'netherite_pickaxe', 'stone_pickaxe'];
 
+/** The kit's own things, which nothing at home makes again but the nether spares chore: the fetch looks for them (findKit). */
+const KIT_THINGS = ['golden_helmet', 'flint_and_steel', 'obsidian'] as const;
+
+/**
+ * Kit things the chests' memory has lost (none in it, or none where it said), looked for in the home chests
+ * themselves: each looked into afresh (peekChest), the gear chests first (the stash's for the golden helmet and the
+ * flint and steel; with them full it puts them in the first chest with room), until every one is seen or every chest
+ * looked into. Live on Nov 15 the barter's fetch took no golden helmet and no flint and steel where the memory had
+ * them, the trip did not set out, and the nether spares chore crafted both again; the stash then put the new ones in
+ * a stone chest, the gear chests being full. Returns what was seen, and where.
+ */
+export async function findKit(ctx: GoalContext, names: readonly string[]): Promise<{ name: string; chest: Pos }[]> {
+  const want = new Set(names);
+  const seen: { name: string; chest: Pos }[] = [];
+  const assign = ctx.world.chestAssign ?? {};
+  const gear = (c: Pos) => (assign[key(c)] === 'gear' ? 0 : 1);
+  for (const c of [...ctx.world.landmarks.chests].sort((a, b) => gear(a) - gear(b))) {
+    if (!want.size || ctx.signal.aborted) break;
+    const items: Record<string, number> = (await peekChest(ctx, c).catch(() => undefined)) ?? {};
+    for (const n of [...want]) if ((items[n] ?? 0) > 0) { seen.push({ name: n, chest: { ...c } }); want.delete(n); }
+  }
+  return seen;
+}
+
 /**
  * The Nether kit at home before the walk to the portal (mine.ts NETHER_TRIP and the frame's obsidian): what is short of
  * it out of the chests (never the spare set: takeFromChests leaves its pieces), food enough for 40 points, room made
  * again for the trip's 12 free slots with the Nether's own keep (the kit and nothing else), the golden helmet last (the
- * home stash would put it away as spare gear); eaten to full first, healed last. Undefined when the bot is ready, else
- * what it is still short of.
+ * home stash would put it away as spare gear); eaten to full first, healed last. The golden helmet, the flint and
+ * steel and the frame's obsidian are looked for in the chests (findKit) where neither the pockets nor the memory hold
+ * them, and again where a take found none where the memory said. Undefined when the bot is ready, else what it is
+ * still short of, said only after all that.
  */
 export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefined> {
   // fed first: eaten to full (the Guardian tops up only while nothing goes to waste), before the food is counted. The
   // room keeps the trip's 40 points of food and no more: a meal after it left the kit short (a bread eaten, 35 < 40)
   // and the trip did not set out; the top-up below makes up what the meals ate
-  for (let i = 0; i < 4; i++) {
-    const st = await ctx.status().catch(() => undefined);
-    if (!st || (st.food ?? 20) >= NETHER_TRIP.food) break;
-    await ctx.act('eat', {}).catch(() => undefined);
-  }
+  const eatToFull = async () => {
+    for (let i = 0; i < 4; i++) {
+      const st = await ctx.status().catch(() => undefined);
+      if (!st || (st.food ?? 20) >= NETHER_TRIP.food) break;
+      await ctx.act('eat', {}).catch(() => undefined);
+    }
+  };
+  await eatToFull();
   let items = await inventory(ctx);
   const refresh = async () => { items = await inventory(ctx); };
   // (its own portal standing already, the trip only checks the link: no frame to build; a frame part placed, only the
   // rest is needed, though the whole frame's worth is taken where the chests hold it: a block knocked out since)
   const obsidian = setupObsidian(ctx.world);
-  if (obsidian > 0 && total(items, ['obsidian']) < SETUP_OBSIDIAN) { await takeFromChests(ctx, 'obsidian', SETUP_OBSIDIAN - total(items, ['obsidian'])); await refresh(); }
-  if (total(items, ['flint_and_steel']) < NETHER_TRIP.flintAndSteel) { await takeFromChests(ctx, 'flint_and_steel', 1); await refresh(); }
+  /** the kit's own things it is short of carried: the golden helmet, the fire starter, the frame's obsidian */
+  const lacking = (): string[] => KIT_THINGS.filter(n => total(items, [n]) < (n === 'golden_helmet' ? 1 : n === 'flint_and_steel' ? NETHER_TRIP.flintAndSteel : obsidian));
+  // what the memory knows of none of: looked for in the chests first, then taken from where the look saw it
+  const looked = new Set<string>();
+  const seek = async (names: string[]) => { if (!names.length) return; for (const n of names) looked.add(n); await findKit(ctx, names); };
+  const free = freeChestTotals(ctx.world);
+  await seek(lacking().filter(n => !(free[n] > 0)));
+  const takeObsidian = async () => { if (obsidian > 0 && total(items, ['obsidian']) < SETUP_OBSIDIAN) { await takeFromChests(ctx, 'obsidian', SETUP_OBSIDIAN - total(items, ['obsidian'])); await refresh(); } };
+  const takeFlint = async () => { if (total(items, ['flint_and_steel']) < NETHER_TRIP.flintAndSteel) { await takeFromChests(ctx, 'flint_and_steel', 1); await refresh(); } };
+  await takeObsidian();
+  await takeFlint();
+  // a take that found none where the memory said (a chest's memory can be wrong): the chests looked into, and taken
+  // again. The helmet, taken last, is looked for in the same round where it is not carried: one round for all
+  const missed = lacking().filter(n => !looked.has(n));
+  if (missed.some(n => n !== 'golden_helmet')) { await seek(missed); await takeObsidian(); await takeFlint(); }
   for (const b of NETHER_BLOCKS) {
     const n = total(items, NETHER_BLOCKS);
     if (n >= NETHER_TRIP.blocks) break;
@@ -775,7 +817,8 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
   }
   if (!total(items, ['shield'])) { await takeFromChests(ctx, 'shield', 1); await refresh(); }
   const points = () => readyFoodPoints(new Map(items.map(i => [i.name, total(items, [i.name])])));
-  if (points() < NETHER_TRIP.foodPoints) {
+  const topUpFood = async () => {
+    if (points() >= NETHER_TRIP.foodPoints) return;
     const foods = foodsFor26();
     const stored = Object.entries(freeChestTotals(ctx.world))
       .filter(([n]) => foods[n] && !COOKS_TO[n] && !AVOID_UNLESS_ASKED.has(n))
@@ -785,7 +828,8 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
       if (want > 0 && await takeFromChests(ctx, name, want)) await refresh();
       if (points() >= NETHER_TRIP.foodPoints) break;
     }
-  }
+  };
+  await topUpFood();
   // the trip's room with the Nether's own keep: its kit and nothing of what the bot carries for life at home (chores.ts
   // stashKeep; with the home kit kept the live room stored nothing and the trip did not set out, 9 slots free of 12)
   const helmet = total(items, ['golden_helmet']) > 0;
@@ -796,6 +840,13 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
     await refresh();
   }
   if (!helmet) { await takeFromChests(ctx, 'golden_helmet', 1); await refresh(); }
+  if (lacking().includes('golden_helmet') && !looked.has('golden_helmet')) { await seek(['golden_helmet']); await takeFromChests(ctx, 'golden_helmet', 1); await refresh(); }
+  // fed again just before it goes, and the 40 points made up again if that meal ate into them: the room's walks (the
+  // dump spot and back) and a fight at the portal by night cost the points the first meals gave (live, Nov 15:
+  // "not setting out: food 17 < 18", twice)
+  await eatToFull();
+  await refresh();
+  await topUpFood();
   await holdHarmless(ctx);
   // whole: the healing that follows the meals
   for (let waited = 0; ; waited += SETUP_WAITS.pollMs) {

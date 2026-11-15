@@ -1,4 +1,4 @@
-import type { ChestContents, ChestStack } from '../tools.js';
+import { brainRun, type ChestContents, type ChestStack } from '../tools.js';
 import type { GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { holdHarmless, isHazard } from './fluidpick.js';
@@ -49,9 +49,18 @@ export async function peekChest(ctx: GoalContext, at: Pos): Promise<Record<strin
     remember(ctx.world, at, got.items, got.stacks, got.free, got.slots);
     return got.items;
   } finally {
-    await ctx.call('container.close').catch(() => undefined);
+    await closeChest(ctx);
   }
 }
+
+/**
+ * A chest's menu closed, outside the brain's run (brainRun.exit), as the anvil and the table are: once the brain gives
+ * a run up every call of it is refused, the close too, and the chest stayed open. The bridge's next chest.open then
+ * answered with that chest's contents, remembered under the next chest's key: live on Nov 15 the enchant chore was cut
+ * while it stored a book in the gear chest, and seconds later the gear chest's memory had lost the spare set, the
+ * golden helmet and the flint and steel.
+ */
+const closeChest = (ctx: GoalContext) => brainRun.exit(() => ctx.call('container.close')).catch(() => undefined);
 
 /** Walk up to a chest and open it, as peekChest says; the caller closes it. */
 async function openAt(ctx: GoalContext, at: Pos): Promise<ChestContents> {
@@ -146,7 +155,7 @@ export async function takeSlot(ctx: GoalContext, chest: Pos, slot: number, count
     remember(ctx.world, chest, r.items, r.stacks, r.free, r.slots);
     return r.moved ?? 0;
   } finally {
-    await ctx.call('container.close').catch(() => undefined);
+    await closeChest(ctx);
   }
 }
 
@@ -183,7 +192,7 @@ export async function storeStackAt(ctx: GoalContext, name: string, slot: number,
     } catch (e) {
       ctx.progress(`the ${name} into the chest at ${fmt(c)}: ${(e as Error).message}`);
     } finally {
-      await ctx.call('container.close').catch(() => undefined);
+      await closeChest(ctx);
     }
   }
   return undefined;
@@ -345,13 +354,16 @@ export function sparePieces(world: WorldMemory): SparePiece[] {
 /**
  * The spare set's pieces still in their chests, as the chests' memory has them: in a home chest that holds that many
  * of the name, and in its slot where the chest's stacks of that name are known (a tool's text reply lets go of a
- * name's stacks: then the count alone). What is gone is reserved no longer, and the spare set's step makes it again.
+ * name's stacks: then the count alone). What is gone is reserved no longer, and the spare set's step makes it again
+ * (once its chest is looked into again: portal.ts spareSetStep). One piece of each name, the first recorded that is
+ * held: the set is one set, and a second piece of a name in the record is plain stock (oneSpareSet).
  */
 export function spareHeld(world: WorldMemory): SparePiece[] {
   const out: SparePiece[] = [];
   const seen = new Map<string, number>();
   const home = new Set(world.landmarks.chests.map(key));
   for (const p of sparePieces(world)) {
+    if (out.some(o => o.name === p.name)) continue;
     const k = key(p.chest);
     if (!home.has(k)) continue;
     const stacks = world.chestStacks?.[k];
@@ -362,6 +374,23 @@ export function spareHeld(world: WorldMemory): SparePiece[] {
     out.push(p);
   }
   return out;
+}
+
+/**
+ * The spare set's record made one set again: of each name the piece the chests' memory holds (spareHeld), else the
+ * first recorded, and the rest let go, plain stock from then on (the kit, the trip kit and the regear may take them).
+ * Live on Nov 15 the nether spares chore stored a second set (29 diamonds) while the first lay in its slots 12 to 17
+ * of the gear chest, whose memory had lost them for a moment, and the record listed both: twelve pieces in three
+ * chests. The brain asks this on every tick (a record of one set is left as it is). Returns the pieces let go.
+ */
+export function oneSpareSet(world: WorldMemory): SparePiece[] {
+  const all = sparePieces(world);
+  const held = spareHeld(world);
+  const kept: SparePiece[] = [];
+  for (const p of all) if (!kept.some(k => k.name === p.name)) kept.push(held.find(h => h.name === p.name) ?? p);
+  const loose = all.filter(p => !kept.includes(p));
+  if (loose.length) world.spareSet = { ...world.spareSet, pieces: kept };
+  return loose;
 }
 
 /** The slots of a chest that hold the spare set's pieces (of `item` only, if given). */
@@ -404,7 +433,7 @@ async function takeAround(ctx: GoalContext, chest: Pos, item: string, count: num
       got += r.moved ?? 0;
     }
   } finally {
-    await ctx.call('container.close').catch(() => undefined);
+    await closeChest(ctx);
   }
   if (got > 0 && isHazard(item)) await holdHarmless(ctx);
   return got;
