@@ -4,7 +4,7 @@ import { freeChestTotals, takeFromChests } from './chests.js';
 import { pickMineStart, tripBudgetMs, MINE_FROM_BUILDS } from './mine.js';
 import { nearestZone, type Zone } from './courtesy.js';
 import { daylightLeft } from './schedule.js';
-import { fuelFor } from './project.js';
+import { fuelFor, oreAside } from './project.js';
 import { tripDecline, diamondsWanted } from './deep.js';
 // (both come back to this file through their own imports: what they give is used inside functions only)
 import { tierOf } from './work.js';
@@ -239,6 +239,8 @@ async function deliver(ctx: GoalContext, m: Mission): Promise<string> {
       const fuel = await fuelFor(ctx, {}, n);
       if (!fuel) throw new Error(`${n} ${raw} to smelt for the ${m.chest} chest, and nothing to burn`);
       ctx.progress(`smelting ${n} ${raw} for the ${m.chest} chest`);
+      // the smelt's ore cooking in there (it loads the furnace and goes): out of the way first (project.ts oreAside)
+      await oreAside(ctx);
       const r = await ctx.act('smelt-item', { ...furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
       if (!r.ok) throw new Error(`could not smelt ${raw}: ${r.text.slice(0, 120)}`);
       have = await carried(ctx, m.item);

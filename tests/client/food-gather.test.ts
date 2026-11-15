@@ -130,18 +130,22 @@ test('gatherFood: hungry, the only game it found past the hunting range: walks o
   t.notRegex(text, /now carrying 0 food points/);
 });
 
-/** A furnace that holds `input` unlit in its input slot: smelt-item answers (ok) that the slot is occupied until it's taken out. */
-function blockedFurnaceCtx(inv: Map<string, number>, acts: string[], opts: { farmland?: boolean } = {}) {
-  let input: { name: string; count: number } | null = { name: 'oak_log', count: 5 };
+/**
+ * A furnace that holds `input` unlit in its input slot (or `held`, lit: still cooking): smelt-item answers (ok) that
+ * the slot is occupied until it's taken out.
+ */
+function blockedFurnaceCtx(inv: Map<string, number>, acts: string[], opts: { farmland?: boolean; held?: { name: string; count: number } } = {}) {
+  let input: { name: string; count: number } | null = opts.held ?? { name: 'oak_log', count: 5 };
+  const lit = !!opts.held;
   const world = { landmarks: { chests: [], farmland: opts.farmland ? [{ x: 5, y: 63, z: 5 }] : [], furnace: { x: 2, y: 64, z: 0 } }, leash: 96, zones: {} } as unknown as WorldMemory;
-  const s = { food: 20, health: 20, home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, counts: inv, position: { x: 0, y: 64, z: 0 } } as unknown as Snapshot;
+  const s = { now: 10 * 60 * 60_000, food: 20, health: 20, home: { x: 0, y: 64, z: 0, dimension: 'overworld' }, counts: inv, position: { x: 0, y: 64, z: 0 } } as unknown as Snapshot;
   const ctx = {
     s, world, signal: new AbortController().signal, progress: () => undefined,
     // evening: no hunting, so only the cooking (and the farm) can bring food
     status: async () => ({ timeOfDay: 11_500 }),
     call: (async (m: string, a: Record<string, unknown> = {}) => {
       if (m === 'inventory') return { items: [...inv].map(([name, count], slot) => ({ slot, name, count })) };
-      if (m === 'furnace.open') return { open: true, input, fuel: null, output: null, lit: false };
+      if (m === 'furnace.open') return { open: true, input, fuel: null, output: null, lit: lit && !!input };
       if (m === 'furnace.take' && a.slot === 'input') { const took = input; input = null; if (took) inv.set(took.name, (inv.get(took.name) ?? 0) + took.count); return { took }; }
       return {};
     }) as GoalContext['call'],
@@ -171,6 +175,32 @@ test('gatherFood: logs left in the furnace input are taken out first, then the m
   t.is(inv.get('oak_log'), 5, 'the logs came back');
   t.is(inv.get('cooked_beef'), 2);
   t.regex(text, /cooked 2 beef; cooked 2 chicken/);
+});
+
+test('gatherFood: the smelt\'s ore cooking in the furnace (it loads the furnace and goes) comes out of the way first, then the meat cooks; the ore back in the pockets is the smelt\'s next load', async t => {
+  const inv = new Map<string, number>([['beef', 2], ['coal', 3]]);
+  const acts: string[] = [];
+  const { ctx, world } = blockedFurnaceCtx(inv, acts, { held: { name: 'raw_gold', count: 40 } });
+  const text = await gatherFood(ctx, 20, true);
+  t.is(inv.get('raw_gold'), 40, 'the gold came back');
+  t.is(inv.get('cooked_beef'), 2);
+  t.regex(text, /cooked 2 beef/);
+  t.true(acts.indexOf('move-to-position') < acts.indexOf('smelt-item beef'), acts.join(', '));
+  t.is(world.furnaceLoad, undefined);
+});
+
+test('gatherFood: no room in the pockets for the smelt\'s ore and the cooked meat after it: nothing comes out of the furnace and it does not cook now (the stash makes the room), saying why', async t => {
+  // 35/36: the ore would take the last slot, and the meat would cook into none
+  const inv = new Map<string, number>([['beef', 2], ['coal', 3], ...Array.from({ length: 33 }, (_, i): [string, number] => [`dirt_${i}`, 1])]);
+  const acts: string[] = [];
+  const said: string[] = [];
+  const { ctx, world } = blockedFurnaceCtx(inv, acts, { held: { name: 'raw_gold', count: 40 } });
+  (ctx as { progress: GoalContext['progress'] }).progress = (x: string) => { said.push(x); };
+  await gatherFood(ctx, 20, true).catch(() => undefined);
+  t.false(inv.has('raw_gold'), 'the gold still in the furnace');
+  t.false(acts.includes('smelt-item beef'), acts.join(', '));
+  t.true(said.some(l => /^could not cook beef: pockets: 35\/36, no room/.test(l)), said.join(' | '));
+  t.like(world.furnaceLoad, { item: 'raw_gold', count: 40 });
 });
 
 test('gatherFood: a cook that leaves the meat raw and a farm with nothing ripe are no food: it fails, not "done"', async t => {

@@ -28,7 +28,7 @@ export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 
 import { breakOut, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { outFromUnder } from './underyard.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
-import { farm, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
+import { farm, furnaceLine, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
 import { readBox } from './milestones.js';
 import { projectGoal } from './project.js';
@@ -483,7 +483,8 @@ export class Brain {
     if (world) {
       const l = world.landmarks;
       const p = (q?: { x: number; y: number; z: number }) => (q ? `(${q.x}, ${q.y}, ${q.z})` : 'none');
-      lines.push(`Landmarks: bed ${p(l.bed)}, chests ${l.chests.length}, furnace ${p(l.furnace)}, table ${p(l.table)}, farmland ${l.farmland.length}.`);
+      // (and what it cooks, as the smelt left it: it loads the furnace and goes)
+      lines.push(`Landmarks: bed ${p(l.bed)}, chests ${l.chests.length}, furnace ${p(l.furnace)}${furnaceLine(world, this.now())}, table ${p(l.table)}, farmland ${l.farmland.length}.`);
     }
     const waiting = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
     if (waiting.length) lines.push(`Retrying later: ${waiting.join(', ')}.`);

@@ -43,7 +43,7 @@ import type { Pos, WorldMemory } from './memory.js';
 import type { WorkResult } from './work.js';
 import { NEAR_HOME } from './pockets.js';
 import { freeChestTotals, key, storeInChests, takeFromChests } from './chests.js';
-import { SMELTED, fuelFor } from './project.js';
+import { SMELTED, fuelFor, oreAside } from './project.js';
 import { collectFurnace } from './chores.js';
 import { homePortal, tripsOn } from './portal.js';
 import {
@@ -183,6 +183,9 @@ export const goldGoal: Goal = {
     if (ctx.signal.aborted) throw new Error('aborted');
     const today = smeltedToday(ctx.world);
     (netherOf(ctx.world).barter ??= {}).smelted = { day: gameDay(ctx.world), n: today + n };
+    // the smelt's ore cooking in there (it loads the furnace and goes): out of the way first, or on its raw gold this
+    // smelt would wait for all of it (project.ts oreAside)
+    await oreAside(ctx);
     const r = await ctx.act('smelt-item', { ...furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
     const got = carried(await inventory(ctx), 'gold_ingot') - carried(before, 'gold_ingot');
     if (got <= 0) throw new Error(`could not smelt ${raw}: ${r.text.replace(/\s+/g, ' ').slice(0, 120)}`);

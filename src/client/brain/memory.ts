@@ -111,6 +111,14 @@ export interface WorldMemory {
   chestStacks?: Record<string, import('../tools.js').ChestStack[]>;
   /** when (ms) daily chores last ran, by chore */
   lastDone?: Record<string, number>;
+  /**
+   * What the home furnace is cooking (chores.ts smelt): `count` of `item` in its input at `at` (ms), lit, all of it
+   * cooked 10.5 s an item on (chores.ts furnaceNow). The smelt loads it and goes, and its next run takes the output
+   * out once that time is up: it stood at the furnace through every batch (Nov 15), and the stash and the smelt took
+   * turns after each. Set from what a look in the furnace saw (collectFurnace) and from each load; gone once the
+   * input is seen empty or taken back out
+   */
+  furnaceLoad?: { item: string; count: number; at: number };
   /** dark spots ("x,y,z") no torch of the lights round reached: left out from then on */
   darkIgnore?: string[];
   /** stray blocks the daily tidy couldn't get at ("x,y,z" -> tries): left be after two */

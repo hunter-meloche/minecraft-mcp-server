@@ -8,7 +8,8 @@ import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 import { smeltsPerFuel } from '../../tools/furnace-tools.js';
 import { clock } from './idlelog.js';
 import { makeRoom, noRoom, room } from './pockets.js';
-import { FURNACE_TURN, furnaceTurn } from './chores.js';
+import { FURNACE_TURN, cooksInto, furnaceNow, furnaceTurn } from './chores.js';
+import { stackSize } from './storage.js';
 
 /**
  * The project goal: works the next milestone of the long game, one step per slot of free daytime, so the bot keeps
@@ -383,10 +384,13 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
       // fuel the bill places (its logs, its planks) burns only beyond what the bill needs
       const fuelCount = reserve[fuel] ? Math.max(1, (await count(ctx, x => x === fuel)) - reserve[fuel]) : undefined;
       const args = { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, ...(fuelCount ? { fuelCount } : {}), takeOutput: true, timeoutMs: k * 10_500 + 15_000 };
+      // the smelt goal's ore in the furnace (it loads and goes): a job's, the project's or a milestone's few go first,
+      // and the ore back in the pockets for its next load. The cleanup's 4 stone found the furnace full of raw gold,
+      // then raw iron, run after run for an hour (Nov 15). Its load as remembered first (on the same ore this smelt
+      // would wait for all of it); one it does not remember (gone out) when the furnace says so. With no room in the
+      // pockets for what comes out it throws: the caller fails on room (the stash makes it), not short of the item
+      await oreAside(ctx);
       const r = await ctx.act('smelt-item', args);
-      // the smelt goal's ore in the furnace (a batch stopped midway, or one gone out): a job's, the project's or a
-      // milestone's few go first, and the ore back in the pockets for its next batch. The cleanup's 4 stone found
-      // the furnace full of raw gold, then raw iron, run after run for an hour (Nov 15)
       if (RAW_ORE_IN.test(r.text) && await oreOut(ctx)) await ctx.act('smelt-item', args);
       have = await counted();
       if (have >= n) return {};
@@ -426,16 +430,89 @@ export const SMELT_BATCH = 24;
 /** smelt-item's reply when the furnace holds raw ore (the smelt goal's, chores.ts) where something else is to go in. */
 export const RAW_ORE_IN = /^Furnace input slot is occupied by raw_(iron|gold|copper)$/;
 
-/** Take the raw ore out of the home furnace's input (the bot stands at it after smelt-item); whether it came out. */
+type Slot = { name: string; count: number } | null;
+type Pockets = { name: string; count: number; slot: number }[];
+const pocketsNow = async (ctx: GoalContext): Promise<Pockets> =>
+  (await ctx.call<{ items: Pockets }>('inventory')).items.filter(i => i.slot >= 0 && i.slot < 36);
+const carriedIn = (items: Pockets, name: string) => items.filter(i => i.name === name).reduce((a, i) => a + i.count, 0);
+
+/**
+ * With the home furnace open: its input back in the pockets; whether all of it came out. The bridge's take answers
+ * with what the slot held before it, moved or not (with the pockets full nothing moves), so what came out is counted
+ * in the pockets: all of it, and the smelt's load is forgotten (world.furnaceLoad); some, and the load is what is left
+ * in there. Taken at its word, a load still in the furnace was forgotten and the smelt after it refused again.
+ */
+async function inputOut(ctx: GoalContext, input: { name: string; count: number }): Promise<boolean> {
+  const before = carriedIn(await pocketsNow(ctx), input.name);
+  await ctx.call('furnace.take', { slot: 'input' });
+  const moved = carriedIn(await pocketsNow(ctx), input.name) - before;
+  if (moved >= input.count) { delete ctx.world.furnaceLoad; return true; }
+  if (moved > 0) ctx.world.furnaceLoad = { item: input.name, count: input.count - moved, at: ctx.s.now };
+  return false;
+}
+
+/**
+ * Take the raw ore out of the home furnace's input (the bot stands at it after smelt-item); whether it came out. Out,
+ * the smelt's load is forgotten (world.furnaceLoad): the ore is back in the pockets, its next load.
+ */
 export async function oreOut(ctx: GoalContext): Promise<boolean> {
-  type Slot = { name: string; count: number } | null;
   try {
     const f = await ctx.call<{ input: Slot }>('furnace.open', { ...ctx.world.landmarks.furnace! });
     if (!f.input || !/^raw_(iron|gold|copper)$/.test(f.input.name)) return false;
-    const r = await ctx.call<{ took: Slot }>('furnace.take', { slot: 'input' });
-    return !!r.took;
+    return await inputOut(ctx, f.input);
   } catch {
     return false;
+  } finally {
+    await ctx.call('container.close').catch(() => undefined);
+  }
+}
+
+/** The slots taking these into the pockets costs: what fits in the stacks of the same carried costs none. */
+function slotsFor(items: Pockets, adds: Slot[]): number {
+  let slots = 0;
+  for (const a of adds) {
+    if (!a) continue;
+    const room = items.filter(i => i.name === a.name).reduce((k, i) => k + Math.max(0, stackSize(a.name) - i.count), 0);
+    if (a.count > room) slots += Math.ceil((a.count - room) / stackSize(a.name));
+  }
+  return slots;
+}
+
+/**
+ * The smelt goal's load out of the furnace before another goal's own few go in (chores.ts smelt loads it and goes, the
+ * load remembered in furnaceLoad): raw ore or logs of another kind refuse them ("input slot is occupied"), and on the
+ * same ore smelt-item tops the load up and waits at the furnace for all of it (64 raw iron are 11 minutes, past a
+ * run's time). Back in the pockets the ore is the smelt's next load. What the load has cooked comes out first, done or
+ * not: the furnace cooks nothing else onto it, and smelt-item would take it out into the slot the caller's own needs.
+ * To the furnace first: the bot may be across the yard, and the smelt that follows walks there anyway. Nothing of the
+ * smelt's remembered: nothing done.
+ *
+ * Only with room in the pockets for what comes out and for the caller's own after it: the output and the load, each
+ * unless it fits in a stack of it carried, and a slot more. Without it nothing comes out and it throws on the pockets,
+ * so the caller fails on room and the stash makes it. At 35/36 the ore and the ingots took the last slots, the job's
+ * 4 stone stayed in the furnace, and the job wrote them down as short for the stock trips to fetch.
+ */
+export async function oreAside(ctx: GoalContext): Promise<void> {
+  const at = ctx.world.landmarks.furnace;
+  if (!at || !ctx.world.furnaceLoad) return;
+  const load = furnaceNow(ctx.world, ctx.s.now);
+  if (!load || !cooksInto(load.item)) return;
+  await ctx.act('move-to-position', { ...at, range: 2, timeoutMs: 60_000 });
+  const f = await ctx.call<{ input: Slot; output: Slot }>('furnace.open', { ...at }).catch(() => undefined);
+  if (!f) return;
+  try {
+    const ore = f.input?.name === load.item ? f.input : null;
+    if (f.output || ore) {
+      const items = await pocketsNow(ctx);
+      const used = new Set(items.map(i => i.slot)).size;
+      if (36 - used < slotsFor(items, [f.output, ore]) + 1) {
+        const what = [f.output, ore].filter((x): x is { name: string; count: number } => !!x).map(x => `${x.count} ${x.name}`).join(' and ');
+        throw new Error(`pockets: ${used}/36, no room to take the smelt's ${what} out of the furnace and smelt after it`);
+      }
+      if (f.output) await ctx.call('furnace.take');
+    }
+    if (ore) await inputOut(ctx, ore);
+    else if (!f.input) delete ctx.world.furnaceLoad;
   } finally {
     await ctx.call('container.close').catch(() => undefined);
   }

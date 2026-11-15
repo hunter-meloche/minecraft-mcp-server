@@ -1131,6 +1131,46 @@ test.serial('the gold chore\'s run: the raw gold out of the chests and into the 
   carriedTo(f, 'gold_ingot', 0);
   t.like(goldWant(lookAt(f.inv, 6000), w), { n: 11 }, 'the rest of the day\'s 64');
 });
+test.serial('the gold chore with the smelt\'s raw gold cooking in the furnace (it loads the furnace and goes): that comes out first, and its own 32 go in alone, not topped up onto the load and waited for', async (t) => {
+  const w = goldWorld(990, 0);
+  const f = game(w);
+  let input: { name: string; count: number } | null = { name: 'raw_gold', count: 40 };
+  // (the smelt's own record of it)
+  Object.assign(w, { furnaceLoad: { item: 'raw_gold', count: 40, at: T0 - 5000 } });
+  const act = f.ctx.act;
+  const call = f.ctx.call;
+  (f.ctx as { act: GoalContext['act'] }).act = async (tool: string, a: Record<string, unknown> = {}) => {
+    if (tool === 'move-to-position') { f.did.push('to the furnace'); return { ok: true, text: 'Arrived' }; }
+    if (tool !== 'smelt-item') return act(tool, a);
+    const n = Number(a.inputCount);
+    f.did.push(`smelt ${a.inputItem} x${n}${input ? ` onto ${input.count} (waited for all)` : ''}`);
+    let left = n;
+    for (const i of f.inv.filter(x => x.slot < 36 && x.name === a.inputItem)) { const k = Math.min(i.count, left); i.count -= k; left -= k; }
+    f.inv.splice(0, f.inv.length, ...f.inv.filter(i => i.count > 0));
+    f.inv.push({ slot: [...Array(36).keys()].find(i => !f.inv.some(x => x.slot === i))!, name: 'gold_ingot', count: n + (input?.count ?? 0) });
+    input = null;
+    return { ok: true, text: `Smelted ${n} ${a.inputItem}` };
+  };
+  (f.ctx as { call: GoalContext['call'] }).call = (async (m: string, a?: Record<string, unknown>) => {
+    if (m === 'furnace.open') return { open: true, input, output: null, fuel: { name: 'coal', count: 5 }, lit: !!input };
+    if (m === 'furnace.take' && a?.slot === 'input' && input) {
+      const took = input;
+      input = null;
+      f.inv.push({ slot: [...Array(36).keys()].find(i => !f.inv.some(x => x.slot === i))!, ...took });
+      return { took };
+    }
+    if (m === 'furnace.take' || m === 'container.close') return { took: null };
+    return call(m, a);
+  }) as GoalContext['call'];
+  const rawGold = () => f.inv.filter(i => i.slot < 36 && i.name === 'raw_gold').reduce((k, i) => k + i.count, 0);
+  const had = rawGold();
+  await goldGoal.run({ ...f.ctx, s: lookAt(f.inv, 6000) });
+  t.true(f.did.includes('smelt raw_gold x32'), f.did.join(' | '));
+  t.true(f.did.indexOf('to the furnace') < f.did.indexOf('smelt raw_gold x32'));
+  t.false(f.did.some(d => /onto/.test(d)));
+  t.is(rawGold(), had + 40, 'the smelt\'s 40 back in the pockets, its next load');
+  t.is(w.furnaceLoad, undefined);
+});
 /** Take the carried stack of a kind down to `n`. */
 function carriedTo(f: Game, name: string, n: number) {
   const i = f.inv.find(x => x.slot < 36 && x.name === name);

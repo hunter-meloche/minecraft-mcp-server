@@ -3,6 +3,7 @@ import { foodsFor26 } from '../tools.js';
 import { AT_HOME, fromGate, nearHome, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { collectFurnace, farmAll } from './chores.js';
+import { oreAside } from './project.js';
 import { FOOD_CARRY } from './pockets.js';
 import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
@@ -213,6 +214,14 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
         }
       }
       if (!fuel) { say('no fuel to cook with'); return; }
+      // the smelt's ore cooking in there (it loads the furnace and goes) refuses the meat: out of the way first, and
+      // the smelt loads it again. No room for it and the meat after it: no cooking now (the stash makes the room)
+      try {
+        await oreAside(ctx);
+      } catch (e) {
+        ctx.progress(`could not cook ${raw}: ${(e as Error).message}`);
+        return;
+      }
       const r = await ctx.act('smelt-item', { ...landmarks.furnace, inputItem: raw, inputCount: n, fuelItem: fuel, takeOutput: true, timeoutMs: n * 10_500 + 15_000 });
       await refresh();
       // cooked means the raw meat went: "input slot is occupied" is no error, and counted as done the food goal
