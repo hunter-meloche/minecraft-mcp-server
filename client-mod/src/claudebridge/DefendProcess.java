@@ -70,6 +70,10 @@ public final class DefendProcess implements IBaritoneProcess {
         if (!Guardian.enabled || Combat.fighting || p == null || mc.level == null || mc.gameMode == null) { target = null; return false; }
         String mode = mc.gameMode.getPlayerMode().name();
         if (mode.equals("CREATIVE") || mode.equals("SPECTATOR") || p.getHealth() <= 6) { target = null; return false; }
+        // riding (a boat home with a villager in the back): Baritone's walk presses the movement keys, which steer the
+        // boat (LocalPlayer.rideTick hands them to it), and vehicle.drive's steering with them; the melee reflex still hits
+        // whatever comes within reach
+        if (p.isPassenger()) { target = null; return false; }
         if (target != null && target.isRemoved() && (target instanceof net.minecraft.world.entity.LivingEntity le) && le.isDeadOrDying()) {
             lootAt = target.position(); lootTicks = 60;
         } else if (target != null && !target.isAlive()) { lootAt = target.position(); lootTicks = 60; }

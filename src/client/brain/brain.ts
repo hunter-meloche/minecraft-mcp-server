@@ -49,6 +49,8 @@ import { netherSparesGoal, regearGoal } from './regear.js';
 import { oneSpareSet } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 import { homeBed } from './villagers.js';
+import { closeUpGoal } from './villagemove.js';
+import { VILLAGE_RANGE, movesOn, noteBells, noteSeen, villagersLine, villagesOf, type Seen } from './village.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -205,7 +207,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -265,6 +267,17 @@ export class Brain {
     this.memory.save();
   }
 
+  /**
+   * The villager-moves switch (the villager-moves tool): the villagers rung moves a villager home only while it is on.
+   * Said in the log with who turned it (`villager moves on (by the lead)`), and saved at once.
+   */
+  setVillagerMoves(on: boolean, by: string): void {
+    if (!this.worldId) throw new Error('not in a world yet');
+    this.memory.world(this.worldId).villagerMoves = on;
+    this.note(`villager moves ${on ? 'on' : 'off'} (by ${by})`);
+    this.memory.save();
+  }
+
   /** The LLM ran a tool: step back now and stay out until it has been quiet for a while. */
   async manual(tool: string): Promise<void> {
     this.leaseUntil = this.now() + this.leaseMs;
@@ -306,9 +319,12 @@ export class Brain {
       // bridge whenever they change or the bridge has none (nothing then counts them as anyone's build)
       this.measure('portals', () => this.rt.setOwnPortals?.(allOwnPortals(world)));
       await this.seePortals(s, world);
+      await this.seeVillages(s, world);
       this.idleTrack(s);
       this.workQueue(s, world);
       this.measure('daily', () => this.dailyLines(s, world));
+      // seated in a boat (or a minecart) with no run to steer it: out of it before anything else starts
+      if (!this.running && s.riding) { await this.outOfVehicle(s, world); return; }
       const r = this.running;
       if (r) {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
@@ -482,6 +498,8 @@ export class Brain {
     if (world?.yard) lines.push(`Yard: x ${world.yard.x1}..${world.yard.x2}, z ${world.yard.z1}..${world.yard.z2}, ground y ${world.yard.y}.`);
     // the Nether: the switch, the stage, the clean trips, the deaths, the portals known
     if (world) this.measure('status', () => lines.push(netherLine(world, this.now())));
+    // the villagers: the switch, the hall and its villagers, the villages known and judged, the last move
+    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now())));
     if (world) this.measure('status', () => {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
@@ -655,7 +673,8 @@ export class Brain {
       // jar sends neither: no effects, not burning
       effects: Array.isArray(st.effects) ? st.effects.filter(e => typeof e?.name === 'string') : [],
       onFire: !!st.onFire,
-      ...(inv.held !== undefined ? { held: inv.held?.name ?? '' } : {})
+      ...(inv.held !== undefined ? { held: inv.held?.name ?? '' } : {}),
+      ...(st.riding && typeof st.riding.id === 'number' ? { riding: { id: st.riding.id, uuid: st.riding.uuid, name: st.riding.name, own: st.riding.own, position: st.riding.position } } : {})
     };
     this.last = s;
     return s;
@@ -676,6 +695,64 @@ export class Brain {
     const r = await this.rt.call<{ dimension?: string; portals?: PortalShape[] }>('foreign.portals', { dimension: s.dimension }).catch(() => undefined);
     if (!Array.isArray(r?.portals)) return;
     this.measure('portals', () => notePortals(world, r.dimension ?? s.dimension, r.portals!));
+  }
+
+  /** when the bells the scans saw were last asked for (seeVillages) */
+  private villagesAt = -Infinity;
+
+  /**
+   * With the villager-moves switch on, every 10 minutes: the bells the bridge's scans have seen within VILLAGE_RANGE of
+   * home (foreign.marks: on any walk this client session), kept as village sites for the villagers rung. Off, nothing
+   * is asked (the sightings of villagers and players in the runs' own looks are kept either way). An older jar without
+   * the call: nothing kept.
+   */
+  private async seeVillages(s: Snapshot, world: WorldMemory): Promise<void> {
+    if (!movesOn(world) || s.dimension !== OVERWORLD || !s.home || this.now() - this.villagesAt < 10 * 60_000) return;
+    this.villagesAt = this.now();
+    const home = s.home;
+    const r = await this.rt.call<{ at?: { x: number; y: number; z: number; name: string }[] }>('foreign.marks', {
+      x1: home.x - VILLAGE_RANGE, z1: home.z - VILLAGE_RANGE, x2: home.x + VILLAGE_RANGE, z2: home.z + VILLAGE_RANGE, match: '^bell$', max: 64
+    }).catch(() => undefined);
+    if (!Array.isArray(r?.at)) return;
+    this.measure('villages', () => {
+      const fresh = noteBells(world, r.at!.filter(m => m.name === 'bell'), this.now(), home);
+      if (fresh) this.note(`villagers: ${fresh} village(s) seen on the walks (their bells), within ${VILLAGE_RANGE} of home`);
+    });
+  }
+
+  /** when the bot was last got out of a vehicle no run steers (outOfVehicle) */
+  private outAt = -Infinity;
+
+  /**
+   * In a boat or a minecart with no run to steer it: a villager move stopped from outside whose own let-go did not get
+   * the bot out, or a restart (the server seats a player who comes back in the vehicle it left in). Nothing else may
+   * start while seated: a walk's Baritone keys steer the boat, with the villager behind and no look at drops or lava.
+   * Out of it toward home (anyhow, else), and the bot's own boat broken back into its item (the villager in it steps
+   * out where it is). Tried every 20 s while it rides; nothing else starts meanwhile (the Guardian still fights, and
+   * gets out at low health).
+   */
+  private async outOfVehicle(s: Snapshot, world: WorldMemory): Promise<void> {
+    if (this.now() - this.outAt < 20_000) return;
+    this.outAt = this.now();
+    const v = s.riding!;
+    const what = v.name ?? 'boat';
+    const home = s.home ?? s.position;
+    type Reply = { ok: boolean; reason?: string };
+    const fail = (e: unknown): Reply => ({ ok: false, reason: (e as Error).message });
+    let off = await this.rt.call<Reply>('vehicle.dismount', { toward: { x: home.x, z: home.z } }, 15_000).catch(fail);
+    if (!off.ok) off = await this.rt.call<Reply>('vehicle.dismount', { force: true }, 15_000).catch(fail);
+    if (!off.ok) { this.note(`villagers: still in the ${what} with no run to steer it: ${off.reason ?? 'no reply'}`); return; }
+    // the bot's own: put down by a move (its uuid kept in villages.boat across a restart, when the bridge's own set is gone)
+    const kept = world.villages?.boat;
+    let took = '';
+    if (v.own || (kept && v.uuid && kept.uuid === v.uuid)) {
+      await new Promise(res => setTimeout(res, 500));
+      const r = await this.rt.call<Reply>('vehicle.take', { id: v.id, ...(v.uuid ? { uuid: v.uuid } : {}) }, 30_000).catch(fail);
+      if (r.ok) { if (kept?.uuid === v.uuid) delete villagesOf(world).boat; took = ', its boat taken back up'; } else took = `; its boat left (${r.reason ?? 'no reply'})`;
+    }
+    const at = v.position ? ` at (${Math.floor(v.position.x)}, ${Math.floor(v.position.y)}, ${Math.floor(v.position.z)})` : '';
+    this.note(`villagers: out of the ${what}${at}, no run steering it (a move stopped from outside, or a restart)${took}`);
+    this.memory.save();
   }
 
   /** Look around home for the bed, chests, furnace, table and farmland: once, then every 10 minutes while near it. */
@@ -757,7 +834,18 @@ export class Brain {
         if (abort.signal.aborted) throw new Error('aborted');
         return { ok: !r.isError, text: r.content.map(c => (c as { text?: string }).text ?? '').join(' ') };
       },
-      call: (m, p, t) => this.rt.call(m, p, t),
+      call: <T>(m: string, p?: Record<string, unknown>, t?: number) => {
+        const r = this.rt.call<T>(m, p, t);
+        // every look round a run makes, remembered for the villages' judge: the players seen anywhere in the
+        // overworld (a village within 64 of one is someone's), and villagers out in the world (village.ts noteSeen)
+        if (m === 'world.entities') {
+          r.then(x => this.measure('villages', () => {
+            const seen = (x as { entities?: Seen[] } | undefined)?.entities;
+            if (Array.isArray(seen)) noteSeen(world, seen, this.now(), this.last?.dimension ?? s.dimension);
+          })).catch(() => undefined);
+        }
+        return r;
+      },
       status: () => this.rt.status(),
       progress: text => { this.step = text; this.note(`${goal.name}: ${text}`); void this.show(); },
       gain: n => {

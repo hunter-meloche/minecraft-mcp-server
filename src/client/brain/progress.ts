@@ -266,6 +266,9 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   flint_and_steel: { makes: 1, from: { iron_ingot: 1, flint: 1 } },
   golden_helmet: { makes: 1, from: { gold_ingot: 5 } },
   ladder: { makes: 3, from: { stick: 7 } },
+  // the villager move's boat (P5c), as 26.3's data/minecraft/recipe/oak_boat.json has it: five oak planks in a boat's
+  // shape, at a table. Oak, not any planks: birch planks make a birch_boat, and the craft of an oak_boat would fail
+  oak_boat: { makes: 1, from: { oak_planks: 5 } },
   stone_hoe: { makes: 1, from: { cobblestone: 2, stick: 2 } },
   oak_trapdoor: { makes: 2, from: { planks: 6 } },
   oak_pressure_plate: { makes: 1, from: { planks: 2 } },

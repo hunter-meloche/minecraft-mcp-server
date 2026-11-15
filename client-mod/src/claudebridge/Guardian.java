@@ -141,6 +141,12 @@ public final class Guardian {
         // (checks for a standing shelter, not where one was: the lab found a bot back in its old cell with the
         // shelter gone, and the reflex did nothing)
         if (p.getHealth() <= 6 && Ticker.ticks() - lastHurtTick < 60 && !sheltered(mc, p.blockPosition())) {
+            // in a boat or a minecart no wall goes up round the bot and Baritone can't run with it: out first, and the
+            // next look takes cover where it stands
+            if (p.isPassenger()) {
+                Vehicle.leave(mc, "health " + round(p.getHealth()) + " and under attack");
+                return;
+            }
             busy = true;
             shieldGuardDown();
             float h = p.getHealth();

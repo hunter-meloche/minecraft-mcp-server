@@ -100,6 +100,11 @@ public final class Foreign {
         final Map<Long, List<Mark>> byChunk = new HashMap<>();
         /** Lit nether portals seen, by chunk (the bot's own too) */
         final Map<Long, List<Seen>> portals = new java.util.concurrent.ConcurrentHashMap<>();
+        /**
+         * Every chunk looked at (chunk key), whatever it held: byChunk keeps only those with markers, so a chunk with
+         * none could not be told from one never seen. foreign.marks says how much of a box the scans have seen
+         */
+        final Set<Long> looked = java.util.concurrent.ConcurrentHashMap.newKeySet();
         /** the tick of the last scan */
         long lastScan = Long.MIN_VALUE / 2;
     }
@@ -272,6 +277,7 @@ public final class Foreign {
             for (int cz = (me.getZ() - SCAN_RADIUS) >> 4; cz <= (me.getZ() + SCAN_RADIUS) >> 4; cz++) {
                 LevelChunk ch = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
                 if (ch == null) continue;
+                dim.looked.add((((long) cx) << 32) ^ (cz & 0xffffffffL));
                 List<Mark> marks = new ArrayList<>();
                 List<Seen> portals = new ArrayList<>();
                 LevelChunkSection[] sections = ch.getSections();
@@ -537,6 +543,52 @@ public final class Foreign {
             for (Portal.Shape sh : foreignPortals(which)) out.add(sh.json());
             return obj("dimension", which, "portals", out);
         });
+        // {x1, z1, x2, z2, y1?, y2?, dimension?, match?: regex, max?: 64} -> {dimension, kinds: {name: count}, at: [{x, y,
+        // z, name}], chunks, of}: the markers the scans have seen in a box (on any walk this session: what each chunk held
+        // when last looked at), counted by kind; `at` lists those whose name matches `match` (a village's bell, beds and
+        // job sites), nearest the box's middle first, at most `max`; `chunks` of the box's `of` chunks were looked at. The
+        // brain's courtesy judge of a village (P5c) reads round it for what only a player puts there (a sign, a rail,
+        // redstone, a portal): the zones name only their six commonest kinds, and a village's hundreds of planks hide a sign
+        s.register("foreign.marks", true, (p, c) -> {
+            fresh(Minecraft.getInstance());
+            String which = Names.strip(strParam(p, "dimension", Nether.here()));
+            int ax = intParam(p, "x1", 0), bx = intParam(p, "x2", 0), az = intParam(p, "z1", 0), bz = intParam(p, "z2", 0);
+            int x1 = Math.min(ax, bx), x2 = Math.max(ax, bx), z1 = Math.min(az, bz), z2 = Math.max(az, bz);
+            int y1 = intParam(p, "y1", Integer.MIN_VALUE), y2 = intParam(p, "y2", Integer.MAX_VALUE);
+            if ((long) (x2 - x1 + 1) * (z2 - z1 + 1) > 1024L * 1024L) throw new IllegalArgumentException("box too large (max 1024 x 1024)");
+            String match = strParam(p, "match", null);
+            Pattern pat = match == null || match.isEmpty() ? null : Pattern.compile(match);
+            int max = Math.max(0, Math.min(512, intParam(p, "max", 64)));
+            Dim dim = dim(which);
+            Map<String, Integer> kinds = new java.util.TreeMap<>();
+            List<Mark> hits = new ArrayList<>();
+            int looked = 0, of = 0;
+            for (int cx = x1 >> 4; cx <= x2 >> 4; cx++) for (int cz = z1 >> 4; cz <= z2 >> 4; cz++) {
+                of++;
+                long key = (((long) cx) << 32) ^ (cz & 0xffffffffL);
+                if (dim.looked.contains(key)) looked++;
+                List<Mark> l = dim.byChunk.get(key);
+                if (l == null) continue;
+                for (Mark m : l) {
+                    BlockPos q = m.pos();
+                    if (q.getX() < x1 || q.getX() > x2 || q.getZ() < z1 || q.getZ() > z2 || q.getY() < y1 || q.getY() > y2) continue;
+                    String n = name(m.block());
+                    kinds.merge(n, 1, Integer::sum);
+                    if (pat != null && pat.matcher(n).matches()) hits.add(m);
+                }
+            }
+            double mx = (x1 + x2) / 2.0, mz = (z1 + z2) / 2.0;
+            hits.sort(java.util.Comparator.comparingDouble(m -> Math.hypot(m.pos().getX() - mx, m.pos().getZ() - mz)));
+            JsonObject k = new JsonObject();
+            for (Map.Entry<String, Integer> e : kinds.entrySet()) k.addProperty(e.getKey(), e.getValue());
+            JsonArray at = new JsonArray();
+            for (int i = 0; i < hits.size() && i < max; i++) {
+                JsonObject o = pos(hits.get(i).pos());
+                o.addProperty("name", name(hits.get(i).block()));
+                at.add(o);
+            }
+            return obj("dimension", which, "kinds", k, "at", at, "chunks", looked, "of", of);
+        });
         // {positions: [[x, y, z], ...]} -> {inside: [bool, ...]}: which are in someone else's build
         s.register("foreign.at", true, (p, c) -> {
             fresh(Minecraft.getInstance());
@@ -559,6 +611,7 @@ public final class Foreign {
                 n += e.getValue().zones.size();
                 e.getValue().zones.clear();
                 e.getValue().byChunk.clear();
+                e.getValue().looked.clear();
             }
             return obj("cleared", n);
         });

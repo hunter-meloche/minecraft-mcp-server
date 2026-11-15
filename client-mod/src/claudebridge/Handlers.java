@@ -94,6 +94,8 @@ public final class Handlers {
             // in a nether portal's blocks (the server counts its time there), and whether Node has said which are its own
             r.addProperty("inPortal", Portal.inside(pl));
             r.addProperty("ownPortalsSynced", Portal.ownSynced());
+            // in a boat or a minecart: which, its seat (0 in front) and whether the bot steers it (null on foot)
+            r.add("riding", Vehicle.riding(pl));
             // the world spawn (non-ops can't build within the server's spawn protection round it), and others' builds
             r.add("spawn", pos(mc.level.getRespawnData().pos()));
             r.add("foreign", Foreign.summary(pl.blockPosition()));
@@ -288,6 +290,8 @@ public final class Handlers {
                 marks(o, e, pl);
                 // a villager's job, level and biome type; a wandering trader's `merchant` alone
                 Merchant.describe(o, e);
+                // a boat's or minecart's riders (front seat first), and whether it is the bot's own (vehicle.place's)
+                Vehicle.describe(o, e);
                 if (Foreign.inZone(e.blockPosition())) o.addProperty("foreign", true);
                 double nb = Foreign.nearest(e.blockPosition());
                 if (!Double.isInfinite(nb)) o.addProperty("buildDistance", round(nb));

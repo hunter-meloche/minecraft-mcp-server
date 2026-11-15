@@ -46,6 +46,11 @@ export interface Snapshot {
   onFire?: boolean;
   /** what the main hand holds, by name ('' for nothing); undefined where it was not read (a fake, an older reply) */
   held?: string;
+  /**
+   * what the bot rides (a boat, a minecart: status.riding): its id and uuid, whether it is the bot's own; undefined on
+   * foot or from an older jar
+   */
+  riding?: { id: number; uuid?: string; name?: string; own?: boolean; position?: Pos };
 }
 
 export interface GoalContext {

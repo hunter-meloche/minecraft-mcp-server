@@ -207,6 +207,13 @@ export interface WorldMemory {
    */
   nether?: Partial<import('./nether.js').NetherMemory>;
   /**
+   * The villager-moves switch (progression P5c): the villagers rung moves an unemployed villager home by boat only while
+   * it is true; off (undefined) until the lead turns it on (the villager-moves tool) and watches the first move
+   */
+  villagerMoves?: boolean;
+  /** The villages known, the players seen, the hall's count, the last move and what a move left open (village.ts) */
+  villages?: import('./village.js').VillagesMemory;
+  /**
    * The spare diamond set the portal milestone stored for a regear after a death in the Nether (chests.ts SpareSet):
    * which chest slots hold it. Nothing else takes or uses those pieces
    */

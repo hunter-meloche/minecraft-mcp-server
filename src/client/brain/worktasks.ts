@@ -2,8 +2,9 @@
  * The rungs of the work ladder (work.ts runs them): what the bot does with a day that has no job in it, the top rung
  * first. The cane patch grown on the lake shore, cows for the pen while it holds fewer than a pair (out past the
  * leash: the herd is farmed for good) and wild cane while the project waits on cane, the kit for a trip down from out
- * in the yard, a trip down for every ore the home keeps, and coal from the surface. Each says why it does not run
- * when it does not; the wrapper books what each brought in and walks home.
+ * in the yard, a villager brought home by boat to its hall (villagemove.ts, behind the villager-moves switch), a trip
+ * down for every ore the home keeps, and coal from the surface. Each says why it does not run when it does not; the
+ * wrapper books what each brought in and walks home.
  *
  * Gates only read: every total is counted afresh on each look (the chests as last seen with the pockets), so stock
  * that is used, given away or taken opens its target again at once. Nothing here is used at the module's top level:
@@ -34,6 +35,7 @@ import { barterOpen, barterReady, barterRun } from './netherbarter.js';
 import { quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
 import { scoutOpen, scoutReady, scoutRun } from './netherscout.js';
 import { debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
+import { villagersTask } from './villagemove.js';
 
 const MINUTE = 60_000;
 
@@ -667,4 +669,4 @@ const surface: WorkTask = {
   }
 };
 
-export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, nether, deep, surface];
+export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, villagersTask, nether, deep, surface];

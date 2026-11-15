@@ -2401,8 +2401,9 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
   t.deepEqual(b.said().filter(l => !l.startsWith('landmarks: ')).slice(1), [
     'start work: deep: iron: under ground',
     // (no cane to plant a patch with, no cow pen, and no project waiting on cane: the rungs above have nothing to do)
-    // (the nether rung, 4.5, above the deep one since P2a: its switch is off)
-    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready) | nether (unneeded: trips are off)',
+    // (the nether rung, 4.5, above the deep one since P2a: its switch is off; the villagers rung, 4.4, since P5c: its
+    // switch is off too)
+    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off)',
     'work: deep: out to the mine at (0, -56)',
     'work: deep: mining iron for 23 more (180 s)',
     'work: deep: Mined for 100s: raw_iron x23.',
@@ -2435,8 +2436,9 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
     'work: every deep target met: tier 1 (diamond 32, iron 192, gold 64, redstone 128, lapis 64)',
     'start work: surface: coal: 96 blocks out',
     // the stored ingots make the armour: at home that is the kit goal's to do
-    // (the nether rung, 4.5, above the deep one since P2a: its switch is off)
-    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | nether (unneeded: trips are off) | deep (kit: armour below iron (deep needs the deep kit))',
+    // (the nether rung, 4.5, above the deep one since P2a: its switch is off; the villagers rung, 4.4, since P5c: its
+    // switch is off too)
+    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off) | deep (kit: armour below iron (deep needs the deep kit))',
     'work: surface: mining coal_ore for up to 24 (90 s)',
     'work: surface: mining coal_ore for up to 1 (90 s)',
     'done work: surface in 0s: [coal] +23 coal; back home'

@@ -65,6 +65,11 @@ export interface Status {
   effects?: StatusEffect[];
   /** burning (fire resistance stops the hurt, not the flames) */
   onFire?: boolean;
+  /**
+   * what the bot rides (a boat, a minecart: the bridge's Vehicle.riding): the vehicle's id, uuid, where it is, its seat
+   * (0 in front) and whether the bot steers it, its passengers (front seat first); null on foot, absent from an older jar
+   */
+  riding?: { id: number; uuid?: string; name?: string; position?: Pos; yaw?: number; own?: boolean; seat?: number; controlling?: boolean; passengers?: { id: number; name?: string }[] } | null;
 }
 /** An effect on the bot: amplifier 0 is level I; seconds left, -1 for one that never runs out. */
 export interface StatusEffect { name: string; amplifier: number; seconds: number }

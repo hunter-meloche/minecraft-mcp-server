@@ -1526,17 +1526,18 @@ test('the cows\' range is their own: a new range lets their terrain marks go at 
   t.like(pick(rung('cows'), s, world), { decline: { cause: 'dry' } });
   t.deepEqual(workTick(s, world, () => undefined), ['work: cows reach 256 from home now (was 96): 5 terrain mark(s) let go']);
   t.deepEqual(Object.keys(w.dry), ['cane:south']);
-  t.deepEqual(w.ranges, { cows: 256 });
+  // (the villagers rung, P5c, keeps a range of its own too: VILLAGE_RANGE, whatever the leash)
+  t.deepEqual(w.ranges, { cows: 256, villagers: 384 });
   t.like(pick(rung('cows'), s, world), { variant: 'north' });
   t.deepEqual(workTick(s, world, () => undefined), []);
   // kept in brain.json, and what is not a range there dropped
-  t.deepEqual(workOf(liveWorld({ work: JSON.parse(JSON.stringify(w)) })).ranges, { cows: 256 });
+  t.deepEqual(workOf(liveWorld({ work: JSON.parse(JSON.stringify(w)) })).ranges, { cows: 256, villagers: 384 });
   t.false('ranges' in workOf(liveWorld({ work: { ...JSON.parse(JSON.stringify(w)), ranges: { cows: 'far', cane: -1 } } })));
   // the leash set to 300: every terrain mark goes with the land, as ever, and the cows' range is the leash
   markDry(world, 'cows:north', T0);
   world.leash = 300;
   t.deepEqual(workTick(s, world, () => undefined), ['work: a new home or leash: 2 terrain mark(s) let go']);
-  t.deepEqual(w.ranges, { cows: 300 });
+  t.deepEqual(w.ranges, { cows: 300, villagers: 384 });
   t.like(pick(rung('cows'), s, world), { variant: 'north', dist: 300 });
 });
 

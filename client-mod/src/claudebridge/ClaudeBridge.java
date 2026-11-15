@@ -40,6 +40,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Anvil.register(server);
         Merchant.register(server);
         Portal.register(server);
+        Vehicle.register(server);
         Signs.register(server);
         Terraslicer.register(server);
         Foreign.register(server);
