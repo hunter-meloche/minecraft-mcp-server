@@ -1,7 +1,8 @@
 import test from 'ava';
 import { breakKinds, layoutSpec, type StructureSpec } from '../../src/client/schematic.js';
 import { billLeft, billOf, hall, HALL_SIZE, type Blueprint, type Side } from '../../src/client/brain/blueprints.js';
-import { stockShort } from '../../src/client/brain/chores.js';
+import { FURNACE_TURN, smelt, stockShort } from '../../src/client/brain/chores.js';
+import { decide } from '../../src/client/brain/brain.js';
 import { RECIPES, rawShort, recipeFor, STRING_KEEP, type MilestoneState } from '../../src/client/brain/progress.js';
 import { TREE } from '../../src/client/brain/tree.js';
 import { prepare, projectGoal } from '../../src/client/brain/project.js';
@@ -657,11 +658,12 @@ test('the windows\' glass with the live stores\' 3 sand (Nov 15): the 3 smelted,
   t.is(await run(), 'a villager hall - the beds and the windows\' glass: the windows\' glass: short of 1 sand');
   t.true(h.did.includes('smelt-item sand x3'), h.did.join(' | '));
   t.is(h.carried('glass'), 3);
-  t.deepEqual(world.progress!.need, { sand: 1 });
+  // and the glass still to smelt (no stock row fetches it): the hall's turn at the furnace between two ore batches
+  t.deepEqual(world.progress!.need, { sand: 1, glass: 1 });
   t.like(stockShort(h.look(), world).find(r => r.name === 'sand'), { short: 1 });
   // the trip brings sand home and serves the shortfall (chores.ts stock): the wait ends with it there, the last glass made
   world.chestItems![STONE].sand = 5;
-  world.progress!.need = undefined;
+  delete world.progress!.need!.sand;
   t.is(await run(), 'a villager hall - the beds and the windows\' glass: 3 white_bed and 4 glass for the hall');
   t.true(h.did.includes('smelt-item sand x1'));
   t.is(h.carried('glass'), 4);
@@ -678,7 +680,8 @@ test('the windows\' glass with its sand there and the furnace smelting none of i
   t.deepEqual(await makingsStep.run(ctx, st), {
     status: 'blocked', retryMs: 10 * MINUTE, text: 'the windows\' glass: the furnace smelted none of the sand there (busy with something else?)'
   });
-  t.is(world.progress!.need, undefined);
+  // the glass still to smelt, for the hall's turn at the furnace: no stock row fetches it
+  t.deepEqual(world.progress!.need, { glass: 4 });
   t.false(stockShort(h.look(), world).some(r => r.name === 'sand'));
 });
 
@@ -703,7 +706,7 @@ test('the build with the windows\' glass gone since the makings step (a trip\'s 
   const b = atBuild(0);
   delete b.world.chestItems![STONE].sand;
   t.deepEqual(await b.run(), { status: 'blocked', retryMs: 3 * MINUTE, text: 'the windows\' glass: short of 4 sand', need: { sand: 4 } });
-  t.deepEqual(b.world.progress!.need, { sand: 4 });
+  t.deepEqual(b.world.progress!.need, { sand: 4, glass: 4 });
   t.like(stockShort(b.h.look(), b.world).find(r => r.name === 'sand'), { short: 4 });
   // the west wall's two windows in already and the other two carried: what it has placed is no reason to smelt more
   const c = atBuild(2);
@@ -711,6 +714,32 @@ test('the build with the windows\' glass gone since the makings step (a trip\'s 
   t.deepEqual(await c.run(), { status: 'done', text: 'villager hall built at (-561, 62, 2131)' });
   t.false(c.h.did.some(d => /smelt-item/.test(d)), c.h.did.join(' | '));
   t.is(c.h.carried('glass'), 0);
+});
+
+test('the windows\' glass takes the furnace\'s turn between two ore batches once its sand is home: the glass still to smelt written with the sand (its need named only the sand, or nothing, and the hall\'s 4 glass waited behind every batch)', async (t) => {
+  const world = afterPortal();
+  delete world.chestItems![STONE].sand;
+  const h = home(world, kit());
+  const goal = projectGoal(TREE);
+  const at = (min: number) => lookAt(h.inv, 1000, { now: T0 + min * MINUTE });
+  const run = async (min = 0) => goal.run({ ...h.ctx, s: at(min) });
+  t.is(await run(), 'a villager hall - find room for the hall: the hall goes at (-561, 62, 2131), 11 x 9');
+  t.is(await run(), 'a villager hall - the beds and the windows\' glass: the windows\' glass: short of 4 sand');
+  t.deepEqual(world.progress!.need, { sand: 4, glass: 4 });
+  // a deep trip's raw iron home, and the smelt's first batch of it loaded (chores.ts smelt): the sand still to come,
+  // so no turn, nothing it could smelt
+  h.inv.push({ slot: 20, name: 'raw_iron', count: 108 });
+  world.lastDone = { ...world.lastDone, furnace: T0 + 2 * MINUTE, oreBatch: T0 + 2 * MINUTE };
+  t.true(goal.urgency!(at(5), world) < smelt.priority);
+  // the trip brings it home and serves its row (chores.ts stock): the glass is left, and the hall goes before the next batch
+  world.chestItems![STONE].sand = 4;
+  delete world.progress!.need!.sand;
+  t.is(goal.urgency!(at(5), world), FURNACE_TURN);
+  t.is(decide(at(5), world, [smelt, goal], new Map())?.goal.name, 'project');
+  t.is(await run(5), 'a villager hall - the beds and the windows\' glass: 3 white_bed and 4 glass for the hall');
+  t.true(h.did.includes('smelt-item sand x4'), h.did.join(' | '));
+  // its turn had: the next batch
+  t.is(decide(at(6), world, [smelt, goal], new Map())?.goal.name, 'smelt');
 });
 
 // ------------------------------------------------------------------------------------------------ done, and the bot's own bed

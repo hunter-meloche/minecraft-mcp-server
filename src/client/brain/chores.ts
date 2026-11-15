@@ -613,6 +613,41 @@ function storedIronToSmelt(s: Snapshot, world: WorldMemory): number {
   return Math.min(chest.raw_iron ?? 0, Math.max(0, INGOTS_KEPT - ingots), 16);
 }
 
+/**
+ * Most raw ore loaded at a time, one batch a run (about 3 minutes at the furnace): the home has one furnace, and a load
+ * of 64 kept it 11 minutes. A build job's few smelts waited behind it: the cleanup's 4 stone for its stone bricks, an
+ * hour behind 46 raw gold and then 124 raw iron (Nov 15). Between batches a job or the project goes first (furnaceTurn).
+ */
+export const ORE_BATCH = 16;
+
+/**
+ * Raw ore carried home, and something to burn carried or in the chests: the ore and how much, else undefined. Not only
+ * carried fuel: the smelt fetches coal for the batch from the chests and burns all of it, so a second batch waited
+ * for the half-hourly look at the furnace. Of the chests' fuel only the coal and charcoal, which it fetches for the
+ * whole batch: their logs came 8 at a time (pickFuel's last resort), cooked 12 of a batch of 16 and burnt the yard's
+ * building wood for ore. And only with a slot free to fetch it into: at 36/36 the take moves none, the run ends
+ * "nothing to smelt" and wants again at once, ahead of the stash (60) that would make the room.
+ */
+function oreWaiting(s: Snapshot, world: WorldMemory): { ore: string; n: number } | undefined {
+  const ore = Object.keys(ORES).find(o => (s.counts.get(o) ?? 0) > 0);
+  if (!ore) return undefined;
+  const stored = freeChestTotals(world);
+  const fetchable = s.slotsUsed < 36 && (stored.coal ?? 0) + (stored.charcoal ?? 0) > 0;
+  return fetchable || FUELS.some(f => (s.counts.get(f) ?? 0) > 0) ? { ore, n: s.counts.get(ore)! } : undefined;
+}
+
+/**
+ * The furnace's turn for a build job or the project between two ore batches: the last smelt run loaded a batch of ore
+ * and no smelt run has started since, more ore waits for the next (the smelt would take the furnace now: at home),
+ * and `ranAt` (the job's last run, the project's) came before that batch. On its turn it goes before the smelt
+ * (FURNACE_TURN), once: run since, it waits behind the next batch again. Not while a batch is under way (a run on its
+ * turn would stop it), nor after one that was stopped; nor away from home, where ore a trip mines is no batch's rest.
+ */
+export function furnaceTurn(s: Snapshot, world: WorldMemory, ranAt: number): boolean {
+  const batch = world.lastDone?.oreBatch;
+  return batch !== undefined && batch === world.lastDone?.furnace && ranAt < batch && awakeAtHome(s) && !!world.landmarks.furnace && !!oreWaiting(s, world);
+}
+
 /** Logs to burn into charcoal: when coal (carried and stored) is under 8 and it carries 10 or more of one kind. */
 function charcoalLogs(s: Snapshot, world: WorldMemory): { name: string; count: number } | undefined {
   const chest = chestTotals(world);
@@ -630,8 +665,8 @@ export const smelt: Goal = {
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
     if (!awakeAtHome(s) || !world.landmarks.furnace) return null;
-    const ore = Object.keys(ORES).find(o => (s.counts.get(o) ?? 0) > 0);
-    if (ore && FUELS.some(f => (s.counts.get(f) ?? 0) > 0)) return `${s.counts.get(ore)} ${ore} to smelt`;
+    const ore = oreWaiting(s, world);
+    if (ore) return `${ore.n} ${ore.ore} to smelt`;
     if (storedIronToSmelt(s, world) > 0) return `${storedIronToSmelt(s, world)} raw iron in the chests to smelt for the gear`;
     if (since(world, 'furnace', s.now) > 30 * MINUTE) return 'check the furnace for finished smelting';
     return charcoalLogs(s, world) ? 'low on coal: charcoal from logs' : null;
@@ -667,8 +702,10 @@ export const smelt: Goal = {
       }
     }
     for (const ore of Object.keys(ORES)) {
-      const n = ctx.s.counts.get(ore) ?? 0;
-      if (!n) continue;
+      const carried = ctx.s.counts.get(ore) ?? 0;
+      if (!carried) continue;
+      // a batch a run (ORE_BATCH), the rest next run: a build job's or the project's smelts get the furnace in between
+      const n = Math.min(carried, ORE_BATCH);
       // enough to cook all of it (coal from the chests when what is carried falls short: fuelFor)
       const fuel = await fuelFor(ctx, {}, n);
       if (!fuel) continue;
@@ -676,15 +713,22 @@ export const smelt: Goal = {
       // smelted means the ore went: a reply like "input slot is occupied" is no error, and counted as done it had
       // the bot "smelt" the same 7 raw copper every 5 seconds
       const left = (await ctx.call<{ items: { name: string; count: number }[] }>('inventory')).items.filter(i => i.name === ore).reduce((a, i) => a + i.count, 0);
-      if (left >= n) throw new Error(`could not smelt ${ore}: ${r.text.slice(0, 120)}`);
+      if (left >= carried) throw new Error(`could not smelt ${ore}: ${r.text.slice(0, 120)}`);
+      // the batch is in: the furnace's turn goes to a job or the project before the next one (furnaceTurn)
+      done(ctx.world, 'oreBatch', ctx.s.now);
       // into the furnace is not cooked: a fire gone out leaves the rest in it unlit (collectFurnace takes it back)
       const unlit = /ran out of fuel/.test(r.text) ? ` (${/^Smelted \d+/.exec(r.text)?.[0].replace('Smelted ', '') ?? 'none'} cooked: the fire went out)` : '';
-      did.push(r.ok ? `smelted ${n - left} ${ore}${unlit}` : `could not smelt ${ore}: ${r.text}`);
+      const rest = left ? `, ${left} for the next batch` : '';
+      did.push(r.ok ? `smelted ${carried - left} ${ore}${unlit}${rest}` : `could not smelt ${ore}: ${r.text}`);
       ctx.progress(did.at(-1)!);
+      break;
     }
     return did.join('; ') || 'nothing to smelt';
   }
 };
+
+/** The urgency of a build job or the project on its turn at the furnace (furnaceTurn): just above the smelt's. */
+export const FURNACE_TURN = smelt.priority + 0.5;
 
 // ------------------------------------------------------------------------------------------------ kit
 

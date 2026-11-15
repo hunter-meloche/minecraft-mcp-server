@@ -64,3 +64,42 @@ test('prepare: a big smelt goes a batch at a time, and no sand means sand is sho
   const noFuel = fakeBot({ sand: 10 });
   t.deepEqual(await prepare(noFuel.ctx, 'glass', 10), { coal: 2 });
 });
+
+test('prepare: the smelt goal\'s ore in the furnace comes back out, and a job\'s stone goes first (the cleanup\'s 4 stone found raw gold, then raw iron, in it for an hour, Nov 15)', async (t) => {
+  /** The fake bot with a furnace holding `held`: smelt-item refuses while it is there, as the tool's reply says. */
+  const busyFurnace = (held: { name: string; count: number }) => {
+    const bot = fakeBot({ cobblestone: 10, coal: 2 });
+    let input: { name: string; count: number } | null = held;
+    const calls: string[] = [];
+    const ctx = {
+      ...bot.ctx,
+      act: async (tool: string, a: Record<string, unknown>) => {
+        if (tool === 'smelt-item' && input) { bot.acts.push(`smelt-item refused (${input.name} in it)`); return { ok: true, text: `Furnace input slot is occupied by ${input.name}` }; }
+        return bot.ctx.act(tool, a);
+      },
+      call: async (m: string, a?: Record<string, unknown>) => {
+        if (m !== 'inventory') calls.push(m);
+        if (m === 'furnace.open') return { open: true, input, output: null, fuel: { name: 'coal', count: 1 }, lit: true };
+        if (m === 'furnace.take' && a?.slot === 'input' && input) {
+          const took = input;
+          input = null;
+          bot.inv.set(took.name, (bot.inv.get(took.name) ?? 0) + took.count);
+          return { took };
+        }
+        return bot.ctx.call(m);
+      }
+    } as unknown as GoalContext;
+    return { ...bot, ctx, calls };
+  };
+  const ore = busyFurnace({ name: 'raw_iron', count: 9 });
+  t.deepEqual(await prepare(ore.ctx, 'stone', 4), {});
+  t.is(ore.inv.get('stone'), 4);
+  t.deepEqual(ore.acts, ['smelt-item refused (raw_iron in it)', 'smelt-item cobblestone 4']);
+  t.deepEqual(ore.calls, ['furnace.open', 'furnace.take', 'container.close']);
+  // the ore back in the pockets, for the smelt goal's next batch
+  t.is(ore.inv.get('raw_iron'), 9);
+  // something else of somebody's (the hall's sand) is left where it is: the stone is still to come
+  const sand = busyFurnace({ name: 'sand', count: 12 });
+  t.deepEqual(await prepare(sand.ctx, 'stone', 4), { stone: 4 });
+  t.deepEqual(sand.calls, []);
+});

@@ -8,6 +8,7 @@ import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 import { smeltsPerFuel } from '../../tools/furnace-tools.js';
 import { clock } from './idlelog.js';
 import { makeRoom, noRoom, room } from './pockets.js';
+import { FURNACE_TURN, furnaceTurn } from './chores.js';
 
 /**
  * The project goal: works the next milestone of the long game, one step per slot of free daytime, so the bot keeps
@@ -19,6 +20,26 @@ const MINUTE = 60_000;
 export function projectGoal(tree: Milestone[]): Goal {
   // while a step runs it keeps the raised urgency: a stock trip for 1 cobblestone stopped the yard's leveling midway
   let running = false;
+  /**
+   * Short of something smelted (the windows' glass, a wall's stone: the rest of a batch, or the furnace was busy), its
+   * turn at the furnace between two ore batches (chores.ts furnaceTurn): it goes before the next batch, and keeps the
+   * turn while its step runs (the smelt, wanting the next batch, stopped it otherwise)
+   */
+  let turn = false;
+  /**
+   * The turn is only for a step that can smelt now: what it smelts from is there (no turn spent while the hall waits
+   * for its sand), and the milestone it would work is the one in hand that is short of it. One held by its wait had
+   * the next milestone's step run on the turn, ahead of the stash and the chores, with no use for the furnace
+   */
+  const atFurnace = (s: Snapshot, world: WorldMemory) => {
+    const p = world.progress;
+    const smelts = Object.keys(p?.need ?? {}).filter(k => SMELTED[k]);
+    if (!smelts.length || !p?.current || !furnaceTurn(s, world, world.lastDone?.project ?? 0)) return false;
+    const have = allItems(s, world);
+    if (!smelts.some(k => countOf(have, SMELTED[k]) > 0)) return false;
+    // (a look at the tree, as stuck's: one that cannot answer is no turn)
+    try { return look(tree, s, world).next?.id === p.current.id; } catch { return false; }
+  };
   /** Nowhere it could work from: no home, another dimension. */
   const off = (s: Snapshot): Decline | null =>
     (s.dimension !== 'overworld' || !s.home || !Number.isFinite(s.distHome) ? no.away(s, 'project', 64) : null);
@@ -50,7 +71,8 @@ export function projectGoal(tree: Milestone[]): Goal {
     // ahead of them, below food, kit and the stash (a whole day went by with the storage house never touched). Not
     // with a step that has come back short of materials twice running and is short still: that put a project that
     // could only come back short again ahead of the chores, the trips that fetch what it waits for among them (stuck)
-    urgency: (s, world) => (running ? 39 : stuck(tree, s, world) ? 28 : s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 39 : 28),
+    urgency: (s, world) => (running ? (turn ? FURNACE_TURN : 39) : atFurnace(s, world) ? FURNACE_TURN : stuck(tree, s, world) ? 28
+      : s.now - (world.lastDone?.project ?? 0) > 4 * MINUTE ? 39 : 28),
     timeoutMs: 9 * MINUTE,
     retryMs: 2 * MINUTE,
     gate,
@@ -74,10 +96,11 @@ export function projectGoal(tree: Milestone[]): Goal {
     // a step that ends where it began (short of something, waiting) is busy time to no gain
     gains: true,
     run: async ctx => {
+      turn = atFurnace(ctx.s, ctx.world);
       running = true;
       // a slot free first (home to the chests where there is none): the step is then chosen and counted from the bot
       // as it is after that, before anything is written down
-      try { return await runStep({ ...ctx, s: await makeRoom(ctx, 'project') }); } finally { running = false; }
+      try { return await runStep({ ...ctx, s: await makeRoom(ctx, 'project') }); } finally { running = false; turn = false; }
     }
   };
 
@@ -359,7 +382,12 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
       const k = Math.min(ore, want, SMELT_BATCH);
       // fuel the bill places (its logs, its planks) burns only beyond what the bill needs
       const fuelCount = reserve[fuel] ? Math.max(1, (await count(ctx, x => x === fuel)) - reserve[fuel]) : undefined;
-      await ctx.act('smelt-item', { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, ...(fuelCount ? { fuelCount } : {}), takeOutput: true, timeoutMs: k * 10_500 + 15_000 });
+      const args = { ...ctx.world.landmarks.furnace, inputItem: raw, inputCount: k, fuelItem: fuel, ...(fuelCount ? { fuelCount } : {}), takeOutput: true, timeoutMs: k * 10_500 + 15_000 };
+      const r = await ctx.act('smelt-item', args);
+      // the smelt goal's ore in the furnace (a batch stopped midway, or one gone out): a job's, the project's or a
+      // milestone's few go first, and the ore back in the pockets for its next batch. The cleanup's 4 stone found
+      // the furnace full of raw gold, then raw iron, run after run for an hour (Nov 15)
+      if (RAW_ORE_IN.test(r.text) && await oreOut(ctx)) await ctx.act('smelt-item', args);
       have = await counted();
       if (have >= n) return {};
       return { [item]: n - have };
@@ -395,6 +423,23 @@ export const SMELTED: Record<string, string> = {
 };
 /** Most to smelt in one go (about 4 minutes at the furnace): a bigger bill is smelted over several runs. */
 export const SMELT_BATCH = 24;
+/** smelt-item's reply when the furnace holds raw ore (the smelt goal's, chores.ts) where something else is to go in. */
+const RAW_ORE_IN = /^Furnace input slot is occupied by raw_(iron|gold|copper)$/;
+
+/** Take the raw ore out of the home furnace's input (the bot stands at it after smelt-item); whether it came out. */
+async function oreOut(ctx: GoalContext): Promise<boolean> {
+  type Slot = { name: string; count: number } | null;
+  try {
+    const f = await ctx.call<{ input: Slot }>('furnace.open', { ...ctx.world.landmarks.furnace! });
+    if (!f.input || !/^raw_(iron|gold|copper)$/.test(f.input.name)) return false;
+    const r = await ctx.call<{ took: Slot }>('furnace.take', { slot: 'input' });
+    return !!r.took;
+  } catch {
+    return false;
+  } finally {
+    await ctx.call('container.close').catch(() => undefined);
+  }
+}
 const FUEL = /^(coal|charcoal|(?!stripped_)[a-z_]+_log|[a-z_]+_planks)$/;
 
 /**

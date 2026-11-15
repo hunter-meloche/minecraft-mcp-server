@@ -11,6 +11,7 @@ import { Voxels, type P } from './terraslicer/world.js';
 import { slice } from './terraslicer/slicer.js';
 import { haveFor, provisionStep, release, reserve, toolpathBill, toolsFor } from './terraslicer/provision.js';
 import { runLoad } from './terraslicer/executor.js';
+import { FURNACE_TURN, furnaceTurn } from '../brain/chores.js';
 
 /**
  * Build jobs: the LLM asks for a structure (structure-apply) and the brain works on it at priority 3.5, below staying
@@ -258,14 +259,38 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
     }
     return late ?? { want: `${j.mode} ${j.structure}${j.note ? `: ${j.note}` : ''}` };
   };
+  /**
+   * The run on its turn at the furnace keeps it to the end (`turn`), and a run counts as the job's from its start
+   * (`turnAt`). The stamp went first in a run: a new job's "levelling the site", then 8 min of level-area, was back at
+   * 44 five seconds in, the smelt for the next batch stopped it, and so after every batch; a run that ends unstamped
+   * (cells out of sight) kept the turn and went ahead of the smelt run after run
+   */
+  let turn = false;
+  let turnAt = 0;
+  // securing its bill (one kind made or smelted a run), its turn at the furnace between two ore batches comes before
+  // the next batch (chores.ts furnaceTurn): the cleanup's 4 stone waited an hour behind 46 raw gold and 124 raw iron
+  // (Nov 15). The job the gate looks at
+  const onTurn = (s: Snapshot, world: WorldMemory) => {
+    const j = (world.buildJobs ?? []).find(x => !DONE.has(x.status) && (x.retryAt ?? 0) <= s.now);
+    return !!j && (!j.phase || j.phase === 'provisioning') && furnaceTurn(s, world, Math.max(j.updatedAt, turnAt));
+  };
   return {
     name: 'build',
     priority: BUILD_PRIORITY,
+    urgency: (s, world) => (turn || onTurn(s, world) ? FURNACE_TURN : BUILD_PRIORITY),
     timeoutMs: 10 * MINUTE,
     retryMs: MINUTE,
     gate,
     ...fromGate(gate),
     run: async run => {
+      turn = onTurn(run.s, run.world);
+      turnAt = run.s.now;
+      try { return await work(run); } finally { turn = false; }
+    }
+  };
+
+  /** A run of the job the gate looks at. */
+  async function work(run: GoalContext): Promise<string> {
       const job = activeJob(run.world, run.s.now);
       if (!job) return 'no build job';
       // a slot free first (home to the chests where there is none), and the job goes on from where the bot stands
@@ -322,8 +347,7 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
         return `${job.structure} complete${left}`;
       };
       return terraslice(ctx, job, c, changes, new Set(st0.tidy!.keep), stamp, finish, protect, built);
-    }
-  };
+  }
 }
 
 /**

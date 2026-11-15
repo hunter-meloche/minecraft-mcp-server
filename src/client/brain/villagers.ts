@@ -205,30 +205,38 @@ async function bedsFor(ctx: GoalContext, st: MilestoneState): Promise<StepResult
  * (prepare); undefined when it is. Short, it names the sand still to fetch, a glass a sand: prepare smelts the sand
  * there is and names the glass still to come, and no stock row fetches glass (with the live 3 sand, Nov 15, it said
  * "short of 1 glass" and nobody went). Sand there and none of it smelted (the furnace busy with ore, the smelt refused)
- * is no trip's: it says so and waits.
+ * is no trip's: it says so and waits. `glass`: how much is still to be smelted, whatever holds it up (together).
  */
-async function glassFor(ctx: GoalContext, want = HALL_GLASS): Promise<StepResult | undefined> {
-  if (!want || ((await haveNow(ctx)).glass ?? 0) >= want) return undefined;
+async function glassFor(ctx: GoalContext, want = HALL_GLASS): Promise<(StepResult & { glass?: number }) | undefined> {
+  const had = (await haveNow(ctx)).glass ?? 0;
+  if (!want || had >= want) return undefined;
   const short = await prepare(ctx, 'glass', want);
   if (!Object.keys(short).length) return undefined;
+  // (none smelted when it came back short of the sand or the coal)
+  const glass = short.glass ?? want - had;
   if (short.glass) {
     const sand = Math.max(0, short.glass - ((await haveNow(ctx)).sand ?? 0));
     delete short.glass;
     if (sand) short.sand = (short.sand ?? 0) + sand;
-    else if (!Object.keys(short).length) return blocked('the windows\' glass: the furnace smelted none of the sand there (busy with something else?)', 10 * MINUTE);
+    else if (!Object.keys(short).length) return { ...blocked('the windows\' glass: the furnace smelted none of the sand there (busy with something else?)', 10 * MINUTE), glass };
   }
-  return shortOf(`the windows' glass: short of ${list(short)}`, short);
+  return { ...shortOf(`the windows' glass: short of ${list(short)}`, short), glass };
 }
 
 /**
  * What is still short, as one result: the parts' shortfalls together, written where the stock trips read them
  * (progress.need, as prepareBill and the build step write it; a step's own `need` only times its wait). Not written,
- * nothing ever went for the windows' sand: the hall waited at its glass for good.
+ * nothing ever went for the windows' sand: the hall waited at its glass for good. The glass still to smelt is written
+ * there too (no stock row fetches it), not in the step's `need`, so the wait still ends when the sand is in: it is
+ * the hall's turn at the furnace between two ore batches (project.ts atFurnace). Only sand or nothing named there,
+ * the hall's 4 glass waited behind every batch of ore.
  */
-function together(ctx: GoalContext, left: StepResult[]): StepResult {
+function together(ctx: GoalContext, left: (StepResult & { glass?: number })[]): StepResult {
   const need: Record<string, number> = {};
   for (const r of left) if (r.status === 'blocked') for (const [k, v] of Object.entries(r.need ?? {})) need[k] = (need[k] ?? 0) + v;
-  progressOf(ctx.world).need = Object.keys(need).length ? need : undefined;
+  const glass = left.reduce((a, r) => a + (r.glass ?? 0), 0);
+  const written = glass ? { ...need, glass } : need;
+  progressOf(ctx.world).need = Object.keys(written).length ? written : undefined;
   const text = left.map(r => r.text).join('; ');
   const retryMs = Math.max(...left.map(r => (r.status === 'blocked' ? r.retryMs ?? 0 : 0)));
   return Object.keys(need).length ? { status: 'blocked', text, retryMs, need } : blocked(text, retryMs || 10 * MINUTE);

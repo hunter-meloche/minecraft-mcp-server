@@ -836,6 +836,78 @@ test('smelt: ore with 2 planks carried fetches coal for it, and burns that', asy
     progress: () => undefined
   };
   await smelt.run(ctx as never);
-  t.like(acts.find(([n]) => n === 'take-from-chest')?.[1], { item: 'coal', count: 6 });
-  t.like(acts.find(([n]) => n === 'smelt-item')?.[1], { inputItem: 'raw_gold', fuelItem: 'coal' });
+  // the coal for the batch it loads (a batch of 16 at a time, ORE_BATCH: 2 coal), not for all 46 at once
+  t.like(acts.find(([n]) => n === 'take-from-chest')?.[1], { item: 'coal', count: 2 });
+  t.like(acts.find(([n]) => n === 'smelt-item')?.[1], { inputItem: 'raw_gold', inputCount: 16, fuelItem: 'coal' });
+});
+
+test('smelt: ore a batch of 16 a run, the rest next run; between two batches the furnace\'s turn goes to a build job or the project (the cleanup\'s 4 stone waited an hour behind 46 raw gold and 124 raw iron, Nov 15)', async (t) => {
+  const { furnaceTurn, ORE_BATCH } = await import('../../src/client/brain/chores.js');
+  const items = [{ slot: 9, name: 'raw_iron', count: 40 }, { slot: 10, name: 'coal', count: 5 }];
+  const s = snap(items);
+  const w = world({ lastDone: { furnace: s.now - 60_000 } });
+  const acts: [string, Record<string, unknown>][] = [];
+  const ctx = {
+    s, world: w, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown>) => {
+      acts.push([tool, a]);
+      if (tool === 'smelt-item') items[0].count -= Number(a.inputCount);
+      return { ok: true, text: `Smelted ${a.inputCount} iron_ingot` };
+    },
+    call: (async (m: string) => {
+      if (m === 'inventory') return { items };
+      if (m === 'furnace.open') return { open: true, output: null, input: null, lit: false };
+      return {};
+    }) as never,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined
+  };
+  t.is(await smelt.run(ctx as never), 'smelted 16 raw_iron, 24 for the next batch');
+  t.deepEqual(acts.filter(([n]) => n === 'smelt-item').map(([, a]) => a.inputCount), [ORE_BATCH]);
+  // the rest is the next run's
+  const after = snap(items, { now: s.now + 3 * 60_000 });
+  t.is(smelt.wants(after, w), '24 raw_iron to smelt');
+  // the turn: a job (or the project) that last ran before the batch has it, one that has run since has not
+  t.true(furnaceTurn(after, w, s.now - 1));
+  t.false(furnaceTurn(after, w, s.now + 60_000));
+  // not while the next batch is under way (a smelt run started since: a run on its turn would stop that batch)
+  t.false(furnaceTurn(after, { ...w, lastDone: { ...w.lastDone, furnace: after.now } }, s.now - 1));
+  // nor with the ore all smelted: nothing to go before; nor away from home (ore a trip mines down the mine is no
+  // batch's rest, and the job on a turn would cut that trip short)
+  t.false(furnaceTurn(snap([{ slot: 10, name: 'coal', count: 5 }], { now: after.now }), w, s.now - 1));
+  t.false(furnaceTurn(snap(items, { now: after.now, position: { x: 0, y: 12, z: 0 }, distHome: 52 }), w, s.now - 1));
+  // nor after a batch that never went in (refused): no batch stamped
+  const refused = world({ lastDone: { furnace: s.now - 60_000 } });
+  const busy = { ...ctx, s: snap(items), world: refused, act: async () => ({ ok: true, text: 'Furnace input slot is occupied by sand' }) };
+  await t.throwsAsync(smelt.run(busy as never), { message: /could not smelt raw_iron/ });
+  t.false(furnaceTurn(after, refused, s.now - 1));
+});
+
+test('smelt: ore carried and the coal in the chests is a batch to smelt (the coal it fetches for a batch all burns: the next waited for the half-hourly look)', (t) => {
+  const s = snap([{ slot: 0, name: 'raw_iron', count: 24 }]);
+  const w = world({ lastDone: { furnace: s.now - 60_000 }, chestItems: { '1,64,0': { coal: 40 } } });
+  t.is(smelt.wants(s, w), '24 raw_iron to smelt');
+  // coal a build job holds in the chests is not there to burn
+  t.is(smelt.wants(s, { ...w, reserved: { 3: { coal: 40 } } }), null);
+});
+
+test('smelt: ore carried and no fuel carried wants only the chests\' coal or charcoal, with a slot free to fetch it into (at 36/36 it took none, said "nothing to smelt" and wanted again, ahead of the stash; their logs cooked 12 of 16)', async (t) => {
+  const { furnaceTurn } = await import('../../src/client/brain/chores.js');
+  const now = 10 * 60 * 60_000;
+  const coal = world({ lastDone: { furnace: now - 60_000 }, chestItems: { '1,64,0': { coal: 40 } } });
+  // home from a deep trip, the pockets full: the stash goes first, and makes the room
+  const full = snap([{ slot: 0, name: 'raw_iron', count: 40 }, ...Array.from({ length: 35 }, (_, i) => ({ slot: 1 + i, name: 'cobblestone', count: 64 }))]);
+  t.is(full.slotsUsed, 36);
+  t.is(smelt.wants(full, coal), null);
+  t.false(furnaceTurn(full, { ...coal, lastDone: { furnace: now - 60_000, oreBatch: now - 60_000 } }, 0));
+  // a slot free: the coal fetched for the batch
+  const room = snap([{ slot: 0, name: 'raw_iron', count: 40 }, ...Array.from({ length: 34 }, (_, i) => ({ slot: 1 + i, name: 'cobblestone', count: 64 }))]);
+  t.is(smelt.wants(room, coal), '40 raw_iron to smelt');
+  // charcoal will do; the yard's logs and planks are no fuel to fetch for ore
+  t.is(smelt.wants(room, world({ lastDone: { furnace: now - 60_000 }, chestItems: { '1,64,0': { charcoal: 3 } } })), '40 raw_iron to smelt');
+  t.is(smelt.wants(room, world({ lastDone: { furnace: now - 60_000 }, chestItems: { '1,64,0': { oak_log: 64, birch_planks: 40 } } })), null);
+  // carried fuel, full or not, as ever
+  const withCoal = snap([{ slot: 0, name: 'raw_iron', count: 40 }, { slot: 1, name: 'coal', count: 5 }, ...Array.from({ length: 34 }, (_, i) => ({ slot: 2 + i, name: 'cobblestone', count: 64 }))]);
+  t.is(withCoal.slotsUsed, 36);
+  t.is(smelt.wants(withCoal, world({ lastDone: { furnace: now - 60_000 } })), '40 raw_iron to smelt');
 });

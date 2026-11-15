@@ -529,3 +529,46 @@ test('an old brain.json with blockedUntil and no blocked: its wait runs as writt
     t.true((w.progress?.blockedUntil?.room ?? 0) > T + 12 * MIN, said);
   }
 });
+
+test('the project short of something smelted takes the furnace\'s turn between two ore batches, and keeps it while its step runs: with what it smelts from there, for the milestone in hand', async (t) => {
+  const { FURNACE_TURN } = await import('../../src/client/brain/chores.js');
+  const during: number[] = [];
+  const ran: string[] = [];
+  const goal = projectGoal([
+    { id: 'hall', title: 'hall', prereqs: [], steps: [{ name: 'glass', run: async (ctx) => {
+      ran.push('hall');
+      during.push(goal.urgency!(ctx.s, ctx.world));
+      return { status: 'blocked', text: 'short of 4 sand', need: { sand: 4 } };
+    } }] },
+    { id: 'anvil', title: 'anvil', prereqs: [], steps: [{ name: 'iron', run: async () => { ran.push('anvil'); return { status: 'progress', text: 'iron' }; } }] }
+  ]);
+  const ore: [string, number][] = [['raw_iron', 40], ['coal', 8]];
+  // the hall's glass came back short of its sand at T, the glass still to smelt written with it (villagers.ts
+  // together); the smelt loaded a batch of ore at T + 2 min
+  const at = (need: Record<string, number>, sand: number): WorldMemory => ({
+    ...world(), landmarks: { chests: [{ x: 1, y: 64, z: 1 }], farmland: [], furnace: { x: -1, y: 64, z: 0 } }, chestItems: { '1,64,1': sand ? { sand } : {} },
+    lastDone: { project: T, furnace: T + 2 * MIN, oreBatch: T + 2 * MIN }, progress: { done: [], journal: [], current: { id: 'hall', step: 0, data: {} }, need }
+  });
+  const s = snap(ore, { now: T + 5 * MIN });
+  // the sand still to fetch: no turn, it could smelt nothing
+  t.is(goal.urgency!(s, at({ sand: 4, glass: 4 }, 0)), 39);
+  // the trip brought it home and served the sand (chores.ts stock): the glass is left, and it is the hall's turn
+  const w = at({ glass: 4 }, 4);
+  t.is(goal.urgency!(s, w), FURNACE_TURN);
+  await goal.run(ctxFor(w, s));
+  // its step ran on the turn, not cut short by the smelt for the next batch
+  t.deepEqual(ran, ['hall']);
+  t.deepEqual(during, [FURNACE_TURN]);
+  // run since the batch: behind the next one again, as before
+  t.is(goal.urgency!(snap(ore, { now: T + 6 * MIN }), w), 28);
+  // the hall held by a wait of its own (the furnace smelted none of its sand: 10 min) is no turn for the milestone
+  // that would run instead: the anvil's step ran on it, ahead of the stash and the chores, with no use for the furnace
+  const held = at({ glass: 4 }, 4);
+  held.progress!.blockedUntil = { hall: T + 15 * MIN };
+  t.is(goal.urgency!(s, held), 39);
+  held.progress!.blockedUntil = { hall: T + 4 * MIN };
+  t.is(goal.urgency!(s, held), FURNACE_TURN);
+  // short of nothing smelted, or no ore waiting: as before
+  t.is(goal.urgency!(s, at({ leather: 3 }, 4)), 39);
+  t.is(goal.urgency!(snap([['coal', 8]], { now: T + 5 * MIN }), at({ glass: 4 }, 4)), 39);
+});
