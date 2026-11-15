@@ -136,3 +136,27 @@ test('an empty spare chest is lent to a full category before building another', 
   t.deepEqual(r.short, ['ores']);
   t.deepEqual(giveChests({ a: 'gear', c: 'stone' }, { a: {}, c: {} }, ['gear']).short, ['gear']); // stone's only chest
 });
+
+test('the Nether\'s things (P3a: the barter\'s and the quartz) have chests of their own kinds, not the misc chest', (t) => {
+  const cases: Record<string, string> = {
+    // the barter's targets
+    potion: 'gear', splash_potion: 'gear', lingering_potion: 'gear', soul_sand: 'stone', leather: 'mobdrops', obsidian: 'stone', ender_pearl: 'mobdrops', quartz: 'ores',
+    // the rest of its loot
+    crying_obsidian: 'stone', fire_charge: 'gear', spectral_arrow: 'mobdrops', nether_brick: 'stone', gravel: 'stone', blackstone: 'stone', iron_nugget: 'ores',
+    string: 'mobdrops', dried_ghast: 'mobdrops', enchanted_book: 'gear', iron_boots: 'gear',
+    // the ground down there, the ore to a silk touch pickaxe
+    soul_soil: 'stone', netherrack: 'stone', nether_quartz_ore: 'ores', nether_bricks: 'stone'
+  };
+  for (const [item, cat] of Object.entries(cases)) t.is(categoryOf(item) as string, cat, item);
+  // a barter trip's haul at home: each kind to its own category's chest, none to misc
+  const assign = { [K(0)]: 'gear', [K(1)]: 'stone', [K(2)]: 'mobdrops', [K(3)]: 'ores', [K(4)]: 'misc' };
+  const haul = ['potion', 'soul_sand', 'obsidian', 'crying_obsidian', 'fire_charge', 'spectral_arrow', 'nether_brick', 'ender_pearl', 'quartz', 'blackstone']
+    .map((name, slot) => ({ slot, name, count: name === 'potion' ? 1 : 8 }));
+  const plan = depositPlan(haul, new Set(), assign);
+  t.deepEqual(plan.full, []);
+  t.false(plan.moves.some(m => m.chest === K(4)), 'nothing in the misc chest');
+  t.deepEqual(Object.fromEntries(plan.moves.map(m => [m.name, assign[m.chest]])), {
+    potion: 'gear', soul_sand: 'stone', obsidian: 'stone', crying_obsidian: 'stone', fire_charge: 'gear', spectral_arrow: 'mobdrops', nether_brick: 'stone',
+    ender_pearl: 'mobdrops', quartz: 'ores', blackstone: 'stone'
+  });
+});

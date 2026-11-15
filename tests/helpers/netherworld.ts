@@ -2,7 +2,9 @@
  * The two dimensions as the bridge and the tools answer for them, for the Nether trips' tests (nethersetup.test.ts,
  * netherramp.test.ts): the live yard with the home portal lit, the Nether round home's scaled point (netherrack, a
  * cliff, a lava pool, the community's stone-brick room round their portal), the server's rule for where a portal
- * leads, chests by their totals, digging, placing and lighting.
+ * leads, chests by their totals, digging, placing and lighting; and for the barter (netherbarter.test.ts) the mobs down
+ * there, the items lying, a toss, a right click, a piglin's admiring and what it throws; and for the quartz
+ * (netherquartz.test.ts) what a dug quartz ore drops, where it comes to rest.
  */
 import type { InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
@@ -95,6 +97,15 @@ export const stackSize = (n: string) => (/_(pickaxe|sword|helmet|chestplate|legg
 export type Dim = typeof OVERWORLD | typeof NETHER;
 export interface Lit extends PortalShape { dim: Dim }
 
+/** A mob down there as the bridge's world.entities reports it: where its feet are, and what the barter reads of it. */
+export interface Mob {
+  id: number; name: string; position: Pos; baby?: boolean; aggressive?: boolean; offhand?: string; mainhand?: string; buildDistance?: number; foreign?: boolean;
+}
+/** What a piglin throws for a gold ingot, one barter's (a potion by its contents). */
+export interface Loot { name: string; count: number; potion?: string }
+/** An item lying down there (`toss`: one the bot threw). */
+export interface Drop { id: number; item: string; count: number; potion?: string; position: Pos; from?: 'toss' }
+
 /**
  * Both dimensions as the bridge and the tools answer for them: blocks (a world's ground and what was dug or placed
  * over it), the lit portals and the server's rule for where each leads (nether.ts linkedTo: 16 round the scaled point
@@ -105,6 +116,20 @@ export function game(world: WorldMemory, opts: {
   closed?: boolean; stranger?: PortalShape; items?: InventoryItem[]; after?: { changed: { dim: Dim; at: Pos; to: string }[]; lit: Lit[] }; now?: number;
   /** the Nether's zones as the bridge's scan has them (default: the community's room) */
   zones?: NetherZone[];
+  /** the mobs down there (P3a's barter: piglins, hoglins, ghasts) */
+  mobs?: Mob[];
+  /** what each barter throws, in turn (round again after the last; default 4 soul sand) */
+  loot?: Loot[];
+  /** the server's mobGriefing: off, no piglin picks up a thrown ingot (a right click still gives one) */
+  griefing?: boolean;
+  /** the looks (world.entities asked) a piglin admires its gold for (the game's 6 s) */
+  admireLooks?: number;
+  /** where the loot comes down: halfway to the bot (default), or 2 to the side of the piglin */
+  lootAt?: 'between' | 'side';
+  /** called at every world.entities before it answers, with how many there were (a test hurts the bot, turns a piglin, brings a hoglin) */
+  onLook?: (n: number) => void;
+  /** the quartz each nether_quartz_ore dug down there drops (the pickaxe's fortune: 2 by default) */
+  quartz?: number;
 } = {}) {
   const did: string[] = [];
   const said: string[] = [];
@@ -117,7 +142,7 @@ export function game(world: WorldMemory, opts: {
   // the Nether as an earlier trip left it: what it dug and built there, the portal it lit
   for (const c of opts.after?.changed ?? []) over[c.dim].set(k(c.at), c.to);
   for (const l of opts.after?.lit ?? []) if (l.dim === NETHER && !lit.some(x => x.dim === l.dim && x.x === l.x && x.y === l.y && x.z === l.z)) lit.push({ ...l });
-  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword' };
+  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20 };
   const own: { dimension: string; x: number; y: number; z: number }[] = [];
   const inPortal = (dim: Dim, p: Pos) => lit.find(l => l.dim === dim && portalCells(l).some(c => c.x === p.x && c.y === p.y && c.z === p.z));
   const get = (dim: Dim, p: Pos): string => (inPortal(dim, p) ? 'nether_portal' : over[dim].get(k(p)) ?? ground[dim](p));
@@ -142,6 +167,63 @@ export function game(world: WorldMemory, opts: {
     if (x.count <= 0) inv.splice(inv.indexOf(x), 1);
     return true;
   };
+  // ---- the barter down there: the mobs, the items lying, a piglin's admiring and what it throws, the bot's pickup
+  const mobs: Mob[] = (opts.mobs ?? []).map(m => ({ ...m, position: { ...m.position } }));
+  const drops: Drop[] = [];
+  const admire = new Map<number, number>();
+  const lootPlan = opts.loot ?? [{ name: 'soul_sand', count: 4 }];
+  let nextId = 5000, looks = 0, barters = 0;
+  const flat = (a: Pos, b: Pos) => Math.hypot(a.x - b.x, a.z - b.z);
+  // (the game's pickup box: the player's grown by 1 across and half a block up and down, against the item's 0.25)
+  const pickup = () => {
+    for (const d of [...drops]) {
+      if (state.dim !== NETHER || flat(d.position, state.pos) > 1.3 || d.position.y + 0.25 < state.pos.y - 0.5 || d.position.y > state.pos.y + 2.3) continue;
+      drops.splice(drops.indexOf(d), 1);
+      if (d.potion) inv.push({ slot: pocket(), name: d.item, count: d.count, potion: d.potion });
+      else give(d.item, d.count);
+      did.push(`picked up ${d.count} ${d.item}`);
+    }
+  };
+  const tick = () => {
+    looks++;
+    opts.onLook?.(looks);
+    // the admiring runs out: the off hand empty, the loot thrown toward the bot
+    for (const [id, n] of [...admire]) {
+      const m = mobs.find(x => x.id === id);
+      if (!m) { admire.delete(id); continue; }
+      if (n > 1) { admire.set(id, n - 1); continue; }
+      admire.delete(id);
+      delete m.offhand;
+      const l = lootPlan[barters++ % lootPlan.length];
+      const dx = state.pos.x - m.position.x, dz = state.pos.z - m.position.z, d = Math.hypot(dx, dz) || 1;
+      const at = opts.lootAt === 'side' ? { x: m.position.x - dz / d * 2, y: m.position.y, z: m.position.z + dx / d * 2 } : { x: m.position.x + dx / 2, y: m.position.y, z: m.position.z + dz / 2 };
+      drops.push({ id: nextId++, item: l.name, count: l.count, ...(l.potion ? { potion: l.potion } : {}), position: at });
+      did.push(`piglin #${id} threw ${l.count} ${l.name}${l.potion ? ` of ${l.potion}` : ''}`);
+    }
+    // a thrown ingot picked up by the piglin nearest it within its reach, holding nothing (a baby keeps it)
+    if (opts.griefing !== false) {
+      for (const d of drops.filter(x => x.from === 'toss')) {
+        const m = mobs.filter(x => x.name === 'piglin' && !x.offhand && flat(x.position, d.position) <= 1.2 && Math.abs(x.position.y - d.position.y) < 1.5)
+          .sort((a, b) => flat(a.position, d.position) - flat(b.position, d.position))[0];
+        if (!m) continue;
+        drops.splice(drops.indexOf(d), 1);
+        m.offhand = 'gold_ingot';
+        if (!m.baby) admire.set(m.id, opts.admireLooks ?? 3);
+        did.push(`piglin #${m.id} took the gold`);
+      }
+    }
+    pickup();
+  };
+  const seenMob = (m: Mob) => ({
+    id: m.id, name: m.name, category: 'monster', position: { ...m.position }, distance: Math.hypot(m.position.x - state.pos.x, m.position.y - state.pos.y, m.position.z - state.pos.z),
+    height: 1.95, health: 16, baby: !!m.baby, aggressive: !!m.aggressive,
+    ...(m.mainhand ? { mainhand: m.mainhand } : {}), ...(m.offhand ? { offhand: m.offhand } : {}), ...(m.name === 'piglin' ? { admiring: /gold/.test(m.offhand ?? '') } : {}),
+    ...(m.foreign ? { foreign: true } : {}), ...(m.buildDistance !== undefined ? { buildDistance: m.buildDistance } : {})
+  });
+  const seenDrop = (d: Drop) => ({
+    id: d.id, name: 'item', category: 'misc', position: { ...d.position }, distance: Math.hypot(d.position.x - state.pos.x, d.position.y - state.pos.y, d.position.z - state.pos.z),
+    height: 0.25, item: d.item, count: d.count
+  });
   const holds = (key: string) => `It holds: ${(chests.get(key) ?? []).map(s => `${s.name} x${s.count}`).join(', ') || 'nothing'}; 30/54 slots free.`;
   const feet = () => ({ x: Math.floor(state.pos.x), y: Math.floor(state.pos.y), z: Math.floor(state.pos.z) });
   const eye = () => ({ x: state.pos.x, y: state.pos.y + 1.62, z: state.pos.z });
@@ -182,7 +264,7 @@ export function game(world: WorldMemory, opts: {
   const ctx = {
     s: lookAt(inv, 1000, { now: opts.now ?? T0 }), world, signal: new AbortController().signal, gain: () => undefined,
     progress: (x: string) => { said.push(x); },
-    status: async () => ({ inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: 20, food: 20, timeOfDay: 1000 }),
+    status: async () => ({ inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: state.health, food: 20, timeOfDay: 1000 }),
     call: async (m: string, p: Record<string, unknown> = {}) => {
       const at = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
       if (m === 'inventory') return { items: inv.map(i => ({ ...i })), held: { name: state.held, count: 1 } };
@@ -208,6 +290,43 @@ export function game(world: WorldMemory, opts: {
         const theirs = lit.filter(l => l.dim === state.dim && l !== lit[0] && !own.some(o => o.dimension === l.dim && portalCells(l).some(c => Math.abs(c.x - o.x) <= 1 && Math.abs(c.y - o.y) <= 1 && Math.abs(c.z - o.z) <= 1)));
         return { dimension: state.dim, portals: theirs.map(shape) };
       }
+      if (m === 'world.entities') {
+        tick();
+        const range = Number(p.maxDistance ?? 32);
+        if (state.dim !== NETHER) return { entities: [] };
+        const all = [...mobs.map(seenMob), ...drops.map(seenDrop)].filter(e => e.distance <= range && (p.type === undefined || e.name === p.type));
+        return { entities: all.sort((a, b) => a.distance - b.distance) };
+      }
+      if (m === 'item.toss') {
+        const name = String(p.name);
+        const to = p.toward as Pos;
+        if (!inv.some(i => i.slot < 36 && i.name === name)) throw new Error(`no ${name} in inventory`);
+        const off = flat(to, state.pos);
+        if (off > 4.25) throw new Error(`no throw rests by the point, ${off.toFixed(2)} blocks off along the ground: the nearest rests 3.75 out (stand 1 to 4 from it)`);
+        const c = { x: Math.floor(to.x), y: Math.floor(to.y), z: Math.floor(to.z) };
+        for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const dy of [-1, 0]) {
+          const b = get(state.dim, { x: c.x + dx, y: c.y + dy, z: c.z + dz });
+          if (/^lava/.test(b)) throw new Error(`the throw might come to rest by lava at (${c.x + dx}, ${c.y + dy}, ${c.z + dz})`);
+        }
+        takeOne(name);
+        drops.push({ id: nextId++, item: name, count: 1, position: { x: to.x, y: to.y, z: to.z }, from: 'toss' });
+        did.push(`toss ${name} -> ${fmt(c)} from ${fmt(feet())}`);
+        return { tossed: 1, item: name, landed: [{ ...to, fromTarget: 0 }] };
+      }
+      if (m === 'entity.use') {
+        const mob = mobs.find(x => x.id === Number(p.id));
+        if (!mob) throw new Error(`no entity with id ${p.id} nearby`);
+        const reach = Math.hypot(mob.position.x - state.pos.x, mob.position.y + 1 - (state.pos.y + 1.62), mob.position.z - state.pos.z);
+        if (reach > 4.5) throw new Error(`too far: ${reach.toFixed(2)} blocks to the ${mob.name} (max 4.5)`);
+        if (p.item) state.held = String(p.item);
+        if (mob.name === 'piglin' && !mob.baby && !mob.offhand && p.item === 'gold_ingot' && takeOne('gold_ingot')) {
+          mob.offhand = 'gold_ingot';
+          admire.set(mob.id, opts.admireLooks ?? 3);
+          did.push(`hand gold_ingot to piglin #${mob.id}`);
+          return { result: 'Success', success: true, hand: 'main', entity: mob.name, id: mob.id };
+        }
+        return { result: 'Pass', success: false, hand: null, entity: mob.name, id: mob.id };
+      }
       if (m === 'goto') {
         walks.push({ dim: state.dim, to: at, careful: !!p.careful });
         // (GoalNear: a standing cell within the range will do)
@@ -217,6 +336,7 @@ export function game(world: WorldMemory, opts: {
         const to = state.dim === OVERWORLD ? at : near.filter(c => standing(NETHER, c)).sort((a, b) => Math.hypot(a.x - at.x, a.y - at.y, a.z - at.z) - Math.hypot(b.x - at.x, b.y - at.y, b.z - at.z))[0];
         if (!to) return { arrived: false, at: feet() };
         state.pos = { x: to.x + 0.5, y: to.y, z: to.z + 0.5 };
+        pickup();
         return { arrived: true, at: to };
       }
       if (m === 'dig.here') {
@@ -225,6 +345,12 @@ export function game(world: WorldMemory, opts: {
         if (reach(at) > 5) return { dug: false, reason: 'out of reach or out of sight', block: b };
         set(state.dim, at, 'air', `dug from ${fmt(feet())}`);
         did.push(`dig ${name(b)} ${fmt(at)}`);
+        // a quartz ore's quartz: down through the open cells under it to the first floor, in the middle of its column
+        if (name(b) === 'nether_quartz_ore' && state.dim === NETHER && (opts.quartz ?? 2) > 0) {
+          let y = at.y;
+          while (y > 1 && !solid(get(state.dim, { x: at.x, y: y - 1, z: at.z }))) y--;
+          drops.push({ id: nextId++, item: 'quartz', count: opts.quartz ?? 2, position: { x: at.x + 0.5, y, z: at.z + 0.5 } });
+        }
         return { dug: true, block: b };
       }
       return {};
@@ -278,5 +404,5 @@ export function game(world: WorldMemory, opts: {
       return { ok: false, text: `unexpected ${tool}` };
     }
   } as unknown as GoalContext;
-  return { ctx, did, said, changed, walks, lit, own, state, get, inv };
+  return { ctx, did, said, changed, walks, lit, own, state, get, inv, mobs, drops };
 }

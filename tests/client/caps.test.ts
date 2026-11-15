@@ -349,3 +349,17 @@ test.serial('the brain says the farm\'s wait once a day: "farm: the larder is fu
     'farm: the larder is full (carrot 3233/640, potato 330/320, wheat 310/256, bread 991/640)']);
   brain.setEnabled(false);
 });
+
+test('caps: none of the Nether\'s things (P3a: the barter\'s targets and loot, the quartz) is capped, however much is stored; the gravel keeps its old cap', (t) => {
+  const nether = ['quartz', 'soul_sand', 'soul_soil', 'obsidian', 'crying_obsidian', 'potion', 'splash_potion', 'lingering_potion', 'ender_pearl', 'leather',
+    'string', 'fire_charge', 'spectral_arrow', 'nether_brick', 'blackstone', 'iron_nugget', 'dried_ghast', 'nether_quartz_ore'];
+  for (const name of nether) t.false(name in GLUT, name);
+  t.is(GLUT.gravel, 128);
+  // a stack of each of the first twelve carried, 5000 of each stored: every one goes in the chests, none thrown
+  const items: InventoryItem[] = [...kit()];
+  let slot = 9;
+  for (const name of nether.slice(0, 12)) items.push({ slot: slot++, name, count: name.endsWith('potion') ? 1 : 16 });
+  const plan = stashList(snap(items), world({}, Object.fromEntries(nether.map(n => [n, 5000]))));
+  t.deepEqual(plan.drop, []);
+  for (const name of nether.slice(0, 12)) t.is(byName(plan.deposit)[name], name.endsWith('potion') ? 1 : 16, name);
+});

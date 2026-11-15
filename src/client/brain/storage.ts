@@ -21,15 +21,26 @@ export type ChestContents = Record<string, Record<string, number>>;
 const keyOf = (p: Pos) => `${p.x},${p.y},${p.z}`;
 const bare = (name: string) => name.replace(/^minecraft:/, '');
 
-const GEAR = /_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots|horse_armor)$|^(shield|bow|crossbow|trident|mace|elytra|bucket|fishing_rod|shears|flint_and_steel|carrot_on_a_stick|warped_fungus_on_a_stick|brush|spyglass|compass|clock|lead|saddle|enchanted_book)$|_bucket$/;
+/**
+ * The Nether's things (P3a: the piglins' barter and the quartz). Before, the stash sent most of them to the misc chest,
+ * and that one stood full live on Nov 14. The potions, by any of their forms, are gear (the Guardian's hook drinks fire
+ * resistance in lava or fire, the brewing stand of P4 makes more), and the fire charge with the flint and steel it
+ * stands in for; spectral arrows with the arrows,
+ * the dried ghast with the ghast's tear; soul sand and soul soil with the ground they are (the sand, the dirt the farm
+ * grows in: the wart farm of P4 takes its soul sand from there), obsidian and crying obsidian with the blocks, the
+ * nether brick with the brick; quartz, the nuggets and the ore are the ores' already, and leather, string and ender
+ * pearls the mobs' drops, blackstone and gravel the stone's. None of them is a GLUT cap (pockets.ts): the gravel's
+ * cap of 128 was there before.
+ */
+const GEAR = /_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots|horse_armor)$|^(shield|bow|crossbow|trident|mace|elytra|bucket|fishing_rod|shears|flint_and_steel|fire_charge|carrot_on_a_stick|warped_fungus_on_a_stick|brush|spyglass|compass|clock|lead|saddle|enchanted_book|potion|splash_potion|lingering_potion)$|_bucket$/;
 /** Checked before food: rotten flesh and spider eyes are "edible", but nobody wants them in the food chest. */
-const MOBDROPS = new Set(['rotten_flesh', 'string', 'spider_eye', 'gunpowder', 'bone', 'arrow', 'leather', 'feather', 'phantom_membrane',
-  'ender_pearl', 'slime_ball', 'blaze_rod', 'ghast_tear', 'ink_sac', 'glow_ink_sac', 'rabbit_hide', 'rabbit_foot', 'magma_cream', 'prismarine_shard', 'prismarine_crystals', 'breeze_rod', 'armadillo_scute', 'turtle_scute']);
+const MOBDROPS = new Set(['rotten_flesh', 'string', 'spider_eye', 'gunpowder', 'bone', 'arrow', 'spectral_arrow', 'tipped_arrow', 'leather', 'feather', 'phantom_membrane',
+  'ender_pearl', 'slime_ball', 'blaze_rod', 'ghast_tear', 'dried_ghast', 'ink_sac', 'glow_ink_sac', 'rabbit_hide', 'rabbit_foot', 'magma_cream', 'prismarine_shard', 'prismarine_crystals', 'breeze_rod', 'armadillo_scute', 'turtle_scute']);
 /** Checked before food too: carrots and potatoes are food (they're eaten more than planted), seeds and saplings are not. */
 const FARMING = /_seeds$|_sapling$|_propagule$|^(wheat|sugar_cane|bone_meal|egg|blue_egg|brown_egg|cocoa_beans|pumpkin|melon|cactus|bamboo|hay_block|nether_wart|azalea|flowering_azalea|kelp|sweet_berries_bush)$/;
 const ORES = /^raw_|_ingot$|_nugget$|_ore$|^(diamond|emerald|lapis_lazuli|redstone|coal|charcoal|quartz|netherite_scrap|ancient_debris|amethyst_shard)$|^(coal|iron|gold|copper|diamond|emerald|lapis|redstone|netherite|quartz)_block$/;
 const WOOD = /_log$|_wood$|_planks$|_stem$|_hyphae$|^stripped_|^(stick|bamboo_block)$/;
-const STONE = /^(cobblestone|mossy_cobblestone|cobbled_deepslate|stone|smooth_stone|andesite|diorite|granite|tuff|deepslate|calcite|dripstone_block|sand|red_sand|gravel|dirt|coarse_dirt|rooted_dirt|mud|clay|clay_ball|brick|bricks|netherrack|blackstone|basalt|smooth_basalt|end_stone|sandstone|red_sandstone|terracotta|flint)$|^polished_|_bricks$/;
+const STONE = /^(cobblestone|mossy_cobblestone|cobbled_deepslate|stone|smooth_stone|andesite|diorite|granite|tuff|deepslate|calcite|dripstone_block|sand|red_sand|gravel|dirt|coarse_dirt|rooted_dirt|mud|clay|clay_ball|brick|bricks|netherrack|blackstone|basalt|smooth_basalt|end_stone|sandstone|red_sandstone|terracotta|flint|soul_sand|soul_soil|obsidian|crying_obsidian|nether_brick)$|^polished_|_bricks$/;
 
 /**
  * Each item's category, once worked out: the stash's plan is read on every tick it would run (F2: whether anything

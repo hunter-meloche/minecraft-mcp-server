@@ -267,12 +267,15 @@ test('the look\'s gate: open once linked with its own portal known, at stage 0 o
   const past = linkedWorld();
   netherOf(past).stage = 1;
   t.false(lookOpen(past), 'past stage 0: the look is done with');
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0']);
+  // (P3a adds the barter and the quartz at stage 1)
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1']);
   const s = lookAt(KIT, 1000);
   t.is(lookReady(s, w), null, 'its own portal stands: no frame\'s obsidian asked for');
   const rung = workGoals(() => undefined, LADDER, () => T0).find(g => g.name === 'work: nether')!;
   t.is(rung.wants(s, w), 'look: in the nether');
-  t.deepEqual(rung.declines!(s, past), { cause: 'unneeded', text: 'no nether work yet' });
+  // (past stage 0 the barter and the quartz are the work, P3a: these chests hold no gold for the barter, so the quartz
+  // goes, its target short)
+  t.is(rung.wants(lookAt(KIT, 1000), past), 'quartz: in the nether');
   const bare = linkedWorld();
   delete bare.chestItems!['-547,64,2182'].golden_helmet;
   t.deepEqual(lookReady(s, bare), { cause: 'kit', text: 'look: short of a golden helmet (carried or in the chests)' });
@@ -316,7 +319,9 @@ test.serial('the setup, then the look an hour on: through the home portal into i
   const s = lookAt(f.inv, 1000, { now: later + MINUTE });
   t.true(workTick(s, w, () => undefined, LADDER).includes('nether: stage 1 after 2 clean trips'));
   t.false(lookOpen(w));
-  t.deepEqual(rung.declines!(s, w), { cause: 'unneeded', text: 'no nether work yet' });
+  // (stage 1 opens the barter and the quartz, P3a: the rung's work now, held by the day's two trips; there was none before)
+  t.deepEqual(NETHER_WORK.filter(v => v.open?.(w) ?? true).map(v => v.id), ['barter', 'quartz']);
+  t.deepEqual(rung.declines!(s, w), { cause: 'hold', text: '2 nether trips today (at most 2 a game day)' });
   t.regex(netherLine(w, later + MINUTE), /^Nether: trips on; stage 1, 2\/4 clean trips to stage 2, on probation 2\/3, 0 death\(s\) in 3 days; .*\(linked\); others' portals seen: 1 in overworld, 1 in the nether; 3 site\(s\) known; last trip 1 min ago \(clean\): \[look\] looked round its hut at nether \(-79, 70, 266\): 1 build of others .*\.\.\.\.$/);
 });
 

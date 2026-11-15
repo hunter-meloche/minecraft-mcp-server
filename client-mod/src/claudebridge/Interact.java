@@ -835,6 +835,103 @@ public final class Interact {
             return obj("dropped", dropped);
         });
 
+        // throw items toward a point, a gold ingot to a piglin's feet (its position): turned to the point at the pitch whose
+        // throw comes to rest nearest it (Toss), the look sent first, as for the fireball's hit (the server throws along the
+        // look it has for the bot), then the inventory's one-item throw, the same throw as Q's. The shield stays up: a
+        // throw from the inventory ends no use. Then it watches the thrown item until it comes to rest, at most the 2 s
+        // nothing may pick it up in, and says where it lies (`landed`, each with `fromTarget` along the ground; `gone`: in
+        // lava, or taken). Refused when the point has no floor under it, no throw rests within Toss.MAX_MISS of it (a
+        // throw goes about 3.75 at most), or one might rest by lava or fire. One a piglin cannot see, or one that lands
+        // nearer another piglin (or a baby, which keeps it), is the caller's to avoid.
+        s.register("item.toss", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            LocalPlayer pl = player();
+            if (pl.containerMenu != pl.inventoryMenu) pl.closeContainer();
+            String name = required(p, "name").replace("minecraft:", "");
+            int want = Math.max(1, Math.min(intParam(p, "count", 1), 16));
+            if (!p.has("toward") || !p.get("toward").isJsonObject()) throw new IllegalArgumentException("missing parameter: toward {x, y, z}");
+            JsonObject t = p.getAsJsonObject("toward");
+            Vec3 to = new Vec3(numParam(t, "x", Double.NaN), numParam(t, "y", Double.NaN), numParam(t, "z", Double.NaN));
+            if (!Double.isFinite(to.x) || !Double.isFinite(to.y) || !Double.isFinite(to.z)) throw new IllegalArgumentException("toward needs x, y and z");
+            boolean carried = false;
+            for (int i = 0; i < 36 && !carried; i++) carried = name.equals(nameOf(pl.getInventory().getItem(i)));
+            if (!carried) throw new IllegalArgumentException("no " + name + " in inventory");
+            Vec3 start = new Vec3(pl.getX(), pl.getEyeY() - Toss.BELOW_EYE, pl.getZ());
+            double dx = to.x - start.x, dz = to.z - start.z, distance = Math.hypot(dx, dz);
+            // the floor it is to rest on: the block under the point (soul sand's top is 2/16 down: the point in its cell)
+            BlockPos floor = BlockPos.containing(to.x, to.y - 0.2, to.z);
+            if (!mc.level.isLoaded(floor)) throw new IllegalStateException("the point is not loaded");
+            BlockState floorState = mc.level.getBlockState(floor);
+            var shape = floorState.getCollisionShape(mc.level, floor);
+            // the point is where it is to rest: a mob's feet, not its eyes, and not a mob in mid-jump
+            if (shape.isEmpty()) throw new IllegalStateException("nothing to land on under the point (" + Names.block(floorState) + " at " + floor.toShortString() + "): give a mob's feet");
+            double sink = Math.max(0, Math.min(1, 1 - shape.max(Direction.Axis.Y)));
+            Toss.Floor ground = new Toss.Floor(floorState.getBlock().getFriction(), floorState.getBlock().getSpeedFactor(), sink);
+            boolean step = Math.abs(to.y - pl.getY()) > 0.5;
+            Toss.Aim aim = Toss.aim(distance, start.y - to.y, ground, step);
+            if (aim == null || aim.miss(distance) > Toss.MAX_MISS) {
+                throw new IllegalStateException("no throw rests by the point, " + round(distance) + " blocks off along the ground"
+                    + (aim == null ? ": no throw comes down on its floor" : ": the nearest rests " + round(aim.rest()) + " out (stand 1 to 4 from it)"));
+            }
+            float yaw = distance < 1e-3 ? pl.getYRot() : Toss.yaw(dx, dz);
+            Vec3 along = distance < 1e-3 ? Vec3.ZERO : new Vec3(dx / distance, 0, dz / distance);
+            // no lava or fire where it may come to rest (a lost ingot)
+            for (BlockPos b : Toss.restCells(start, along, aim, to.y, step ? pl.getY() : to.y)) {
+                BlockState st = mc.level.getBlockState(b);
+                if (st.getFluidState().is(net.minecraft.tags.FluidTags.LAVA) || st.is(net.minecraft.tags.BlockTags.FIRE)) {
+                    throw new IllegalStateException("the throw might come to rest by " + Names.block(st) + " at (" + b.getX() + ", " + b.getY() + ", " + b.getZ() + ")");
+                }
+            }
+            java.util.Set<Integer> before = new java.util.HashSet<>();
+            for (net.minecraft.world.entity.Entity e : mc.level.entitiesForRendering()) if (e instanceof net.minecraft.world.entity.item.ItemEntity) before.add(e.getId());
+            float pitch = (float) aim.pitch();
+            pl.setYRot(yaw);
+            pl.setXRot(pitch);
+            pl.setYHeadRot(yaw);
+            pl.connection.send(new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Rot(yaw, pitch, pl.onGround(), pl.horizontalCollision));
+            int tossed = 0;
+            for (int i = 0; i < 36 && tossed < want; i++) {
+                while (tossed < want && name.equals(nameOf(pl.getInventory().getItem(i)))) {
+                    int had = pl.getInventory().getItem(i).getCount();
+                    click(pl.inventoryMenu, inventoryMenuSlot(i), 0, ContainerInput.THROW);
+                    ItemStack now = pl.getInventory().getItem(i);
+                    if ((now.isEmpty() ? 0 : now.getCount()) >= had) break; // not taken: no endless clicking
+                    tossed++;
+                }
+            }
+            if (tossed == 0) throw new IllegalStateException("could not throw the " + name);
+            final int thrown = tossed;
+            final Vec3 rest = start.add(along.scale(aim.rest()));
+            Ticker.add(new Ticker.Task() {
+                int age = 0;
+                final Map<Integer, net.minecraft.world.entity.item.ItemEntity> mine = new java.util.LinkedHashMap<>();
+                @Override public boolean tick(Minecraft m) {
+                    if (m.player == null || m.level == null) { c.fail("not in a world"); return true; }
+                    age++;
+                    // ours: an item of the name that turns up by the throw's start within a second (its data comes with it)
+                    if (mine.size() < thrown && age <= 20) for (net.minecraft.world.entity.Entity e : m.level.entitiesForRendering()) {
+                        if (e instanceof net.minecraft.world.entity.item.ItemEntity ie && !before.contains(ie.getId()) && !mine.containsKey(ie.getId())
+                            && name.equals(nameOf(ie.getItem())) && ie.position().distanceTo(start) < 3 && mine.size() < thrown) mine.put(ie.getId(), ie);
+                    }
+                    boolean still = mine.size() >= thrown && mine.values().stream()
+                        .allMatch(ie -> ie.isRemoved() || (ie.onGround() && ie.getDeltaMovement().horizontalDistanceSqr() < 1e-4));
+                    if (age < Toss.PICKUP_DELAY && !(still && age >= 10)) return false;
+                    com.google.gson.JsonArray landed = new com.google.gson.JsonArray();
+                    for (var ie : mine.values()) {
+                        JsonObject o = pos(ie.position());
+                        o.addProperty("fromTarget", round(Math.hypot(ie.getX() - to.x, ie.getZ() - to.z)));
+                        if (ie.isRemoved()) o.addProperty("gone", true);
+                        landed.add(o);
+                    }
+                    c.ok(obj("tossed", thrown, "item", name, "yaw", round(yaw), "pitch", round(pitch), "distance", round(distance),
+                        "predicted", pos(new Vec3(rest.x, to.y, rest.z)), "shortest", round(aim.shortest()), "longest", round(aim.longest()),
+                        "landed", landed));
+                    return true;
+                }
+            });
+            return BridgeServer.LATER;
+        });
+
         // fish at a water block: cast, reel in when a fish bites, repeat `times` (recast after 45 s without a bite)
         s.register("fish", true, (p, c) -> {
             Minecraft mc = Minecraft.getInstance();

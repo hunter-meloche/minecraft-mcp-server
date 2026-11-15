@@ -271,8 +271,18 @@ public final class Handlers {
                     "position", pos(e.position()), "distance", round(e.distanceTo(pl)), "height", round(e.getBbHeight()));
                 if (e instanceof LivingEntity le) {
                     o.addProperty("health", round(le.getHealth()));
-                    o.addProperty("baby", le.isBaby()); // synced (AgeableMob's DATA_BABY_ID, zombies' own flag)
+                    // synced (AgeableMob's DATA_BABY_ID, so a hoglin's; zombies' and piglins' own flags; a brute never is)
+                    o.addProperty("baby", le.isBaby());
+                    // what it holds (the server sends a mob's hands on any change, and on sight): a piglin holds the gold
+                    // it admires in the off hand, a brute its golden axe, a crossbow piglin its crossbow
+                    if (!le.getMainHandItem().isEmpty()) o.addProperty("mainhand", Names.item(le.getMainHandItem()));
+                    if (!le.getOffhandItem().isEmpty()) o.addProperty("offhand", Names.item(le.getOffhandItem()));
                 }
+                // after someone: the synced aggressive flag (a piglin's, brute's or hoglin's attack target; an enderman's
+                // stare), see Nether.angry. Their anger itself (ANGRY_AT) stays on the server.
+                if (e instanceof net.minecraft.world.entity.Mob) o.addProperty("aggressive", Nether.angry(e));
+                // a piglin with a loved item in the off hand: admiring it (its ~6 s), taking no more gold meanwhile
+                if (e instanceof net.minecraft.world.entity.monster.piglin.Piglin pg) o.addProperty("admiring", Nether.admiring(pg.getOffhandItem()));
                 // someone's: named, tamed, on a lead, or in someone else's build (a friend's pen): the brain leaves those be
                 if (e.hasCustomName()) o.addProperty("named", true);
                 if ((e instanceof net.minecraft.world.entity.TamableAnimal t && t.isTame())

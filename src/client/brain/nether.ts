@@ -16,7 +16,7 @@ import { out as afield } from './pockets.js';
 import { homePortal, ownPortals, tripsOn } from './portal.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit, type NetherCheck } from './mine.js';
 import { readyFoodPoints } from './food.js';
-import { storedStacks } from './chests.js';
+import { freeChestTotals, storedStacks } from './chests.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -38,6 +38,18 @@ export interface PortalShape { x: number; y: number; z: number; axis: string; wi
 
 /** A death in the Nether: when (real ms) and where (Nether coordinates). */
 export interface NetherDeath { at: number; where: Pos }
+
+/**
+ * The barter work's own (P3a, netherbarter.ts): the hold for the rest of a game day after a piglin turned on the bot
+ * (the game day, the idle tally's, when and why), the gold the gold chore smelted on a game day (at most its 64), and
+ * the tossed ingots in a row that lay where they fell while a right click then gave one (the server's mobGriefing off:
+ * no mob picks up an item then, a piglin neither): from three on the gold goes by hand first.
+ */
+export interface BarterMemory {
+  held?: { day: number; at: number; why: string };
+  smelted?: { day: number; n: number };
+  untaken?: number;
+}
 
 /**
  * Where the setup trip (P2b, nethersetup.ts) builds the bot's own Nether-side portal: the portal's inside, its lowest
@@ -103,6 +115,8 @@ export interface NetherMemory {
   seen?: Record<string, PortalShape[]>;
   /** places found down there (P3c: fortresses, bastions) */
   sites: { kind: string; x: number; y: number; z: number; at?: number }[];
+  /** the barter work's hold, the gold chore's day, how the gold is given (P3a: netherbarter.ts) */
+  barter?: BarterMemory;
 }
 
 /** Spots of its own portal refused, kept (the oldest let go). */
@@ -134,10 +148,53 @@ export const tripsForStage = (stage: number): number => (stage <= 0 ? 0 : NETHER
 /** A drinkable potion of fire resistance, by its contents (never by its name: every potion is `potion`). */
 const isFirePotion = (i: { name: string; potion?: string }) => i.name === 'potion' && /(^|_)fire_resistance$/.test(i.potion ?? '');
 
-/** Potions of fire resistance carried and in the home chests (by their stacks, as last seen). */
+/** Potions carried and in the home chests (by their stacks, as last seen) that `is` takes. */
+const firePotionsOf = (items: { name: string; count: number; potion?: string }[], world: WorldMemory, is: (i: { name: string; potion?: string }) => boolean): number =>
+  items.filter(is).reduce((a, i) => a + i.count, 0) + storedStacks(world, is).reduce((a, f) => a + f.stack.count, 0);
+
+/** Potions of fire resistance to drink, carried and in the home chests (by their stacks, as last seen). */
 export function firePotions(items: { name: string; count: number; potion?: string }[], world: WorldMemory): number {
-  return items.filter(isFirePotion).reduce((a, i) => a + i.count, 0) + storedStacks(world, isFirePotion).reduce((a, f) => a + f.stack.count, 0);
+  return firePotionsOf(items, world, isFirePotion);
 }
+
+// ------------------------------------------------------------------------------------------------ the stock
+
+/**
+ * What the Nether work keeps at home (P3a of the progression plan), carried and in the chests together: potions of
+ * fire resistance until the brewing stand makes them (P4), soul sand for the wart farm, leather for the books, obsidian
+ * for a portal made again, ender pearls, and quartz. The barter brings every one of them (quartz too, a few at a time:
+ * the quartz work mines it, 32 a trip); what else it brings (gravel, blackstone, nuggets, string, spectral arrows,
+ * fire charges, soul speed books or boots) is the stash's to keep or put away, by its own rules.
+ */
+export const NETHER_STOCK = { fire_resistance: 4, soul_sand: 16, leather: 16, obsidian: 20, ender_pearl: 16, quartz: 64 } as const;
+export type NetherStockKind = keyof typeof NETHER_STOCK;
+
+/**
+ * A potion of fire resistance in any of its forms (drunk, splash or lingering: the barter throws both of the first),
+ * by its contents, plain or long: never by its name.
+ */
+export const anyFirePotion = (i: { name: string; potion?: string }) =>
+  /^(potion|splash_potion|lingering_potion)$/.test(i.name) && /(^|_)fire_resistance$/.test(i.potion ?? '');
+
+/**
+ * How much of a Nether stock kind the home has: carried (the off hand and the armour slots too) and in the chests
+ * beyond what the build jobs and the missions hold there; the potions by their stacks as last seen (a chest that
+ * answered in text holds none that can be told).
+ */
+export function netherStock(kind: NetherStockKind, s: Pick<Snapshot, 'items' | 'counts'>, world: WorldMemory, free = freeChestTotals(world)): number {
+  if (kind === 'fire_resistance') return firePotionsOf(s.items, world, anyFirePotion);
+  return (s.counts.get(kind) ?? 0) + (free[kind] ?? 0);
+}
+
+/** The stock kinds of `kinds` under their targets, each with what the home has: the first short first, in NETHER_STOCK's order. */
+export function netherShort(s: Pick<Snapshot, 'items' | 'counts'>, world: WorldMemory, kinds: readonly NetherStockKind[] = Object.keys(NETHER_STOCK) as NetherStockKind[]):
+  { kind: NetherStockKind; have: number; want: number }[] {
+  const free = freeChestTotals(world);
+  return kinds.map(kind => ({ kind, have: netherStock(kind, s, world, free), want: NETHER_STOCK[kind] as number })).filter(k => k.have < k.want);
+}
+
+/** A stock kind in words: `fire resistance` for the potions, the item's name for the rest. */
+export const stockName = (kind: NetherStockKind) => (kind === 'fire_resistance' ? 'fire resistance' : kind);
 
 /** The longest line kept of the last trip. */
 const TRIP_TEXT = 200;
@@ -196,6 +253,15 @@ function clean(raw: unknown): NetherMemory {
     m.lastTrip = { at: last.at, text: last.text.slice(0, TRIP_TEXT), end: last.end as TripEnd };
   }
   if (fin(r.regearedFor)) m.regearedFor = r.regearedFor;
+  const b = r.barter;
+  if (isObj(b)) {
+    const barter: BarterMemory = {};
+    const held = b.held, smelted = b.smelted;
+    if (isObj(held) && fin(held.day) && fin(held.at)) barter.held = { day: held.day, at: held.at, why: typeof held.why === 'string' ? held.why.slice(0, TRIP_TEXT) : '' };
+    if (isObj(smelted) && fin(smelted.day) && fin(smelted.n)) barter.smelted = { day: smelted.day, n: Math.max(0, Math.floor(smelted.n)) };
+    if (fin(b.untaken) && b.untaken > 0) barter.untaken = Math.floor(b.untaken);
+    if (Object.keys(barter).length) m.barter = barter;
+  }
   const arrival = posOf(r.arrival);
   if (arrival) m.arrival = arrival;
   if (fin(r.enteredAt)) m.enteredAt = r.enteredAt;
@@ -235,6 +301,16 @@ export function peekNether(world: WorldMemory): NetherMemory {
 
 /** The game day as the work queue counts it (the idle tally's day number): the trips per day go by it. */
 export const gameDay = (world: WorldMemory): number => { const d: unknown = world.idle?.today?.day; return fin(d) ? d : 0; };
+
+/**
+ * The barter work's hold after a piglin turned on the bot (netherbarter.ts), while it holds: for the rest of that game
+ * day, and never past a real day (a tally that stood still would hold it for good). A look only. The quartz work by
+ * the same portal keeps it too, and writes it the same way (netherquartz.ts): the same piglins round the same hut.
+ */
+export function barterHold(world: WorldMemory, now: number): { why: string; at: number } | undefined {
+  const h = peekNether(world).barter?.held;
+  return h && h.day === gameDay(world) && now - h.at < DAY && now >= h.at ? { why: h.why, at: h.at } : undefined;
+}
 
 // ------------------------------------------------------------------------------------------------ where a portal leads
 
@@ -789,10 +865,12 @@ export function netherLine(world: WorldMemory, now: number): string {
   const seen = Object.entries(n.seen ?? {}).map(([dim, l]) => `${l.length} in ${dim === NETHER ? 'the nether' : dim}`).join(', ');
   const probation = n.cleanTrips < NETHER_PROBATION.clean ? `, on probation ${n.cleanTrips}/${NETHER_PROBATION.clean}` : '';
   const hold = n.setupHold && now < n.setupHold.until ? `; setup held until ${clock(n.setupHold.until)}: ${n.setupHold.why}` : '';
+  const bh = barterHold(world, now);
+  const barterHeld = bh ? `; barter held for the day: ${bh.why}` : '';
   const t = n.lastTrip;
   const last = t ? `; last trip ${Math.max(0, Math.round((now - t.at) / MINUTE))} min ago (${t.end}): ${t.text.replace(/(?<!\.)\.$/, '')}` : '';
   return `Nether: trips ${tripsOn(world) ? 'on' : 'off'}; stage ${n.stage}, ${toNext(n)}${probation}, ${deaths} death(s) in 3 days; ` +
     `home portal ${home ? `overworld ${fmt(home)}` : 'none'}, nether side ${n.portal ? `nether ${fmt(n.portal)}` : 'none'}` +
-    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${seen ? `; others' portals seen: ${seen}` : ''}` +
+    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${barterHeld}${seen ? `; others' portals seen: ${seen}` : ''}` +
     `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${last}.`;
 }

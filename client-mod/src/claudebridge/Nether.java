@@ -300,10 +300,30 @@ public final class Nether {
         return neutral(Names.entity(e), e instanceof net.minecraft.world.entity.NeutralMob, e instanceof net.minecraft.world.entity.npc.villager.AbstractVillager);
     }
 
-    /** Live: angry at someone (an attack target), as the client sees it. */
+    /**
+     * Live: angry at someone (an attack target), as the client sees it: Mob's synced aggressive flag, which piglins,
+     * brutes and hoglins set every tick to whether their brain holds an attack target (PiglinAi, PiglinBruteAi, HoglinAi
+     * updateActivity: setAggressive(hasMemoryValue(ATTACK_TARGET))). Their ANGRY_AT memory is the server's own; a piglin
+     * angry at the bot makes it its attack target once the bot is within its follow range (16), and the flag goes up.
+     * A piglin hunting a hoglin is aggressive too: the flag cannot say at whom.
+     */
     static boolean angry(Entity e) {
         if (e instanceof net.minecraft.world.entity.monster.Enderman en && en.isCreepy()) return true;
         return e instanceof net.minecraft.world.entity.Mob m && m.isAggressive();
+    }
+
+    /**
+     * A piglin admiring something, as the client sees it: a piglin_loved item in its off hand. The admiring itself is a
+     * brain memory the server keeps to itself (ADMIRING_ITEM, 119 ticks: about 6 s); what reaches the client are the
+     * hands (LivingEntity sends ClientboundSetEquipmentPacket on any change, and on sight). PiglinAi puts what it
+     * admires in the off hand (holdInOffhand: picked up, or given by a right click) and takes it out when the memory
+     * runs out (StopHoldingItemIfNoLongerAdmiring), and Piglin.getArmPose makes this very test for its ADMIRING_ITEM
+     * pose (after dancing). A gold ingot (the barter currency) is paid for with the barter loot, thrown toward the
+     * nearest player it sees when the admiring ends; anything else loved (raw gold, a golden helmet) it keeps. While it
+     * holds one it picks up no other gold (isNotHoldingLovedItemInOffHand).
+     */
+    static boolean admiring(ItemStack offhand) {
+        return !offhand.isEmpty() && offhand.is(net.minecraft.tags.ItemTags.PIGLIN_LOVED);
     }
 
     /** Live: the bot is the nearest player to it (within 16): an angry one near it is most likely after it. */

@@ -148,12 +148,15 @@ export function ownItems<T extends { name: string; count: number; slot: number }
 /**
  * What the bot keeps of each precious thing; what's beyond it goes to the community, a lot at a time. Emeralds: a
  * stack, to buy Mending from its own librarian later (the progression plan's villager hall): with keep 0 every
- * emerald it came by went up for the community chest. None is held yet.
+ * emerald it came by went up for the community chest. None is held yet. Gold ingots: the 21 the barter never gives
+ * (the netherite's 16, the golden helmet's repairs 5) and a barter trip's 32 (netherbarter.ts GOLD_RESERVE and
+ * GOLD.trip: the gold chore smelts them from the raw gold for the piglins). With 16 kept, every ingot the chore
+ * smelted over that went up for the community chest within the donations' three hours, the reserve with it.
  */
 export const KEEP: Record<string, { keep: number; lot: number }> = {
   diamond: { keep: 8, lot: 4 },
   emerald: { keep: 64, lot: 8 },
-  gold_ingot: { keep: 16, lot: 8 },
+  gold_ingot: { keep: 53, lot: 8 },
   iron_ingot: { keep: 48, lot: 16 }
 };
 /** How often a donation round may run: every few hours of play, not every day. */

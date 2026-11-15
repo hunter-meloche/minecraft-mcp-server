@@ -104,6 +104,19 @@ export function blockAt(g: Grid, p: Pos): string | null {
 }
 
 /**
+ * The ground as a dig of the bot's own left it: the block at a place read as air from now on (the quartz trip's map
+ * of what it dug, netherquartz.ts: its walks and its sight go by the ground as it is, not as the one read had it).
+ */
+export function setOpen(g: Grid, p: Pos): void {
+  const ix = p.x - g.x, iy = p.y - g.y, iz = p.z - g.z;
+  if (ix < 0 || iy < 0 || iz < 0 || ix >= g.width || iy >= g.height || iz >= g.length) return;
+  const i = ix + iz * g.width + iy * g.width * g.length;
+  g.blocks[i] = 'minecraft:air';
+  const names = named.get(g);
+  if (names) names[i] = 'air';
+}
+
+/**
  * What a cell is to the setup: open air; a small plant (passable, gone at a touch: roots, sprouts, fungi, vines); the
  * Nether's own ground the bot may dig (netherrack and the like); anything else solid (kept, never dug: bedrock,
  * debris, obsidian, what someone built; cobblestone, which the Nether never makes, so any there was placed by
@@ -361,9 +374,9 @@ const FACES: { name: string; dx: number; dy: number; dz: number }[] = [
   { name: 'east', dx: 1, dy: 0, dz: 0 }, { name: 'west', dx: -1, dy: 0, dz: 0 }, { name: 'up', dx: 0, dy: 1, dz: 0 }
 ];
 /** How far the eye reaches: dig.here's own limit (the interaction range less 0.1), and place's. */
-const DIG_REACH = 4.4;
+export const DIG_REACH = 4.4;
 const PLACE_REACH = 4.5;
-const EYE = 1.62;
+export const EYE = 1.62;
 
 type V = { x: number; y: number; z: number };
 const eyeOf = (feet: Pos): V => ({ x: feet.x + 0.5, y: feet.y + EYE, z: feet.z + 0.5 });
@@ -373,7 +386,7 @@ const dist = (a: V, b: V) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
  * Whether a ray from the eye to a point in the target block meets nothing but open cells before it (a grid walk of
  * the voxels it crosses, as the bridge's clip does with block outlines: a plant in the way stops it too).
  */
-function clearTo(open: (p: Pos) => boolean, from: V, to: V, target: Pos): boolean {
+export function clearTo(open: (p: Pos) => boolean, from: V, to: V, target: Pos): boolean {
   let x = Math.floor(from.x), y = Math.floor(from.y), z = Math.floor(from.z);
   const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
   const sx = Math.sign(dx), sy = Math.sign(dy), sz = Math.sign(dz);
@@ -848,10 +861,17 @@ export const inNether = async (ctx: GoalContext): Promise<boolean> => ((await ct
 /** What a run says that found itself out of the Nether halfway (nothing held, nothing written: the wrapper walks home, workTick books the death). */
 export const GONE: WorkResult = { gain: 0, text: 'not in the nether any more (a death down there?)' };
 
-/** A walk along a path a few cells at a time, careful (nothing broken or placed): `stuck` where a leg did not arrive, `gone` out of the Nether. */
-async function walkAlong(ctx: GoalContext, path: Pos[], every = 4): Promise<'ok' | 'stuck' | 'gone'> {
-  for (let i = Math.min(every, path.length - 1); i > 0; i = i === path.length - 1 ? 0 : Math.min(i + every, path.length - 1)) {
+/**
+ * A walk along a path a few cells at a time, careful (nothing broken or placed): `stuck` where a leg did not arrive,
+ * `gone` out of the Nether. `between` (the barter's and the quartz's walks out): asked before every leg after the
+ * first; `back` once it says no. Their danger rules (a hoglin, a ghast, a piglin turned) lived in a look before and
+ * after a walk only: a hoglin come 6 off at the second leg of a walk out to a piglin 40 away was first seen 8 legs on,
+ * the bot some 30 cells further from its hut beside it.
+ */
+export async function walkAlong(ctx: GoalContext, path: Pos[], every = 4, between?: () => Promise<boolean>): Promise<'ok' | 'stuck' | 'gone' | 'back'> {
+  for (let i = Math.min(every, path.length - 1), first = true; i > 0; i = i === path.length - 1 ? 0 : Math.min(i + every, path.length - 1), first = false) {
     if (!(await inNether(ctx))) return 'gone';
+    if (between && !first && !(await between())) return 'back';
     const p = path[i];
     const r = await ctx.call<{ arrived?: boolean }>('goto', { ...p, range: 0, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => ({ arrived: false }));
     if (ctx.signal.aborted) throw new Error('aborted');

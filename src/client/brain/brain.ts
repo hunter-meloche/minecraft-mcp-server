@@ -45,6 +45,7 @@ import { penFences } from './yardgates.js';
 import { holdHarmless, unsafeInHand } from './fluidpick.js';
 import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 import { netherSparesGoal, regearGoal } from './regear.js';
+import { goldGoal } from './netherbarter.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -201,7 +202,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, stash, storageGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

@@ -126,6 +126,12 @@ export function tripBudgetMs(timeOfDay: number, walkBackMs: number): number {
   const t = ((timeOfDay % 24000) + 24000) % 24000;
   return Math.max(0, (HOME_BY - t) * MS_PER_TICK - walkBackMs);
 }
+/**
+ * The deep trip's walk back up, and the least mining worth going down for (as deep.ts has them): with these the deep
+ * rung sets out until tod 5000 (work.ts lateFor). The gold chore keeps off that window too (netherbarter.ts goldWant).
+ */
+export const DEEP_WALK_BACK = 2 * 60_000;
+export const DEEP_WORTH = 3 * 60_000;
 
 /** How far the deep trip's departure point keeps from anyone's build on the surface (Baritone digs nothing near one). */
 export const MINE_FROM_BUILDS = 32;

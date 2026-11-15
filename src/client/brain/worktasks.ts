@@ -30,6 +30,8 @@ import { homePortal, tripsOn } from './portal.js';
 import { netherKitDecline, peekNether } from './nether.js';
 import { setupOpen, setupReady, setupRun } from './nethersetup.js';
 import { lookOpen, lookReady, lookRun } from './netherlook.js';
+import { barterOpen, barterReady, barterRun } from './netherbarter.js';
+import { quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
 
 const MINUTE = 60_000;
 
@@ -463,8 +465,34 @@ const lookWork: NetherWork = {
   run: (ctx, budgetMs, now) => lookRun(ctx, budgetMs, now)
 };
 
-/** The Nether rung's work: stage 0's setup and look now; P3 adds the barter, the quartz and the rest at their stages. */
-export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork];
+/**
+ * `barter` (P3a, netherbarter.ts): from stage 1, by its own portal: gold ingots tossed to piglins within 48 of it, what
+ * they throw back picked up, while a barter target (nether.ts NETHER_STOCK) is short and gold over the reserve is
+ * there (the gold chore smelts it at home).
+ */
+const barterWork: NetherWork = {
+  id: 'barter',
+  stage: 1,
+  open: world => barterOpen(world),
+  ready: (s, world) => barterReady(s, world),
+  run: (ctx, budgetMs, now) => barterRun(ctx, budgetMs, now)
+};
+
+/**
+ * `quartz` (P3a, netherquartz.ts): from stage 1, by its own portal: nether quartz ore within 24 of it with a face open
+ * to air, none by lava, 32 at most a trip, while the home has less quartz than its target (nether.ts NETHER_STOCK).
+ * It takes its turn with the barter (the rung's turn goes round its variants).
+ */
+const quartzWork: NetherWork = {
+  id: 'quartz',
+  stage: 1,
+  open: world => quartzOpen(world),
+  ready: (s, world) => quartzReady(s, world),
+  run: (ctx, budgetMs, now) => quartzRun(ctx, budgetMs, now)
+};
+
+/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz; P3b and P3c add the rest at their stages. */
+export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork];
 
 /** The home portal is lit and the bot's own: the portal milestone is done and the portal known. */
 const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).includes('nether-portal') && !!homePortal(world);
@@ -475,13 +503,16 @@ const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).include
  * slots free, home by dusk (nether.ts netherBudgetMs), held after deaths down there, on probation until three trips
  * end well, two a game day at most (work.ts). Never while the switch is off or the home portal not lit: then it says
  * `nether trips are off`, or `no nether work yet` while no work is open (linked, and the look done or no portal of
- * its own known; past stage 0, until P3 adds the work of the stages).
+ * its own known, at stage 0).
  */
 const nether: WorkTask = {
   name: 'nether',
   rank: 4.5,
   reach: 'nether',
   room: 'nether',
+  // (the barter and the quartz take turns: a productive barter kept the turn every morning while the gold chore
+  // brought the gold back each afternoon)
+  rotate: true,
   // (a Nether trip is given the day instead: work.ts budgetFor)
   budgetMs: 0,
   variants: (_s, world) => {

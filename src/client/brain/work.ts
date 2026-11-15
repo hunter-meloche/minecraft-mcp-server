@@ -13,7 +13,7 @@ import { fromGate, nearHome, nearHomeAt, no, onHomeLevel, outsideBy, YARD_EDGE, 
 import type { Pos, WorldMemory } from './memory.js';
 import { NEAR_HOME, TRIP_STASH_RANGE, inYardOrNear, look, makeRoom, noRoom, out, room, type RoomKind } from './pockets.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
-import { deepTripKit, tripBudgetMs } from './mine.js';
+import { DEEP_WALK_BACK, DEEP_WORTH, deepTripKit, tripBudgetMs } from './mine.js';
 import { tripCheck } from './deep.js';
 import { clock } from './idlelog.js';
 import { LADDER, tierStep } from './worktasks.js';
@@ -65,6 +65,11 @@ export interface WorkTask {
   budgetMs: number;
   /** its dry marks tell of the land, not of the hour: they go on doubling past 160 min */
   terrain?: true;
+  /**
+   * its variants take turns whatever a run brought in (else a run that gained keeps the turn): the Nether's work, one
+   * trip a morning, where a barter that brings loot back every day would keep the quartz from its turn for weeks
+   */
+  rotate?: true;
   /**
    * how far from home its variants go, across the ground, when that is not the leash (the cows: the user let them go
    * past it, Nov 13). Its terrain marks are kept to that range, and let go when it changes (workTick)
@@ -143,9 +148,6 @@ export const MIN_WORK = { yard: 15_000, near: 20_000, far: 60_000 } as const;
  */
 export const needMs = (dist: number, reach: Exclude<Reach, 'deep' | 'nether'>, backPace?: number): number =>
   (backPace ? Math.round(dist * 1000 / 3 + dist * 1000 / backPace) : 2 * dist / 3 * 1000) + MIN_WORK[reach];
-/** the deep trip's walk back up, and the least mining worth going down for (as deep.ts has them) */
-const DEEP_WALK_BACK = 2 * MINUTE;
-const DEEP_WORTH = 3 * MINUTE;
 /** a death this far from home (or outside the yard by more than its edge) is a death away */
 const DEATH_AWAY = 32;
 const KIT_HOLD_MS = HOUR;
@@ -818,7 +820,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     if (under) underMark(task, c, ctx.world, key, at, setOut);
     else if (gain > 0) {
       if (mark && !own) delete w.dry[key];
-      if (!c.first) w.next[task.name] = c.index;
+      if (!c.first) w.next[task.name] = task.rotate ? c.index + 1 : c.index;
     } else if (!r.untried) {
       // (a stand forgotten left its mark behind for good: the key named a place no longer kept)
       if (r.mark === 'forget') delete w.dry[key];

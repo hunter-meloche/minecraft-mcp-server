@@ -61,13 +61,15 @@ test("the community's diamonds don't count toward the bot's own diamond kit", (t
 });
 
 test('donations: only the surplus beyond what the bot keeps and what the work queue keeps of its family, a lot at a time; diamonds once its kit is done', (t) => {
-  // at tier 0 the queue keeps 96 iron, 32 gold and 16 diamonds, over the bot's own 48 ingots, 16 ingots and 8: the
-  // old floors alone gave 70 iron, 20 gold and 20 diamonds of these
+  // at tier 0 the queue keeps 96 iron, 32 gold and 16 diamonds, over the bot's own 48 ingots, 53 ingots (P3a: the
+  // barter's reserve and a trip's gold) and 8: the old floors alone gave 70 iron, 20 gold and 20 diamonds of these
   t.deepEqual(donationPlan({ iron_ingot: 118, gold_ingot: 36, diamond: 28, emerald: 2 }, 0, 0), { iron_ingot: 22, diamond: 12 });
   t.deepEqual(donationPlan({ iron_ingot: 118, diamond: 28 }, 5, 0), { iron_ingot: 22 });
   t.deepEqual(donationPlan({ iron_ingot: 98, gold_ingot: 32 }, 0, 0), {});
   // the family counts raw and smelted together, as the queue does; the ingots the bot keeps stay kept all the same
-  t.deepEqual(donationPlan({ raw_gold: 30, gold_ingot: 26 }, 0, 0), { gold_ingot: 10 });
+  // (53 of them since P3a: with 26 and the old 16 kept, 10 went)
+  t.deepEqual(donationPlan({ raw_gold: 30, gold_ingot: 26 }, 0, 0), {});
+  t.deepEqual(donationPlan({ raw_gold: 30, gold_ingot: 63 }, 0, 0), { gold_ingot: 10 });
   t.deepEqual(donationPlan({ raw_gold: 400, gold_ingot: 20, raw_iron: 1000, iron_ingot: 60 }, 0, 0), {});
   t.deepEqual(donationPlan({ raw_iron: 20, iron_ingot: 100 }, 0, 0), { iron_ingot: 24 });
   // emeralds no rung mines: what the bot keeps of them is all there is to it. A stack now (P0: they buy Mending later),
@@ -144,7 +146,8 @@ test('the donate goal keeps what the work queue mined for the bot: at tier 4 wit
   t.is(donateGoal.wants(atHome(), tierFour()), null);
   t.deepEqual(donateGoal.declines!(atHome(), tierFour()), { cause: 'unneeded', text: 'nothing spare to give' });
   // over the targets: what is over goes, now and then as ever, and no more (the ingots the bot keeps stay too)
-  const over = tierFour({ diamond: 270, raw_gold: 500, gold_ingot: 40, iron_ingot: 400 });
+  // (the 53 gold ingots the barter keeps since P3a: 77 for the 24 that went over the old 16 with 40)
+  const over = tierFour({ diamond: 270, raw_gold: 500, gold_ingot: 77, iron_ingot: 400 });
   t.is(donateGoal.wants(atHome(), over), 'spare for the community: 14 diamond, 24 gold_ingot, 43 iron_ingot');
   // the tier steps up when every family is at its target: the floor only rises with it, so nothing over the old
   // targets swings back out
