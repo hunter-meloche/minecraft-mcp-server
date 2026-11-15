@@ -48,6 +48,7 @@ import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf
 import { netherSparesGoal, regearGoal } from './regear.js';
 import { oneSpareSet } from './chests.js';
 import { goldGoal } from './netherbarter.js';
+import { homeBed } from './villagers.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -687,7 +688,7 @@ export class Brain {
     const l = world.landmarks;
     const y = world.yard;
     const ours = (p: Pos) => (y && p.x >= y.x1 - 6 && p.x <= y.x2 + 6 && p.z >= y.z1 - 6 && p.z <= y.z2 + 6) || Math.hypot(p.x - home.x, p.z - home.z) <= 24;
-    const all = [l.bed, ...l.chests, l.furnace, l.table, l.anvil, l.smithing, l.portal, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
+    const all = [l.bed, ...(l.beds ?? []), ...l.chests, l.furnace, l.table, l.anvil, l.smithing, l.portal, l.fletching, ...l.farmland].filter((p): p is Pos => !!p && !ours(p));
     if (!all.length) return;
     const r = await this.rt.call<{ inside?: boolean[] }>('foreign.at', { positions: all.map(p => [p.x, p.y, p.z]) }).catch(() => undefined);
     if (!Array.isArray(r?.inside)) return;
@@ -701,6 +702,8 @@ export class Brain {
     if (l.anvil) l.anvil = mine(l.anvil);
     if (l.smithing) l.smithing = mine(l.smithing);
     if (l.portal) l.portal = mine(l.portal);
+    if (l.beds) l.beds = l.beds.filter(p => mine(p));
+    if (l.fletching) l.fletching = mine(l.fletching);
     l.chests = l.chests.filter(p => mine(p));
     l.farmland = l.farmland.filter(p => mine(p));
     this.note(`landmarks: left ${theirs.size} of someone else's alone (their chests, bed or farm)`);
@@ -726,6 +729,8 @@ export class Brain {
     // nothing in someone else's build is the bot's: a friend's chest by home is not home storage, their bed not its bed,
     // their farmland not its farm (the mod knows the builds round the bot it didn't make)
     await this.dropForeign(world, s.home);
+    // the villager hall's beds are the villagers' (villagers.ts): the bot sleeps in its own, the nearest of the rest
+    world.landmarks.bed = homeBed(world.landmarks, world);
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
       const l = world.landmarks;
       this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland` +

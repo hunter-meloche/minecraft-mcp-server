@@ -248,6 +248,14 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   // dropped the slime ball from it (26.3's data/minecraft/recipe/lead.json): with the old recipe here the bot took 4
   // string and a slime ball out and the game, a string short, crafted none ("none would craft", live 2026-11-13)
   lead: { makes: 2, from: { string: 5 } },
+  // the villager hall's (P5b), as 26.3's data/minecraft/recipe/white_wool_from_string.json (four string in the 2x2: the
+  // beds' wool while the sheep pen stands empty), white_bed.json (above: three wool, three planks of any wood) and
+  // fletching_table.json (two flint over four planks, on the table's grid) have them; the lectern (lectern.json: four
+  // slabs of any wood round a bookshelf) is for the librarian's chores (P5d). What else is made of string leaves the
+  // leads' share (STRING_KEEP below)
+  white_wool: { makes: 1, from: { string: 4 } },
+  fletching_table: { makes: 1, from: { flint: 2, planks: 4 } },
+  lectern: { makes: 1, from: { oak_slab: 4, bookshelf: 1 } },
   paper: { makes: 3, from: { sugar_cane: 3 } },
   book: { makes: 1, from: { paper: 3, leather: 1 } },
   bookshelf: { makes: 1, from: { planks: 6, book: 3 } },
@@ -300,6 +308,13 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   iron_nugget: { makes: 9, from: { iron_ingot: 1 } },
   lantern: { makes: 1, from: { iron_nugget: 8, torch: 1 } }
 };
+/**
+ * The string that stays for two leads (A29, as amended: the pens walk the cows home on them, and five string make two):
+ * anything else made of string (the hall's wool) takes only what is beyond it. The string comes in only as the mobs drop
+ * it; nothing fetches it.
+ */
+export const STRING_KEEP = RECIPES.lead.from.string;
+
 const WOODEN = /^(oak|birch|spruce|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_(planks|door|fence_gate|fence|stairs|slab|sign|trapdoor|pressure_plate|button)$/;
 
 /** The recipe for an item: wooden things of any wood (birch_fence from birch_planks, birch_planks from birch_log). */

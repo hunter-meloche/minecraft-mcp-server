@@ -25,6 +25,8 @@ Object.assign(CAST_TIMING, { settle: 0, float: 0, floatTries: 3, drain: 0 });
 
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 const cell = (spec: StructureSpec, p: Pos) => spec.layers[p.y]?.[p.z]?.[p.x] ?? '.';
+/** The portal milestone in the tree (the last but the villager hall, P5b). */
+const PORTAL = () => TREE.find(m => m.id === 'nether-portal')!;
 
 // ------------------------------------------------------------------------------------------------ the recipes
 
@@ -91,12 +93,14 @@ test('the portal frame along z: turned a quarter, the landmark still the inside\
 
 // ------------------------------------------------------------------------------------------------ the tree
 
-test('the portal milestone comes after the workshop, the last of the tree, its steps in order', (t) => {
-  const m = TREE.at(-1)!;
+test('the portal milestone comes after the workshop, the last of the tree but the villager hall (P5b), its steps in order', (t) => {
+  const m = PORTAL();
   t.is(m.id, 'nether-portal');
   t.is(m.title, 'a nether portal');
   t.deepEqual(m.prereqs, ['workshop']);
-  t.is(TREE.findIndex(x => x.id === 'workshop'), TREE.length - 2);
+  t.is(TREE.findIndex(x => x.id === 'workshop'), TREE.length - 3);
+  t.is(TREE.indexOf(m), TREE.length - 2);
+  t.is(TREE.at(-1)!.id, 'hall');
   t.deepEqual(m.steps.map(s => s.name), [
     'gather 20 obsidian', 'craft 2 flint and steel', 'the spare diamond set', 'a golden helmet', 'find room for the portal', 'build the portal frame', 'light the portal'
   ]);
@@ -209,7 +213,7 @@ function obsidianCtx(carried: number, wild: Pos[], stored = 0) {
 }
 
 test('the portal\'s 20 obsidian: four more a run where they come one at a time, progress till all 20 are carried; marked carried for the stash', async (t) => {
-  const step = TREE.at(-1)!.steps[0];
+  const step = PORTAL().steps[0];
   const wild = Array.from({ length: 20 }, (_, i) => ({ x: i - 10, y: 12, z: 30 }));
   const o = obsidianCtx(6, wild);
   const st: MilestoneState = { step: 0, data: {} };
@@ -227,7 +231,7 @@ test('the portal\'s 20 obsidian: four more a run where they come one at a time, 
 });
 
 test('the obsidian runs keep off the frame of a portal of others seen lit before and gone out since (a blast): only in its own dimension', async (t) => {
-  const step = TREE.at(-1)!.steps[0];
+  const step = PORTAL().steps[0];
   // someone's 2 x 3 portal along x at (20..21, 64..66, 30), out now: its 10-block frame left standing
   const gone = { x: 20, y: 64, z: 30, axis: 'x', width: 2, height: 3 };
   const frame: Pos[] = [
@@ -287,7 +291,7 @@ test('the portal\'s obsidian cast at home a batch at a time: 6 lava buckets carr
       return { ok: true, text: 'Used' };
     }
   } as unknown as GoalContext;
-  const r = await TREE.at(-1)!.steps[0].run(ctx, { step: 0, data: {} });
+  const r = await PORTAL().steps[0].run(ctx, { step: 0, data: {} });
   t.deepEqual(r, { status: 'progress', text: '4/20 obsidian, cast at home' });
   t.is(inv.get('obsidian'), 4);
   t.is(inv.get('lava_bucket'), 2, 'the other two for the next run');
@@ -579,7 +583,7 @@ test('the portal from the workshop on: obsidian, flint and steel, the spare set,
   t.is(frame.y, 64, 'the inside starts two up: the plinth in the ground, the frame\'s bottom on it');
   t.is(h.get({ ...frame, y: 63 }), 'minecraft:obsidian');
   t.is(h.get(frame), 'minecraft:air');
-  t.false(TREE.at(-1)!.done!({ s: s(), world, have: () => 0 }), 'built, not lit: not done');
+  t.false(PORTAL().done!({ s: s(), world, have: () => 0 }), 'built, not lit: not done');
 
   // the light: trips off (as it ships). It says so, in the line the lead watches for, and waits 30 min
   const before = h.did.length;
@@ -589,8 +593,13 @@ test('the portal from the workshop on: obsidian, flint and steel, the spare set,
   t.deepEqual(h.did.slice(before).filter(d => !/^progress a nether portal - /.test(d)), [`progress ${LIGHT_OFF}`]);
   t.is(world.progress!.journal.at(-1)!.text, `a nether portal: ${LIGHT_OFF}`);
   t.is(world.progress!.blockedUntil!['nether-portal'], T0 + 30 * MINUTE);
-  t.is(goal.wants(s(), world), null);
-  t.deepEqual(goal.declines!(s(), world), { cause: 'unneeded', text: 'a nether portal: light the portal waits (nether trips are off)', until: T0 + 30 * MINUTE });
+  // meanwhile the project goes on with the villager hall (P5b: after the workshop, the portal no prereq of it); with
+  // that done too, nothing is left but the light, which waits for the switch
+  t.is(goal.wants(s(), world), 'a villager hall: find room for the hall');
+  const hallDone = structuredClone(world);
+  hallDone.progress!.done.push('hall');
+  t.is(goal.wants(s(), hallDone), null);
+  t.deepEqual(goal.declines!(s(), hallDone), { cause: 'unneeded', text: 'a nether portal: light the portal waits (nether trips are off)', until: T0 + 30 * MINUTE });
   // the half hour over: it wants again, still stopping nothing; never once through a portal, never the flint and steel
   const later = lookAt(h.inv, 1000, { xpLevel: 40, now: T0 + 31 * MINUTE });
   t.is(goal.wants(later, world), 'a nether portal: light the portal');
@@ -612,8 +621,9 @@ test('the portal from the workshop on: obsidian, flint and steel, the spare set,
   t.true(world.progress!.journal.some(j => /^a nether portal: light the portal done \(the portal is lit at /.test(j.text)));
   t.deepEqual(homePortal(world), { x: frame.x, y: frame.y, z: frame.z });
   t.deepEqual(ownPortals(world), [{ dimension: 'overworld', x: frame.x, y: frame.y, z: frame.z }]);
-  t.like(goal.declines!(later, world), { cause: 'unneeded', text: `all ${TREE.length} milestone(s) done` });
-  t.true(TREE.at(-1)!.done!({ s: later, world, have: () => 0 }));
+  // the tree goes on with the villager hall (P5b): the last milestone after the workshop
+  t.is(goal.wants(later, world), 'a villager hall: find room for the hall');
+  t.true(PORTAL().done!({ s: later, world, have: () => 0 }));
 });
 
 /** The world with the frame built at (-562, 62, 2188) along z (as the build step leaves it), at the light step. */
@@ -629,7 +639,7 @@ function atTheLight(lights = true) {
   })));
   world.zones!.portal = [{ x: site.x, y: 62, z: site.z, width: 3, length: 6 }];
   world.zones!['portal:frame'] = [{ x: site.x + 1, y: 64, z: site.z + 2 }];
-  return { world, h, frame: { x: site.x + 1, y: 64, z: site.z + 2 }, step: TREE.at(-1)!.steps[6], st: world.progress!.current };
+  return { world, h, frame: { x: site.x + 1, y: 64, z: site.z + 2 }, step: PORTAL().steps[6], st: world.progress!.current };
 }
 
 test('the light: a frame short of obsidian, or with something in its inside, is not lit, and says why; one that does not take says so and waits', async (t) => {
@@ -729,7 +739,7 @@ function atTheBuild(items: InventoryItem[], fills = true) {
     if (tool === 'build-structure') for (const p of dug) h.set(p, 'minecraft:air');
     return r;
   }) as GoalContext['act'];
-  return { world, h, site, dug, levels, step: TREE.at(-1)!.steps[5], st: world.progress!.current };
+  return { world, h, site, dug, levels, step: PORTAL().steps[5], st: world.progress!.current };
 }
 
 test('F3: after the frame\'s build the ground round its plinth is the yard\'s ground again: the holes Baritone dug as it built filled with dirt, as a site step levels', async (t) => {
@@ -779,7 +789,7 @@ test('F3: the ground round the plinth short of dirt to fill it: the step waits f
 
 test('done with a lit portal already standing in the yard (it is then its own); not with one outside it', (t) => {
   const w = afterWorkshop();
-  const m = TREE.at(-1)!;
+  const m = PORTAL();
   const view = { s: lookAt([], 1000), world: w, have: () => 0 };
   t.false(m.done!(view));
   t.deepEqual(ownPortals(w), []);

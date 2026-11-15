@@ -1,5 +1,5 @@
 import { itemOf } from '../brain/blueprints.js';
-import { recipeFor } from '../brain/progress.js';
+import { recipeFor, STRING_KEEP } from '../brain/progress.js';
 import { SMELTED } from '../brain/project.js';
 import type { Change } from './diff.js';
 
@@ -40,7 +40,7 @@ export function sourceBill(bill: Record<string, number>, have: Record<string, nu
   const missing: Record<string, number> = {};
   // take from what there is: a recipe's "planks" or "log" is any of the kind, a design's "oak_planks" only that
   const GROUPS = ['log', 'planks', 'coal', 'cobblestone'];
-  const take = (item: string, n: number): number => {
+  const take = (item: string, n: number, keep = 0): number => {
     if (GROUPS.includes(item)) {
       let got = 0;
       for (const [name, k] of Object.entries(exact)) {
@@ -53,7 +53,7 @@ export function sourceBill(bill: Record<string, number>, have: Record<string, nu
       pool[item] = (pool[item] ?? 0) - got;
       return got;
     }
-    const got = Math.min(n, exact[item] ?? 0);
+    const got = Math.min(n, Math.max(0, (exact[item] ?? 0) - keep));
     exact[item] = (exact[item] ?? 0) - got;
     pool[generic(item)] = (pool[generic(item)] ?? 0) - got;
     return got;
@@ -62,7 +62,9 @@ export function sourceBill(bill: Record<string, number>, have: Record<string, nu
   const rank: Source[] = ['have', 'craft', 'smelt', 'gather', 'missing'];
   const worst = (a: Source, b: Source) => (rank.indexOf(a) >= rank.indexOf(b) ? a : b);
   const need = (item: string, n: number, depth: number): Source => {
-    const left = n - take(item, n);
+    // the leads' string (STRING_KEEP) is no craft's, as prepare keeps it: wool is made of what is beyond it. Counted
+    // as there, the plan said "craft" and the job then waited on "gathering 3 string", which no trip fetches
+    const left = n - take(item, n, item === 'string' && depth > 0 ? STRING_KEEP : 0);
     if (left <= 0) return 'have';
     const r = recipeFor(item) ?? (item === 'planks' ? { makes: 4, from: { log: 1 } } : undefined);
     if (r && depth < 6) {

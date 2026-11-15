@@ -98,7 +98,8 @@ test('provisionStep: missing stops it with the reason; short goes to the stock t
   const { ctx } = fakeCtx(w, new Map());
   const glass = await provisionStep(ctx, j, { white_wool: 2 }, []);
   t.false(glass.ready);
-  t.deepEqual(glass.missing, { white_wool: 2 });
+  // (wool is made of string since the villager hall, P5b: four a wool; it is the string nobody fetches)
+  t.deepEqual(glass.missing, { string: 8 });
   t.regex(glass.note, /put them in a home chest/);
   const logs = await provisionStep(ctx, j, { oak_log: 10 }, []);
   t.deepEqual(logs.need, { oak_log: 7 });
@@ -107,6 +108,18 @@ test('provisionStep: missing stops it with the reason; short goes to the stock t
   t.true(ready.ready);
   t.deepEqual(w.reserved?.[7], { oak_log: 10 });
   t.deepEqual(provisioned(w, { ...j, bill: { oak_log: 10 } }), { held: 10, total: 10, short: {} });
+});
+
+test('provisionStep: wool of string with less than the leads\' five string left over is missing (the design to change), not "gathering string" that no trip fetches', async t => {
+  const w = world({ string: 10 });
+  const calls: string[] = [];
+  const { ctx } = fakeCtx(w, new Map(), calls);
+  const wool = await provisionStep(ctx, job(), { white_wool: 2 }, []);
+  t.false(wool.ready);
+  t.deepEqual(wool.missing, { string: 3 });
+  t.is(wool.need, undefined);
+  t.regex(wool.note, /can't get string x3 by itself: put them in a home chest/);
+  t.false(calls.some(c => /take-from-chest string|craft-item/.test(c)), calls.join(' | '));
 });
 
 test('provisionStep: makes what other lines are made from first (the oak planks for the walls before the fence)', async t => {

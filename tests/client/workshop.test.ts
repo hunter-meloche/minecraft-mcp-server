@@ -242,11 +242,11 @@ function afterEnchanting(): WorldMemory {
   return w;
 }
 
-test('the workshop comes after the enchanting room (the nether portal after it, P2a): its site, its build, its water; with the room done it is next', (t) => {
+test('the workshop comes after the enchanting room (the nether portal after it, P2a, and the villager hall, P5b): its site, its build, its water; with the room done it is next', (t) => {
   const m = TREE.find(x => x.id === 'workshop')!;
   t.is(TREE.indexOf(m), TREE.findIndex(x => x.id === 'enchanting') + 1);
-  t.is(TREE.at(-1)!.id, 'nether-portal');
-  t.deepEqual(TREE.at(-1)!.prereqs, ['workshop']);
+  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['nether-portal', 'hall']);
+  for (const after of TREE.slice(TREE.indexOf(m) + 1)) t.deepEqual(after.prereqs, ['workshop'], after.id);
   t.is(m.id, 'workshop');
   t.is(m.title, 'a workshop');
   t.deepEqual(m.prereqs, ['enchanting']);

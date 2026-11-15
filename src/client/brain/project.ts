@@ -2,7 +2,7 @@ import { fromGate, nearHome, no, type Decline, type Gate, type Goal, type GoalCo
 import type { WorldMemory } from './memory.js';
 import {
   allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, stepId, stepOf,
-  stillShort, type Milestone
+  stillShort, STRING_KEEP, type Milestone
 } from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
 import { clock } from './idlelog.js';
@@ -367,6 +367,13 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   const r = recipeFor(item);
   if (!r || depth > 6) return { [item]: n - have };
   const crafts = Math.ceil((n - have) / r.makes);
+  // the leads' string stays (STRING_KEEP): wool for the hall's beds, or anything else made of string, uses only what
+  // is beyond it. Taken, the pens' next lead would want string no trip fetches (it comes only as the mobs drop it)
+  const strings = (r.from.string ?? 0) * crafts;
+  if (strings && item !== 'lead') {
+    const there = (await count(ctx, x => x === 'string')) + Math.max(0, (chestTotals(ctx.world).string ?? 0) - reservedCount(ctx.world, 'string'));
+    if (there < strings + STRING_KEEP) return { string: strings + STRING_KEEP - there };
+  }
   const short: Record<string, number> = {};
   for (const [inp, k] of Object.entries(r.from)) {
     for (const [sk, sv] of Object.entries(await prepare(ctx, inp, k * crafts, depth + 1, reserve))) short[sk] = (short[sk] ?? 0) + sv;

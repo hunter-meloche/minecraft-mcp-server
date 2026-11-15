@@ -24,6 +24,13 @@ export interface Landmarks {
    * improvement run or a player lit there, which the milestone counts as its own (portal.ts)
    */
   portal?: Pos;
+  /**
+   * every bed's head round home, the nearest first (only where there are any): `bed` is the bot's own of them, never
+   * one of the villager hall's (villagers.ts homeBed). With a fletching table (the nearest), what tells a villager hall
+   * the improvement runs put up (the hall milestone counts that as its own)
+   */
+  beds?: Pos[];
+  fletching?: Pos;
   /** farmland cells near home */
   farmland: Pos[];
   /** when these were looked for (ms) */
@@ -255,7 +262,7 @@ const id = (b: string | null) => (b ?? '').replace(/^minecraft:/, '').replace(/\
  */
 export function findLandmarks(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
   const found: Landmarks = { chests: [], farmland: [] };
-  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [], portals: Pos[] = [];
+  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [], portals: Pos[] = [], fletchings: Pos[] = [];
   blocks.forEach((b, i) => {
     const name = id(b);
     if (!name) return;
@@ -268,18 +275,22 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
     else if (name === 'crafting_table') tables.push(at);
     else if (name === 'anvil' || name === 'chipped_anvil' || name === 'damaged_anvil') anvils.push(at);
     else if (name === 'smithing_table') smithings.push(at);
+    else if (name === 'fletching_table') fletchings.push(at);
     else if (name === 'nether_portal') portals.push(at);
     else if (name === 'farmland') found.farmland.push(at);
   });
   const near = (a: Pos, b: Pos) => Math.hypot(a.x - home.x, a.y - home.y, a.z - home.z) - Math.hypot(b.x - home.x, b.y - home.y, b.z - home.z);
   found.chests.sort(near);
-  found.bed = beds.sort(near)[0];
+  beds.sort(near);
+  found.bed = beds[0];
   found.furnace = furnaces.sort(near)[0];
   found.table = tables.sort(near)[0];
   // (set only where found: a home without them has the landmarks it had before, key for key)
-  const anvil = anvils.sort(near)[0], smithing = smithings.sort(near)[0], portal = portals.sort(near)[0];
+  const anvil = anvils.sort(near)[0], smithing = smithings.sort(near)[0], portal = portals.sort(near)[0], fletching = fletchings.sort(near)[0];
   if (anvil) found.anvil = anvil;
   if (smithing) found.smithing = smithing;
   if (portal) found.portal = portal;
+  if (beds.length) found.beds = beds;
+  if (fletching) found.fletching = fletching;
   return found;
 }

@@ -283,11 +283,11 @@ public final class Handlers {
                 if (e instanceof net.minecraft.world.entity.Mob) o.addProperty("aggressive", Nether.angry(e));
                 // a piglin with a loved item in the off hand: admiring it (its ~6 s), taking no more gold meanwhile
                 if (e instanceof net.minecraft.world.entity.monster.piglin.Piglin pg) o.addProperty("admiring", Nether.admiring(pg.getOffhandItem()));
-                // someone's: named, tamed, on a lead, or in someone else's build (a friend's pen): the brain leaves those be
-                if (e.hasCustomName()) o.addProperty("named", true);
-                if ((e instanceof net.minecraft.world.entity.TamableAnimal t && t.isTame())
-                    || (e instanceof net.minecraft.world.entity.animal.equine.AbstractHorse h && h.isTamed())) o.addProperty("tamed", true);
-                if (e instanceof net.minecraft.world.entity.Leashable l && l.isLeashed()) o.addProperty("leashed", true);
+                // someone's: named, tamed, on a lead, riding something, or in someone else's build (a friend's pen): the
+                // brain leaves those be
+                marks(o, e, pl);
+                // a villager's job, level and biome type; a wandering trader's `merchant` alone
+                Merchant.describe(o, e);
                 if (Foreign.inZone(e.blockPosition())) o.addProperty("foreign", true);
                 double nb = Foreign.nearest(e.blockPosition());
                 if (!Double.isInfinite(nb)) o.addProperty("buildDistance", round(nb));
@@ -456,6 +456,37 @@ public final class Handlers {
         }
         if (st.isEnchanted()) o.addProperty("enchanted", true);
         return o;
+    }
+
+    /** A custom name is cut to this many characters (a book's worth of name tag would not help the brain). */
+    static final int NAME_MAX = 64;
+
+    /**
+     * The marks of someone's on an entity, as the client has them (checked against the 26.3 jar), added only when set:
+     * `named` and its `customName` (synced entity data); `tamed`; `leashed` and `leashedTo` ("me" for the bot's own lead,
+     * else the holder's entity name: "player", "leash_knot" for a fence post, "wandering_trader" for its llamas); and
+     * `vehicle` with `vehicleId`, what it rides (a boat, a minecart: the passengers packet). The lead is read through
+     * getLeashHolder: the client gets only the holder's id (ClientboundSetEntityLinkPacket) and isLeashed() stays false
+     * until something asks for the holder (the renderer does, for what it draws).
+     */
+    static void marks(JsonObject o, Entity e, Entity self) {
+        if (e.hasCustomName()) {
+            o.addProperty("named", true);
+            String name = e.getCustomName().getString();
+            o.addProperty("customName", name.length() > NAME_MAX ? name.substring(0, NAME_MAX) : name);
+        }
+        if ((e instanceof net.minecraft.world.entity.TamableAnimal t && t.isTame())
+            || (e instanceof net.minecraft.world.entity.animal.equine.AbstractHorse h && h.isTamed())) o.addProperty("tamed", true);
+        Entity holder = e instanceof net.minecraft.world.entity.Leashable l ? l.getLeashHolder() : null;
+        if (holder != null) {
+            o.addProperty("leashed", true);
+            o.addProperty("leashedTo", holder == self ? "me" : Names.entity(holder));
+        }
+        Entity vehicle = e.getVehicle();
+        if (vehicle != null) {
+            o.addProperty("vehicle", Names.entity(vehicle));
+            o.addProperty("vehicleId", vehicle.getId());
+        }
     }
 
     /**

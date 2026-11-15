@@ -387,6 +387,85 @@ export function workshop(opts: { doorSide?: Side } = {}): Blueprint {
   return rotate(blueprint('workshop', spec, { entrances: [{ ...door, facing: 'south' }], landmarks }), TURNS_FROM_SOUTH[doorSide]);
 }
 
+/** The villager hall's footprint as a site step asks for it: a 9 x 7 room inside, and its walls. */
+export const HALL_SIZE = { width: 11, length: 9 } as const;
+
+/**
+ * The villager hall (P5b of the progression plan): an 11 x 9 room (9 x 7 inside), groundOffset 0 with nothing placed
+ * in the ground layer (layer 0): the yard's grass is the floor, as in the workshop, and runs level through the gate.
+ * Planks laid there would have the build replace the yard's grass, and a build lifts the no-break rule on every kind it
+ * replaces for as long as it runs, everywhere in reach and not only in its box: Baritone could dig the lawn round the
+ * hall, as the portal's plinth left five holes beside it (Nov 14). Log corner posts and plank walls 3 high on the
+ * ground (layers 1-3), a flat plank roof (layer 4). Villagers cannot open a fence gate (they open doors), and the bot
+ * can: the way in is an oak fence gate in the middle of `gateSide` with the
+ * cell over it open (a player's head; a closed gate is 1.5 high, more than any mob jumps). Inside, drawn with the gate
+ * south, the back (north) wall holds three beds side by side, their heads against it and their feet into the room,
+ * with the row past the feet kept clear (a villager walks up to its bed; nothing stands there); further along the
+ * same wall the lectern's cell, left empty (P5d places the lectern there and breaks it again for a reroll), and the
+ * fletching table in the corner (a fletcher's work: sticks for emeralds). Floor torches in the two front corners
+ * light every cell inside (nothing spawns in the room: block light 0 is where monsters spawn), glass windows two
+ * each in the walls either side of the gate's. The `panel`: a 1 x 2 section of the wall on `panelSide` (beside the
+ * gate when that is the gate's side), plain planks as the wall is, which the move (P5c) digs out to bring villagers in
+ * and puts back; the cells inside it are kept clear (outside, the site's clearance keeps the ground free). `turned`:
+ * the site was found 9 wide and 11 long (findSite turned it); the gate goes on whichever side it is asked for either
+ * way (drawn with it on a long wall or on a short one). Landmarks:
+ * 'bed' x3 (heads), 'bed-foot' x3, 'lectern', 'fletching', 'gate', 'panel' x2 (bottom, top), 'inside' (the floor cell
+ * in the middle of the room, feet level), 'torch' x2.
+ */
+export function hall(opts: { gateSide?: Side; panelSide?: Side; turned?: boolean; bed?: string } = {}): Blueprint {
+  const gateSide = opts.gateSide ?? 'south';
+  const panelSide = opts.panelSide ?? 'north';
+  checkSide(gateSide);
+  checkSide(panelSide);
+  const bed = opts.bed ?? 'white_bed';
+  if (!/^[a-z_]+_bed$/.test(bed)) throw new Error(`a bed is a "<colour>_bed", not "${bed}"`);
+  const turns = TURNS_FROM_SOUTH[gateSide];
+  // the size it stands at in the world, and the size drawn with the gate south (turned a quarter, they swap)
+  const world = opts.turned ? { width: HALL_SIZE.length, length: HALL_SIZE.width } : { ...HALL_SIZE };
+  const [W, L] = turns % 2 ? [world.length, world.width] : [world.width, world.length];
+  const panel = turn(panelSide, -turns);
+  const g = new Grid(W, 5, L, '.');
+  for (let z = 0; z < L; z++) for (let x = 0; x < W; x++) {
+    const edgeX = x === 0 || x === W - 1, edgeZ = z === 0 || z === L - 1;
+    // the ground left as it is, under the walls and inside (the floor)
+    g.set(x, 0, z, ' ');
+    for (let y = 1; y <= 3; y++) if (edgeX || edgeZ) g.set(x, y, z, edgeX && edgeZ ? 'L' : 'P');
+    g.set(x, 4, z, 'P');
+  }
+  const gx = (W - 1) / 2, mid = (L - 1) / 2;
+  const gate = { x: gx, y: 1, z: L - 1 };
+  g.set(gate.x, 1, gate.z, 'G');
+  g.set(gate.x, 2, gate.z, '.');
+  const panelAt: Record<Side, { x: number; z: number }> = { south: { x: gx + 2, z: L - 1 }, north: { x: gx, z: 0 }, west: { x: 0, z: mid }, east: { x: W - 1, z: mid } };
+  const p = panelAt[panel];
+  // two windows in each side wall, either side of where a panel there would be
+  for (const x of [0, W - 1]) for (const z of [mid - 2, mid + 2]) g.set(x, 2, z, 'W');
+  const landmarks: Landmark[] = [];
+  for (let i = 0; i < 3; i++) {
+    const x = 1 + i;
+    g.set(x, 1, 1, 'H');
+    g.set(x, 1, 2, 'F');
+    landmarks.push({ kind: 'bed', at: { x, y: 1, z: 1 } }, { kind: 'bed-foot', at: { x, y: 1, z: 2 } });
+  }
+  g.set(W - 2, 1, 1, 'X');
+  const torches = [{ x: 1, y: 1, z: L - 2 }, { x: W - 2, y: 1, z: L - 2 }];
+  for (const t of torches) g.set(t.x, t.y, t.z, 'T');
+  landmarks.push(
+    { kind: 'lectern', at: { x: W - 3, y: 1, z: 1 } }, { kind: 'fletching', at: { x: W - 2, y: 1, z: 1 } }, { kind: 'gate', at: gate },
+    { kind: 'panel', at: { x: p.x, y: 1, z: p.z } }, { kind: 'panel', at: { x: p.x, y: 2, z: p.z } }, { kind: 'inside', at: { x: gx, y: 1, z: mid } },
+    ...torches.map(at => ({ kind: 'torch', at }))
+  );
+  const spec: StructureSpec = {
+    palette: {
+      L: 'oak_log[axis=y]', P: 'oak_planks', T: 'torch', W: 'glass', X: 'fletching_table', G: 'oak_fence_gate[facing=south]',
+      H: `${bed}[facing=north,part=head]`, F: `${bed}[facing=north,part=foot]`
+    },
+    layers: g.layers()
+  };
+  const bp = blueprint('villager-hall', spec, { entrances: [{ ...gate, facing: 'south' }], landmarks, groundOffset: 0 });
+  return rotate(bp, turns);
+}
+
 /**
  * A nether portal's frame (P2a of the progression plan), 6 x 6 x 3, groundOffset 0, drawn along x (`axis` 'x'; 'z'
  * turns it a quarter): in the middle row (z 1) a 6 x 1 plinth of cobblestone in the ground layer itself (layer 0), on

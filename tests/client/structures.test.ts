@@ -3,6 +3,7 @@ import { compile, validateDesign, type Design } from '../../src/client/structure
 import { diff, sameBlock, summary } from '../../src/client/structures/diff.js';
 import { packages } from '../../src/client/structures/order.js';
 import { billFor, sourceBill } from '../../src/client/structures/bill.js';
+import { STRING_KEEP } from '../../src/client/brain/progress.js';
 import { placed } from '../../src/client/structures/tools.js';
 
 const hut: Design = {
@@ -105,7 +106,19 @@ test('bill: what the changes place, sourced from what there is, recipes, smeltin
   t.is(by.torch, 'craft');
   t.is(by.white_wool, 'missing');
   t.is(by.iron_ingot, 'gather'); // one smelted from the raw iron, the other mined
-  t.deepEqual(s.missing, { white_wool: 2 });
+  // wool is made of string since the villager hall (P5b: four a wool), and string comes to nobody's call
+  t.deepEqual(s.missing, { string: 8 });
+});
+
+test('bill: wool of string leaves the leads\' five string as prepare does, so a plan that says it can craft it can', (t) => {
+  t.is(STRING_KEEP, 5);
+  // 8 string for 2 wool, and 5 kept: 10 there is 3 short, which nobody fetches (prepare would have said "gathering 3 string" for good)
+  const short = sourceBill({ white_wool: 2 }, { string: 10 });
+  t.like(short.lines[0], { item: 'white_wool', source: 'missing' });
+  t.deepEqual(short.missing, { string: 3 });
+  t.like(sourceBill({ white_wool: 2 }, { string: 13 }), { lines: [{ item: 'white_wool', source: 'craft' }], missing: {}, gather: {} });
+  // string placed as it is (a tripwire) is not a craft of it: prepare keeps nothing back from that
+  t.like(sourceBill({ string: 3 }, { string: 5 }), { lines: [{ item: 'string', source: 'have' }], missing: {} });
 });
 
 test('planText and render: what the LLM reads', async (t) => {
