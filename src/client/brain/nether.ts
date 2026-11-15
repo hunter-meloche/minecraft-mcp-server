@@ -61,10 +61,12 @@ export interface SetupSpot { x: number; y: number; z: number; axis: 'x' | 'z'; s
 
 /**
  * How a Nether trip ended, as the work wrapper saw it: home through a portal with the two sides linked and no death
- * (`clean`: it counts for the stages), home through a portal but not linked, not got home through a portal
- * (`stranded`: the leave nether goal took over), a death on it, or stopped before its end.
+ * after doing its work down there (`clean`: it counts for the stages); the same but turned back before any of its work
+ * (`turned back`: a ghast in sight, no piglin, no ore; it counts for nothing, and its trip of the day is given back);
+ * home through a portal but not linked, not got home through a portal (`stranded`: the leave nether goal took over), a
+ * death on it, or stopped before its end.
  */
-export type TripEnd = 'clean' | 'not linked' | 'stranded' | 'a death' | 'cut short';
+export type TripEnd = 'clean' | 'turned back' | 'not linked' | 'stranded' | 'a death' | 'cut short';
 
 /** Kept in brain.json per world (`world.nether`). */
 export interface NetherMemory {
@@ -73,11 +75,12 @@ export interface NetherMemory {
   /** the stage the trips have reached (the ramp, NETHER_STAGES: the nether rung's work opens by it): 0 to start */
   stage: number;
   /**
-   * clean trips counted for the stages (NETHER_STAGES): home through a portal, the two sides linked, no death on it.
-   * Never less than the stage's own count: a death in the Nether drops the stage and puts this back to that stage's
+   * clean trips counted for the stages (NETHER_STAGES): home through a portal, the two sides linked, no death on it, its
+   * work done down there (P3b: one turned back before any counts for nothing). Never less than the stage's own count: a
+   * death in the Nether drops the stage and puts this back to that stage's
    */
   stageTrips: number;
-  /** Nether trips in a row that ended with no death (the probation's) */
+  /** Nether trips in a row that ended with no death (the probation's; one turned back before its work counts for nothing) */
   cleanTrips: number;
   /** the last Nether trip that went (one that never set out is not one): when it ended, its line, how (brain-status) */
   lastTrip?: { at: number; text: string; end: TripEnd };
@@ -113,8 +116,14 @@ export interface NetherMemory {
   seenIn?: string;
   /** the lit portals seen that are not its own, by dimension (the bridge keeps its own list for a client session only) */
   seen?: Record<string, PortalShape[]>;
-  /** places found down there (P3c: fortresses, bastions) */
-  sites: { kind: string; x: number; y: number; z: number; at?: number }[];
+  /**
+   * places found down there (the look from its hut, P3b's scouting legs: fortresses, bastions, others' builds, lava
+   * lakes, the biomes it walked into, ancient debris with a face open to air); `leg`: the bearing of the scouting leg
+   * that found it, whose way leads there (a debris trip goes out by it, netherdebris.ts)
+   */
+  sites: { kind: string; x: number; y: number; z: number; at?: number; leg?: Bearing }[];
+  /** the scouting legs walked out from its own portal (P3b, netherscout.ts), one a bearing: the newest kept */
+  legs?: ScoutLeg[];
   /** the barter work's hold, the gold chore's day, how the gold is given (P3a: netherbarter.ts) */
   barter?: BarterMemory;
   /**
@@ -124,16 +133,40 @@ export interface NetherMemory {
   helmet?: { left: number; max: number; at: number };
 }
 
+/**
+ * The eight bearings the scouting legs go out along (netherscout.ts), the compass order: across the ground, north
+ * being -z and east +x as the game has them.
+ */
+export const BEARINGS = [
+  { name: 'north', dx: 0, dz: -1 }, { name: 'north-east', dx: 1, dz: -1 }, { name: 'east', dx: 1, dz: 0 }, { name: 'south-east', dx: 1, dz: 1 },
+  { name: 'south', dx: 0, dz: 1 }, { name: 'south-west', dx: -1, dz: 1 }, { name: 'west', dx: -1, dz: 0 }, { name: 'north-west', dx: -1, dz: -1 }
+] as const;
+export type Bearing = typeof BEARINGS[number]['name'];
+const isBearing = (v: unknown): v is Bearing => BEARINGS.some(b => b.name === v);
+
+/**
+ * A scouting leg (P3b): along which bearing, when it ended (real ms), how far out it got along it (blocks from its
+ * portal), why it turned back there, and the way it took: waypoints of the cells it walked out, from its hut on, a
+ * few blocks apart (each a cell it stood on, the next a careful walk of a few steps on), so a later trip can follow
+ * a known way out there.
+ */
+export interface ScoutLeg { bearing: Bearing; at: number; reach: number; end: string; way: Pos[] }
+/** A leg's waypoints kept at most. */
+export const WAYPOINTS = 16;
+
 /** A golden helmet's durability (26.3's ArmorMaterials.GOLD: 7 x 11 for a helmet), where the inventory says none. */
 const GOLDEN_HELMET_DURABILITY = 77;
 
 /** Spots of its own portal refused, kept (the oldest let go). */
 export const REFUSED_SPOTS = 16;
-/** Deaths kept (3 days' worth at most), starts (24 h), portals seen per dimension, sites. */
+/**
+ * Deaths kept (3 days' worth at most), starts (24 h), portals seen per dimension, sites (the look's and eight legs'
+ * of scouting, some four a leg: noteSites lets the lesser kinds go first).
+ */
 const DEATHS = 32;
 const STARTS = 64;
 const SEEN = 16;
-const SITES = 16;
+export const SITES = 32;
 
 // ------------------------------------------------------------------------------------------------ the stages
 
@@ -143,8 +176,11 @@ export const FIRE_POTIONS = 2;
 /**
  * The stage ramp (P2b of the progression plan). Stage 0 is the setup (its own Nether-side portal, linked) and then a
  * short look from its hut; each stage after it opens once the clean trips reach its count: 1 after 2 (P3a: barter,
- * quartz), 2 after 4 (P3b/c: debris, scout), 3 after 6 with potions of fire resistance in stock too (P3c/P6: fortress,
- * bastion, each fought with one drunk). The nether rung's work says its own stage (worktasks.ts NETHER_WORK).
+ * quartz), 2 after 4 (P3b: debris, scout), 3 after 6 with potions of fire resistance in stock too (P3c/P6: fortress,
+ * bastion, each fought with one drunk). A clean trip is one that did its work down there (netherEnd): live on Nov 15
+ * stage 2 came of a barter and a quartz trip that went through to the hut and straight back (ghasts 20 and 12 off),
+ * which had shown nothing of what stage 2 asks of the bot. The nether rung's work says its own stage (worktasks.ts
+ * NETHER_WORK).
  */
 export const NETHER_STAGES: readonly { stage: number; trips: number; potions?: number }[] = [
   { stage: 1, trips: 2 }, { stage: 2, trips: 4 }, { stage: 3, trips: 6, potions: FIRE_POTIONS }
@@ -153,8 +189,8 @@ export const NETHER_STAGES: readonly { stage: number; trips: number; potions?: n
 /** The clean trips a stage stands at (0 for stage 0): where a death in the Nether puts the count back to. */
 export const tripsForStage = (stage: number): number => (stage <= 0 ? 0 : NETHER_STAGES[Math.min(stage, NETHER_STAGES.length) - 1].trips);
 
-/** A drinkable potion of fire resistance, by its contents (never by its name: every potion is `potion`). */
-const isFirePotion = (i: { name: string; potion?: string }) => i.name === 'potion' && /(^|_)fire_resistance$/.test(i.potion ?? '');
+/** A drinkable potion of fire resistance, by its contents (never by its name: every potion is `potion`): what the debris trip drinks (netherdebris.ts). */
+export const isFirePotion = (i: { name: string; potion?: string }) => i.name === 'potion' && /(^|_)fire_resistance$/.test(i.potion ?? '');
 
 /** Potions carried and in the home chests (by their stacks, as last seen) that `is` takes. */
 const firePotionsOf = (items: { name: string; count: number; potion?: string }[], world: WorldMemory, is: (i: { name: string; potion?: string }) => boolean): number =>
@@ -206,7 +242,7 @@ export const stockName = (kind: NetherStockKind) => (kind === 'fire_resistance' 
 
 /** The longest line kept of the last trip. */
 const TRIP_TEXT = 200;
-const ENDS: readonly string[] = ['clean', 'not linked', 'stranded', 'a death', 'cut short'];
+const ENDS: readonly string[] = ['clean', 'turned back', 'not linked', 'stranded', 'a death', 'cut short'];
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -231,8 +267,17 @@ function clean(raw: unknown): NetherMemory {
     }).slice(-DEATHS),
     starts: (Array.isArray(r.starts) ? r.starts : []).filter(fin).slice(-STARTS),
     sites: (Array.isArray(r.sites) ? r.sites : []).flatMap(p => (isObj(p) && typeof p.kind === 'string' && posOf(p)
-      ? [{ kind: p.kind, ...posOf(p)!, ...(fin(p.at) ? { at: p.at } : {}) }] : [])).slice(0, SITES)
+      ? [{ kind: p.kind, ...posOf(p)!, ...(fin(p.at) ? { at: p.at } : {}), ...(isBearing(p.leg) ? { leg: p.leg } : {}) }] : [])).slice(0, SITES)
   };
+  if (Array.isArray(r.legs)) {
+    // (one a bearing, the newest: a file a hand edited may hold two)
+    const legs = (r.legs as unknown[]).flatMap(l => {
+      if (!isObj(l) || !isBearing(l.bearing) || !fin(l.at) || !fin(l.reach)) return [];
+      const way = (Array.isArray(l.way) ? l.way : []).map(posOf).filter((p): p is Pos => !!p).slice(0, WAYPOINTS);
+      return [{ bearing: l.bearing, at: l.at, reach: Math.max(0, Math.round(l.reach)), end: typeof l.end === 'string' ? l.end.slice(0, TRIP_TEXT) : '', way }];
+    }).sort((a, b) => b.at - a.at).filter((l, i, all) => all.findIndex(o => o.bearing === l.bearing) === i);
+    if (legs.length) m.legs = legs;
+  }
   if (typeof r.trips === 'boolean') m.trips = r.trips;
   const t = r.tripsToday;
   if (isObj(t) && fin(t.day) && fin(t.n)) m.tripsToday = { day: t.day, n: Math.max(0, Math.floor(t.n)) };
@@ -505,18 +550,44 @@ export function notePortals(world: WorldMemory, dimension: string, portals: Port
   (netherOf(world).seen ??= {})[dimension] = next;
 }
 
-/** A place found down there: a natural `fortress` or `bastion`, someone's `build`, a `lava` lake, the `exit` of its hut. */
-export interface NetherSite { kind: string; x: number; y: number; z: number }
+/**
+ * A place found down there: a natural `fortress` or `bastion`, someone's `build`, a `lava` lake, the `exit` of its
+ * hut, a biome a scouting leg walked into (`soul_sand_valley`, `crimson_forest`, `warped_forest`), an
+ * `ancient_debris` a scouting leg saw with a face open to air (the debris trip's, netherdebris.ts); `leg`: the bearing
+ * of the scouting leg that found it (its way, world.nether.legs, leads there).
+ */
+export interface NetherSite { kind: string; x: number; y: number; z: number; leg?: Bearing }
 
 /**
- * Places found down there into `world.nether.sites` (the look from its hut now; P3c's scouting later), to the block:
- * the newest first, each in place of one of its kind within 8 of it (the same place seen again), SITES kept.
+ * How long a site of a kind is kept against the rest when the list is full: the natural ones last (P3c's fortress, P6's
+ * bastion), the debris a leg saw with the builds and the hut's exit (the netherite's, and rare: the game makes none
+ * that touches air).
+ */
+const siteRank = (kind: string) => (kind === 'fortress' || kind === 'bastion' ? 0 : kind === 'build' || kind === 'exit' || kind === 'ancient_debris' ? 1 : 2);
+
+/**
+ * Places found down there into `world.nether.sites` (the look from its hut, the scouting legs), to the block: the
+ * newest first, each in place of one of its kind within 8 of it (the same place seen again: the leg that found it
+ * kept when the new sight has none), SITES kept. Over that the oldest of the lowest kind goes first: lava lakes and
+ * biomes, then builds, the hut's exit and debris, a natural fortress or bastion last (eight legs of scouting, some four
+ * sites each, would otherwise push the fortress P3c is to go to out of the list).
  */
 export function noteSites(world: WorldMemory, found: NetherSite[], at: number): void {
   const n = netherOf(world);
-  const fresh = found.map(f => ({ kind: f.kind, x: Math.floor(f.x), y: Math.floor(f.y), z: Math.floor(f.z), at }));
-  const again = (o: NetherSite) => fresh.some(f => f.kind === o.kind && Math.hypot(f.x - o.x, f.y - o.y, f.z - o.z) <= 8);
-  n.sites = [...fresh, ...n.sites.filter(o => !again(o))].slice(0, SITES);
+  const near = (a: NetherSite, b: NetherSite) => a.kind === b.kind && Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= 8;
+  const fresh = found.map(f => {
+    const site = { kind: f.kind, x: Math.floor(f.x), y: Math.floor(f.y), z: Math.floor(f.z) };
+    const leg = f.leg ?? n.sites.find(o => near(site, o) && o.leg)?.leg;
+    return { ...site, at, ...(leg ? { leg } : {}) };
+  });
+  const list = [...fresh, ...n.sites.filter(o => !fresh.some(f => near(f, o)))];
+  while (list.length > SITES) {
+    const worst = Math.max(...list.map(s => siteRank(s.kind)));
+    let i = list.length - 1;
+    while (siteRank(list[i].kind) !== worst) i--;
+    list.splice(i, 1);
+  }
+  n.sites = list;
 }
 
 // ------------------------------------------------------------------------------------------------ holds
@@ -733,7 +804,9 @@ export function netherStart(world: WorldMemory, now: number): void {
  * A start taken back (work.ts runTask): the run never went through the portal (its kit fell short at home, the home
  * portal not listed, no way to it on foot). The setup and the look fetch their kit inside the run, after the stamp:
  * such a run left the yard no more than P2a's gate, which read the kit carried, let it, and costs neither the
- * probation's hour nor one of the day's two trips.
+ * probation's hour nor one of the day's two trips. A trip turned back before its work (netherEnd's `turned back`) is
+ * given back the same way: live on Nov 15 every barter and quartz trip went to the hut and straight back (four times a
+ * ghast 12 to 30 off, once no piglin within 48), each one of the day's two.
  */
 export function netherUnstart(world: WorldMemory, setOut: number): void {
   const n = netherOf(world);
@@ -746,25 +819,34 @@ export function netherUnstart(world: WorldMemory, setOut: number): void {
   }
 }
 
-/** How a trip that went ended, as the wrapper saw it: when, its line, and whether it came home through a portal itself. */
-export interface TripSeen { at: number; text: string; cameBack: boolean }
+/**
+ * How a trip that went ended, as the wrapper saw it: when, its line, whether it came home through a portal itself, and
+ * whether its run did its work down there (work.ts WorkResult `worked`: the setup linked, the look done, a barter, an
+ * ore mined).
+ */
+export interface TripSeen { at: number; text: string; cameBack: boolean; worked: boolean }
 
 /**
  * A Nether trip is over: a death since it set out (in any dimension: the way to the portal is the trip's too) puts the
  * run of clean trips back to none; one that ran its course without a death counts towards the probation's three; one
  * cut short before then changes nothing. With `end` (a trip that went: one that never set out has none) it is the
  * last trip, and a clean one (home through a portal, its own run's or netherHome's; no death; the two sides linked
- * at its end) counts for the stages: the setup that links them is the first, the look after it the second.
+ * at its end; its work done) counts for the stages: the setup that links them is the first, the look after it the
+ * second. One that would be clean but did no work down there (turned back by a ghast in sight, no piglin, no ore) is
+ * `turned back`: it counts for nothing, neither for the stages nor the probation, and is no failure (the wrapper gives
+ * its trip of the day back, as for a run that never went: netherUnstart). How it ended, with `end`.
  */
-export function netherEnd(world: WorldMemory, startedAt: number, death: DeathSeen | undefined, ranItsCourse: boolean, end?: TripSeen): void {
+export function netherEnd(world: WorldMemory, startedAt: number, death: DeathSeen | undefined, ranItsCourse: boolean, end?: TripSeen): TripEnd | undefined {
   const n = netherOf(world);
   const died = !!death && fin(death.time) && death.time >= startedAt;
+  const how: TripEnd | undefined = !end ? undefined
+    : died ? 'a death' : !ranItsCourse ? 'cut short' : !end.cameBack ? 'stranded' : n.linked !== true ? 'not linked' : !end.worked ? 'turned back' : 'clean';
   if (died) n.cleanTrips = 0;
-  else if (ranItsCourse) n.cleanTrips += 1;
-  if (!end) return;
-  const how: TripEnd = died ? 'a death' : !ranItsCourse ? 'cut short' : !end.cameBack ? 'stranded' : n.linked !== true ? 'not linked' : 'clean';
+  else if (ranItsCourse && how !== 'turned back') n.cleanTrips += 1;
+  if (!end || !how) return undefined;
   if (how === 'clean') n.stageTrips += 1;
   n.lastTrip = { at: end.at, text: end.text.length > TRIP_TEXT ? `${end.text.slice(0, TRIP_TEXT - 3)}...` : end.text, end: how };
+  return how;
 }
 
 // ------------------------------------------------------------------------------------------------ home from there
@@ -895,8 +977,8 @@ export function leaveNetherGoal(): Goal {
 /**
  * brain-status, `Nether:`: the switch; the stage and the clean trips to the next one (the probation while it lasts),
  * the deaths in 3 days; the portals it knows (the home portal, its own Nether side and whether the two are linked),
- * the setup's hold while it holds, the others' portals seen, the sites known; and the last trip, how it ended and its
- * line. A look only.
+ * the setup's hold while it holds, the others' portals seen, the sites known, the bearings its scouting legs have
+ * walked (of the eight); and the last trip, how it ended and its line. A look only.
  */
 export function netherLine(world: WorldMemory, now: number): string {
   const n = peekNether(world);
@@ -912,5 +994,5 @@ export function netherLine(world: WorldMemory, now: number): string {
   return `Nether: trips ${tripsOn(world) ? 'on' : 'off'}; stage ${n.stage}, ${toNext(n)}${probation}, ${deaths} death(s) in 3 days; ` +
     `home portal ${home ? `overworld ${fmt(home)}` : 'none'}, nether side ${n.portal ? `nether ${fmt(n.portal)}` : 'none'}` +
     `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${barterHeld}${seen ? `; others' portals seen: ${seen}` : ''}` +
-    `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${last}.`;
+    `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${n.legs?.length ? `; ${n.legs.length}/${BEARINGS.length} bearings scouted` : ''}${last}.`;
 }

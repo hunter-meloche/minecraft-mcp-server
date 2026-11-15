@@ -32,6 +32,8 @@ import { setupOpen, setupReady, setupRun } from './nethersetup.js';
 import { lookOpen, lookReady, lookRun } from './netherlook.js';
 import { barterOpen, barterReady, barterRun } from './netherbarter.js';
 import { quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
+import { scoutOpen, scoutReady, scoutRun } from './netherscout.js';
+import { debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
 
 const MINUTE = 60_000;
 
@@ -491,8 +493,36 @@ const quartzWork: NetherWork = {
   run: (ctx, budgetMs, now) => quartzRun(ctx, budgetMs, now)
 };
 
-/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz; P3b and P3c add the rest at their stages. */
-export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork];
+/**
+ * `scout` (P3b, netherscout.ts): from stage 2, from its own portal: a leg of up to 96 out on foot along one of the
+ * eight bearings (the least known first, then each in turn a day after its last), over open ground by the barter's
+ * walking rules, turned back at half its time; what it passes (others' builds, natural fortresses and bastions, lava
+ * lakes, the biomes) kept as sites with the way it took.
+ */
+const scoutWork: NetherWork = {
+  id: 'scout',
+  stage: 2,
+  open: world => scoutOpen(world),
+  ready: (s, world) => scoutReady(s, world),
+  run: (ctx, budgetMs, now) => scoutRun(ctx, budgetMs, now)
+};
+
+/**
+ * `debris` (P3b, netherdebris.ts): from stage 2, by its own portal and by the known ways of the scouting legs: ancient
+ * debris with a face open to air within 24 of its portal or of a waypoint, none by lava, 4 at most a trip, mined
+ * only under the fire resistance it drinks at its portal. With no potion of fire resistance in stock it stays shut,
+ * and says so.
+ */
+const debrisWork: NetherWork = {
+  id: 'debris',
+  stage: 2,
+  open: world => debrisOpen(world),
+  ready: (s, world) => debrisReady(s, world),
+  run: (ctx, budgetMs, now) => debrisRun(ctx, budgetMs, now)
+};
+
+/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz, stage 2's scouting and debris; P3c adds the rest at its stage. */
+export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork, scoutWork, debrisWork];
 
 /** The home portal is lit and the bot's own: the portal milestone is done and the portal known. */
 const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).includes('nether-portal') && !!homePortal(world);

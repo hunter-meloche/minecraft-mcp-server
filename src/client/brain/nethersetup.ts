@@ -781,7 +781,14 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
     for (let i = 0; i < 4; i++) {
       const st = await ctx.status().catch(() => undefined);
       if (!st || (st.food ?? 20) >= NETHER_TRIP.food) break;
-      await ctx.act('eat', {}).catch(() => undefined);
+      const r = await ctx.act('eat', {}).catch((e: unknown) => ({ ok: false, text: e instanceof Error ? e.message : String(e) }));
+      // a meal that did not happen says why, and the next try waits a moment (live, Nov 15 04:11Z: "not setting out:
+      // food 17 < 18" with bread carried, just after the bot woke; the reason was swallowed)
+      if (!/^Ate /.test(r.text)) {
+        ctx.progress(`nether kit: no meal: ${r.text.replace(/\s+/g, ' ').slice(0, 120)}`);
+        await pause(SETUP_WAITS.pollMs);
+        if (ctx.signal.aborted) throw new Error('aborted');
+      }
     }
   };
   await eatToFull();
@@ -931,11 +938,14 @@ export async function walkAlong(ctx: GoalContext, path: Pos[], every = 4, betwee
   return 'ok';
 }
 
-/** Read a box of the Nether, again while some of it is not loaded yet (a walk out of the portal outruns the chunks). */
-export async function readGround(ctx: GoalContext, b: Box): Promise<Grid> {
+/**
+ * Read a box of the Nether, again while some of it is not loaded yet (a walk out of the portal outruns the chunks), up
+ * to `tries` reads (the barter's read out to 96 asks once: its far corners lie past the client's chunks for good).
+ */
+export async function readGround(ctx: GoalContext, b: Box, tries = SETUP_WAITS.loadTries): Promise<Grid> {
   const box = { x: b.x1, y: b.y1, z: b.z1, width: b.x2 - b.x1 + 1, height: b.y2 - b.y1 + 1, length: b.z2 - b.z1 + 1 };
   let blocks = await readBox(ctx, box);
-  for (let i = 1; i < SETUP_WAITS.loadTries && blocks.some(x => x === null); i++) {
+  for (let i = 1; i < tries && blocks.some(x => x === null); i++) {
     await pause(SETUP_WAITS.loadMs);
     if (ctx.signal.aborted) throw new Error('aborted');
     blocks = await readBox(ctx, box);
@@ -1289,7 +1299,7 @@ export async function setupRun(ctx: GoalContext, budgetMs: number, now: () => nu
   if (linked) {
     delete mem.setupHold;
     ctx.progress(`nether: linked: home portal overworld ${fmt(home)} <-> nether ${fmt(spot)}`);
-    return { gain: 1, text: `its own portal at nether ${fmt(spot)}, linked with the home portal`, cameBack: true };
+    return { gain: 1, text: `its own portal at nether ${fmt(spot)}, linked with the home portal`, cameBack: true, worked: true };
   }
   holdSetup(ctx, now(), `nether: not linked: came out at overworld ${fmt(out)}`, `its own portal at nether ${fmt(spot)} led back to overworld ${fmt(out)}, not home`);
   return { gain: 0, text: `its own portal at nether ${fmt(spot)} led back to overworld ${fmt(out)}: not linked; setup held a day`, cameBack: true };

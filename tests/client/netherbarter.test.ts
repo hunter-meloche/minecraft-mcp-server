@@ -3,8 +3,9 @@ import type { InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
-  BARTER_FOR, BARTER_RADIUS, BARTER_WAITS, CROWD, GOLD, GOLD_RESERVE, HOGLIN_GAP, LAVA_GAP, NEAR, PLAYER_GAP, STANCE, TOSS_FAILS, barterDanger, barterGround,
-  barterOpen, barterReady, barterRun, barterable, goldGoal, goldWant, lavaBy, lootWords, overDrop, spareGold, stanceFor, throwClear, type Seen
+  BARTER_FOR, BARTER_RADIUS, BARTER_REACH, BARTER_WAITS, CROWD, FIRE_MISS, GHAST_WATCH, GOLD, GOLD_RESERVE, HOGLIN_GAP, KNOCK_GAP, LAVA_GAP, NEAR, PLAYER_GAP, STANCE,
+  TOSS_FAILS, barterDanger, barterGround, barterOpen, barterReady, barterRun, barterable, firedAt, ghastSees, ghastWatched, goldGoal, goldWant, lavaBy, lootWords,
+  overDrop, piglinFault, spareGold, stanceFor, throwClear, type Seen
 } from '../../src/client/brain/netherbarter.js';
 import { quartzGround } from '../../src/client/brain/netherquartz.js';
 import { FROM_BUILDS, SETUP_WAITS, boxGap, boxOf, footing, walkFrom, zoneBox, type Box, type NetherZone } from '../../src/client/brain/nethersetup.js';
@@ -219,18 +220,18 @@ test.serial('a hoglin near stops it: back to its portal and through at once, wha
   t.is(f.state.dim, OVERWORLD);
 });
 
-test.serial('a hit taken stops it (health down since the last look), and so does a ghast within 32', async (t) => {
+test.serial('a hit taken stops it (health down since the last look), and so does a ghast within 16 that sees it (P3b: the ghast rule)', async (t) => {
   let g: Game | undefined;
   const hit = await afterSetup({ mobs: [P1], onLook: once(() => g, /^picked up/, x => { x.state.health = 15; }) });
   g = hit.f;
   const r = await barterRun(hit.f.ctx, HOUR, () => T0 + 2 * HOUR);
   t.is(r.text, 'bartered 1 gold with 1 piglin: 4 soul_sand; a hit taken (health 20 -> 15); back at overworld (-562, 65, 2191)');
   let h: Game | undefined;
-  const ghast = await afterSetup({ mobs: [P1], onLook: once(() => h, /took the gold/, x => x.mobs.push({ id: 31, name: 'ghast', position: { x: x.state.pos.x, y: 85, z: x.state.pos.z - 20 } })) });
+  const ghast = await afterSetup({ mobs: [P1], onLook: once(() => h, /took the gold/, x => x.mobs.push({ id: 31, name: 'ghast', position: { x: x.state.pos.x, y: 76, z: x.state.pos.z - 8 } })) });
   h = ghast.f;
   const r2 = await barterRun(ghast.f.ctx, HOUR, () => T0 + 2 * HOUR);
   // (sent back as the piglin admired: nothing thrown yet to pick up)
-  t.regex(r2.text, /^bartered 1 gold with 1 piglin: nothing picked up; a ghast near \(25 off\); back at overworld/);
+  t.regex(r2.text, /^bartered 1 gold with 1 piglin: nothing picked up; a ghast in sight \(10 off\); back at overworld/);
   t.true(ghast.f.said.includes('nether: bartered 1 gold: nothing picked up'));
 });
 
@@ -267,25 +268,29 @@ test.serial('a hoglin come near in the middle of a walk out is seen at the next 
   t.false(f.did.some(d => d.startsWith('toss ')));
 });
 
-test.serial('turned back by a danger before any barter (a ghast near on arrival): the place is not marked dry as an empty one is, its mark stays at the first (20 min) trip after trip', async (t) => {
-  const ghast: Mob = { id: 31, name: 'ghast', position: { x: -76.5, y: 80, z: 245.5 } };
+test.serial('turned back by a danger before any barter (a ghast in sight on arrival): the place is not marked dry as an empty one is, its mark stays at the first (20 min) trip after trip; and the trip counts for nothing (P3b), its trip of the day given back', async (t) => {
+  // (12 off the hut's door, in sight through it)
+  const ghast: Mob = { id: 31, name: 'ghast', position: { x: -66.5, y: 74, z: 262.5 } };
   const { w, first, later, f } = await afterSetup({ mobs: [P1, ghast] });
   // (the quartz at its target: the rung's turn is the barter's)
   w.chestItems![ORES].quartz = 64;
-  t.regex(await rung(later).run(f.ctx), /^\[barter\] no barter; a ghast near \(\d+ off\); back at overworld .*; back home$/);
+  t.regex(await rung(later).run(f.ctx), /^\[barter\] no barter; a ghast in sight \(\d+ off\); back at overworld .*; back home$/);
   t.like(w.work!.dry['nether:barter'], { n: 1, at: later });
+  t.like(peekNether(w), { stage: 1, stageTrips: 2, cleanTrips: 3, lastTrip: { end: 'turned back' } });
+  t.is(peekNether(w).tripsToday, undefined, 'its trip of the day given back');
   const again = later + 30 * MINUTE;
   // (the fake's chests as the trip left them in world memory)
   w.chestItems![ORES].quartz = 64;
   const g = game(w, { items: f.inv, after: { changed: [...first.changed, ...f.changed], lit: f.lit }, now: again, mobs: [P1, ghast] });
-  t.regex(await rung(again).run(g.ctx), /^\[barter\] no barter; a ghast near/);
+  t.regex(await rung(again).run(g.ctx), /^\[barter\] no barter; a ghast in sight/);
   t.like(w.work!.dry['nether:barter'], { n: 1, at: again });
+  t.like(peekNether(w), { stageTrips: 2, tripsToday: undefined });
   // (on the next game day, past the day's two trips: the barter waits its first mark's 20 min, no more)
   w.idle!.today.day = 8;
   t.like(rung(again + MINUTE).declines!(lookAt(g.inv, 1000, { now: again + MINUTE }), w), { cause: 'dry', until: again + 20 * MINUTE });
 });
 
-test('what sends it back: a piglin of any kind aggressive within 16 (the anger: held), a hit, a brute or a hoglin within 16, a ghast within 32; nothing further off', (t) => {
+test('what sends it back: a piglin of any kind aggressive within 16 (the anger: held), a hit, a brute or a hoglin within 16, a ghast within 16 (in sight), a fireball coming at it within 32; nothing further off', (t) => {
   const at = (name: string, distance: number, extra: Partial<Seen> = {}): Seen => ({ id: distance, name, position: { x: distance, y: 70, z: 0 }, distance, ...extra });
   t.deepEqual(barterDanger([at('piglin', 12, { aggressive: true })], 20, 20), { why: 'a piglin turned aggressive at nether (12, 70, 0)', angry: true });
   t.deepEqual(barterDanger([at('zombified_piglin', 15, { aggressive: true })], 20, 20), { why: 'a zombified_piglin turned aggressive at nether (15, 70, 0)', angry: true });
@@ -295,10 +300,260 @@ test('what sends it back: a piglin of any kind aggressive within 16 (the anger: 
   t.deepEqual(barterDanger([at('piglin_brute', 14)], 20, 20), { why: 'a piglin brute near (14 off)' });
   t.deepEqual(barterDanger([at('hoglin', NEAR.hoglin)], 20, 20), { why: `a hoglin near (${NEAR.hoglin} off)` });
   t.deepEqual(barterDanger([at('zoglin', 9)], 20, 20), { why: 'a zoglin near (9 off)' });
-  t.deepEqual(barterDanger([at('ghast', 30)], 20, 20), { why: 'a ghast near (30 off)' });
-  t.is(barterDanger([at('ghast', 40), at('hoglin', 17), at('piglin_brute', 17), at('piglin', 5)], 20, 20), null);
+  // (no ground read given: every ghast that near sees it, every fireball comes at it)
+  t.deepEqual(barterDanger([at('ghast', NEAR.ghast)], 20, 20), { why: `a ghast in sight (${NEAR.ghast} off)` });
+  t.is(barterDanger([at('ghast', 30)], 20, 20), null, 'watched, not fled');
+  t.deepEqual(barterDanger([at('fireball', 30)], 20, 20), { why: 'a ghast\'s fireball coming at it (30 off)' });
+  t.is(barterDanger([at('ghast', 17), at('fireball', 33), at('hoglin', 17), at('piglin_brute', 17), at('piglin', 5)], 20, 20), null);
   // the anger first, whatever else
   t.like(barterDanger([at('hoglin', 5), at('piglin', 10, { aggressive: true })], 12, 20), { angry: true });
+});
+
+// ------------------------------------------------------------------------------------------------ P3b: the ghast rule
+
+/** The test Nether's ground with `extra` put in it, read over a box (as the barter reads it). */
+const groundOf = (extra: Record<string, string>, box: Box) => { const base = netherGround(); return gridOf(p => extra[k(p)] ?? base(p), box); };
+const GHAST_BOX: Box = { x1: -90, y1: 60, z1: 230, x2: -50, y2: 92, z2: 280 };
+/** A wall of netherrack across the floor's whole height at z 247 (x -76 to -55). */
+const WALL: Record<string, string> = {};
+for (let x = -76; x <= -55; x++) for (let y = 70; y <= 89; y++) WALL[k({ x, y, z: 247 })] = 'netherrack';
+const NETHER_ROCK = (cells: Record<string, string>) => Object.entries(cells).map(([key, to]) => {
+  const [x, y, z] = key.split(',').map(Number);
+  return { dim: NETHER as typeof NETHER, at: { x, y, z }, to, how: 'test' };
+});
+
+test('P3b, the ghast rule: a ghast within 16 that sees the bot sends it back; behind rock, or further off, it is watched, not fled; a fireball coming at it within 32 does, one going elsewhere does not; a hit does', (t) => {
+  const open = groundOf({}, GHAST_BOX), walled = groundOf(WALL, GHAST_BOX);
+  const me = { x: -70.5, y: 70, z: 255.5 };
+  const ghast = (x: number, y: number, z: number): Seen => ({ id: 31, name: 'ghast', position: { x, y, z }, distance: Math.hypot(x - me.x, y - me.y, z - me.z) });
+  // 12 off, south of the wall's line
+  const g12 = ghast(-70.5, 74, 244.5);
+  t.true(g12.distance <= NEAR.ghast);
+  t.true(ghastSees(open, g12.position, me));
+  t.false(ghastSees(walled, g12.position, me), 'rock between');
+  t.deepEqual(barterDanger([g12], 20, 20, { g: open, me }), { why: 'a ghast in sight (12 off)' });
+  t.is(barterDanger([g12], 20, 20, { g: walled, me }), null, 'behind rock: watched, not fled');
+  t.true(ghastWatched([g12]));
+  // in sight, 20 off: watched
+  const g20 = ghast(-70.5, 84, 241.5);
+  t.true(g20.distance > NEAR.ghast && g20.distance <= GHAST_WATCH);
+  t.true(ghastSees(open, g20.position, me));
+  t.is(barterDanger([g20], 20, 20, { g: open, me }), null);
+  t.true(ghastWatched([g20]));
+  t.false(ghastWatched([ghast(-70.5, 70, 220.5)]), '35 off: not even watched');
+  // over the read's top nothing read stands between: it sees; the ceiling read stops it
+  const high = { x: -70.5, y: 90, z: 248.5 };
+  t.true(ghastSees(groundOf({}, { ...GHAST_BOX, y2: 85 }), high, me));
+  t.false(ghastSees(open, high, me));
+  // a fireball 18 off: coming at it (its way through the bot's middle), going away, passing 7 to the side, just fired
+  const fb = (motion?: Pos): Seen => ({ id: 40, name: 'fireball', position: { x: -70.5, y: 80, z: 240.5 }, distance: 18, ...(motion ? { motion } : {}) });
+  const toward = { x: 0, y: -0.55, z: 0.83 };
+  t.deepEqual(barterDanger([fb(toward)], 20, 20, { g: open, me }), { why: 'a ghast\'s fireball coming at it (18 off)' });
+  t.true(firedAt(fb(toward), me));
+  t.is(barterDanger([fb({ x: 0, y: 0.55, z: -0.83 })], 20, 20, { g: open, me }), null, 'going away');
+  const aside = { x: 8 / 19.5, y: -9.6 / 19.5, z: 15 / 19.5 };
+  t.false(firedAt(fb(aside), me), `its way passes more than ${FIRE_MISS} off`);
+  t.is(barterDanger([fb(aside)], 20, 20, { g: open, me }), null);
+  t.deepEqual(barterDanger([fb()], 20, 20, { g: open, me }), { why: 'a ghast\'s fireball coming at it (18 off)' }, 'no motion yet: just fired');
+  t.is(barterDanger([{ ...fb(toward), distance: GHAST_WATCH + 1 }], 20, 20, { g: open, me }), null);
+  // a hit, whatever the ghast
+  t.deepEqual(barterDanger([g20], 15, 20, { g: open, me }), { why: 'a hit taken (health 20 -> 15)' });
+});
+
+test('P3b: with a ghast within 32 no drop\'s edge within 2 (a fireball\'s blast throws the bot): the columns 2 across and the corners, past an open cell', (t) => {
+  const pit: Record<string, string> = {};
+  for (let y = 60; y <= 69; y++) pit[k({ x: -70, y, z: 240 })] = 'air';
+  const box: Box = { x1: -80, y1: 55, z1: 230, x2: -60, y2: 80, z2: 250 };
+  const g = groundOf(pit, box);
+  const c = (x: number, z: number): Pos => ({ x, y: 70, z });
+  t.true(overDrop(g, c(-71, 240)), 'the rim');
+  t.false(overDrop(g, c(-72, 240)));
+  t.true(overDrop(g, c(-72, 240), KNOCK_GAP), '2 back');
+  t.false(overDrop(g, c(-71, 241)), 'a corner is no walk\'s edge');
+  t.true(overDrop(g, c(-71, 241), KNOCK_GAP), 'but a blast\'s');
+  t.false(overDrop(g, c(-73, 240), KNOCK_GAP), '3 back');
+  // a wall between: no blast throws it through
+  const walled = groundOf({ ...pit, [k(c(-71, 240))]: 'netherrack', [k({ x: -71, y: 71, z: 240 })]: 'netherrack' }, box);
+  t.false(overDrop(walled, c(-72, 240), KNOCK_GAP));
+});
+
+test.serial('P3b: a ghast 18 off is watched, not fled: the barter goes on, and while it is within 32 no walk ends within 2 of a drop\'s edge (with none about, one does)', async (t) => {
+  // a trench 6 deep (its bottom in the ground read: a drop, no chasm taken as lava) from the piglin's feet toward its
+  // hut, the cliff 4 west of it: the way along the cliff and the places to toss from come within 2 of its edge
+  const pit: Record<string, string> = {};
+  for (let x = -72; x <= -71; x++) for (let z = 256; z <= 262; z++) for (let y = 64; y <= 69; y++) pit[k({ x, y, z })] = 'air';
+  const high: Mob = { id: 31, name: 'ghast', position: { x: -72.5, y: 88, z: 258.5 } };
+  const run = async (mobs: Mob[]) => {
+    const { w, first, later } = await afterSetup();
+    const f = game(w, { items: first.inv, after: { changed: [...first.changed, ...NETHER_ROCK(pit)], lit: first.lit }, now: later, mobs, loot: [{ name: 'soul_sand', count: 8 }] });
+    onlySoulSand(w, f.inv);
+    const r = await barterRun(f.ctx, HOUR, () => later);
+    const g = gridOf(p => f.get(NETHER, p), { x1: -90, y1: 55, z1: 240, x2: -55, y2: 85, z2: 275 });
+    return { f, r, edges: netherWalks(f).filter(x => overDrop(g, x.to, KNOCK_GAP)).map(x => k(x.to)) };
+  };
+  const watched = await run([P1, high]);
+  // (what the piglin threw came down by the trench's edge, where it does not go meanwhile: left lying, and the piglin let
+  // be for the trip, not given the trip's gold for nothing)
+  t.is(watched.r.text, 'bartered 1 gold with 1 piglin: nothing picked up; no piglin to barter with within 48 of its portal (1 tried already); back at overworld (-562, 65, 2191)');
+  t.deepEqual(watched.edges, []);
+  const calm = await run([P1]);
+  t.regex(calm.r.text, /^bartered 2 gold with 1 piglin/);
+  t.true(calm.edges.length > 0, `the rule is what keeps it off: ${netherWalks(calm.f).map(x => k(x.to)).join(' | ')}`);
+});
+
+test.serial('P3b: a ghast come about as it steps onto the place it would toss from, at a drop\'s edge: no toss from there, a place off the edge first', async (t) => {
+  // (the trench of the test before: with none about, the first toss is from 2 off its edge, the walk's last leg there)
+  const pit: Record<string, string> = {};
+  for (let x = -72; x <= -71; x++) for (let z = 256; z <= 262; z++) for (let y = 64; y <= 69; y++) pit[k({ x, y, z })] = 'air';
+  const run = async (edge?: string) => {
+    const { w, first, later } = await afterSetup();
+    const f = game(w, { items: first.inv, after: { changed: [...first.changed, ...NETHER_ROCK(pit)], lit: first.lit }, now: later, mobs: [P1], loot: [{ name: 'soul_sand', count: 8 }] });
+    onlySoulSand(w, f.inv);
+    const call = f.ctx.call;
+    let came = false;
+    (f.ctx as { call: GoalContext['call'] }).call = (async (m: string, p?: Record<string, unknown>) => {
+      const r = await call(m, p);
+      if (edge && m === 'goto' && f.state.dim === NETHER && !came && k(p as unknown as Pos) === edge) { came = true; f.mobs.push({ id: 31, name: 'ghast', position: { x: -72.5, y: 88, z: 258.5 } }); }
+      return r;
+    }) as GoalContext['call'];
+    const r = await barterRun(f.ctx, HOUR, () => later);
+    return { f, r, came, tosses: f.did.filter(d => d.startsWith('toss ')) };
+  };
+  const calm = await run();
+  t.is(calm.tosses[0], 'toss gold_ingot -> (-71, 70, 255) from (-74, 70, 257)');
+  const g = gridOf(p => calm.f.get(NETHER, p), { x1: -90, y1: 55, z1: 240, x2: -55, y2: 85, z2: 275 });
+  t.true(overDrop(g, { x: -74, y: 70, z: 257 }, KNOCK_GAP));
+  const watched = await run('-74,70,257');
+  t.true(watched.came);
+  t.is(watched.r.text, 'bartered 1 gold with 1 piglin: nothing picked up; no piglin to barter with within 48 of its portal (1 tried already); back at overworld (-562, 65, 2191)');
+  t.deepEqual(watched.tosses, ['toss gold_ingot -> (-71, 70, 255) from (-75, 70, 255)']);
+  t.false(overDrop(g, { x: -75, y: 70, z: 255 }, KNOCK_GAP));
+});
+
+test.serial('P3b: a ghast within 16 behind rock is watched, not fled: the barter goes on; the same ghast with nothing between sends it home', async (t) => {
+  const ghast: Mob = { id: 31, name: 'ghast', position: { x: -70.5, y: 72, z: 244.5 } };
+  const run = async (rock: Record<string, string>) => {
+    const { w, first, later } = await afterSetup();
+    const f = game(w, { items: first.inv, after: { changed: [...first.changed, ...NETHER_ROCK(rock)], lit: first.lit }, now: later, mobs: [P1, ghast], loot: [{ name: 'soul_sand', count: 8 }] });
+    onlySoulSand(w, f.inv);
+    let nearest = Infinity;
+    const call = f.ctx.call;
+    (f.ctx as { call: GoalContext['call'] }).call = (async (m: string, p?: Record<string, unknown>) => {
+      const r = await call(m, p) as { entities?: Seen[] };
+      if (m === 'world.entities') nearest = Math.min(nearest, ...(r.entities ?? []).filter(e => e.name === 'ghast').map(e => e.distance));
+      return r;
+    }) as GoalContext['call'];
+    return { r: await barterRun(f.ctx, HOUR, () => later), nearest: () => nearest };
+  };
+  const behind = await run(WALL);
+  t.is(behind.r.text, 'bartered 2 gold with 1 piglin: 16 soul_sand; every barter target met; back at overworld (-562, 65, 2191)');
+  t.true(behind.nearest() <= NEAR.ghast, `it came within ${NEAR.ghast}: ${behind.nearest()}`);
+  const open = await run({});
+  t.regex(open.r.text, /^(no barter|bartered \d gold with 1 piglin: [^;]+); a ghast in sight \(1\d off\); back at overworld/);
+});
+
+test.serial('P3b: a ghast\'s fireball coming at it sends it home; one going away does not', async (t) => {
+  let h: Game | undefined;
+  const fire = (motion: Pos) => (x: Game) => x.mobs.push({ id: 40, name: 'fireball', position: { x: x.state.pos.x, y: 80, z: x.state.pos.z - 15 }, motion });
+  const at = await afterSetup({ mobs: [P1], onLook: once(() => h, /took the gold/, fire({ x: 0, y: -0.55, z: 0.83 })) });
+  h = at.f;
+  const r = await barterRun(at.f.ctx, HOUR, () => at.later);
+  t.regex(r.text, /^bartered 1 gold with 1 piglin: nothing picked up; a ghast's fireball coming at it \(18 off\); back at overworld/);
+  let g: Game | undefined;
+  const away = await afterSetup({ mobs: [P1], loot: [{ name: 'soul_sand', count: 8 }], onLook: once(() => g, /took the gold/, fire({ x: 0, y: 0.55, z: -0.83 })) });
+  g = away.f;
+  onlySoulSand(away.w, away.f.inv);
+  const r2 = await barterRun(away.f.ctx, HOUR, () => away.later);
+  t.is(r2.text, 'bartered 2 gold with 1 piglin: 16 soul_sand; every barter target met; back at overworld (-562, 65, 2191)');
+});
+
+// ------------------------------------------------------------------------------------------------ P3b: the barter's reach
+
+test.serial('P3b, the barter\'s reach: no piglin within 48 will do and one 70 off would: the ground read out toward it, the walk there careful, 16 from every build, by no lava or drop, a look between its legs; bartered, home, and a clean trip', async (t) => {
+  const FAR: Mob = { id: 11, name: 'piglin', position: { x: -70.5, y: 70, z: 196.5 } };
+  // someone's build off to the side of the way there
+  const SIDE: NetherZone = { x1: -50, y1: 66, z1: 215, x2: -44, y2: 76, z2: 222, markers: 30, surface: true, sample: 'stone_bricks' };
+  const { w, f, later } = await afterSetup({ mobs: [FAR], loot: [{ name: 'soul_sand', count: 8 }], zones: [ROOM_ZONE, SIDE] });
+  onlySoulSand(w, f.inv);
+  w.work!.next.nether = 0;
+  const seq: string[] = [];
+  const call = f.ctx.call;
+  (f.ctx as { call: GoalContext['call'] }).call = (async (m: string, p?: Record<string, unknown>) => {
+    if (f.state.dim === NETHER && /^(goto|world\.entities|item\.toss)$/.test(m)) seq.push(m);
+    return call(m, p);
+  }) as GoalContext['call'];
+  const text = await rung(later).run(f.ctx);
+  t.is(text, '[barter] bartered 2 gold with 1 piglin: 16 soul_sand; every barter target met; back at overworld (-562, 65, 2191); back home');
+  t.true(f.said.includes(`barter: no piglin to barter with within ${BARTER_RADIUS} of its portal: out to ${BARTER_REACH} for 1 piglin further off`), f.said.join(' | '));
+  t.is(f.said.filter(l => l.startsWith('barter: no piglin')).length, 1, 'said once');
+  // every walk careful, within 96 of its portal, 16 from both builds, by no lava and at no drop's edge; past 48 too
+  const g = gridOf(p => f.get(NETHER, p), { x1: -100, y1: 60, z1: 180, x2: -30, y2: 82, z2: 290 });
+  for (const x of netherWalks(f)) {
+    t.true(x.careful, k(x.to));
+    t.true(boxGap(OWN_BOX, cellBox(x.to)) <= BARTER_REACH, k(x.to));
+    for (const z of [ROOM_ZONE, SIDE]) t.true(boxGap(zoneBox(z), cellBox(x.to)) >= FROM_BUILDS, k(x.to));
+    t.false(lavaBy(g, x.to), k(x.to));
+    t.false(overDrop(g, x.to), k(x.to));
+  }
+  t.true(netherWalks(f).some(x => boxGap(OWN_BOX, cellBox(x.to)) > BARTER_RADIUS + 10), 'it went out past 48');
+  // a look between every two legs of the walk out, up to the first toss
+  const out = seq.slice(seq.indexOf('goto'), seq.indexOf('item.toss'));
+  t.true(out.filter(x => x === 'goto').length > 10);
+  t.false(out.join(' ').includes('goto goto'), out.join(' '));
+  t.like(peekNether(w), { stageTrips: 3, lastTrip: { end: 'clean' } });
+});
+
+test.serial('P3b: the reach is bounded by the time left: a piglin 92 off with less of the barter\'s time than the walk there and back and a barter there need is let be; one past 96 is none, and the line says so', async (t) => {
+  const FAR: Mob = { id: 11, name: 'piglin', position: { x: -70.5, y: 70, z: 174.5 } };
+  const a = await afterSetup({ mobs: [FAR] });
+  const r = await barterRun(a.f.ctx, 2 * MINUTE, () => a.later);
+  t.is(r.text, 'no barter; no piglin to barter with within 48 of its portal (1 too far for the time left); back at overworld (-562, 65, 2191)');
+  t.false(a.f.said.some(l => l.startsWith('barter: no piglin')));
+  t.false(netherWalks(a.f).some(x => boxGap(OWN_BOX, cellBox(x.to)) > BARTER_RADIUS));
+  // with the time: it goes
+  const b = await afterSetup({ mobs: [FAR] });
+  const r2 = await barterRun(b.f.ctx, HOUR, () => b.later);
+  t.regex(r2.text, /^bartered \d+ gold with 1 piglin: \d+ soul_sand/);
+  const PAST: Mob = { id: 12, name: 'piglin', position: { x: -70.5, y: 70, z: 160.5 } };
+  const c = await afterSetup({ mobs: [PAST] });
+  const r3 = await barterRun(c.f.ctx, HOUR, () => c.later);
+  t.is(r3.text, `no barter; no piglin to barter with within 48 of its portal (1 more than ${BARTER_REACH} from its portal); back at overworld (-562, 65, 2191)`);
+  t.false(c.f.did.some(d => d.startsWith('toss ')));
+  // (by every other rule of the near ground's: a baby out there is no reason to go)
+  const baby = { id: 13, name: 'piglin', baby: true, position: FAR.position, distance: 90 };
+  t.is(piglinFault(baby, [baby], OWN_BOX, [zoneBox(ROOM_ZONE)], BARTER_REACH), 'a baby');
+});
+
+test.serial('P3b: out past 48 only on the near ground\'s levels (8 under to 8 over its portal): a piglin within 96 but 20 under it is no reason to read the ground down to it, and the line says so', async (t) => {
+  const DEEP: Mob = { id: 11, name: 'piglin', position: { x: -70.5, y: 50, z: 200.5 } };
+  const a = await afterSetup({ mobs: [DEEP] });
+  const r = await barterRun(a.f.ctx, HOUR, () => a.later);
+  t.is(r.text, 'no barter; no piglin to barter with within 48 of its portal (1 more than 8 below or above its portal); back at overworld (-562, 65, 2191)');
+  t.false(a.f.said.some(l => l.startsWith('barter: no piglin')), 'not out to 96');
+  t.false(netherWalks(a.f).some(x => boxGap(OWN_BOX, cellBox(x.to)) > BARTER_RADIUS));
+});
+
+test.serial('P3b: a ghast watched with every place to toss from at a drop\'s edge: back as from a danger (the ghast keeps it off them, not the place), the mark as for a danger; with none about it barters from there', async (t) => {
+  // a trench 6 deep round the piglin 2 out: the places 3 and 4 from its feet are at its rim, or 2 from it
+  const ring: Record<string, string> = {};
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== 2) continue;
+    for (let y = 64; y <= 69; y++) ring[k({ x: -71 + dx, y, z: 255 + dz })] = 'air';
+  }
+  const high: Mob = { id: 31, name: 'ghast', position: { x: -72.5, y: 88, z: 258.5 } };
+  const run = async (mobs: Mob[]) => {
+    const { w, first, later } = await afterSetup();
+    const f = game(w, { items: first.inv, after: { changed: [...first.changed, ...NETHER_ROCK(ring)], lit: first.lit }, now: later, mobs, loot: [{ name: 'soul_sand', count: 8 }] });
+    onlySoulSand(w, f.inv);
+    return { f, r: await barterRun(f.ctx, HOUR, () => later) };
+  };
+  const watched = await run([P1, high]);
+  t.is(watched.r.text, "no barter; a ghast about (21 off): the piglins only from a drop's edge; back at overworld (-562, 65, 2191)");
+  t.like(watched.r, { gain: 0, mark: 'same' });
+  t.false('worked' in watched.r);
+  t.false(watched.f.did.some(d => d.startsWith('toss ')));
+  const calm = await run([P1]);
+  t.regex(calm.r.text, /^bartered \d gold with 1 piglin/);
 });
 
 test.serial('a piglin turned aggressive: back to its portal at once and the barter held for the rest of the game day (brain-status says it); the next game day it may go again', async (t) => {
@@ -891,8 +1146,8 @@ test('the gold chore and the barter on the brain\'s own list: the chore at 67 (a
     t.is(gold.wants(lookAt(KIT, tod), liveWorld()), null);
     t.is(rung().wants(lookAt(KIT, tod), liveWorld()), null);
   }
-  // (P3a's quartz beside the barter)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1']);
+  // (P3a's quartz beside the barter, P3b's scouting and debris at stage 2)
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
 });
 
 test('the barter\'s memory as brain.json may hold it: made whole, the rest let go', (t) => {

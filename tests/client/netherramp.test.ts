@@ -42,8 +42,8 @@ function linkedWorld(): WorldMemory {
   return w;
 }
 
-/** A Nether trip ended well, as the wrapper books it: home through a portal, no death. */
-const clean = (w: WorldMemory, at = T0, text = '[look] looked round its hut; back home') => netherEnd(w, at - MINUTE, undefined, true, { at, text, cameBack: true });
+/** A Nether trip ended well, as the wrapper books it: home through a portal, no death, its work done (P3b). */
+const clean = (w: WorldMemory, at = T0, text = '[look] looked round its hut; back home') => netherEnd(w, at - MINUTE, undefined, true, { at, text, cameBack: true, worked: true });
 /** The Nether's housekeeping on a look at home (the live kit), with a death told or none. */
 const tick = (w: WorldMemory, d?: DeathSeen, items: InventoryItem[] = KIT) => netherTick(lookAt(items, 1000), w, d);
 /** A death down there `min` minutes before T0 (or in the overworld). */
@@ -94,7 +94,7 @@ test('the ramp waits for the link: trips while the two sides are not linked coun
 
 test('a clean trip: home through a portal, linked, no death on it; stranded, a death, cut short or not linked count for nothing; one that never went is no last trip', (t) => {
   const w = linkedWorld();
-  const ended = (ran: boolean, cameBack: boolean, d?: DeathSeen, text = 'x') => { netherEnd(w, T0 - 10 * MINUTE, d, ran, { at: T0, text, cameBack }); return peekNether(w); };
+  const ended = (ran: boolean, cameBack: boolean, d?: DeathSeen, text = 'x') => { netherEnd(w, T0 - 10 * MINUTE, d, ran, { at: T0, text, cameBack, worked: true }); return peekNether(w); };
   t.like(ended(true, false, undefined, '[look] looked round, but could not get home: no lit portal in sight'), {
     stageTrips: 0, cleanTrips: 1, lastTrip: { at: T0, end: 'stranded', text: '[look] looked round, but could not get home: no lit portal in sight' }
   });
@@ -107,7 +107,7 @@ test('a clean trip: home through a portal, linked, no death on it; stranded, a d
   netherEnd(w, T0, undefined, false);
   t.like(peekNether(w), { stageTrips: 1, lastTrip: { end: 'clean' } });
   // the text kept short
-  netherEnd(w, T0, undefined, true, { at: T0, text: 'y'.repeat(500), cameBack: true });
+  netherEnd(w, T0, undefined, true, { at: T0, text: 'y'.repeat(500), cameBack: true, worked: true });
   t.is(peekNether(w).lastTrip!.text, `${'y'.repeat(197)}...`);
 });
 
@@ -184,13 +184,13 @@ function bench(world: WorldMemory, run: (go: { into: () => void; out: () => void
 test.serial('through the wrapper: home by netherHome or by its own run\'s way back is a clean trip and counts; one seen in the overworld with no way back of its own (a death\'s respawn) is none', async (t) => {
   const w = linkedWorld();
   // ends down there: the wrapper takes it home through its own portal
-  let b = bench(w, async go => { go.into(); return { gain: 1, text: 'looked round its hut' }; });
+  let b = bench(w, async go => { go.into(); return { gain: 1, text: 'looked round its hut', worked: true }; });
   t.is(await b.goal.run(b.ctx), '[look] looked round its hut; back home');
   t.like(peekNether(w), { stageTrips: 1, cleanTrips: 1, lastTrip: { at: T0, end: 'clean', text: '[look] looked round its hut' } });
   t.false(afield.trip);
   // its own run came back through a portal (the setup's link check, the look's way back): no netherHome, and clean
   later(w);
-  b = bench(w, async go => { go.into(); go.out(); return { gain: 1, text: 'back at overworld (-562, 65, 2191)', cameBack: true }; });
+  b = bench(w, async go => { go.into(); go.out(); return { gain: 1, text: 'back at overworld (-562, 65, 2191)', cameBack: true, worked: true }; });
   t.is(await b.goal.run(b.ctx), '[look] back at overworld (-562, 65, 2191); back home');
   t.false(b.calls.includes('portal.enter'), 'no second way through');
   t.like(peekNether(w), { stageTrips: 2, lastTrip: { end: 'clean' } });
@@ -217,6 +217,47 @@ test.serial('through the wrapper: not got home through a portal is stranded, a d
   b = bench(w, async () => ({ gain: 0, text: 'not setting out: no golden helmet', untried: true }));
   await t.throwsAsync(b.goal.run(b.ctx));
   t.like(peekNether(w), { lastTrip: { end: 'a death' } });
+});
+
+test('P3b: a trip counts for the stages only when it did its work; one that would be clean but did none is turned back: neither clean nor a failure, for the stages or the probation', (t) => {
+  const w = linkedWorld();
+  const end = (worked: boolean, text: string) => netherEnd(w, T0 - 10 * MINUTE, undefined, true, { at: T0, text, cameBack: true, worked });
+  t.is(end(false, '[barter] no barter; a ghast in sight (12 off); back at overworld (-562, 65, 2191)'), 'turned back');
+  t.like(peekNether(w), { stageTrips: 0, cleanTrips: 0, lastTrip: { end: 'turned back', text: '[barter] no barter; a ghast in sight (12 off); back at overworld (-562, 65, 2191)' } });
+  t.is(end(false, '[quartz] no quartz mined; no quartz ore it may mine within 24 of its portal'), 'turned back');
+  t.like(peekNether(w), { stageTrips: 0, cleanTrips: 0 });
+  t.is(end(true, '[barter] bartered 1 gold with 1 piglin: 4 soul_sand'), 'clean');
+  t.like(peekNether(w), { stageTrips: 1, cleanTrips: 1, lastTrip: { end: 'clean' } });
+  // a death, a cut, stranded or not linked come first: they are what they were whatever the work
+  t.is(netherEnd(w, T0 - 10 * MINUTE, death(5), true, { at: T0, text: 'x', cameBack: true, worked: false }), 'a death');
+  t.is(netherEnd(w, T0 - 10 * MINUTE, undefined, true, { at: T0, text: 'x', cameBack: false, worked: false }), 'stranded');
+  t.is(netherEnd(w, T0, undefined, false), undefined, 'one that never went: no end');
+  // (the death put the probation's run back to none, the stranded trip after it ran its course with none: 1)
+  t.regex(netherLine(w, T0), /; stage 0, 1\/2 clean trips to stage 1, on probation 1\/3/);
+  // brain.json keeps the new end
+  const again = liveWorld();
+  again.nether = JSON.parse(JSON.stringify({ ...peekNether(w), lastTrip: { at: T0, text: 'y', end: 'turned back' } }));
+  t.is(netherOf(again).lastTrip?.end, 'turned back');
+});
+
+test.serial('P3b through the wrapper: a trip turned back before its work (a ghast in sight at the hut) is no failure, counts for nothing, and gives back its trip of the day; the next that does its work counts', async (t) => {
+  const w = linkedWorld();
+  netherOf(w).cleanTrips = 3;
+  w.idle = { today: { day: 7 } as never, days: [] };
+  let b = bench(w, async go => { go.into(); go.out(); return { gain: 0, text: 'no barter; a ghast in sight (12 off); back at overworld (-562, 65, 2191)', mark: 'same', cameBack: true }; });
+  t.is(await b.goal.run(b.ctx), '[look] no barter; a ghast in sight (12 off); back at overworld (-562, 65, 2191); back home');
+  const n = peekNether(w);
+  t.like(n, { stageTrips: 0, cleanTrips: 3, lastTrip: { at: T0, end: 'turned back' } });
+  // (its start given back: neither the probation's hour nor one of the day's two)
+  t.deepEqual(n.starts, []);
+  t.is(n.tripsToday, undefined);
+  t.regex(netherLine(w, T0), /last trip 0 min ago \(turned back\): \[look\] no barter; a ghast in sight/);
+  // one that did its work: a clean trip, the day's first
+  if (w.work) w.work.dry = {};
+  b = bench(w, async go => { go.into(); go.out(); return { gain: 4, text: 'bartered 1 gold with 1 piglin: 4 soul_sand; back at overworld (-562, 65, 2191)', cameBack: true, worked: true }; });
+  await b.goal.run(b.ctx);
+  t.like(peekNether(w), { stageTrips: 1, cleanTrips: 4, tripsToday: { day: 7, n: 1 }, lastTrip: { end: 'clean' } });
+  t.is(peekNether(w).starts.length, 1);
 });
 
 // ------------------------------------------------------------------------------------------------ the look: what it sees
@@ -271,8 +312,8 @@ test('the look\'s gate: open once linked with its own portal known, at stage 0 o
   const past = linkedWorld();
   netherOf(past).stage = 1;
   t.false(lookOpen(past), 'past stage 0: the look is done with');
-  // (P3a adds the barter and the quartz at stage 1)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1']);
+  // (P3a adds the barter and the quartz at stage 1, P3b the scouting and the debris at stage 2)
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
   const s = lookAt(KIT, 1000);
   t.is(lookReady(s, w), null, 'its own portal stands: no frame\'s obsidian asked for');
   const rung = workGoals(() => undefined, LADDER, () => T0).find(g => g.name === 'work: nether')!;

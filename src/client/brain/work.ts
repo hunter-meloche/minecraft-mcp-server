@@ -52,9 +52,12 @@ export type Reach = 'yard' | 'near' | 'far' | 'deep' | 'nether';
  * the walk home comes up by first when it is near (homeward.ts walkHome). `cameBack`: a Nether trip's run that came
  * back into the overworld through a portal itself (the setup's check of the link, the look's way back): home through
  * a portal as the wrapper's netherHome is, which a clean trip asks for (a death down there wakes the bot in the
- * overworld too, and is none).
+ * overworld too, and is none). `worked`: a Nether trip's run that did its work down there (the setup's portal linked,
+ * the look done, a barter made, an ore mined, a scouting leg walked): only such a trip counts for the stages (P3b of the
+ * progression plan). One that went through and came back before any (a ghast in sight, no piglin, no ore) counts for
+ * nothing, gives back its trip of the day, and is no failure (nether.ts netherEnd: `turned back`).
  */
-export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget'; upAt?: Pos; cameBack?: true }
+export interface WorkResult { gain: number; text: string; untried?: true; mark?: 'first' | 'same' | 'forget'; upAt?: Pos; cameBack?: true; worked?: true }
 
 export interface WorkTask {
   name: string;
@@ -729,7 +732,9 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
   let netherOut = false;
   let ranItsCourse = false;
   /** a Nether trip's end as the wrapper saw it (none for one that never went: an untried run is no trip) */
-  const trip: { variant?: string; text?: string; cameBack: boolean; untried: boolean } = { cameBack: false, untried: false };
+  const trip: { variant?: string; text?: string; cameBack: boolean; untried: boolean; worked: boolean } = { cameBack: false, untried: false, worked: false };
+  /** when a Nether trip was stamped as set out (its start given back if it turned back before its work) */
+  let netherSetOut: number | undefined;
   /** the bot was seen home (or walked there) at the run's end */
   let home = false;
   current = { task, token };
@@ -759,7 +764,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     }
     const setOut = now();
     if (task.reach === 'deep') { deepStart(ctx.world, setOut); deepOut = true; }
-    else if (task.reach === 'nether') { netherStart(ctx.world, setOut); netherOut = true; writes++; }
+    else if (task.reach === 'nether') { netherStart(ctx.world, setOut); netherOut = true; netherSetOut = setOut; writes++; }
     else if (task.reach === 'far' && isUnblocker(task)) { farDayOf(workOf(ctx.world), ctx.world).unblockers += 1; writes++; }
 
     let told = 0;
@@ -787,6 +792,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     ranItsCourse = !r.untried;
     trip.text = `[${variant}] ${r.text}`;
     trip.untried = !!r.untried;
+    trip.worked = !!r.worked;
 
     // the task stays where its work ended: the way home is the wrapper's, once, for every task. Home is on its level:
     // down the mine under the yard's edge, 10 from home across the ground, is no end of the walk home. Looked at
@@ -889,11 +895,14 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
     // a few seconds on the walk up is the trip's too (workTick)
     if (deepOut) { try { deepEnd(ctx.world, startedAt, lastDeath(), ranItsCourse, home ? undefined : now()); } catch { /* the flags below matter more */ } }
     // a Nether trip the same way: a death since it set out (down there or on the way) ends its run of clean trips; one
-    // that went is the last trip, and home through a portal, linked, with no death, it counts for the stages
+    // that went is the last trip, and home through a portal, linked, with no death and its work done, it counts for
+    // the stages. Turned back before its work (a ghast in sight, no piglin), its start is given back as an untried
+    // run's is: live on Nov 15 each such trip took one of the day's two
     if (netherOut) {
       try {
-        const end = trip.untried ? undefined : { at: now(), text: trip.text ?? `[${trip.variant ?? task.name}] stopped before its end`, cameBack: trip.cameBack };
-        netherEnd(ctx.world, startedAt, lastDeath(), ranItsCourse, end);
+        const end = trip.untried ? undefined : { at: now(), text: trip.text ?? `[${trip.variant ?? task.name}] stopped before its end`, cameBack: trip.cameBack, worked: trip.worked };
+        const how = netherEnd(ctx.world, startedAt, lastDeath(), ranItsCourse, end);
+        if (how === 'turned back' && netherSetOut !== undefined) netherUnstart(ctx.world, netherSetOut);
         writes++;
       } catch { /* the flags below matter more */ }
     }

@@ -9,9 +9,10 @@
  *
  * The trip (worktasks.ts NETHER_WORK `barter`, from stage 1 while a barter target is short and there is gold): the
  * Nether kit at home and the gold, through the home portal into its own hut (anywhere else: the link is broken the one
- * way, as the look trip has it: straight back, the setup held a day), and out on foot. Within 48 of its own portal, on
- * a careful walk over the ground read (never into anyone's build, never by lava or the edge of a drop, nothing broken
- * or placed), an adult piglin that is no brute, not angry, not admiring already, with no player or hoglin within 16 of
+ * way, as the look trip has it: straight back, the setup held a day), and out on foot. Within 48 of its own portal (and
+ * when none there will do but one further out would, up to 96: the ground out there read then), on a careful walk over
+ * the ground read (never into anyone's build, never by lava or the edge of a drop, nothing broken or placed), an adult
+ * piglin that is no brute, not angry, not admiring already, with no player or hoglin within 16 of
  * it and no other piglin by it (a baby keeps the gold, and only one piglin takes it); 16 from anyone's Nether build or
  * a natural fortress or bastion (the bridge's zones, asked again at every look). It stands 3 to 4 from it and tosses
  * one ingot to its feet (the bridge's item.toss: the pitch whose throw rests nearest them), waits while it admires
@@ -19,13 +20,19 @@
  * player by it), and goes on to the next. A tossed ingot left lying (the server's
  * mobGriefing off: no mob picks anything up then) is given by a right click instead (PiglinAi.mobInteract takes it
  * whatever the gamerule), and after three such the gold goes by hand first. The Guardian keeps the shield up against
- * whatever comes at it, as on every walk down there.
+ * what has hit it and hits a ghast's fireball back (or holds the shield toward it) as it closes in, as on every walk
+ * down there.
  *
- * It stops at the trip's 32 ingots (given, or gone from the pockets) or its time, on any hit taken, a hoglin, a brute
- * or a ghast near (looked for between the legs of every walk out too), the pockets full, or every barter target met,
- * and walks back into its hut and through its own portal; the leave nether goal sees to
- * dusk and to anything that goes wrong. A piglin turned aggressive (the bot's own hit, a gold block broken, someone
- * else's quarrel: the flag cannot say at whom) sends it back at once and holds the barter for the rest of the game day.
+ * It stops at the trip's 32 ingots (given, or gone from the pockets) or its time (the way back from out there kept),
+ * on any hit taken, a hoglin or a brute near, a ghast within 16 that sees it or a fireball coming at it (looked for
+ * between the legs of every walk out too: the ghast rule, barterDanger), the pockets full, or every barter target met,
+ * and walks back into its hut and through its own portal; the leave nether goal sees to dusk and to anything that goes
+ * wrong. A ghast further off, or with rock between, is watched: while one is within 32 the bot walks and stands at no
+ * drop's edge within 2 (a fireball's blast throws it), and where only such an edge would do, it goes back as from a
+ * danger (no dry mark grows as for a place with no piglin). Out past 48 only on the near ground's levels, 8 under to
+ * 8 over its portal. A piglin turned aggressive (the bot's own hit, a gold block
+ * broken, someone else's quarrel: the flag cannot say at whom) sends it back at once and holds the barter for the rest
+ * of the game day.
  *
  * Coordinates are `nether (x, y, z)` and `overworld (x, y, z)` in the lines, as nether.ts says them. Nothing here is
  * used at the module's top level (worktasks.ts and brain.ts reach it, and this module reaches most of the brain).
@@ -45,8 +52,9 @@ import {
 } from './nether.js';
 import { DEEP_WALK_BACK, DEEP_WORTH, tripBudgetMs } from './mine.js';
 import {
-  FROM_BUILDS, GONE, LINK_RANGE, MAX_DROP, SETUP_HEALTH, SETUP_WAITS, blockAt, bottomOf, boxGap, boxOf, cellOf, enter, fetchSetupKit, footing, holdSetup,
-  inNether, intoNether, listPortals, pathOf, readGround, setupShort, walkAlong, walkFrom, zoneBox, type Box, type Entered, type Grid, type Listed, type NetherZone
+  EYE, FROM_BUILDS, GONE, LINK_RANGE, MAX_DROP, SETUP_HEALTH, SETUP_WAITS, blockAt, bottomOf, boxGap, boxOf, cellOf, clearTo, enter, fetchSetupKit, footing,
+  holdSetup, inNether, intoNether, listPortals, pathOf, readGround, setupShort, walkAlong, walkFrom, zoneBox, type Box, type Cell, type Entered, type Grid,
+  type Listed, type NetherZone
 } from './nethersetup.js';
 
 const MINUTE = 60_000;
@@ -209,6 +217,12 @@ export function barterReady(s: Snapshot, world: WorldMemory): Decline | null {
 
 /** How far from its own portal the barter goes (its walks, the piglins, what it picks up). */
 export const BARTER_RADIUS = 48;
+/**
+ * How far it goes when no piglin within BARTER_RADIUS will do but one further out would (the user's "as far as
+ * needed", bounded by the day and the trip's time): the ground out there is read then, toward the piglins seen. Live
+ * on Nov 15 a trip went home with "no piglin to barter with within 48 of its portal (1 more than 48 from its portal)".
+ */
+export const BARTER_REACH = 96;
 /** The ground read round its portal: down and up from it. */
 const GROUND_DOWN = 8;
 const GROUND_UP = 8;
@@ -247,11 +261,20 @@ export function lavaBy(g: Grid, p: Pos): boolean {
   return false;
 }
 
-/** A standing cell at the edge of a drop deeper than a walk's fall (3): a side open at feet and head with no ground within that under it. */
-export function overDrop(g: Grid, p: Pos): boolean {
-  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+/**
+ * A standing cell at the edge of a drop deeper than a walk's fall (3): a side open at feet and head with no ground
+ * within that under it. With `gap` 2 (KNOCK_GAP: while a ghast is near) the columns 2 across and the corners too, each
+ * where the way to it is open at feet and head: a fireball's blast throws the bot a block or two, any way.
+ */
+export function overDrop(g: Grid, p: Pos, gap = 1): boolean {
+  const open = (x: number, z: number) => passable(cellOf(blockAt(g, { x, y: p.y, z }))) && passable(cellOf(blockAt(g, { x, y: p.y + 1, z })));
+  const sides: [number, number][] = gap <= 1 ? [[1, 0], [-1, 0], [0, 1], [0, -1]] : [];
+  for (let dx = -gap; gap > 1 && dx <= gap; dx++) for (let dz = -gap; dz <= gap; dz++) if (dx || dz) sides.push([dx, dz]);
+  for (const [dx, dz] of sides) {
     const q = { x: p.x + dx, y: p.y, z: p.z + dz };
-    if (!passable(cellOf(blockAt(g, q))) || !passable(cellOf(blockAt(g, { ...q, y: q.y + 1 })))) continue;
+    if (!open(q.x, q.z)) continue;
+    // (further than a block: only past an open cell, the one between it and the bot)
+    if ((Math.abs(dx) > 1 || Math.abs(dz) > 1) && !open(p.x + Math.sign(dx) * Math.ceil(Math.abs(dx) / 2), p.z + Math.sign(dz) * Math.ceil(Math.abs(dz) / 2))) continue;
     let ground = false;
     for (let f = q.y - 1; f >= q.y - 1 - MAX_DROP; f--) {
       const c = cellOf(blockAt(g, { ...q, y: f }));
@@ -264,18 +287,18 @@ export function overDrop(g: Grid, p: Pos): boolean {
 }
 
 /**
- * The cells the barter may walk and stand on, pure: within BARTER_RADIUS of its own portal, FROM_BUILDS (16) from every
- * zone the bridge's scan has down there (anyone's build: courtesy; a natural fortress or bastion: blazes and brutes),
- * no lava or fire by it, at no drop's edge. Each cell judged once (the walks are searched again for every barter and
- * every thing picked up, over the same ground).
+ * The cells the barter may walk and stand on, pure: within `radius` of its own portal (BARTER_RADIUS, or BARTER_REACH
+ * once it goes further), FROM_BUILDS (16) from every zone the bridge's scan has down there (anyone's build: courtesy; a
+ * natural fortress or bastion: blazes and brutes), no lava or fire by it, at no drop's edge. Each cell judged once
+ * (the walks are searched again for every barter and every thing picked up, over the same ground).
  */
-export function barterGround(g: Grid, portal: Box, zones: Box[]): (p: Pos) => boolean {
+export function barterGround(g: Grid, portal: Box, zones: Box[], radius = BARTER_RADIUS): (p: Pos) => boolean {
   const judged = new Map<string, boolean>();
   return p => {
     const k = cellKey(p);
     let ok = judged.get(k);
     if (ok === undefined) {
-      ok = boxGap(portal, cellBox(p)) <= BARTER_RADIUS && !zones.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && !lavaBy(g, p) && !overDrop(g, p);
+      ok = boxGap(portal, cellBox(p)) <= radius && !zones.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && !lavaBy(g, p) && !overDrop(g, p);
       judged.set(k, ok);
     }
     return ok;
@@ -303,6 +326,8 @@ export interface Seen {
   id: number; name: string; position: Pos; distance: number;
   baby?: boolean; aggressive?: boolean; admiring?: boolean; offhand?: string; mainhand?: string;
   item?: string; count?: number; foreign?: boolean; buildDistance?: number;
+  /** a projectile's motion, blocks a tick (the bridge's from P3b on; none for one just fired, or from an older jar) */
+  motion?: Pos;
 }
 
 /** Where it stands to toss: this far from the piglin's feet, along the ground. */
@@ -315,8 +340,22 @@ const HAND_REACH = 4.2;
 export const HOGLIN_GAP = 16;
 /** No other piglin (a baby keeps the gold) within this of the target's feet, where the ingot comes down. */
 export const CROWD = 2;
-/** What sends it back to its portal, by how near to the bot. */
-export const NEAR = { angry: 16, brute: 16, hoglin: 16, ghast: 32 } as const;
+/** What sends it back to its portal, by how near to the bot: a ghast only with a line of sight to the bot (ghastSees). */
+export const NEAR = { angry: 16, brute: 16, hoglin: 16, ghast: 16 } as const;
+/**
+ * The ghast rule (P3b, the lead's default, the user asked): a ghast within NEAR.ghast that sees the bot sends it back,
+ * and so does a fireball coming at it within GHAST_WATCH, or a hit; a ghast further off or behind rock is watched, not
+ * fled: while one is within GHAST_WATCH the bot walks and stands at no drop's edge within KNOCK_GAP. Live on Nov 15 the
+ * old rule (any ghast within 32) sent four trips of five home from the hut, ghasts 12 to 30 off, while the Guardian hit
+ * their fireballs back ("hit a ghast's fireball back (2.67 blocks off)").
+ */
+export const GHAST_WATCH = 32;
+/** The drop's edge kept from while a ghast is watched: a fireball's blast (power 1) throws the bot a block or two. */
+export const KNOCK_GAP = 2;
+/** A fireball whose way passes this near the bot comes at it (a ghast aims where the bot was as it fired). */
+export const FIRE_MISS = 6;
+/** A ghast's eyes over its feet (26.3's EntityType.GHAST: 4 x 4, eyes at 2.6). */
+const GHAST_EYE = 2.6;
 /** What it throws is picked up within this of where the piglin stood. */
 export const LOOT_RANGE = 6;
 /**
@@ -329,6 +368,19 @@ export const PLAYER_GAP = 16;
 export const BARTER_MAX_MS = 8 * MINUTE;
 export const BARTER_LEAST_MS = 2 * MINUTE;
 export const BACK_MS = 45_000;
+/**
+ * Past BARTER_RADIUS: the way back's time a block further out (a careful walk's legs of 4 with a look between them,
+ * some 2 s a leg, and a way round), and a barter's own time out there (the walk to its stance aside: the toss, the
+ * admiring's 6 to 10 s, the loot picked up). A piglin out there is gone to only with the time for both and the way back.
+ */
+export const FAR_STEP_MS = 750;
+export const FAR_TURN_MS = 20_000;
+/** What world.entities is asked for round the bot: piglins out to BARTER_REACH from its portal while it stands by it. */
+const LOOK_RANGE = BARTER_REACH + 16;
+/** The ground read toward the piglins out there: so far round each, across (its stance, the lava rule round that) and down and up. */
+const FAR_MARGIN = { across: STANCE.far + LAVA_GAP + 6, down: 8, up: 8 } as const;
+/** Cells a walk's search may reach over the ground read out to BARTER_REACH (the near ground's default is 40,000). */
+const FAR_CELLS = 160_000;
 /** Tossed ingots in a row that lay untaken while a right click then worked: from these on the gold goes by hand first. */
 export const TOSS_FAILS = 3;
 /**
@@ -341,44 +393,98 @@ export const BARTER_WAITS = { pollMs: 500, takenLooks: 10, admireLooks: 20, loot
 const HOGLINS = /^(hoglin|zoglin)$/;
 const PIGLINS = /^(piglin|piglin_brute|zombified_piglin)$/;
 
+/** What stops a ghast's sight: a block with a collision box (its own look is a clip of colliders, fluids not counted). */
+const stopsSight = (c: Cell) => c === 'dig' || c === 'solid' || c === 'falls';
+
+/**
+ * Whether a ghast there sees the bot standing here (its feet and the bot's), pure: no block between its eyes and the
+ * bot's in the ground read (Mob.hasLineOfSight's clip: lava, fire, plants and portals let it through). A cell the read
+ * does not hold (out of it, or not loaded) is taken as open: a ghast over the read's top sees the bot unless rock
+ * that was read stands between.
+ */
+export function ghastSees(g: Grid, ghast: Pos, me: Pos): boolean {
+  const from = { x: ghast.x, y: ghast.y + GHAST_EYE, z: ghast.z };
+  const to = { x: me.x, y: me.y + EYE, z: me.z };
+  return clearTo(p => !stopsSight(cellOf(blockAt(g, p))), from, to, floorOf(to));
+}
+
+/**
+ * Whether a fireball comes at the bot standing here, pure: its motion takes it toward the bot and its way passes within
+ * FIRE_MISS of the bot's middle. One with no motion told (just fired: the client has not moved it yet; an older jar
+ * tells none) is taken as coming at it: a ghast within GHAST_WATCH fired it.
+ */
+export function firedAt(fb: Pick<Seen, 'position' | 'motion'>, me: Pos): boolean {
+  const m = fb.motion;
+  const speed = m ? Math.hypot(m.x, m.y, m.z) : 0;
+  if (!m || speed < 0.01) return true;
+  const to = { x: me.x - fb.position.x, y: me.y + 0.9 - (fb.position.y + 0.5), z: me.z - fb.position.z };
+  const along = (m.x * to.x + m.y * to.y + m.z * to.z) / speed;
+  if (along <= 0) return false;
+  return Math.sqrt(Math.max(0, to.x ** 2 + to.y ** 2 + to.z ** 2 - along ** 2)) <= FIRE_MISS;
+}
+
+/** A ghast within GHAST_WATCH, seen or not (one behind rock comes round it): the bot keeps from drops' edges meanwhile. */
+export const ghastWatched = (ents: Seen[]): boolean => ents.some(e => e.name === 'ghast' && e.distance <= GHAST_WATCH);
+
+/**
+ * The nearest ghast watched, in words for a trip's end: `a ghast about (N off)`. Where only a drop's edge would do
+ * (every place to stand, the only way on) while one is watched, the ghast keeps the bot off it, not the place: such a
+ * trip ends as a danger's does (no dry mark grows as for a place found empty, a bearing is not written closed).
+ */
+export function ghastAbout(ents: Seen[]): string {
+  const near = ents.filter(e => e.name === 'ghast' && e.distance <= GHAST_WATCH).sort((a, b) => a.distance - b.distance)[0];
+  return `a ghast about (${near ? Math.round(near.distance) : GHAST_WATCH} off)`;
+}
+
 /**
  * What sends the bot back to its portal now, or null, pure: a piglin of any kind turned aggressive near it (`angry`:
- * the barter is held for the day), a hit taken since the last look (health down), a brute, a hoglin or a ghast near.
+ * the barter is held for the day), a hit taken since the last look (health down), a ghast's fireball coming at it
+ * within GHAST_WATCH, a brute or a hoglin near, a ghast within NEAR.ghast that sees it. `eyes`: the ground read and
+ * where the bot stands, for the ghast's sight and the fireball's way; without them every ghast that near sees it and
+ * every fireball comes at it.
  */
-export function barterDanger(ents: Seen[], health: number, was: number): { why: string; angry?: true } | null {
+export function barterDanger(ents: Seen[], health: number, was: number, eyes?: { g: Grid; me: Pos }): { why: string; angry?: true } | null {
   const mad = ents.filter(e => PIGLINS.test(e.name) && e.aggressive && e.distance <= NEAR.angry).sort((a, b) => a.distance - b.distance)[0];
   if (mad) return { why: `a ${mad.name} turned aggressive at nether ${fmt(mad.position)}`, angry: true };
   if (health < was - 0.5) return { why: `a hit taken (health ${Math.round(was)} -> ${Math.round(health)})` };
-  const near = (re: RegExp, d: number) => ents.filter(e => re.test(e.name) && e.distance <= d).sort((a, b) => a.distance - b.distance)[0];
+  const near = (re: RegExp, d: number, also: (e: Seen) => boolean = () => true) =>
+    ents.filter(e => re.test(e.name) && e.distance <= d && also(e)).sort((a, b) => a.distance - b.distance)[0];
+  const fired = near(/^fireball$/, GHAST_WATCH, e => !eyes || firedAt(e, eyes.me));
+  if (fired) return { why: `a ghast's fireball coming at it (${Math.round(fired.distance)} off)` };
   const brute = near(/^piglin_brute$/, NEAR.brute);
   if (brute) return { why: `a piglin brute near (${Math.round(brute.distance)} off)` };
   const hoglin = near(HOGLINS, NEAR.hoglin);
   if (hoglin) return { why: `a ${hoglin.name} near (${Math.round(hoglin.distance)} off)` };
-  const ghast = near(/^ghast$/, NEAR.ghast);
-  if (ghast) return { why: `a ghast near (${Math.round(ghast.distance)} off)` };
+  const ghast = near(/^ghast$/, NEAR.ghast, e => !eyes || ghastSees(eyes.g, e.position, eyes.me));
+  if (ghast) return { why: `a ghast in sight (${Math.round(ghast.distance)} off)` };
   return null;
 }
 
 /**
  * A piglin it may barter with, pure, or why not: an adult piglin (no brute: the name), not aggressive, not admiring
- * already (a loved thing in its off hand: it takes no more gold), within BARTER_RADIUS of its portal, FROM_BUILDS from
- * every zone and not in anyone's build by the bridge's own word, no player within PLAYER_GAP of it, no hoglin within
- * HOGLIN_GAP of it, no other piglin within CROWD of its feet (a baby keeps the gold), on ground the read holds.
+ * already (a loved thing in its off hand: it takes no more gold), within `radius` of its portal (BARTER_RADIUS, or
+ * BARTER_REACH once it goes further), FROM_BUILDS from every zone and not in anyone's build by the bridge's own word,
+ * no player within PLAYER_GAP of it, no hoglin within HOGLIN_GAP of it, no other piglin within CROWD of its feet (a
+ * baby keeps the gold), on ground the read holds.
  */
-export function barterable(e: Seen, ents: Seen[], g: Grid, portal: Box, zones: Box[]): string | null {
+export function barterable(e: Seen, ents: Seen[], g: Grid, portal: Box, zones: Box[], radius = BARTER_RADIUS): string | null {
+  return piglinFault(e, ents, portal, zones, radius) ?? (footing(g, e.position) ? null : 'on no ground the read holds');
+}
+
+/** barterable's rules but the ground (a piglin beyond the ground read: the read out to it comes after), pure. */
+export function piglinFault(e: Seen, ents: Seen[], portal: Box, zones: Box[], radius = BARTER_RADIUS): string | null {
   if (e.name !== 'piglin') return 'no piglin';
   if (e.baby) return 'a baby';
   if (e.aggressive) return 'aggressive';
   if (e.admiring) return `admiring ${e.offhand ?? 'something'} already`;
   const at = floorOf(e.position);
-  if (boxGap(portal, cellBox(at)) > BARTER_RADIUS) return `more than ${BARTER_RADIUS} from its portal`;
+  if (boxGap(portal, cellBox(at)) > radius) return `more than ${radius} from its portal`;
   if (e.foreign || (e.buildDistance ?? Infinity) < FROM_BUILDS || zones.some(z => boxGap(z, cellBox(at)) < FROM_BUILDS)) return `within ${FROM_BUILDS} of someone's build`;
   if (ents.some(o => o.name === 'player' && dist3(o.position, e.position) < PLAYER_GAP)) return `a player within ${PLAYER_GAP} of it`;
   const hoglin = ents.find(h => HOGLINS.test(h.name) && dist3(h.position, e.position) < HOGLIN_GAP);
   if (hoglin) return `a ${hoglin.name} ${Math.round(dist3(hoglin.position, e.position))} from it`;
   const crowd = ents.find(o => o.id !== e.id && o.name === 'piglin' && across(o.position, e.position) < CROWD && Math.abs(o.position.y - e.position.y) < 2);
   if (crowd) return `${crowd.baby ? 'a baby' : 'another piglin'} by it`;
-  if (!footing(g, e.position)) return 'on no ground the read holds';
   return null;
 }
 
@@ -522,18 +628,34 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
   // ---- the ground round its portal (the bridge's scan follows the protection sync: a moment), then the zones down
   // there: asked once the read is in (the bridge's scan reads loaded chunks only: a build in a chunk that came in while
   // the ground was read was in no answer asked before it, as setupRun found), and again at every look (its scan
-  // follows the bot, 48 round it, and the barter walks 48 from its portal keeping 16 from builds up to 64 out). Every
-  // zone seen on the trip is kept (one gone from a later scan is still someone's); the ground it may walk follows them
+  // follows the bot, 48 round it, and the barter walks 48 from its portal, 96 once it goes further, keeping 16 from
+  // builds past that). Every zone seen on the trip is kept (one gone from a later scan is still someone's); the ground
+  // it may walk follows them
   await pause(SETUP_WAITS.loadMs);
   if (ctx.signal.aborted) throw new Error('aborted');
   const pb = boxOf(portalCells(arrived));
-  const g = await readGround(ctx, {
+  const nearBox: Box = {
     x1: pb.x1 - BARTER_RADIUS, y1: Math.max(1, pb.y1 - GROUND_DOWN), z1: pb.z1 - BARTER_RADIUS,
     x2: pb.x2 + BARTER_RADIUS, y2: Math.min(126, pb.y2 + GROUND_UP), z2: pb.z2 + BARTER_RADIUS
-  });
+  };
+  let g = await readGround(ctx, nearBox);
+  /** how far from its portal it may go: BARTER_RADIUS, then BARTER_REACH once the ground out there is read (`far`) */
+  let radius = BARTER_RADIUS;
+  let far = false;
   const seenZones = new Map<string, Box>();
   let zones: Box[] = [];
-  let may = barterGround(g, pb, zones);
+  let may = barterGround(g, pb, zones, radius);
+  /** a cell at no drop's edge within KNOCK_GAP (while a ghast is watched), each judged once on the ground it was read on */
+  let knocks = new Map<string, boolean>();
+  const knockSafe = (p: Pos) => {
+    const k = cellKey(p);
+    let ok = knocks.get(k);
+    if (ok === undefined) knocks.set(k, ok = !overDrop(g, p, KNOCK_GAP));
+    return ok;
+  };
+  /** a ghast within GHAST_WATCH at the last look: the ground it walks and stands on keeps KNOCK_GAP from drops */
+  let watched = false;
+  const walkable = (p: Pos) => may(p) && (!watched || knockSafe(p));
   /** The bridge's zones down there added to those seen: false when it did not answer. */
   const askZones = async (): Promise<boolean> => {
     const r = await ctx.call<{ zones?: NetherZone[] }>('foreign.zones', { dimension: NETHER }).catch(() => undefined);
@@ -543,7 +665,7 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
       const k = `${z.x1},${z.y1},${z.z1},${z.x2},${z.y2},${z.z2}`;
       if (!seenZones.has(k)) { seenZones.set(k, z); more = true; }
     }
-    if (more) { zones = [...seenZones.values()]; may = barterGround(g, pb, zones); }
+    if (more) { zones = [...seenZones.values()]; may = barterGround(g, pb, zones, radius); }
     return true;
   };
   // (no word of the builds down there: no rule of 16 from them to walk by. Back through its portal, from where it
@@ -572,21 +694,23 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
     if ((st?.dimension ?? NETHER) !== NETHER) { gone = true; return false; }
     me = st?.position ?? me;
     await askZones();
-    ents = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 64 }).catch(() => ({ entities: [] as Seen[] }))).entities ?? [];
+    ents = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: LOOK_RANGE }).catch(() => ({ entities: [] as Seen[] }))).entities ?? [];
     const was = health;
     health = st?.health ?? health;
-    const d = barterDanger(ents, health, was);
+    watched = ghastWatched(ents);
+    const d = barterDanger(ents, health, was, { g, me });
     if (d) { stop = d.why; danger = true; if (d.angry) angry = d.why; return false; }
     if (st?.onFire) { stop = 'on fire'; danger = true; return false; }
     return true;
   };
   /**
    * Between the legs of a walk out: a look round (false on what sends it back), and the rest of the way still on ground
-   * it may walk (a zone come in since it set out: false with nothing set, and the walk is planned again).
+   * it may walk (a zone come in since it set out, or a ghast come within GHAST_WATCH with a drop's edge on the way:
+   * false with nothing set, and the walk is planned again).
    */
   const onTheWay = (path: Pos[]) => {
-    const was = zones;
-    return async () => (await watch()) && (zones === was || path.slice(1).every(p => may(p)));
+    const was = zones, calm = !watched;
+    return async () => (await watch()) && ((zones === was && (!calm || !watched)) || path.slice(1).every(p => walkable(p)));
   };
   /** Looks a poll apart until `done` (or `looks` of them): `done`, `timeout`, or `back` (something sends it back, or it is gone). */
   const wait = async (looks: number, done: () => boolean): Promise<'done' | 'timeout' | 'back'> => {
@@ -600,9 +724,43 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
   const find = (id: number) => ents.find(e => e.id === id);
   const reachFrom = () => {
     const here = footing(g, me);
-    return here ? walkFrom(g, [here], may) : new Map<string, { from: string | null; n: number }>();
+    if (!here) return new Map<string, { from: string | null; n: number }>();
+  // (with a ghast watched, the cell it stands on at a drop's edge (a walk planned before it came ended there) is no
+  // place to dig, toss or pick up from: only the way off it. The search keeps its start whatever the rule, so the plan
+  // made again would pick that very cell, n 0, and the check after the walk let the thing be)
+    const reach = walkFrom(g, [here], walkable, far ? FAR_CELLS : undefined);
+    if (watched && !walkable(here)) reach.delete(cellKey(here));
+    return reach;
+  };
+  /** What the way back from a place needs: BACK_MS from within BARTER_RADIUS of its portal, FAR_STEP_MS a block past it. */
+  const backMs = (p: Pos) => BACK_MS + Math.max(0, boxGap(pb, cellBox(floorOf(p))) - BARTER_RADIUS) * FAR_STEP_MS;
+  /**
+   * The ground read out toward the piglins out there (round each FAR_MARGIN, with the near ground and where the bot
+   * stands, within BARTER_REACH of its portal and the lava rule's cells round that), once a trip: from then on the
+   * barter goes as far as BARTER_REACH, its walks by every rule of the near ground. One read, no waits for chunks not
+   * in: a cell not loaded is no ground it walks.
+   */
+  const goFar = async (out: Seen[]) => {
+    const cells = [...out.map(e => floorOf(e.position)), floorOf(me)];
+    const lim = BARTER_REACH + LAVA_GAP + 1;
+    const box: Box = {
+      x1: Math.max(pb.x1 - lim, Math.min(nearBox.x1, ...cells.map(c => c.x - FAR_MARGIN.across))),
+      y1: Math.max(1, Math.min(nearBox.y1, ...cells.map(c => c.y - FAR_MARGIN.down))),
+      z1: Math.max(pb.z1 - lim, Math.min(nearBox.z1, ...cells.map(c => c.z - FAR_MARGIN.across))),
+      x2: Math.min(pb.x2 + lim, Math.max(nearBox.x2, ...cells.map(c => c.x + FAR_MARGIN.across))),
+      y2: Math.min(126, Math.max(nearBox.y2, ...cells.map(c => c.y + FAR_MARGIN.up))),
+      z2: Math.min(pb.z2 + lim, Math.max(nearBox.z2, ...cells.map(c => c.z + FAR_MARGIN.across)))
+    };
+    g = await readGround(ctx, box, 1);
+    if (ctx.signal.aborted) throw new Error('aborted');
+    far = true;
+    radius = BARTER_REACH;
+    may = barterGround(g, pb, zones, radius);
+    knocks = new Map();
   };
 
+  /** what the last pickUp left lying where the bot may not go (by lava, at a drop's edge, past a way it could walk) */
+  let leftLying = 0;
   /**
    * What a piglin threw (new items within LOOT_RANGE of where it stood) picked up on foot, never by lava, none with a
    * player by it (theirs, or thrown to them: looked at again each round): false when sent back.
@@ -610,13 +768,14 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
   const pickUp = async (around: Pos, before: Set<number>): Promise<boolean> => {
     const passed = new Set<number>();
     const waited = new Set<number>();
+    leftLying = 0;
     for (let round = 0; round < 8; round++) {
       if (!(await watch())) return false;
       const players = ents.filter(e => e.name === 'player');
       const next = ents.filter(e => e.name === 'item' && !before.has(e.id) && !passed.has(e.id) && dist3(e.position, around) <= LOOT_RANGE &&
         !players.some(o => dist3(o.position, e.position) <= LOOT_RANGE))
         .sort((a, b) => dist3(a.position, me) - dist3(b.position, me))[0];
-      if (!next) return true;
+      if (!next) { leftLying = passed.size; return true; }
       // (in reach of the pickup where it stands: a look more; still lying there after it (a block under its feet, down
       // a step: the game's box reaches half a block under them), a cell to take it from)
       if (takesAt(me, next.position) && !waited.has(next.id)) { waited.add(next.id); await pause(BARTER_WAITS.pollMs); continue; }
@@ -636,6 +795,7 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
       if (w === 'back') { if (stop || gone) return false; continue; }
       if (w === 'stuck') passed.add(next.id);
     }
+    leftLying = passed.size;
     return true;
   };
 
@@ -663,7 +823,9 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
   };
   while (!stop && !gone) {
     if (given >= gold) { stop = `the trip's ${gold} gold given`; break; }
-    if (left() < BACK_MS) { stop = 'the barter\'s time is up'; break; }
+    // (the time asked once a round: what it leaves for the way back from where the bot stands, and for one out there)
+    const rest = left();
+    if (rest < backMs(me)) { stop = 'the barter\'s time is up'; break; }
     if (!(await watch())) break;
     const items = await inventory(ctx);
     if (!carried(items, 'gold_ingot')) { stop = 'no gold left'; break; }
@@ -677,19 +839,55 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
     let target: { e: Seen; stance: Pos; n: number } | undefined;
     const refused = new Map<string, number>();
     const note = (why: string) => refused.set(why, (refused.get(why) ?? 0) + 1);
+    /** piglins out past the near ground that the reach to BARTER_REACH would take */
+    const out: Seen[] = [];
+    /** piglins with no place to stand a walk reaches (with a ghast watched: perhaps only at a drop's edge) */
+    const unstood: Seen[] = [];
     for (const e of ents) {
       if (e.name !== 'piglin') continue;
       if (skipped.has(e.id)) { note('tried already'); continue; }
-      const why = barterable(e, ents, g, pb, zones);
+      const why = barterable(e, ents, g, pb, zones, radius);
+      // (past the near ground before it goes further: one the reach to BARTER_REACH would take, else why not by it)
+      if (why && !far && boxGap(pb, cellBox(floorOf(e.position))) > BARTER_RADIUS) {
+        const fault = piglinFault(e, ents, pb, zones, BARTER_REACH);
+        const fy = floorOf(e.position).y;
+        if (fault) note(fault);
+        // (out there only on the near ground's levels: the read toward it reaches FAR_MARGIN under and over them, and
+        // one by the lava sea 50 under its portal, within 96 of it all the same, would pull the read down to it: some 75
+        // layers of 130 across and more, for a piglin few walks reach)
+        else if (fy < nearBox.y1 || fy > nearBox.y2) note(`more than ${GROUND_DOWN} below or above its portal`);
+        else out.push(e);
+        continue;
+      }
       if (why) { note(why); continue; }
       const stance = stanceFor(g, reach, e.position);
       const n = stance ? reach.get(cellKey(stance))?.n : undefined;
-      if (!stance || n === undefined) { note('no place to stand that a walk reaches'); continue; }
+      if (!stance || n === undefined) { note('no place to stand that a walk reaches'); unstood.push(e); continue; }
+      // (out past the near ground: the walk there, a barter and the way back from there within the time left)
+      if (boxGap(pb, cellBox(stance)) > BARTER_RADIUS && rest < n * FAR_STEP_MS + FAR_TURN_MS + backMs(stance)) { note('too far for the time left'); continue; }
       if (!target || n < target.n) target = { e, stance, n };
+    }
+    if (!target && out.length) {
+      // none within BARTER_RADIUS will do and one further out would: the ground read out toward it, and on, with the
+      // time for the walk out to the nearest of them and back and a barter there
+      const nearest = Math.min(...out.map(e => boxGap(pb, cellBox(floorOf(e.position))))) - BARTER_RADIUS;
+      if (rest >= BACK_MS + FAR_TURN_MS + 2 * nearest * FAR_STEP_MS) {
+        ctx.progress(`barter: no piglin to barter with within ${BARTER_RADIUS} of its portal: out to ${BARTER_REACH} for ${plural(out.length, 'piglin')} further off`);
+        await goFar(out);
+        continue;
+      }
+      for (let i = 0; i < out.length; i++) note('too far for the time left');
+    }
+    if (!target && watched && unstood.length) {
+      // (a ghast watched, and a place to toss from only at a drop's edge: the ghast keeps the bot off it, not the place:
+      // back as from a danger, so the wait does not grow as for a place with no piglin)
+      const here = footing(g, me);
+      const plain = here ? walkFrom(g, [here], may, far ? FAR_CELLS : undefined) : undefined;
+      if (plain && unstood.some(e => stanceFor(g, plain, e.position))) { stop = `${ghastAbout(ents)}: the piglins only from a drop's edge`; danger = true; break; }
     }
     if (!target) {
       const whys = [...refused].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(', ');
-      stop = `no piglin to barter with within ${BARTER_RADIUS} of its portal (${whys || 'none seen'})`;
+      stop = `no piglin to barter with within ${radius} of its portal (${whys || 'none seen'})`;
       break;
     }
     const id = target.e.id;
@@ -699,10 +897,13 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
     if (walked === 'back') { if (stop || gone) break; continue; }
     if (walked === 'stuck') { skipped.add(id); continue; }
     if (!(await watch())) break;
-    // it may have walked on: tossed to where it is now from here, or a new place to stand (twice at most)
+    // it may have walked on: tossed to where it is now from here, or a new place to stand (twice at most); and a ghast
+    // come within GHAST_WATCH on the last leg with the bot at a drop's edge: a place off it first
     const seen = find(id);
-    const off = seen ? barterable(seen, ents, g, pb, zones) : 'gone';
-    if (!seen || off || across(me, seen.position) < TOSS.least || across(me, seen.position) > TOSS.most || Math.abs(seen.position.y - me.y) > 1.2) {
+    const off = seen ? barterable(seen, ents, g, pb, zones, radius) : 'gone';
+    const here = footing(g, me);
+    const edge = watched && !!here && !knockSafe(here);
+    if (!seen || off || edge || across(me, seen.position) < TOSS.least || across(me, seen.position) > TOSS.most || Math.abs(seen.position.y - me.y) > 1.2) {
       const n = (tries.get(id) ?? 0) + 1;
       tries.set(id, n);
       if (off || n >= 2) skipped.add(id);
@@ -762,9 +963,13 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
     // ---- its admiring (the off hand empty again: the loot thrown), 10 s at most; a moment for it to come down; picked up on foot
     if ((await wait(BARTER_WAITS.admireLooks, () => !find(barterer)?.admiring)) === 'back') break;
     if ((await wait(BARTER_WAITS.lootLooks, () => false)) === 'back') break;
+    const booked = lootCount;
     const ok = await pickUp(find(barterer)?.position ?? piglin.position, itemsBefore);
     book(await inventory(ctx));
     if (!ok) break;
+    // (all it threw left lying where the bot may not go, as by a lava lake or, with a ghast watched, a drop's edge: its
+    // next throw would come down there too, and the trip's gold go for nothing: let be for the trip)
+    if (leftLying && lootCount === booked) skipped.add(barterer);
   }
   if (!gone && given) book(await inventory(ctx));
 
@@ -772,20 +977,24 @@ export async function barterRun(ctx: GoalContext, budgetMs: number, now: () => n
   const words = lootWords(loot);
   const did = given ? `bartered ${given} gold with ${plural(piglins.size, 'piglin')}: ${words || 'nothing picked up'}` : 'no barter';
   if (given) ctx.progress(`nether: bartered ${given} gold: ${words || 'nothing picked up'}`);
-  if (gone || !(await inNether(ctx))) return { gain: lootCount, text: given ? `${did}; ${GONE.text}` : GONE.text };
+  if (gone || !(await inNether(ctx))) return { gain: lootCount, text: given ? `${did}; ${GONE.text}` : GONE.text, ...(given ? { worked: true as const } : {}) };
   if (angry) {
     (netherOf(world).barter ??= {}).held = { day: gameDay(world), at: now(), why: angry.slice(0, 160) };
     ctx.progress(`nether: ${angry}: back to its portal, the barter held for the day`);
   }
   const why = `${stop ?? 'done'}${angry ? ', the barter held for the day' : ''}`;
   // (turned back by a danger before a barter: the place is not found empty of piglins, and the wrapper's dry mark
-  // must not grow 20, 40, 80, 160 min as for one: the mark stays as it was, 20 min at least)
-  const mark = danger && !given ? { mark: 'same' as const } : {};
+  // must not grow 20, 40, 80, 160 min as for one: the mark stays as it was, 20 min at least. A barter made is the
+  // trip's work: only then does it count for the stages)
+  const mark = { ...(danger && !given ? { mark: 'same' as const } : {}), ...(given ? { worked: true as const } : {}) };
   const here = footing(g, me);
-  const back = here ? walkFrom(g, [here], p => same(p, start) || may(p)) : undefined;
+  // (a ghast watched: the way back keeps from drops' edges too, where there is such a way; else the plain ground's)
+  const wayBack = (ok: (p: Pos) => boolean) => (here ? walkFrom(g, [here], p => same(p, start) || ok(p), far ? FAR_CELLS : undefined) : undefined);
+  let back = wayBack(walkable);
+  if (!back?.has(cellKey(start)) && watched) back = wayBack(may);
   if (!back?.has(cellKey(start))) return { gain: lootCount, text: `${did}; ${why}; no way back on foot to its hut`, ...mark };
   const w = await walkAlong(ctx, pathOf(back, start), 4);
-  if (w === 'gone') return { gain: lootCount, text: `${did}; ${GONE.text}` };
+  if (w === 'gone') return { gain: lootCount, text: `${did}; ${GONE.text}`, ...(given ? { worked: true as const } : {}) };
   if (w === 'stuck') return { gain: lootCount, text: `${did}; ${why}; stuck on the way back to its hut`, ...mark };
   const b = await backThroughOwn(ctx, arrived, homeShape, now);
   return { gain: lootCount, text: `${did}; ${why}; ${b.text}`, ...mark, ...(b.cameBack ? { cameBack: true as const } : {}) };

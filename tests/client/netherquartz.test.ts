@@ -6,7 +6,7 @@ import {
   HUT_GAP, ORE, QUARTZ_DEPTH, QUARTZ_RADIUS, QUARTZ_TRIP, QUARTZ_WAITS, digStance, dropReach, quartzFault, quartzGround, quartzOpen, quartzReady, quartzRun, quartzSurvey,
   takesAt, type QuartzView
 } from '../../src/client/brain/netherquartz.js';
-import { BARTER_WAITS, LAVA_GAP, barterReady, lavaBy, overDrop } from '../../src/client/brain/netherbarter.js';
+import { BARTER_WAITS, KNOCK_GAP, LAVA_GAP, barterReady, lavaBy, overDrop } from '../../src/client/brain/netherbarter.js';
 import { FROM_BUILDS, PLACED_GAP, SETUP_WAITS, boxGap, boxOf, footing, setOpen, walkFrom, zoneBox, type Box } from '../../src/client/brain/nethersetup.js';
 import { NETHER, NETHER_STOCK, OVERWORLD, barterHold, netherOf, peekNether, portalCells, type PortalShape } from '../../src/client/brain/nether.js';
 import { LADDER, NETHER_WORK } from '../../src/client/brain/worktasks.js';
@@ -231,6 +231,93 @@ test.serial('on fire it goes back to its portal, as on a hit', async (t) => {
   t.is(r.text, 'mined 1 quartz ore: 2 quartz; on fire; back at overworld (-562, 65, 2191)');
 });
 
+test.serial('P3b: the quartz keeps the barter\'s ghast rule: a ghast 18 off is watched, not fled (it mines on); one within 16 in sight sends it home with nothing mined, and the trip counts for nothing, its trip of the day given back', async (t) => {
+  const far: Mob = { id: 31, name: 'ghast', position: { x: -66.5, y: 88, z: 252.5 } };
+  const a = await afterSetup(QUARTZ_FIELD, { mobs: [far] });
+  const r = await quartzRun(a.f.ctx, HOUR, () => a.later);
+  t.is(r.text, 'mined 3 quartz ore: 6 quartz; no more quartz ore it may mine within 24 of its portal; back at overworld (-562, 65, 2191)');
+  t.like(r, { worked: true, cameBack: true });
+  // (seen from the hut's door, 9 off)
+  const near: Mob = { id: 31, name: 'ghast', position: { x: -72.5, y: 74, z: 262.5 } };
+  const b = await afterSetup(QUARTZ_FIELD, { mobs: [near] });
+  const text = await rung(b.later).run(b.f.ctx);
+  t.regex(text, /^\[quartz\] no quartz mined; a ghast in sight \(\d+ off\); back at overworld \(-562, 65, 2191\); back home$/);
+  t.deepEqual(dugCells(b.f), []);
+  t.like(peekNether(b.w), { stageTrips: 2, lastTrip: { end: 'turned back' } });
+  t.is(peekNether(b.w).tripsToday, undefined);
+  t.like(b.w.work!.dry['nether:quartz'], { n: 1, at: b.later });
+});
+
+/** A trench 6 deep at x `x` beside the cliff's face (z 250..260), in front of the ore at (-77, 70, 255). */
+const trenchAt = (x: number): Blocks => {
+  const out: Blocks = [];
+  for (let z = 250; z <= 260; z++) for (let y = 64; y <= 69; y++) out.push([at(x, y, z), 'air']);
+  return out;
+};
+/** The walks down there that end within KNOCK_GAP of a drop's edge, and the cells digs were made from that are, on the ground as the game has it. */
+const knockEdges = (f: Game) => {
+  const g = gridOf(p => f.get(NETHER, p), { x1: -95, y1: 55, z1: 230, x2: -55, y2: 90, z2: 280 });
+  const digs = f.changed.filter(c => c.dim === NETHER && c.how.startsWith('dug from ')).map(c => {
+    const [x, y, z] = /\((-?\d+), (-?\d+), (-?\d+)\)/.exec(c.how)!.slice(1).map(Number);
+    return { x, y, z };
+  });
+  return [...netherWalks(f).map(x => x.to), ...digs].filter(p => overDrop(g, p, KNOCK_GAP)).map(k);
+};
+
+test.serial('P3b: a ghast watched (18 off and more): no walk and no dig from within 2 of a drop\'s edge while it is within 32 (a trench by the ore: it digs from the cliff\'s side of it); with none about it walks there', async (t) => {
+  const far: Mob = { id: 31, name: 'ghast', position: { x: -66.5, y: 88, z: 252.5 } };
+  const blocks: Blocks = [[GOOD[0], ORE], ...trenchAt(-73)];
+  const watched = await afterSetup(blocks, { mobs: [far] });
+  const r = await quartzRun(watched.f.ctx, HOUR, () => watched.later);
+  t.is(r.text, 'mined 1 quartz ore: 2 quartz; no more quartz ore it may mine within 24 of its portal; back at overworld (-562, 65, 2191)');
+  t.deepEqual(knockEdges(watched.f), []);
+  t.true(watched.f.changed.some(c => c.dim === NETHER && k(c.at) === k(GOOD[0]) && c.how.startsWith('dug from ')));
+  const calm = await afterSetup(blocks);
+  const r2 = await quartzRun(calm.f.ctx, HOUR, () => calm.later);
+  t.is(r2.text, r.text);
+  t.true(knockEdges(calm.f).length > 0, 'the rule is what keeps it off');
+});
+
+test.serial('P3b: a ghast watched with the ore only from a drop\'s edge (a trench 2 off the cliff\'s face): back as from a danger (the ghast keeps it off, not the ground), the mark as for a danger, the trip turned back; with none about it mines it', async (t) => {
+  const far: Mob = { id: 31, name: 'ghast', position: { x: -66.5, y: 88, z: 252.5 } };
+  const blocks: Blocks = [[GOOD[0], ORE], ...trenchAt(-74)];
+  const { w, later, f } = await afterSetup(blocks, { mobs: [far] });
+  // (an old dry mark long run out: the run's own leaves it at its count)
+  w.work!.dry['nether:quartz'] = { n: 2, at: later - 3 * HOUR };
+  const text = await rung(later).run(f.ctx);
+  t.is(text, "[quartz] no quartz mined; a ghast about (25 off): the quartz ore only from a drop's edge; back at overworld (-562, 65, 2191); back home");
+  t.deepEqual(dugCells(f), []);
+  t.deepEqual(w.work!.dry['nether:quartz'], { n: 2, at: later });
+  t.like(peekNether(w), { stageTrips: 2, lastTrip: { end: 'turned back' } });
+  const calm = await afterSetup(blocks);
+  const r = await quartzRun(calm.f.ctx, HOUR, () => calm.later);
+  t.regex(r.text, /^mined 1 quartz ore: 2 quartz; /);
+});
+
+test.serial('P3b: a ghast come about as it steps onto the place it would dig from, at a drop\'s edge: no dig from there, a place off the edge first', async (t) => {
+  const blocks: Blocks = [[GOOD[0], ORE], ...trenchAt(-73)];
+  // with none about, the place it digs from (the fewest steps) is at the trench's 2
+  const calm = await afterSetup(blocks);
+  await quartzRun(calm.f.ctx, HOUR, () => calm.later);
+  const edges = knockEdges(calm.f);
+  t.true(edges.length > 0);
+  const edge = edges.at(-1)!;
+  t.true(calm.f.changed.some(c => c.dim === NETHER && k(c.at) === k(GOOD[0]) && c.how === `dug from (${edge.replace(/,/g, ', ')})`), edge);
+  // the ghast comes as the walk there arrives (no leg after it, so no look on the way saw it)
+  const { f, later } = await afterSetup(blocks);
+  const call = f.ctx.call;
+  let came = false;
+  (f.ctx as { call: GoalContext['call'] }).call = (async (m: string, p?: Record<string, unknown>) => {
+    const r = await call(m, p);
+    if (m === 'goto' && f.state.dim === NETHER && !came && k(p as unknown as Pos) === edge) { came = true; f.mobs.push({ id: 31, name: 'ghast', position: { x: -92.5, y: 74, z: 258.5 } }); }
+    return r;
+  }) as GoalContext['call'];
+  const r = await quartzRun(f.ctx, HOUR, () => later);
+  t.true(came);
+  t.is(r.text, 'mined 1 quartz ore: 2 quartz; no more quartz ore it may mine within 24 of its portal; back at overworld (-562, 65, 2191)');
+  t.false(f.changed.some(c => c.dim === NETHER && c.how === `dug from (${edge.replace(/,/g, ', ')})`), 'not from the edge');
+});
+
 test.serial('a hoglin come near in the middle of a walk out to an ore is seen at the next leg: not a leg more, back to its portal; nothing dug, and the place not marked dry as an empty one is', async (t) => {
   // one ore, some 16 steps from its hut
   const { f, later } = await afterSetup([[at(-77, 70, 248), ORE]]);
@@ -453,7 +540,7 @@ test('what the bot takes up where it stands: the game\'s pickup box (1 across, h
 // ------------------------------------------------------------------------------------------------ the gate
 
 test('the quartz\'s gate: nothing before stage 1, before the link or without its own portal; at stage 1 the rung\'s work beside the barter, ready while the quartz is under 64 and the kit is whole; its gates write nothing', (t) => {
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
   t.is(NETHER_STOCK.quartz, 64);
   const w = setupWorld();
   const n = netherOf(w);

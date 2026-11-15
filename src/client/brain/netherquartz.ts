@@ -20,8 +20,11 @@
  * it stands on; what the ore drops is picked up on foot, never by lava.
  *
  * It stops at the trip's 32 ore or its time (45 s kept for the way back), the quartz at its target, on any hit taken, a
- * hoglin, a brute or a ghast near (looked for between the legs of every walk out too), the pockets full, or no ore left
- * that it may mine; and walks back into its hut and through its own portal. A piglin turned aggressive near it sends it back at once and holds the barter and the quartz
+ * hoglin or a brute near, a ghast within 16 that sees it or a fireball coming at it (the barter's ghast rule, looked for
+ * between the legs of every walk out too; a ghast further off or behind rock is watched: while one is within 32 the bot
+ * walks and digs from no drop's edge within 2, and where only such an edge would do, it goes back as from a danger),
+ * the pockets full, or no ore left that it may mine; and walks back into
+ * its hut and through its own portal. A piglin turned aggressive near it sends it back at once and holds the barter and the quartz
  * for the rest of the game day (netherbarter.ts's own rule and memory: the same piglins round the same portal). Says
  * `nether: mined N quartz ore: M quartz picked up`.
  *
@@ -34,7 +37,9 @@ import type { Pos, WorldMemory } from './memory.js';
 import type { WorkResult } from './work.js';
 import { homePortal } from './portal.js';
 import { NETHER, NETHER_STOCK, barterHold, gameDay, netherOf, netherStock, peekNether, portalCells } from './nether.js';
-import { BACK_MS, LAVA_GAP, backThroughOwn, barterDanger, barterOpen, lavaBy, overDrop, takesAt, toOwnPortal, type Seen } from './netherbarter.js';
+import {
+  BACK_MS, KNOCK_GAP, LAVA_GAP, backThroughOwn, barterDanger, barterOpen, ghastAbout, ghastWatched, lavaBy, overDrop, takesAt, toOwnPortal, type Seen
+} from './netherbarter.js';
 import {
   DIG_REACH, EYE, FROM_BUILDS, GONE, PLACED_GAP, SETUP_HEALTH, SETUP_WAITS, blockAt, boxGap, boxOf, cellOf, clearTo, fetchSetupKit, footing, inNether,
   pathOf, placedIn, readGround, setOpen, setupShort, walkAlong, walkFrom, zoneBox, type Box, type Cell, type Grid, type NetherZone
@@ -306,6 +311,9 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
   /** sent back by a danger (not by the ore): the trip says nothing of the quartz there */
   let danger = false;
   let gone = false;
+  /** a ghast within GHAST_WATCH at the last look: the ground it walks and digs from keeps KNOCK_GAP from drops (judged as it is: the trip digs) */
+  let watched = false;
+  const walkable = (p: Pos) => ground.may(p) && (!watched || !overDrop(g, p, KNOCK_GAP));
   /** A look round (between the legs of every walk out too): false when something sends it back (`stop` says what) or it is out of the Nether (`gone`). */
   const watch = async (): Promise<boolean> => {
     if (ctx.signal.aborted) throw new Error('aborted');
@@ -315,14 +323,29 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
     ents = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 64 }).catch(() => ({ entities: [] as Seen[] }))).entities ?? [];
     const was = health;
     health = st?.health ?? health;
-    const d = barterDanger(ents, health, was);
+    watched = ghastWatched(ents);
+    const d = barterDanger(ents, health, was, { g, me });
     if (d) { stop = d.why; danger = true; if (d.angry) angry = d.why; return false; }
     if (st?.onFire) { stop = 'on fire'; danger = true; return false; }
     return true;
   };
+  /**
+   * Between the legs of a walk out: a look round, and with a ghast come within GHAST_WATCH since it set out, the rest
+   * of the way at no drop's edge (false with nothing set: the walk is planned again).
+   */
+  const onTheWay = (path: Pos[]) => {
+    const calm = !watched;
+    return async () => (await watch()) && (!calm || !watched || path.slice(1).every(p => walkable(p)));
+  };
   const reachFrom = () => {
     const here = footing(g, me);
-    return here ? walkFrom(g, [here], ground.may) : new Map<string, { from: string | null; n: number }>();
+    if (!here) return new Map<string, { from: string | null; n: number }>();
+  // (with a ghast watched, the cell it stands on at a drop's edge (a walk planned before it came ended there) is no
+  // place to dig, toss or pick up from: only the way off it. The search keeps its start whatever the rule, so the plan
+  // made again would pick that very cell, n 0, and the check after the walk let the thing be)
+    const reach = walkFrom(g, [here], walkable);
+    if (watched && !walkable(here)) reach.delete(cellKey(here));
+    return reach;
   };
 
   /** What a dig dropped (new items within DROP_RANGE of the ore) picked up on foot, never by lava: false when sent back. */
@@ -346,8 +369,10 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
       }
       // (in a hole it cannot stand by, by lava, at a drop's edge, or where it stands already: left where it lies)
       if (!best || best.n === 0) { passed.add(next.id); continue; }
-      const w = await walkAlong(ctx, pathOf(reach, best.p), 4, watch);
-      if (w === 'gone' || w === 'back') { gone ||= w === 'gone'; return false; }
+      const way = pathOf(reach, best.p);
+      const w = await walkAlong(ctx, way, 4, onTheWay(way));
+      if (w === 'gone') { gone = true; return false; }
+      if (w === 'back') { if (stop || gone) return false; continue; }
       if (w === 'stuck') passed.add(next.id);
     }
     return true;
@@ -355,6 +380,8 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
 
   // ---- the mining: the ore of fewest steps to a place to dig it from, then the next
   const tried = new Set<string>();
+  /** ores whose walk was planned again (a ghast come near): once each */
+  const replanned = new Set<string>();
   let dug = 0;
   let refused = 0;
   let got = 0;
@@ -381,6 +408,15 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
       if (st && (!target || st.n < target.n) && dropReach(g, reach, ore)) target = { ore, ...st };
     }
     if (!target) {
+      // (a ghast watched, and what is left only from a drop's edge: the ghast keeps the bot off it, not the ground: back
+      // as from a danger, so the wait does not grow as for a place with no ore)
+      const here = footing(g, me);
+      const plain = watched && here ? walkFrom(g, [here], ground.may) : undefined;
+      if (plain && survey.ores.some(ore => !tried.has(cellKey(ore)) && digStance(g, plain, ore) && dropReach(g, plain, ore))) {
+        stop = `${ghastAbout(ents)}: the quartz ore only from a drop's edge`;
+        danger = true;
+        break;
+      }
       const faults = [...survey.faults].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(', ');
       // (some tried and done with, dug or not: what is left is out of sight, or none)
       stop = tried.size ? `no more quartz ore it may mine within ${QUARTZ_RADIUS} of its portal`
@@ -390,11 +426,18 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
     }
     const k = cellKey(target.ore);
     tried.add(k);
-    const walked = await walkAlong(ctx, pathOf(reach, target.at), 4, watch);
+    const way = pathOf(reach, target.at);
+    const walked = await walkAlong(ctx, way, 4, onTheWay(way));
     if (walked === 'gone') { gone = true; break; }
-    if (walked === 'back') break;
+    // (a ghast come within GHAST_WATCH with a drop's edge ahead: the ore tried again from a place planned anew, once;
+    // a second time, let be)
+    const again = () => { if (!replanned.has(k)) { replanned.add(k); tried.delete(k); } };
+    if (walked === 'back') { if (stop || gone) break; again(); continue; }
     if (walked === 'stuck') continue;
     if (!(await watch())) break;
+    // (and come so on the last leg, the bot at a drop's edge: no dig from there, a place off it first)
+    const here = footing(g, me);
+    if (watched && here && overDrop(g, here, KNOCK_GAP)) { again(); continue; }
     const before = new Set(ents.filter(e => e.name === 'item').map(e => e.id));
     const r = await ctx.call<{ dug?: boolean; reason?: string }>('dig.here', { ...target.ore, timeoutMs: 15_000 }, 25_000)
       .catch((e: Error) => ({ dug: false, reason: e.message }));
@@ -425,20 +468,24 @@ export async function quartzRun(ctx: GoalContext, budgetMs: number, now: () => n
   // ---- done: said, and back into the hut and through its own portal
   const did = dug ? `mined ${dug} quartz ore: ${got} quartz${refused ? ` (${refused} it could not dig)` : ''}` : `no quartz mined${refused ? ` (${refused} it could not dig)` : ''}`;
   if (dug) ctx.progress(`nether: mined ${dug} quartz ore: ${got ? `${got} quartz picked up` : 'nothing picked up'}`);
-  if (gone || !(await inNether(ctx))) return { gain: got, text: dug ? `${did}; ${GONE.text}` : GONE.text };
+  if (gone || !(await inNether(ctx))) return { gain: got, text: dug ? `${did}; ${GONE.text}` : GONE.text, ...(dug ? { worked: true as const } : {}) };
   if (angry) {
     (netherOf(world).barter ??= {}).held = { day: gameDay(world), at: now(), why: angry.slice(0, 160) };
     ctx.progress(`nether: ${angry}: back to its portal, the barter and the quartz held for the day`);
   }
   const why = `${stop ?? 'done'}${angry ? ', the barter and the quartz held for the day' : ''}`;
   // (turned back by a danger before an ore: the place is not found empty of quartz, and the wrapper's dry mark must
-  // not grow 20, 40, 80, 160 min as for one: the mark stays as it was, 20 min at least)
-  const mark = danger && !dug ? { mark: 'same' as const } : {};
+  // not grow 20, 40, 80, 160 min as for one: the mark stays as it was, 20 min at least. An ore mined is the trip's work:
+  // only then does it count for the stages)
+  const mark = { ...(danger && !dug ? { mark: 'same' as const } : {}), ...(dug ? { worked: true as const } : {}) };
   const here = footing(g, me);
-  const way = here ? walkFrom(g, [here], p => same(p, start) || ground.may(p)) : undefined;
+  // (a ghast watched: the way back keeps from drops' edges too, where there is such a way; else the plain ground's)
+  const wayBack = (ok: (p: Pos) => boolean) => (here ? walkFrom(g, [here], p => same(p, start) || ok(p)) : undefined);
+  let way = wayBack(walkable);
+  if (!way?.has(cellKey(start)) && watched) way = wayBack(ground.may);
   if (!way?.has(cellKey(start))) return { gain: got, text: `${did}; ${why}; no way back on foot to its hut`, ...mark };
   const w = await walkAlong(ctx, pathOf(way, start), 4);
-  if (w === 'gone') return { gain: got, text: `${did}; ${GONE.text}` };
+  if (w === 'gone') return { gain: got, text: `${did}; ${GONE.text}`, ...(dug ? { worked: true as const } : {}) };
   if (w === 'stuck') return { gain: got, text: `${did}; ${why}; stuck on the way back to its hut`, ...mark };
   const b = await backThroughOwn(ctx, arrived, homeShape, now);
   return { gain: got, text: `${did}; ${why}; ${b.text}`, ...mark, ...(b.cameBack ? { cameBack: true as const } : {}) };

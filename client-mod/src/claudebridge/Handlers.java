@@ -301,6 +301,9 @@ public final class Handlers {
                     o.addProperty("item", Names.item(ie.getItem()));
                     o.addProperty("count", ie.getItem().getCount());
                 }
+                // a projectile's motion as the client has it, blocks a tick (none yet for one just fired): the brain
+                // tells a ghast's fireball coming at the bot from one going elsewhere (P3b's ghast rule)
+                if (e instanceof net.minecraft.world.entity.projectile.Projectile) o.add("motion", pos(e.getDeltaMovement()));
                 out.add(o);
             }
             return obj("entities", out);

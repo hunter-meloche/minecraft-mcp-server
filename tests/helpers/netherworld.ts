@@ -4,7 +4,10 @@
  * cliff, a lava pool, the community's stone-brick room round their portal), the server's rule for where a portal
  * leads, chests by their totals, digging, placing and lighting; and for the barter (netherbarter.test.ts) the mobs down
  * there, the items lying, a toss, a right click, a piglin's admiring and what it throws; and for the quartz
- * (netherquartz.test.ts) what a dug quartz ore drops, where it comes to rest.
+ * (netherquartz.test.ts) what a dug quartz ore drops, where it comes to rest; for the scouting
+ * (netherscout.test.ts) the biome the status says at the bot's feet; and for the debris (netherdebris.test.ts) the
+ * potions in the chests by their stacks (a withdraw by slot), a potion drunk and the effect it gives, what a dug
+ * ancient debris drops and what the bot held to dig it.
  */
 import type { InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
@@ -97,9 +100,10 @@ export const stackSize = (n: string) => (/_(pickaxe|sword|helmet|chestplate|legg
 export type Dim = typeof OVERWORLD | typeof NETHER;
 export interface Lit extends PortalShape { dim: Dim }
 
-/** A mob down there as the bridge's world.entities reports it: where its feet are, and what the barter reads of it. */
+/** A mob down there as the bridge's world.entities reports it: where its feet are, and what the barter reads of it (a fireball's motion, blocks a tick). */
 export interface Mob {
   id: number; name: string; position: Pos; baby?: boolean; aggressive?: boolean; offhand?: string; mainhand?: string; buildDistance?: number; foreign?: boolean;
+  motion?: Pos;
 }
 /** What a piglin throws for a gold ingot, one barter's (a potion by its contents). */
 export interface Loot { name: string; count: number; potion?: string }
@@ -130,6 +134,10 @@ export function game(world: WorldMemory, opts: {
   onLook?: (n: number) => void;
   /** the quartz each nether_quartz_ore dug down there drops (the pickaxe's fortune: 2 by default) */
   quartz?: number;
+  /** the biome at a block down there, as the status says it at the bot's feet (P3b's scouting; none said by default) */
+  biome?: (p: Pos) => string | undefined;
+  /** a potion drunk does not take (the use ends before it is drunk: nothing goes, no effect) */
+  drinkFails?: boolean;
 } = {}) {
   const did: string[] = [];
   const said: string[] = [];
@@ -142,7 +150,10 @@ export function game(world: WorldMemory, opts: {
   // the Nether as an earlier trip left it: what it dug and built there, the portal it lit
   for (const c of opts.after?.changed ?? []) over[c.dim].set(k(c.at), c.to);
   for (const l of opts.after?.lit ?? []) if (l.dim === NETHER && !lit.some(x => x.dim === l.dim && x.x === l.x && x.y === l.y && x.z === l.z)) lit.push({ ...l });
-  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20 };
+  /** `fire`: the fire resistance on the bot, s (a test lowers it); `heldSlot`: the pocket item.select named by slot */
+  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20, fire: 0, heldSlot: -1 };
+  /** each block dug down there, with what the bot held to dig it */
+  const dugWith: string[] = [];
   const own: { dimension: string; x: number; y: number; z: number }[] = [];
   const inPortal = (dim: Dim, p: Pos) => lit.find(l => l.dim === dim && portalCells(l).some(c => c.x === p.x && c.y === p.y && c.z === p.z));
   const get = (dim: Dim, p: Pos): string => (inPortal(dim, p) ? 'nether_portal' : over[dim].get(k(p)) ?? ground[dim](p));
@@ -152,8 +163,14 @@ export function game(world: WorldMemory, opts: {
   const standing = (dim: Dim, p: Pos) => solid(get(dim, { ...p, y: p.y - 1 })) && name(get(dim, p)) === 'air' && name(get(dim, { ...p, y: p.y + 1 })) === 'air';
 
   const inv = (opts.items ?? KIT).map(i => ({ ...i }));
-  const chests = new Map<string, { name: string; count: number }[]>();
-  for (const [key, contents] of Object.entries(world.chestItems ?? {})) chests.set(key, Object.entries(contents).map(([n, c]) => ({ name: n, count: c })));
+  // (the potions by their stacks as the memory has them, each with its contents: by their totals they would be none)
+  const chests = new Map<string, { name: string; count: number; potion?: string }[]>();
+  for (const [key, contents] of Object.entries(world.chestItems ?? {})) {
+    const potions = (world.chestStacks?.[key] ?? []).filter(st => st.potion).map(st => ({ name: st.name, count: st.count, potion: st.potion }));
+    const named = new Set(potions.map(st => st.name));
+    chests.set(key, [...Object.entries(contents).filter(([n]) => !named.has(n)).map(([n, c]) => ({ name: n, count: c })), ...potions]);
+  }
+  let openChest = '';
   const pocket = () => { for (let i = 0; i < 36; i++) if (!inv.some(x => x.slot === i)) return i; return -1; };
   const give = (n: string, c: number) => {
     if (stackSize(n) === 1) { for (let i = 0; i < c; i++) inv.push({ slot: pocket(), name: n, count: 1 }); return; }
@@ -218,12 +235,20 @@ export function game(world: WorldMemory, opts: {
     id: m.id, name: m.name, category: 'monster', position: { ...m.position }, distance: Math.hypot(m.position.x - state.pos.x, m.position.y - state.pos.y, m.position.z - state.pos.z),
     height: 1.95, health: 16, baby: !!m.baby, aggressive: !!m.aggressive,
     ...(m.mainhand ? { mainhand: m.mainhand } : {}), ...(m.offhand ? { offhand: m.offhand } : {}), ...(m.name === 'piglin' ? { admiring: /gold/.test(m.offhand ?? '') } : {}),
-    ...(m.foreign ? { foreign: true } : {}), ...(m.buildDistance !== undefined ? { buildDistance: m.buildDistance } : {})
+    ...(m.foreign ? { foreign: true } : {}), ...(m.buildDistance !== undefined ? { buildDistance: m.buildDistance } : {}),
+    ...(m.motion ? { motion: { ...m.motion } } : {})
   });
   const seenDrop = (d: Drop) => ({
     id: d.id, name: 'item', category: 'misc', position: { ...d.position }, distance: Math.hypot(d.position.x - state.pos.x, d.position.y - state.pos.y, d.position.z - state.pos.z),
     height: 0.25, item: d.item, count: d.count
   });
+  /** A chest's contents as chest.open answers: its totals, and a stack a slot (the potions with their contents). */
+  const reply = (key: string) => {
+    const stacks = (chests.get(key) ?? []).filter(x => x.count > 0).map((x, slot) => ({ slot, name: x.name, count: x.count, ...(x.potion ? { potion: x.potion } : {}) }));
+    const items: Record<string, number> = {};
+    for (const st of stacks) items[st.name] = (items[st.name] ?? 0) + st.count;
+    return { items, stacks, free: 54 - stacks.length, slots: 54 };
+  };
   const holds = (key: string) => `It holds: ${(chests.get(key) ?? []).map(s => `${s.name} x${s.count}`).join(', ') || 'nothing'}; 30/54 slots free.`;
   const feet = () => ({ x: Math.floor(state.pos.x), y: Math.floor(state.pos.y), z: Math.floor(state.pos.z) });
   const eye = () => ({ x: state.pos.x, y: state.pos.y + 1.62, z: state.pos.z });
@@ -264,19 +289,45 @@ export function game(world: WorldMemory, opts: {
   const ctx = {
     s: lookAt(inv, 1000, { now: opts.now ?? T0 }), world, signal: new AbortController().signal, gain: () => undefined,
     progress: (x: string) => { said.push(x); },
-    status: async () => ({ inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: state.health, food: 20, timeOfDay: 1000 }),
+    status: async () => {
+      const biome = state.dim === NETHER ? opts.biome?.(feet()) : undefined;
+      const effects = state.fire > 0 ? { effects: [{ name: 'fire_resistance', amplifier: 0, seconds: state.fire }] } : {};
+      return { inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: state.health, food: 20, timeOfDay: 1000, ...(biome ? { biome } : {}), ...effects };
+    },
     call: async (m: string, p: Record<string, unknown> = {}) => {
       const at = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
       if (m === 'inventory') return { items: inv.map(i => ({ ...i })), held: { name: state.held, count: 1 } };
-      if (m === 'item.select') { state.held = String(p.name); return {}; }
+      if (m === 'item.select') { state.held = String(p.name); state.heldSlot = p.slot === undefined ? -1 : Number(p.slot); return {}; }
+      // a potion of fire resistance drunk (the one selected by its slot, else the first): its effect, 3:00 or 8:00
+      if (m === 'use') {
+        const potion = inv.find(i => i.slot === state.heldSlot && i.name === state.held) ?? inv.find(i => i.slot < 36 && i.name === state.held);
+        if (!potion || potion.name !== 'potion' || opts.drinkFails) return { finished: false };
+        potion.count -= 1;
+        if (potion.count <= 0) inv.splice(inv.indexOf(potion), 1);
+        if (/(^|_)fire_resistance$/.test(potion.potion ?? '')) state.fire = /^long_/.test(potion.potion ?? '') ? 480 : 180;
+        did.push(`drink potion of ${potion.potion}`);
+        return { finished: true, food: 20, foodBefore: 20, health: state.health, healthBefore: state.health };
+      }
       // a look into a home chest (chests.ts peekChest): what it really holds, a stack a slot
       if (m === 'chest.open') {
         const key = k(at);
+        openChest = key;
         did.push(`look in ${key}`);
-        const stacks = (chests.get(key) ?? []).filter(x => x.count > 0).map((x, slot) => ({ slot, name: x.name, count: x.count }));
-        const items: Record<string, number> = {};
-        for (const st of stacks) items[st.name] = (items[st.name] ?? 0) + st.count;
-        return { items, stacks, free: 54 - stacks.length, slots: 54 };
+        return reply(key);
+      }
+      // a withdraw from the chest open, by its slot (the stack there, or the first of the name when it holds another)
+      if (m === 'chest.withdraw') {
+        const list = (chests.get(openChest) ?? []).filter(x => x.count > 0);
+        const st = list[Number(p.slot)]?.name === p.name ? list[Number(p.slot)] : list.find(x => x.name === p.name);
+        const n = Math.min(Number(p.count ?? st?.count ?? 0), st?.count ?? 0);
+        if (st && n > 0) {
+          st.count -= n;
+          if (st.potion) for (let i = 0; i < n; i++) inv.push({ slot: pocket(), name: st.name, count: 1, potion: st.potion });
+          else give(st.name, n);
+        }
+        did.push(`withdraw ${p.name}${st?.potion ? ` of ${st.potion}` : ''} x${n}`);
+        chests.set(openChest, (chests.get(openChest) ?? []).filter(x => x.count > 0));
+        return { ...reply(openChest), moved: n, from: st ? list.indexOf(st) : -1 };
       }
       if (m === 'container.close') return {};
       if (m === 'world.region') {
@@ -355,11 +406,14 @@ export function game(world: WorldMemory, opts: {
         if (reach(at) > 5) return { dug: false, reason: 'out of reach or out of sight', block: b };
         set(state.dim, at, 'air', `dug from ${fmt(feet())}`);
         did.push(`dig ${name(b)} ${fmt(at)}`);
-        // a quartz ore's quartz: down through the open cells under it to the first floor, in the middle of its column
-        if (name(b) === 'nether_quartz_ore' && state.dim === NETHER && (opts.quartz ?? 2) > 0) {
+        if (state.dim === NETHER) dugWith.push(`${name(b)} ${k(at)} with ${state.held}`);
+        // a quartz ore's quartz, an ancient debris itself: down through the open cells under it to the first floor, in
+        // the middle of its column
+        const drop = name(b) === 'nether_quartz_ore' ? { item: 'quartz', count: opts.quartz ?? 2 } : name(b) === 'ancient_debris' ? { item: 'ancient_debris', count: 1 } : undefined;
+        if (drop && state.dim === NETHER && drop.count > 0) {
           let y = at.y;
           while (y > 1 && !solid(get(state.dim, { x: at.x, y: y - 1, z: at.z }))) y--;
-          drops.push({ id: nextId++, item: 'quartz', count: opts.quartz ?? 2, position: { x: at.x + 0.5, y, z: at.z + 0.5 } });
+          drops.push({ id: nextId++, item: drop.item, count: drop.count, position: { x: at.x + 0.5, y, z: at.z + 0.5 } });
         }
         return { dug: true, block: b };
       }
@@ -414,5 +468,5 @@ export function game(world: WorldMemory, opts: {
       return { ok: false, text: `unexpected ${tool}` };
     }
   } as unknown as GoalContext;
-  return { ctx, did, said, changed, walks, lit, own, state, get, inv, mobs, drops };
+  return { ctx, did, said, changed, walks, lit, own, state, get, inv, mobs, drops, dugWith, chests };
 }

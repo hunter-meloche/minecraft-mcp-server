@@ -236,12 +236,13 @@ export async function lookRun(ctx: GoalContext, budgetMs: number, now: () => num
 
   // ---- back through its own portal: out by the home portal, still linked
   const b = await enter(ctx, nearest(arrived));
-  if (!b.ok || b.dimension !== OVERWORLD) return { gain: 1, text: `${looked}; back through its own portal: ${b.ok ? `came out in ${b.dimension ?? 'the same place'}` : b.reason ?? 'no answer'}` };
+  // (the look done: its work, whatever the way back; P3b's ramp counts only trips that did theirs)
+  if (!b.ok || b.dimension !== OVERWORLD) return { gain: 1, text: `${looked}; back through its own portal: ${b.ok ? `came out in ${b.dimension ?? 'the same place'}` : b.reason ?? 'no answer'}`, worked: true };
   const out = b.portal ?? b.block ?? b.position ?? ctx.s.position;
   if (portalCells(homeShape).some(c => Math.hypot(c.x - out.x, c.y - out.y, c.z - out.z) <= LINK_RANGE)) {
-    return { gain: 1, text: `${looked}; back at overworld ${fmt(out)}`, cameBack: true };
+    return { gain: 1, text: `${looked}; back at overworld ${fmt(out)}`, cameBack: true, worked: true };
   }
   netherOf(world).linked = false;
   holdSetup(ctx, now(), `nether: not linked: came out at overworld ${fmt(out)}`, `its own portal at nether ${fmt(own)} led back to overworld ${fmt(out)}, not home`);
-  return { gain: 1, text: `${looked}; its own portal led back to overworld ${fmt(out)}: not linked; setup held a day`, cameBack: true };
+  return { gain: 1, text: `${looked}; its own portal led back to overworld ${fmt(out)}: not linked; setup held a day`, cameBack: true, worked: true };
 }
