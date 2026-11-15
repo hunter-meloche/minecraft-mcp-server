@@ -3,7 +3,7 @@ import type { WorldMemory } from './memory.js';
 import { DEEP_TRIP, MINE_FROM_BUILDS, MINE_FROM_YARD, MINE_ROOM, deepTripKit, deepTripReady, pickMineStart, tripBudgetMs, type TripCheck } from './mine.js';
 // (pockets.ts and chores.ts reach this file through community.ts: their exports are used inside functions only)
 import { TRIP_STASH_RANGE, inYardOrNear, makeRoom, noRoom, room } from './pockets.js';
-import { readyFoodPoints } from './food.js';
+import { readyFoodPoints, topUpForTrip } from './food.js';
 import { tier } from './kit.js';
 import { chestTotals, freeChestTotals } from './chests.js';
 import { ownItems } from './community.js';
@@ -288,6 +288,9 @@ export async function oreTrip(ctx: GoalContext, opts: {
       : "every side of the yard has someone else's build by it: no deep trip from here");
   }
   (ctx.world.zones ??= {}).mine = [start];
+  // fed for more than one round at the ore: the food goal calls a trip home under its target (food.ts TRIP_FOOD)
+  const fed = await topUpForTrip(ctx);
+  if (fed) ctx.progress(`food for the trip: ${fed}`);
   ctx.progress(`out to the mine at (${start.x}, ${start.z})`);
   // out of the yard by the gate on the way (the east one, to the live start), not over the fence: yardgates.ts
   await leaveYard(ctx, start);

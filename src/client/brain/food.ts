@@ -87,6 +87,24 @@ export const food: Goal = {
   run: ctx => gatherFood(ctx, FOOD_TARGET, true)
 };
 
+/**
+ * What a trip sets out with: the target and the chests' spare. Down the mine the Guardian ate 25 points in 6 minutes
+ * (5 bread), and a deep trip that set out with the 20 the deep kit asks for was called home by the food goal (a
+ * survival goal: it cuts any trip) at 18, five times on 2026-11-15 (14:38Z to 19:17Z, once into the under-yard trap),
+ * each with the walk out and the climb down spent for one round at the ore.
+ */
+export const TRIP_FOOD = FOOD_TARGET + CHEST_SPARE;
+
+/**
+ * Before a trip leaves the yard: ready food from the home chests up to TRIP_FOOD (and their spare beyond it), when
+ * it carries less and the chests are known to hold some. The chests only (a few steps): no farm, hunt or fishing,
+ * the food goal's business when it is really short. Says what it took, or nothing (none taken, or no need).
+ */
+export async function topUpForTrip(ctx: GoalContext): Promise<string | undefined> {
+  if (!ctx.s.home || readyFoodPoints(ctx.s.counts) >= TRIP_FOOD || storedFood(ctx.world) <= 0) return undefined;
+  return gatherFood(ctx, TRIP_FOOD, true, true).catch(() => undefined);
+}
+
 /** Ready food kept at home, carried and in the chests together (food points). */
 export const LARDER = 60;
 const storedFood = (world: WorldMemory) => readyFoodPoints(new Map(Object.entries(chestTotals(world))));
@@ -132,7 +150,7 @@ export const larder: Goal = {
  * Get ready food up to `target` points carried: from the home chests (unless `useChests` is off: the larder adds to
  * the stock rather than moving it about), baked, cooked, farmed, fished, hunted.
  */
-export async function gatherFood(ctx: GoalContext, target: number, useChests: boolean): Promise<string> {
+export async function gatherFood(ctx: GoalContext, target: number, useChests: boolean, chestsOnly = false): Promise<string> {
   const did: string[] = [];
   const say = (t: string) => { did.push(t); ctx.progress(t); };
   const { landmarks } = ctx.world;
@@ -173,6 +191,11 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
       if (r.ok) say('took wheat');
       await refresh();
     }
+  }
+
+  if (chestsOnly) {
+    if (!did.length) throw new Error(`no ready food taken from the chests (carrying ${readyFoodPoints(have)} points)`);
+    return `${did.join('; ')}; now carrying ${readyFoodPoints(have)} food points`;
   }
 
   // 2. bread from wheat

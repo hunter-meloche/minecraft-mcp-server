@@ -377,6 +377,41 @@ test.serial('oreTrip comes up early hurt or with no ready food left, and never d
   t.is(near.world.zones?.mine, undefined);
 });
 
+test.serial('oreTrip sets out fed for more than a round: under TRIP_FOOD it takes ready food from the home chests first', async (t) => {
+  setMineLookMs(0);
+  // live on 2026-11-15 (14:38Z to 19:17Z): deep trips set out with the deep kit's 20 points, the Guardian ate 5 bread
+  // in 6 minutes down there, and the food goal (survival: it cuts any trip) called the trip home at 18, five times
+  const stocked = (): WorldMemory => ({ ...home(), chestItems: { '1,64,1': { bread: 60 } } });
+  const fake = (m: ReturnType<typeof mineBot>) => {
+    const call = m.ctx.call;
+    const act = m.ctx.act;
+    (m.ctx as { call: GoalContext['call'] }).call = (async (method: string, a?: unknown) =>
+      (method === 'chest.open' ? { items: { bread: 60 - m.bag.count('bread') + 4 } } : call(method, a as never))) as GoalContext['call'];
+    (m.ctx as { act: GoalContext['act'] }).act = (async (tool: string, a: { item?: string; count?: number } = {}) => {
+      if (tool !== 'take-from-chest') return act(tool, a as never);
+      m.asked.push(`take ${a.count} ${a.item}`);
+      m.bag.put(a.item!, a.count!);
+      return { ok: true, text: 'ok' };
+    }) as GoalContext['act'];
+  };
+  // 4 bread carried (20 points): 8 more, to the trip's 40 and the chests' spare of 20 beyond it, then down
+  const m = mineBot(KIT, [{ add: { raw_iron: 20 } }], { world: stocked() });
+  fake(m);
+  t.deepEqual(await oreTrip(m.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => m.clock.now }), { gain: 20, text: '+20 raw_iron' });
+  t.deepEqual(m.asked, ['take 8 bread', 'iron_ore to 20 in 180s']);
+  t.is(m.bag.count('bread'), 12);
+  // fed enough already (8 bread, 40 points): straight down
+  const fed = mineBot(KIT.map(i => (i.name === 'bread' ? { ...i, count: 8 } : i)), [{ add: { raw_iron: 20 } }], { world: stocked() });
+  fake(fed);
+  await oreTrip(fed.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => fed.clock.now });
+  t.deepEqual(fed.asked, ['iron_ore to 20 in 180s']);
+  // no food in the chests: no walk to them, and the trip goes as it is (the food goal's farm and hunt are not its)
+  const bare = mineBot(KIT, [{ add: { raw_iron: 20 } }]);
+  fake(bare);
+  await oreTrip(bare.ctx, { wants: [IRON], budgetMs: 7 * MIN, now: () => bare.clock.now });
+  t.deepEqual(bare.asked, ['iron_ore to 20 in 180s']);
+});
+
 test.serial('oreTrip with no pickaxe left, or a round the mine tool cannot do, comes up and marks no vein dry', async (t) => {
   setMineLookMs(0);
   // the pickaxe wears out in the first round: the trip comes up with what it has, and gold is not marked dry for it
