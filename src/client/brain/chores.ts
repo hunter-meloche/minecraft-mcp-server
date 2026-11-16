@@ -1394,11 +1394,34 @@ async function cropsOn(ctx: GoalContext, cells: Pos[]): Promise<string[] | undef
  * has more or less farmland since, or nothing grows on it (a round sows it). A look only.
  */
 export function larderFull(s: Snapshot, world: WorldMemory): string | null {
+  // the cows' wheat is a use for the harvest, or for the seeds a round sows (penWheat)
+  if (penWheat(s, world).short && (cropsWheat(world) || penWheat(s, world).seeds > 0)) return null;
   const seen = world.farmCrops;
   if (!seen || !Array.isArray(seen.crops) || !seen.crops.length || seen.cells !== world.landmarks.farmland.length) return null;
   const yields = seen.crops.map(c => CROP_YIELD[c]);
   if (yields.some(y => !y)) return null;
   return atCaps(s, world, [...new Set(yields.flat())]);
+}
+
+/**
+ * The wheat kept for the cow pen's breeding: the pens round feeds 2 a pair and takes 16 out at a time. The farm baked
+ * every bit of its wheat into bread (558 bread stored, under its cap of 640), the plot drifted to carrots and potatoes
+ * (Baritone replants with whatever seed it carries, and the stash puts the wheat seeds away), and with those over their
+ * caps the round waited: from Nov 15 the pen never bred again, "cow: need 2 wheat to breed (have 0)", 178 rounds.
+ */
+export const PEN_WHEAT = 16;
+
+/** The plot grew wheat when a round last looked at it. */
+const cropsWheat = (world: WorldMemory) => !!world.farmCrops?.crops?.includes('wheat');
+
+/**
+ * The cow pen is short of wheat (one for cows, and less than PEN_WHEAT stored and carried), and the wheat seeds there
+ * are to sow (stored and carried). A look only.
+ */
+export function penWheat(s: Snapshot, world: WorldMemory): { short: boolean; seeds: number } {
+  const stored = chestTotals(world);
+  const n = (name: string) => (stored[name] ?? 0) + (s.counts.get(name) ?? 0);
+  return { short: !!world.zones?.['pen:cow']?.length && n('wheat') < PEN_WHEAT, seeds: n('wheat_seeds') };
 }
 
 /**
@@ -1470,15 +1493,28 @@ export const farm: Goal = {
   },
   run: async ctx => {
     done(ctx.world, 'farm', ctx.s.now);
+    // the cows short of wheat: wheat seeds in the pockets, so the bare farmland is sown with wheat (the farm tool's
+    // replant tries the wheat seeds first); with none carried, it sowed the carrots it had just dug up
+    const pen = penWheat(ctx.s, ctx.world);
+    let sow = '';
+    if (pen.short && (ctx.s.counts.get('wheat_seeds') ?? 0) < 8 && pen.seeds > 0) {
+      const got = await takeFromChests(ctx, 'wheat_seeds', 32);
+      if (got) sow = `; took ${got} wheat_seeds to sow for the cows`;
+    }
     const r = await farmAll(ctx);
     const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
     const wheat = inv.items.filter(i => i.name === 'wheat').reduce((a, i) => a + i.count, 0);
+    // what the pen is short of stays wheat: into the chests with the stash, for the pens round
+    const kept = pen.short ? Math.min(wheat, PEN_WHEAT - (chestTotals(ctx.world).wheat ?? 0)) : 0;
+    const bake = Math.floor((wheat - Math.max(0, kept)) / 3);
     let baked = '';
     // not into bread the chests hold enough of: that would go to the dump, the wheat itself to the chests
-    if (wheat >= 3 && !atCaps(ctx.s, ctx.world, ['bread'])) {
-      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(wheat / 3) });
-      if (b.ok) baked = `; baked ${Math.floor(wheat / 3)} bread`;
+    if (bake >= 1 && !atCaps(ctx.s, ctx.world, ['bread'])) {
+      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: bake });
+      if (b.ok) baked = `; baked ${bake} bread`;
     }
+    if (kept > 0) baked += `; kept ${kept} wheat for the cows`;
+    baked = sow + baked;
     if (!r.ok) throw new Error(r.text);
     return `${r.text.slice(0, 120)}${baked}`;
   }

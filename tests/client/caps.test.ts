@@ -300,6 +300,53 @@ test('the farm round looks at what it replanted, and bakes no bread the chests h
   t.is(odd.w.farmCrops, undefined, 'a reply of the wrong size says nothing');
 });
 
+// ---- the cows' wheat ----
+
+/** the home on Nov 16: the plot grown over to carrots and potatoes, all wheat baked, 34 wheat seeds stored, a cow pen */
+const LIVE = { carrot: 3480, potato: 320, bread: 558, wheat_seeds: 34 };
+const PEN = { 'pen:cow': [{ x: 10, y: 63, z: 10, width: 7, length: 7 }] };
+const penFarm = (stored: Record<string, number>, over: Partial<WorldMemory> = {}) =>
+  farmWorld(stored, { farmCrops: { crops: ['carrots', 'potatoes'], cells: FARMLAND.length, at: NOW - 60 * MIN }, zones: PEN, ...over });
+
+test('the farm round does not wait on a full larder while the cow pen has no wheat to breed with: it sows wheat seeds and keeps the wheat', async (t) => {
+  const s = snap(kit());
+  // live: "cow: need 2 wheat to breed (have 0)" for a day, and the round held by "the larder is full (carrot 3480/640, potato 320/320)"
+  t.is(larderFull(s, penFarm(LIVE)), null);
+  t.is(farm.wants(s, penFarm(LIVE)), 'daily round: the farm');
+  // no cow pen, the wheat the pen keeps in stock, or nothing to sow it from: it waits as before
+  t.is(larderFull(s, penFarm(LIVE, { zones: {} })), 'carrot 3480/640, potato 320/320');
+  t.is(larderFull(s, penFarm({ ...LIVE, wheat: 16 })), 'carrot 3480/640, potato 320/320');
+  t.is(larderFull(s, penFarm({ ...LIVE, wheat_seeds: 0 })), 'carrot 3480/640, potato 320/320');
+  // wheat on the plot already: no seeds needed, the harvest is the use
+  const grows = { farmCrops: { crops: ['carrots', 'wheat'], cells: FARMLAND.length, at: NOW } };
+  t.is(larderFull(s, penFarm({ ...LIVE, wheat_seeds: 0 }, grows)), null);
+
+  // the run: the wheat seeds out of the chest first, and the wheat it brings in stays wheat up to the pen's 16
+  const run = (carried: number) => {
+    const w = penFarm(LIVE);
+    const acts: string[] = [];
+    const ctx = {
+      s: snap(kit()), world: w, signal: new AbortController().signal,
+      act: async (tool: string, a: Record<string, unknown>) => {
+        acts.push(tool === 'craft-item' ? `craft ${String(a.amount)}` : tool === 'take-from-chest' ? `take ${String(a.item)} ${String(a.count)}` : tool);
+        if (tool === 'take-from-chest') return { ok: true, text: 'Took 32 wheat_seeds from the chest at (1, 64, 0). It holds: wheat_seeds x2.' };
+        return { ok: true, text: tool === 'farm' ? `Farmed for 9s: wheat x${carried}.` : 'ok' };
+      },
+      call: (async (method: string) => method === 'world.region' ? { blocks: ['carrots[age=0]', 'air', 'wheat[age=0]'] }
+        : { items: [{ slot: 3, name: 'wheat', count: carried }, { slot: 4, name: 'wheat_seeds', count: 32 }] }) as GoalContext['call'],
+      status: async () => ({ inWorld: true, username: 'b', screen: null }),
+      progress: () => undefined, gain: () => undefined
+    } as GoalContext;
+    return { w, acts, ctx };
+  };
+  const few = run(7);
+  t.is(await farm.run(few.ctx), 'Farmed for 9s: wheat x7.; took 32 wheat_seeds to sow for the cows; kept 7 wheat for the cows');
+  t.deepEqual(few.acts, ['take wheat_seeds 32', 'move-to-position', 'farm'], 'no bread baked from the pen\'s wheat');
+  const many = run(25);
+  t.is(await farm.run(many.ctx), 'Farmed for 9s: wheat x25.; took 32 wheat_seeds to sow for the cows; baked 3 bread; kept 16 wheat for the cows');
+  t.deepEqual(many.acts, ['take wheat_seeds 32', 'move-to-position', 'farm', 'craft 3']);
+});
+
 // ---- the cane round's ----
 
 test('the cane round waits while the chests hold the cane\'s cap, unless a bill is short of cane', (t) => {
