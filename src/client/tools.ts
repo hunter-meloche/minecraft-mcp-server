@@ -1822,11 +1822,12 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     'Harvest ripe crops around the bot (wheat, carrots, potatoes, beetroot, sweet berry bushes, melons, pumpkins, cocoa, nether wart) without destroying the plants, and replant with seeds from the inventory. Runs until nothing is left to do or the time limit. Reports what was gathered.',
     {
       range: z.coerce.number().int().min(4).max(128).optional().describe('How far around the bot to farm (default: 32)'),
-      timeoutMs: z.number().int().min(5000).optional().describe('Stop after this long (default: 120000)')
+      timeoutMs: z.number().int().min(5000).optional().describe('Stop after this long (default: 120000)'),
+      seed: z.string().optional().describe("Replant with this seed first, e.g. 'wheat_seeds' (default: the first seed in the hotbar)")
     },
-    async ({ range = 32, timeoutMs = 120_000 }: { range?: number; timeoutMs?: number }) => {
+    async ({ range = 32, timeoutMs = 120_000, seed }: { range?: number; timeoutMs?: number; seed?: string }) => {
       const before = (await inventoryCounts()).counts;
-      const r = await call<ProcessResult & { gained: Record<string, number> }>('farm', { range, timeoutMs }, timeoutMs + 15_000);
+      const r = await call<ProcessResult & { gained: Record<string, number> }>('farm', { range, timeoutMs, ...(seed ? { seed } : {}) }, timeoutMs + 15_000);
       // harvested items take a moment to fly to the bot: counted right away, a harvest read "nothing ripe"
       await new Promise(res => setTimeout(res, FARM_SETTLE_MS));
       // Baritone harvested but left the farmland bare ("Farm failed"): plant what seeds there are on empty farmland

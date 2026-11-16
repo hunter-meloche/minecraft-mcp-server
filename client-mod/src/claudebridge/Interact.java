@@ -168,6 +168,29 @@ public final class Interact {
         return sel >= 1 && sel <= 7 ? sel : 7;
     }
 
+    /** What Baritone's farm replants farmland with (its FARMLAND_PLANTABLE). */
+    static final java.util.Set<String> PLANTABLE = java.util.Set.of("wheat_seeds", "carrot", "potato", "beetroot_seeds", "melon_seeds", "pumpkin_seeds");
+
+    /**
+     * Make `seed` the first plantable in the hotbar, so Baritone's farm replants with it: it takes the first hotbar slot
+     * (0-8) holding any seed. The carrots the bot eats sat in slot 3 and the wheat seeds in 6, so with wheat seeds
+     * carried for the cow pen every harvested cell went back to carrots (Nov 16). Swaps it into that first plantable's
+     * slot (or a free one when the hotbar holds none); nothing when it is first already or not carried.
+     */
+    static void seedFirst(String seed) {
+        LocalPlayer p = player();
+        Inventory inv = p.getInventory();
+        String q = seed.replace("minecraft:", "");
+        int first = -1, at = -1;
+        for (int k = 0; k < 9 && first < 0; k++) if (!inv.getItem(k).isEmpty() && PLANTABLE.contains(nameOf(inv.getItem(k)))) first = k;
+        if (first >= 0 && q.equals(nameOf(inv.getItem(first)))) return;
+        for (int k = 0; k < 36 && at < 0; k++) if (q.equals(nameOf(inv.getItem(k)))) at = k;
+        if (at < 0) return;
+        int to = first >= 0 ? first : freeHotbarSlot(inv);
+        if (p.containerMenu != p.inventoryMenu) p.closeContainer();
+        click(p.inventoryMenu, inventoryMenuSlot(at), to, ContainerInput.SWAP);
+    }
+
     public static int select(String name) {
         return select(name, -1);
     }

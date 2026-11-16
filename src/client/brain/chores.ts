@@ -1426,10 +1426,10 @@ export function penWheat(s: Snapshot, world: WorldMemory): { short: boolean; see
 
 /**
  * Harvest and replant every plot (the farm tool works around where the bot stands): each crop plot from its middle,
- * and the farmland outside the plots from its own middle. Then a look at what stands on the farmland (the crops
+ * and the farmland outside the plots from its own middle; replanted with `seed` first when one is given. Then a look at what stands on the farmland (the crops
  * replanted), for the farm round's gate: with every one of them stored over its cap, the round waits.
  */
-export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: string }> {
+export async function farmAll(ctx: GoalContext, seed?: string): Promise<{ ok: boolean; text: string }> {
   const plots = ctx.world.zones?.plot ?? [];
   const inPlot = (f: Pos) => plots.some(p => f.x >= p.x && f.x < p.x + (p.width ?? 9) && f.z >= p.z && f.z < p.z + (p.length ?? 9));
   const loose = ctx.world.landmarks.farmland.filter(f => !inPlot(f));
@@ -1442,7 +1442,7 @@ export async function farmAll(ctx: GoalContext): Promise<{ ok: boolean; text: st
     if (ctx.signal.aborted) break;
     // short of the spot but near it will do: the farm works around wherever the bot ends up
     await ctx.act('move-to-position', { ...sp.at, range: 3, timeoutMs: 90_000 }).catch(() => undefined);
-    const r = await ctx.act('farm', { range: sp.range, timeoutMs: 180_000 });
+    const r = await ctx.act('farm', { range: sp.range, timeoutMs: 180_000, ...(seed ? { seed } : {}) });
     ctx.progress(r.text.slice(0, 160));
     out.push(r.text.slice(0, 100));
     ok &&= r.ok;
@@ -1493,15 +1493,17 @@ export const farm: Goal = {
   },
   run: async ctx => {
     done(ctx.world, 'farm', ctx.s.now);
-    // the cows short of wheat: wheat seeds in the pockets, so the bare farmland is sown with wheat (the farm tool's
-    // replant tries the wheat seeds first); with none carried, it sowed the carrots it had just dug up
+    // the cows short of wheat: wheat seeds in the pockets, so the bare farmland is sown with wheat; with none carried,
+    // it sowed the carrots it had just dug up. And the farm told to replant with them first: Baritone replants with the
+    // first seed in the hotbar, and the carrots the bot eats sat ahead of the wheat seeds (slot 3, the seeds 6), so on
+    // Nov 16 every round after 9b52f00 dug up 80-119 carrots, sowed carrots again, and the pen stayed "have 0"
     const pen = penWheat(ctx.s, ctx.world);
     let sow = '';
     if (pen.short && (ctx.s.counts.get('wheat_seeds') ?? 0) < 8 && pen.seeds > 0) {
       const got = await takeFromChests(ctx, 'wheat_seeds', 32);
       if (got) sow = `; took ${got} wheat_seeds to sow for the cows`;
     }
-    const r = await farmAll(ctx);
+    const r = await farmAll(ctx, pen.short ? 'wheat_seeds' : undefined);
     const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
     const wheat = inv.items.filter(i => i.name === 'wheat').reduce((a, i) => a + i.count, 0);
     // what the pen is short of stays wheat: into the chests with the stash, for the pens round

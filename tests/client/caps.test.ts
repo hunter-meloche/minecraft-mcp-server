@@ -328,7 +328,8 @@ test('the farm round does not wait on a full larder while the cow pen has no whe
     const ctx = {
       s: snap(kit()), world: w, signal: new AbortController().signal,
       act: async (tool: string, a: Record<string, unknown>) => {
-        acts.push(tool === 'craft-item' ? `craft ${String(a.amount)}` : tool === 'take-from-chest' ? `take ${String(a.item)} ${String(a.count)}` : tool);
+        acts.push(tool === 'craft-item' ? `craft ${String(a.amount)}` : tool === 'take-from-chest' ? `take ${String(a.item)} ${String(a.count)}`
+          : tool === 'farm' ? `farm ${String(a.seed)}` : tool);
         if (tool === 'take-from-chest') return { ok: true, text: 'Took 32 wheat_seeds from the chest at (1, 64, 0). It holds: wheat_seeds x2.' };
         return { ok: true, text: tool === 'farm' ? `Farmed for 9s: wheat x${carried}.` : 'ok' };
       },
@@ -341,10 +342,11 @@ test('the farm round does not wait on a full larder while the cow pen has no whe
   };
   const few = run(7);
   t.is(await farm.run(few.ctx), 'Farmed for 9s: wheat x7.; took 32 wheat_seeds to sow for the cows; kept 7 wheat for the cows');
-  t.deepEqual(few.acts, ['take wheat_seeds 32', 'move-to-position', 'farm'], 'no bread baked from the pen\'s wheat');
+  // replanted with the wheat seeds first: Baritone took the carrots ahead of them in the hotbar, and sowed carrots (Nov 16)
+  t.deepEqual(few.acts, ['take wheat_seeds 32', 'move-to-position', 'farm wheat_seeds'], 'no bread baked from the pen\'s wheat');
   const many = run(25);
   t.is(await farm.run(many.ctx), 'Farmed for 9s: wheat x25.; took 32 wheat_seeds to sow for the cows; baked 3 bread; kept 16 wheat for the cows');
-  t.deepEqual(many.acts, ['take wheat_seeds 32', 'move-to-position', 'farm', 'craft 3']);
+  t.deepEqual(many.acts, ['take wheat_seeds 32', 'move-to-position', 'farm wheat_seeds', 'craft 3']);
 });
 
 // ---- the cane round's ----

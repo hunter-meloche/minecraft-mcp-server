@@ -391,6 +391,8 @@ public final class Handlers {
             List<net.minecraft.world.level.block.Block> avoidBefore = new java.util.ArrayList<>(avoid.value);
             avoid.value = new java.util.ArrayList<>(avoidBefore);
             avoid.value.remove(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH); // farming walks up to them
+            String seed = strParam(p, "seed", null);
+            if (seed != null) Interact.seedFirst(seed);
             Processes.baritone().getFarmProcess().farm(range, player().blockPosition());
             Processes.watch(c, seq, timeoutTicks, reason -> {
                 avoid.value = avoidBefore;
