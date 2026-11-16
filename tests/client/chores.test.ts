@@ -337,6 +337,56 @@ test('lights: torches checked against the real light; one that lit nothing comes
   t.deepEqual(acts, []);
 });
 
+test('lights: the band outside the fence leaves out the dark spots a torch it took back had in reach, and is not walked out to again for them', async (t) => {
+  // live Nov 13-15: a torch by the west gate at (-567, 63, 2167) lit nothing and came back up 19 rounds running, the
+  // same 10 dark spots left each time. Here: a 9 x 9 yard, everything lit but two flowers walled off from all light
+  // 6 and 7 west of the fence (a flower takes no torch: the plan puts it on the dirt beside them)
+  const yard = { x1: -4, z1: -4, x2: 4, z2: 4, y: 60 };
+  const W = 35, H = 13, L = 35, ox = -17, oy = 57, oz = -17;
+  const blocks = new Array(W * H * L).fill('air');
+  const at = (x: number, y: number, z: number) => (x - ox) + (z - oz) * W + (y - oy) * W * L;
+  for (let z = oz; z < oz + L; z++) for (let x = ox; x < ox + W; x++) for (let y = oy; y <= 60; y++) blocks[at(x, y, z)] = 'dirt';
+  const walled = [{ x: -10, y: 61, z: 0 }, { x: -11, y: 61, z: 0 }];
+  for (const p of walled) blocks[at(p.x, p.y, p.z)] = 'poppy';
+  const light = () => blocks.map((_, i) => {
+    const x = ox + i % W, y = oy + Math.floor(i / (W * L)), z = oz + Math.floor(i / W) % L;
+    return walled.some(p => p.x === x && p.y === y && p.z === z) ? 0 : 15;
+  });
+  const acts: string[] = [];
+  const w = world({ yard });
+  const ctx = {
+    s: snap([{ slot: 0, name: 'torch', count: 40 }]), world: w, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      if (tool === 'place-block' || tool === 'dig-block') {
+        acts.push(`${tool} ${a.x},${a.y},${a.z}`);
+        const i = at(Number(a.x), Number(a.y), Number(a.z));
+        blocks[i] = tool === 'place-block' ? 'torch' : 'air';
+        return { ok: true, text: tool === 'place-block' ? `Placed torch at (${a.x}, ${a.y}, ${a.z})` : 'Dug torch' };
+      }
+      return { ok: true, text: 'ok' };
+    },
+    call: (async (m: string, a: Record<string, unknown> = {}) => {
+      if (m === 'world.region') return { blocks };
+      if (m === 'world.light') return { block: light() };
+      if (m === 'status') return { inWorld: true, position: { x: 0, y: 61, z: 0 } };
+      return a && {};
+    }) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null, position: { x: 0, y: 61, z: 0 } }),
+    progress: () => undefined, gain: () => undefined
+  } as unknown as GoalContext;
+  const r = await lights.run(ctx);
+  t.regex(r, /^the yard is lit; outside the fence: 0 torch\(es\), 2 dark spot\(s\) to go/);
+  t.is(acts.length, 2);
+  t.regex(acts[0], /^place-block /);
+  t.is(acts[1], acts[0].replace('place', 'dig'));
+  t.deepEqual([...(w.darkIgnore ?? [])].sort(), ['-10,61,0', '-11,61,0']);
+  // the next day: no torch for them, no walk out of the gate
+  ctx.s = { ...ctx.s, now: ctx.s.now + 21 * 60_000 };
+  acts.length = 0;
+  t.regex(await lights.run(ctx), /^the yard is lit; outside the fence: 0 torch\(es\), 0 dark spot\(s\) to go/);
+  t.deepEqual(acts, []);
+});
+
 test('farm: a daily round from the middle of the farmland, wheat baked into bread', async (t) => {
   const w = world({ landmarks: { chests: [CHEST], farmland: [{ x: 4, y: 63, z: 4 }, { x: 6, y: 63, z: 4 }], furnace: undefined } });
   const s = snap(gear());

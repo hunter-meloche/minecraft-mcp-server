@@ -13,7 +13,7 @@ import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, stackSize
 import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
 import { DUG, FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, look, makeRoom, noRoom, out as afield, room, stashReach, type RoomKind } from './pockets.js';
-import { planTorches, spawnableCells, yardBox } from './lighting.js';
+import { inTorchReach, planTorches, spawnableCells, yardBox } from './lighting.js';
 import { HeatMap, pathTorchSpots } from './paths.js';
 import { fuelFor } from './project.js';
 import { smeltsPerFuel } from '../../tools/furnace-tools.js';
@@ -1189,7 +1189,11 @@ export const stock: Goal = {
 export const YARD_RADIUS = 16;
 
 type Io = Pick<GoalContext, 'call' | 'act'> & { progress?: (t: string) => void };
-export interface LightReport { box: Box; dark: Pos[]; placed: Pos[]; undone: Pos[]; left: Pos[] }
+/**
+ * `walled`: the dark spots a torch taken back up had in its reach. It lit none of them, so each one is walled off from
+ * where that torch stood, and the plan, whose light goes through walls, would put it there again.
+ */
+export interface LightReport { box: Box; dark: Pos[]; placed: Pos[]; undone: Pos[]; left: Pos[]; walled: Pos[] }
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /**
@@ -1220,7 +1224,7 @@ export async function lightArea(io: Io, centre: Pos, radius: number, opts: { pla
     return { blocks, block, dark: spawnableCells(box, blocks, block, { mask }) };
   };
   let now = await read();
-  const report: LightReport = { box, dark: now.dark, placed: [], undone: [], left: now.dark };
+  const report: LightReport = { box, dark: now.dark, placed: [], undone: [], left: now.dark, walled: [] };
   if (!opts.place || !now.dark.length) return report;
   const plan = planTorches(box, now.blocks, now.block, { prefer: centre, max: opts.max, mask });
   for (const t of plan.torches) {
@@ -1233,6 +1237,7 @@ export async function lightArea(io: Io, centre: Pos, radius: number, opts: { pla
     if (after.dark.length >= now.dark.length) {
       await io.act('dig-block', { ...t, collect: true });
       report.undone.push(t);
+      for (const p of now.dark) if (inTorchReach(t, p) && !report.walled.some(q => key(q) === key(p))) report.walled.push(p);
       io.progress?.(`torch at ${key(t)} lit nothing dark: took it back`);
       now = await read();
     } else {
@@ -1293,6 +1298,7 @@ export const lights: Goal = {
     const ctx: GoalContext = { ...run, s: await toRound(run, NEAR_HOME) };
     done(ctx.world, 'lights', ctx.s.now);
     const ignore = new Set(ctx.world.darkIgnore ?? []);
+    const leaveOut = (ps: Pos[]) => { if (ps.length) ctx.world.darkIgnore = [...new Set([...(ctx.world.darkIgnore ?? []), ...ps.map(key)])].slice(-500); };
     const yard = ctx.world.yard;
     const centre = yard ? { x: Math.round((yard.x1 + yard.x2) / 2), y: yard.y + 1, z: Math.round((yard.z1 + yard.z2) / 2) } : ctx.s.home!;
     const radius = yard ? Math.ceil(Math.max(yard.x2 - yard.x1, yard.z2 - yard.z1) / 2) + 1 : YARD_RADIUS;
@@ -1303,7 +1309,7 @@ export const lights: Goal = {
     torches -= r.placed.length;
     ctx.gain(r.placed.length);
     // what no torch reached is out of reach for this plan (enclosed, or out of the bot's reach): leave it be
-    ctx.world.darkIgnore = [...new Set([...(ctx.world.darkIgnore ?? []), ...r.left.map(key)])].slice(-500);
+    leaveOut(r.left);
     out.push(!r.dark.length ? 'the yard is lit' : `yard: placed ${r.placed.length} torch(es)${r.undone.length ? `, took back ${r.undone.length} that lit nothing` : ''}; ` +
       `${r.left.length} of ${r.dark.length} dark spot(s) left${r.left.length ? ' (left out from now on)' : ''}`);
     if (!yard || ctx.signal.aborted) return out.join('; ');
@@ -1319,6 +1325,10 @@ export const lights: Goal = {
       });
       torches -= b.placed.length;
       ctx.gain(b.placed.length);
+      // but what a torch there lit none of is walled off from it, and is left out from now on: the plan put a torch
+      // at (-567, 63, 2167) by the west gate, lit nothing and took it back, 19 rounds over Nov 13-15 (each one a walk
+      // out of the gate), and another at (-531, 63, 2177) 7 times, the same 10 dark spots left every time
+      leaveOut(b.walled);
       out.push(`outside the fence: ${b.placed.length} torch(es), ${b.left.length} dark spot(s) to go`);
     }
 
@@ -1331,6 +1341,7 @@ export const lights: Goal = {
         tried++;
         const y = Math.floor(ctx.s.position.y);
         const p = await lightArea(ctx, { x: spot.x, y: Math.min(y, yard.y + 1), z: spot.z }, 3, { place: true, max: 1, ignore, before: t => leaveYard(ctx, t) });
+        leaveOut(p.walled);
         if (p.placed.length) { lit++; torches--; ctx.gain(1); ctx.progress(`a torch on the route at (${spot.x}, ${spot.z})`); }
       }
       if (tried) out.push(`routes: ${lit} torch(es) (${tried} of ${spots.length} spot(s) looked at)`);

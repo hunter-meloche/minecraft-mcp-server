@@ -32,6 +32,9 @@ const TORCH = /^(torch|wall_torch|soul_torch|soul_wall_torch)$/;
 /** A torch gives 14 at its cell; with 1 lost per block it lights everything within this taxicab distance. */
 const REACH = 13;
 
+/** Whether a torch at `t` would light `p` in the open (the plan's model: within REACH, taxicab, walls ignored). */
+export const inTorchReach = (t: Pos, p: Pos) => Math.abs(t.x - p.x) + Math.abs(t.y - p.y) + Math.abs(t.z - p.z) <= REACH;
+
 /** The box around home that the yard checks look at. */
 export function yardBox(home: Pos, radius: number, below = 4, above = 8): Box {
   const x = Math.floor(home.x), y = Math.floor(home.y), z = Math.floor(home.z);
