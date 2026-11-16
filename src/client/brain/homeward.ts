@@ -17,7 +17,8 @@ import { inByGate, outOfPen, type WalkContext } from './yardgates.js';
  *   start, within 64 across the ground and with the yard's column not on the straight way there (Baritone's own walk:
  *   out here it may dig);
  * - else straight up, to the block over the ground above it (read with world.region), Baritone free to dig its way up
- *   out here. Not with lava or water over its head (it would run down onto the bot), nor by someone else's build.
+ *   out here. Not with lava or water over its head (it would run down onto the bot), nor by someone else's build:
+ *   then from a spot 12 or 24 aside where neither is over it, away from the yard (climbAside).
  *   By the yard the top of the shaft it came up by is filled after it, as out from under fills its own.
  * Under the yard it walks nowhere: there out from under digs out to the side. Nor does it climb at night, or when
  * the climb would come up after dark (the surface is the mobs' then: the shelter walls in where the bot stands, and
@@ -58,6 +59,14 @@ const TICK_MS = 50;
 const FILL_WITHIN = 8;
 /** The walk home after a climb has at least this long, whatever the climb took of the caller's time. */
 const HOME_MIN_MS = MINUTE;
+/** climbAside: how far aside its spots are, across the ground (the nearer first) */
+const ASIDE = [12, 24];
+/** climbAside: its spots are at least this far off the home zone's column across the ground */
+const ASIDE_OFF = 8;
+/** climbAside: how many spots it looks at, at most */
+const ASIDE_LOOKS = 16;
+/** climbAside: how long the walk to its spot may take (Baritone digs its way there) */
+const ASIDE_WALK_MS = 90_000;
 
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 const floored = (p: Pos): Pos => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
@@ -105,6 +114,29 @@ async function wayBack(ctx: GoalContext, feet: Pos, col: Column, upAt?: Pos): Pr
 const offColumn = (col: Column, p: { x: number; z: number }) => Math.max(col.x1 - p.x, p.x - col.x2, col.z1 - p.z, p.z - col.z2, 0);
 
 /**
+ * Why no climb from `feet` (what is over its head, or someone's build by the way up), or undefined: it may go. `zones`
+ * undefined: no look at anyone's builds was had (no climb then: it might come up under one).
+ */
+function noClimb(feet: Pos, above: Above, zones: Zone[] | undefined): string | undefined {
+  if (above.unseen) return 'could not look over its head';
+  // (open to the sky, deep below home's level: the bottom of a pit, with no ground to climb to)
+  if (above.ground === undefined) return 'nothing over its head to climb through';
+  if (above.lava) return `lava over its head at ${fmt(above.lava)}`;
+  if (above.water) return `water over its head at ${fmt(above.water)}`;
+  if (!zones) return "could not look for anyone's build over it";
+  // the way up and a little round it (Baritone's stair goes a step aside now and then), to the top; the bridge would
+  // not let it break their blocks, and the climb is not made under them in the first place
+  const top = above.ground + 1;
+  const round = (r: number) => ({ x: feet.x - r, y: feet.y, z: feet.z - r, width: 2 * r + 1, height: top + 2 - feet.y, length: 2 * r + 1 });
+  const theirs = zones.find(z => boxMeetsZone(round((z.surface ?? true) ? BUILD_ROOM : CELLAR_ROOM), z));
+  return theirs ? `someone else's build over it${theirs.sample ? ` (${theirs.sample})` : ''}` : undefined;
+}
+
+const lookZones = async (ctx: GoalContext): Promise<Zone[] | undefined> => {
+  try { return (await ctx.call<{ zones?: Zone[] }>('foreign.zones'))?.zones ?? []; } catch { return undefined; }
+};
+
+/**
  * Straight up where it stands, to the block over the ground above it, unless what is over its head says not to, or
  * the climb would come up after dark (`hour`: the time of day as the bot sees it where the climb starts). Says what it
  * did, or why not, as the run's progress: `up`, `not` (the walk home follows either way) or `late` (no walk now).
@@ -113,21 +145,11 @@ const offColumn = (col: Column, p: { x: number; z: number }) => Math.max(col.x1 
 async function climbOut(ctx: GoalContext, feet: Pos, above: Above, home: Pos, col: Column, hour: { timeOfDay: number; thundering: boolean }): Promise<'up' | 'not' | 'late'> {
   const stopped = () => { if (ctx.signal.aborted) throw new Error('aborted'); };
   const no = (why: string) => { ctx.progress(`no climb from ${fmt(feet)}: ${why}; the walk home as it goes`); return 'not' as const; };
-  if (above.unseen) return no('could not look over its head');
-  // (open to the sky, deep below home's level: the bottom of a pit, with no ground to climb to)
-  if (above.ground === undefined) return no('nothing over its head to climb through');
-  if (above.lava) return no(`lava over its head at ${fmt(above.lava)}`);
-  if (above.water) return no(`water over its head at ${fmt(above.water)}`);
-  const top = { x: feet.x, y: above.ground + 1, z: feet.z };
-  let zones: Zone[] | undefined;
-  try { zones = (await ctx.call<{ zones?: Zone[] }>('foreign.zones'))?.zones ?? []; } catch { zones = undefined; }
+  const zones = above.unseen || above.ground === undefined || above.lava || above.water ? [] : await lookZones(ctx);
   stopped();
-  if (!zones) return no("could not look for anyone's build over it");
-  // the way up and a little round it (Baritone's stair goes a step aside now and then), to the top; the bridge would
-  // not let it break their blocks, and the climb is not made under them in the first place
-  const round = (r: number) => ({ x: feet.x - r, y: feet.y, z: feet.z - r, width: 2 * r + 1, height: top.y + 2 - feet.y, length: 2 * r + 1 });
-  const theirs = zones.find(z => boxMeetsZone(round((z.surface ?? true) ? BUILD_ROOM : CELLAR_ROOM), z));
-  if (theirs) return no(`someone else's build over it${theirs.sample ? ` (${theirs.sample})` : ''}`);
+  const why = noClimb(feet, above, zones);
+  if (why || above.ground === undefined) return no(why ?? 'nothing over its head to climb through');
+  const top = { x: feet.x, y: above.ground + 1, z: feet.z };
   // up before dark, or not now: a climb that starts in the evening comes up at night, out where the walk home is
   // over the surface (from 113 under, some 2 minutes)
   const ticks = (top.y - feet.y) * CLIMB_PACE_MS / TICK_MS;
@@ -146,6 +168,62 @@ async function climbOut(ctx: GoalContext, feet: Pos, above: Above, home: Pos, co
     if (filled) ctx.progress(filled);
   }
   return 'up';
+}
+
+/**
+ * No climb where it stands (water or lava over its head, someone's build over it): a climb from a spot a little way
+ * aside, away from the yard, before any walk home under the ground. Live on Nov 15 and 16 the bot came up under its
+ * own yard eight times in two days after `no climb from (...): water over its head` (a river over the iron mine,
+ * south of the yard) or `someone else's build over it` (a mineshaft over the gold mine): go-home's walk from down
+ * there (and the walk toward where the trip went down) went under the ground by the caves and the old escape tunnels
+ * into the yard's column, where out from under had to dig it out again. A river or a mineshaft is narrow: 12 or 24
+ * off in one of the eight ways there is dry rock to climb through. The spots: never in the column or its band
+ * (ASIDE_OFF the column across the ground), the straight way there not across it; the nearer first, and of those the
+ * nearer home. Each is looked at as the climb itself would (noClimb), at most ASIDE_LOOKS of them; the first that
+ * would go is walked to (Baritone, free to dig out here) and climbed from. `undefined`: no spot found or no look at
+ * the builds (the walk home as it goes); else where the bot stood when the walk ended, and the climb's outcome there.
+ */
+async function climbAside(ctx: GoalContext, feet: Pos, home: Pos, col: Column, hour: { timeOfDay: number; thundering: boolean }): Promise<{ at: Pos; climb: 'up' | 'not' | 'late' } | undefined> {
+  const stopped = () => { if (ctx.signal.aborted) throw new Error('aborted'); };
+  const zones = await lookZones(ctx);
+  stopped();
+  if (!zones) return undefined;
+  for (const spot of asideSpots(feet, col, home).slice(0, ASIDE_LOOKS)) {
+    const above = await seeAbove(ctx, spot);
+    stopped();
+    if (noClimb(spot, above, zones)) continue;
+    ctx.progress(`a climb from ${fmt(spot)} instead, ${Math.round(Math.hypot(spot.x - feet.x, spot.z - feet.z))} aside`);
+    const walk = await attempt(() => ctx.call<{ arrived?: boolean }>('goto', { ...spot, range: 2, timeoutMs: ASIDE_WALK_MS }, ASIDE_WALK_MS + 15_000));
+    stopped();
+    const now = (await attempt(() => ctx.status()))?.position;
+    stopped();
+    const at = now ? floored(now) : feet;
+    if (walk?.arrived !== true) {
+      ctx.progress(`did not get to ${fmt(spot)}`);
+      return { at, climb: 'not' };
+    }
+    if (inColumn(col, at)) return { at, climb: 'not' };
+    const there = await seeAbove(ctx, at);
+    stopped();
+    return { at, climb: await climbOut(ctx, at, there, home, col, hour) };
+  }
+  return undefined;
+}
+
+/** The spots for climbAside, in the order they are looked at (see there). */
+export function asideSpots(feet: Pos, col: Column, home: Pos): Pos[] {
+  const spots: Pos[] = [];
+  for (const d of ASIDE) {
+    const tier: Pos[] = [];
+    for (const [dx, dz] of [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]]) {
+      const k = dx && dz ? Math.round(d / Math.SQRT2) : d;
+      const p = { x: feet.x + dx * k, y: feet.y, z: feet.z + dz * k };
+      if (offColumn(col, p) >= ASIDE_OFF && !crosses(col, feet, p)) tier.push(p);
+    }
+    const toHome = (p: Pos) => Math.hypot(p.x - home.x, p.z - home.z);
+    spots.push(...tier.sort((a, b) => toHome(a) - toHome(b)));
+  }
+  return spots;
 }
 
 /**
@@ -224,7 +302,15 @@ export async function walkHome(ctx: GoalContext, opts: { timeoutMs: number; upAt
     stopped();
     if (!deep(feet, above)) return toHome(true);
   }
-  const climb = await climbOut(ctx, feet, above, home, col, hour);
+  let climb = await climbOut(ctx, feet, above, home, col, hour);
+  if (climb === 'not') {
+    const aside = await climbAside(ctx, feet, home, col, hour);
+    if (aside) {
+      feet = aside.at;
+      climb = aside.climb;
+      if (underYard(feet, home, yard)) return under(feet);
+    }
+  }
   if (climb === 'late') return { ok: false, night: true, text: `${depthOf(feet, above, home)}: no climb to the surface this late (it would come up after dark: the walk home climbs out by day)` };
   // no climb made out here, after a trip that went down further off than the way back goes: toward where it went
   // down all the same, a while, as every walk home after a trip did; never across the yard's column
