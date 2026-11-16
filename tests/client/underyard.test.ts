@@ -1293,6 +1293,17 @@ test.serial('no climb where it stands (a river over it, a mineshaft over it): a 
   t.deepEqual(l.said, ['no climb from (-474, 14, 2077): water over its head at (-474, 47, 2077); the walk home as it goes', 'no climb aside either (16 spot(s): 16 water over its head)',
     'back to the mine start (-493, 69, 2183) before the walk home', 'into the yard by its east gate (-533, 63, 2183)']);
   t.deepEqual(underIt(l.stood, world), []);
+  // the live Nov 16 20:56Z one: the climb aside came up at (-372, 32, 2162), the floor of a pit open to the sky, 31
+  // below home's level, and go-home's walk from there ended 54 under the yard. Now: from the pit's floor toward where
+  // the trip went down first (120 off), and home by the east gate from up there
+  const pit = deepAt(far);
+  for (let x = -370; x <= -360; x++) for (let z = 2156; z <= 2164; z++) for (let y = 32; y <= 68; y++) pit.set({ x, y, z }, 'air');
+  const p = walkingHome(pit, {}, world, { zones: [shaft] });
+  t.deepEqual(await walkHome(p.ctx, { timeoutMs: 600_000, upAt }), { ok: true, text: 'Home' });
+  t.deepEqual(p.said.slice(1, 4), ['a climb from (-365, 5, 2160) instead, 12 aside', '26 under the ground at (-365, 5, 2160): up to the surface at (-365, 32, 2160) before the walk home',
+    'climbed to (-365, 32, 2160)']);
+  t.is(p.said[4], 'up where it went down, (-493, 66, 2183), before the walk home');
+  t.deepEqual(underIt(p.stood, world), []);
   // the spots: never in the column or 8 round it, nor across it; the nearer ring first, and in it the nearer home
   const col = homeColumn(HOME, YARD);
   const by = { x: -520, y: -20, z: 2160 };

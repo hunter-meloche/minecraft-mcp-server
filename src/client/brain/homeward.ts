@@ -326,6 +326,16 @@ export async function walkHome(ctx: GoalContext, opts: { timeoutMs: number; upAt
   // trip (idle's, the retreat's walk) toward the mine start however far, the same way: live on Nov 16 a lake under
   // the ground over the east iron mine, wider than any climb aside, sent idle's go-home from (-474, 14, 2077) under
   // the yard, while the trip's walk from the same lake toward where it went down came home by the east gate
+  // A climb that came up still far below home's level came up on the floor of a pit open to the sky (a ravine, a
+  // quarry), no surface to walk home over: the same walk toward where it went down first. Live on Nov 16 (14:43Z and
+  // 20:56Z) climbs came up at (-391, 26, 2170) and (-372, 32, 2162), and go-home's walk from there ended 54 under the yard
+  if (climb === 'up' && !back) {
+    const now = (await look())?.position;
+    if (now && now.y < home.y - BELOW_HOME) {
+      feet = floored(now);
+      climb = 'not';
+    }
+  }
   if (climb === 'not' && !back) {
     const toward = await wayBack(ctx, feet, col, opts.upAt, Infinity);
     stopped();
