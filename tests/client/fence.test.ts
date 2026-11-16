@@ -2,6 +2,8 @@ import test from 'ava';
 import { canPlaceAgainst, isReplaceable } from '../../src/build-protection.js';
 import { FILL_DEPTH, FILL_MAX, YARD_MARGIN, groundUnder, spanOf, standsFor, yardRing, type CellAt, type FenceRing } from '../../src/client/brain/fence.js';
 import { REPAIR_RADIUS, repairGoal } from '../../src/client/brain/repair.js';
+import { bedGoal } from '../../src/client/brain/home.js';
+import { lostBed } from '../../src/client/brain/integrity.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import type { ClientRuntime } from '../../src/client/tools.js';
@@ -327,6 +329,38 @@ test('repair: nothing is done to a whole fence; the round reads it with the rest
   t.is(r, `all ${h.f.record.size} built blocks checked, none missing`);
   t.deepEqual([...new Set(h.f.calls.map(c => c.m))], ['world.region']);
   t.deepEqual([h.f.placed, h.f.walks], [[], []]);
+});
+
+test('repair: the homestead\'s bed gone (live Nov 15, with a door): its two cells go to the bed goal, which puts the chest\'s bed back by day', async (t) => {
+  const h = homestead();
+  const foot = at(-537, 63, 2192), head = at(-537, 63, 2193);
+  // built, then gone: the round sees it missing and leaves the bed itself to the bed goal
+  h.f.record.set(k(foot), 'white_bed[facing=south,occupied=false,part=foot]');
+  h.f.record.set(k(head), 'white_bed[facing=south,occupied=false,part=head]');
+  h.f.record.set(k(at(-540, 63, 2188)), 'oak_door[facing=south,half=lower,hinge=left,open=false,powered=false]');
+  const world = memory();
+  world.chestItems = { '-551,63,2181': { white_bed: 1 } };
+  t.is(bedGoal.wants(snap(), world), null, 'no cells known: nothing for the bed goal before the round');
+  const r = await repairGoal(h.rt).run(ctxFor(h, world));
+  t.regex(r, /white_bed at -537,63,2192 \(doors and beds go back by hand\)/);
+  t.deepEqual([world.zones!['home:bed'], world.zones!['home:bed-foot']], [[head], [foot]]);
+  t.true(h.f.progress.some(x => /the bed at -537,63,2193 is gone/.test(x)));
+  t.regex(bedGoal.wants(snap(), world) ?? '', /no bed: put one in/);
+  t.deepEqual(h.f.placed, [], 'the round itself places no bed');
+
+  // a bed it sleeps in (another one): the cells stay unwritten
+  const slept = memory();
+  slept.landmarks.bed = at(-545, 63, 2190);
+  await repairGoal(h.rt).run(ctxFor(h, slept));
+  t.false('home:bed' in (slept.zones ?? {}));
+});
+
+test('a lost bed\'s cells: the foot as lost, the head one step along its facing; none for a door', (t) => {
+  const lost = (state: string) => [{ at: at(0, 63, 0), state, why: '' }];
+  t.deepEqual(lostBed(lost('red_bed[facing=west,occupied=false,part=foot]')), { head: at(-1, 63, 0), foot: at(0, 63, 0) });
+  t.deepEqual(lostBed(lost('minecraft:white_bed[facing=north,part=foot]')), { head: at(0, 63, -1), foot: at(0, 63, 0) });
+  t.is(lostBed(lost('oak_door[facing=south,half=lower]')), undefined);
+  t.is(lostBed([]), undefined);
 });
 
 test('repair: no fill in water, in someone else\'s build, or outside the fence when the mod cannot say whose it is', async (t) => {

@@ -74,3 +74,21 @@ export function missingBuilt(expected: BuiltBlock[], current: (string | null)[])
   restore.sort((a, b) => a.at.y - b.at.y || a.at.x - b.at.x || a.at.z - b.at.z);
   return { restore, lost, occupied };
 }
+
+const STEP: Record<string, [number, number]> = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] };
+
+/**
+ * A bed the bot built that went missing, as the bed goal fills it (home.ts bedGoal: its `home:bed` and
+ * `home:bed-foot` cells): the lost foot, and its head one step along the foot's facing. missingBuilt keeps the foot
+ * only (the head comes with it). Undefined when no bed is among the lost.
+ */
+export function lostBed(lost: Lost[]): { head: Pos; foot: Pos } | undefined {
+  for (const l of lost) {
+    if (!/_bed$/.test(idOf(l.state))) continue;
+    const props = propsOf(l.state);
+    const step = STEP[props.facing ?? ''];
+    if (!step || props.part === 'head') continue;
+    return { head: { x: l.at.x + step[0], y: l.at.y, z: l.at.z + step[1] }, foot: { ...l.at } };
+  }
+  return undefined;
+}

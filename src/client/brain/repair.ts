@@ -2,7 +2,7 @@ import type { ClientRuntime } from '../tools.js';
 import { nearHome, type Goal, type GoalContext } from './goals.js';
 import { key } from './chests.js';
 import { prepare } from './project.js';
-import { missingBuilt, type BuiltBlock } from './integrity.js';
+import { lostBed, missingBuilt, type BuiltBlock } from './integrity.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { roundDue, roundFrom, toRound } from './work.js';
 import { FILL_MAX, fenceBuilt, fenceGround, mendFence, yardRing } from './fence.js';
@@ -86,6 +86,17 @@ export function repairGoal(rt: ClientRuntime): Goal {
       const plan = missingBuilt(built, await readCells(ctx, built.map(b => b.at)));
       const fencePlan = ring && ringBuilt.length ? missingBuilt(ringBuilt, await readCells(ctx, ringBuilt.map(b => b.at))) : undefined;
       done(ctx.world, 'repair', ctx.s.now);
+      // a bed of the bot's gone and none other slept in: its cells are the bed goal's to fill (home.ts bedGoal puts the
+      // bed back, with its facing, from a bed or wool in the chests). Beds stay out of the round's own placing, but
+      // only the cabin's cells were ever the bed goal's: live on Nov 15 the homestead's bed at (-537, 63, 2193) went
+      // with a door and a sign while the bot was down the mine, a white_bed waited in a chest, and every night after
+      // it walled itself in at home ("no bed yet"), ten rounds in a row saying the bed goes back by hand
+      const bed = !ctx.world.landmarks.bed && !ctx.world.zones?.['home:bed']?.length ? lostBed(plan.lost) : undefined;
+      if (bed) {
+        (ctx.world.zones ??= {})['home:bed'] = [bed.head];
+        ctx.world.zones['home:bed-foot'] = [bed.foot];
+        ctx.progress(`the bed at ${key(bed.head)} is gone: its cells go to the bed goal`);
+      }
       // a hole in the fence: the ground under it, read now, so the fill it takes is fetched with the rest (not for a
       // cell put back in vain twice: that is left alone, and nothing is fetched for it)
       const fails = ctx.world.repairFails ?? {};
