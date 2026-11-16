@@ -15,6 +15,7 @@
     "DestroyToolMixin",
     "MineTargetMixin",
     "FenceScaffoldMixin",
+    "ZoneBreakMixin",
     "HazardUseMixin",
     "ShieldUseMixin",
     "ClientLevelAccessor",

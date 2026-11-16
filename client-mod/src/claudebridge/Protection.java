@@ -167,12 +167,14 @@ public final class Protection {
         Blocks.LAPIS_ORE, Blocks.DEEPSLATE_LAPIS_ORE, Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE, Blocks.EMERALD_ORE,
         Blocks.DEEPSLATE_EMERALD_ORE);
 
-    static boolean nearZone(BlockPos p) {
+    static boolean nearZone(BlockPos p) { return nearZone(p.getX(), p.getZ()); }
+
+    static boolean nearZone(int x, int z) {
         if (!zoneActive()) return false;
         // the yard's rectangle: a circle round home as wide as its farthest corner covered seven times the yard once it
         // grew long, and Baritone, never allowed to dig while in it, found no path to any ore
-        if (zoneRect) return p.getX() >= zoneX1 - ZONE_MARGIN && p.getX() <= zoneX2 + ZONE_MARGIN && p.getZ() >= zoneZ1 - ZONE_MARGIN && p.getZ() <= zoneZ2 + ZONE_MARGIN;
-        double dx = p.getX() - zoneX, dz = p.getZ() - zoneZ;
+        if (zoneRect) return x >= zoneX1 - ZONE_MARGIN && x <= zoneX2 + ZONE_MARGIN && z >= zoneZ1 - ZONE_MARGIN && z <= zoneZ2 + ZONE_MARGIN;
+        double dx = x - zoneX, dz = z - zoneZ;
         return dx * dx + dz * dz <= (double) (zoneRadius + ZONE_MARGIN) * (zoneRadius + ZONE_MARGIN);
     }
 
@@ -227,6 +229,29 @@ public final class Protection {
             else if (!off && kept != null) kept.add(p);
         }
         return kept == null ? locs : kept;
+    }
+
+    private static volatile boolean breakAsked;
+
+    /**
+     * Whether a path may not plan to break that block: ground or ore in the home zone's column, at any depth, by place
+     * (ZoneBreakMixin, as Baritone costs each break, its breakCostMultiplierAt). The rule above goes by kind and holds
+     * only while the bot stands in or near the zone, so a path searched from outside it was free to tunnel through the
+     * column: Baritone walked in on it, could break nothing once there, and the deep trips stopped under the yard's
+     * east edge (live Nov 14 and 15: 11 and 12 a day "out from under", nearly all at x -527..-539, then three iron
+     * trips in a row 107 below the lawn on Nov 16, a minute and a half lost each and the trip with it). Costed as never, the path goes round the column, as walks
+     * in it already do. Lifted as the kind rule is: wholly while suspended, for a narrow lift's kind.
+     */
+    public static boolean zoneBreak(int x, int y, int z, BlockState state) {
+        if (!breakAsked) { breakAsked = true; System.out.println("[claudebridge] path: no path breaks ground or ore in the home zone's column"); }
+        if (suspended > 0 || state == null || !nearZone(x, z)) return false;
+        Block b = state.getBlock();
+        try {
+            return GROUND.contains(b) && !only.contains(b);
+        } catch (RuntimeException e) {
+            // (read on the path thread while a narrow lift changed: allowed, as Baritone would have it)
+            return false;
+        }
     }
 
     private static boolean zoneForbids(java.util.function.Function<BlockPos, Block> blockAt, BlockPos p) {
