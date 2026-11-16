@@ -38,17 +38,20 @@ head come with their other half.`;
 
 /**
  * A design placed under a name: a new structure, or `old` given a new design. What the call leaves out comes from the
- * old file, and so does homeStorage, which only structure-import sets: a homestead given a redesign keeps its chests as
- * the home's storage (without it, the bot stopped stashing in them and fetched its kit from nowhere).
+ * old file, homeStorage above all: a homestead given a redesign keeps its chests as the home's storage (without it, the
+ * bot stopped stashing in them and fetched its kit from nowhere). homeStorage can be given too: storehouse2 (job #11,
+ * 11-16) was a storage house the LLM designed, and its 14 chests were not the home's until a structure-import after the
+ * build set the flag.
  */
-export function placed(old: Structure | null | undefined, o: { name: string; design: string; anchor?: Pos; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string }): Structure {
+export function placed(old: Structure | null | undefined, o: { name: string; design: string; anchor?: Pos; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string; homeStorage?: boolean }): Structure {
   const autoRepair = o.autoRepair ?? old?.autoRepair, notes = o.notes ?? old?.notes, level = o.level ?? old?.prepare?.level;
+  const homeStorage = o.homeStorage ?? old?.homeStorage;
   return {
     version: 1, name: o.name, design: o.design, anchor: o.anchor ?? old!.anchor, rotation: o.rotation ?? old?.rotation ?? 0,
     ...(autoRepair !== undefined ? { autoRepair } : {}),
     ...(notes ? { notes } : {}),
     ...(level || old?.prepare?.foundation ? { prepare: { ...(level ? { level } : {}), ...(old?.prepare?.foundation ? { foundation: true } : {}) } } : {}),
-    ...(old?.homeStorage ? { homeStorage: true } : {})
+    ...(homeStorage ? { homeStorage: true } : {})
   };
 }
 
@@ -218,9 +221,10 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       autoRepair: z.boolean().optional().describe('Put it back automatically when the daily check finds it changed (default: only report)'),
       level: z.boolean().optional().describe('Level the footprint first, to just under the floor (cut hills, fill holes)'),
       notes: z.string().optional().describe('What it is for (kept in the file)'),
+      homeStorage: z.boolean().optional().describe("Its chests are the home's storage (a storage house): the bot stashes in them and takes its kit and food from them (default: kept as the file has it; a new structure's chests are its own)"),
       force: z.boolean().optional().describe("Build it even where it meets someone else's build (only when they agree)")
     },
-    async ({ name, design, anchor, rotation: rot, autoRepair, level, notes, force = false }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string; force?: boolean }) => {
+    async ({ name, design, anchor, rotation: rot, autoRepair, level, notes, homeStorage, force = false }: { name: string; design?: string | Design; anchor?: { x: number; y: number; z: number }; rotation?: Rotation; autoRepair?: boolean; level?: boolean; notes?: string; homeStorage?: boolean; force?: boolean }) => {
       try {
         if (!brain) return factory.createErrorResponse("Build jobs need the bot's brain (the client backend)");
         const w = await world();
@@ -229,7 +233,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
           if (!anchor && !s) return factory.createErrorResponse("A new structure needs an anchor (where the design's minimum corner goes)");
           const d = designOf(design);
           if (typeof design !== 'string') store.saveDesign(d);
-          s = placed(s, { name, design: d.name, anchor, rotation: rot, autoRepair, level, notes });
+          s = placed(s, { name, design: d.name, anchor, rotation: rot, autoRepair, level, notes, homeStorage });
         } else if (!s) {
           return factory.createErrorResponse(`No structure called "${name}" in this world: give design and anchor to place one`);
         } else {
@@ -238,6 +242,7 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
           if (autoRepair !== undefined) s.autoRepair = autoRepair;
           if (notes !== undefined) s.notes = notes;
           if (level !== undefined) s.prepare = { ...(s.prepare ?? {}), level };
+          if (homeStorage !== undefined) { if (homeStorage) s.homeStorage = true; else delete s.homeStorage; }
         }
         const d = designOf(s.design);
         const c = compile(d, s.anchor, s.rotation ?? 0);

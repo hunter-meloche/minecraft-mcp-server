@@ -188,3 +188,12 @@ test('placed: a redesign keeps the old structure\'s flags (homeStorage above all
   // no new anchor: the old one
   t.deepEqual(placed(old, { name: 'homestead', design: 'x' }).anchor, old.anchor);
 });
+
+test('placed: a storage house can be home storage from the start, and a redesign can give the flag up', (t) => {
+  // storehouse2 (job #11): its chests were not the home's until an import after the build set the flag
+  t.deepEqual(placed(null, { name: 'storehouse2', design: 'storehouse2', anchor: { x: -561, y: 63, z: 2190 }, homeStorage: true }),
+    { version: 1, name: 'storehouse2', design: 'storehouse2', anchor: { x: -561, y: 63, z: 2190 }, rotation: 0, homeStorage: true });
+  const old = { version: 1 as const, name: 'homestead', design: 'homestead', anchor: { x: -65, y: 62, z: -31 }, rotation: 0 as const, homeStorage: true };
+  t.false('homeStorage' in placed(old, { name: 'homestead', design: 'x', homeStorage: false }));
+  t.true(placed(old, { name: 'homestead', design: 'x' }).homeStorage);
+});
