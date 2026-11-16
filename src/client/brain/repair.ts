@@ -2,7 +2,7 @@ import type { ClientRuntime } from '../tools.js';
 import { nearHome, type Goal, type GoalContext } from './goals.js';
 import { key } from './chests.js';
 import { prepare } from './project.js';
-import { lostBed, missingBuilt, type BuiltBlock } from './integrity.js';
+import { doorFloors, lostBed, missingBuilt, type BuiltBlock } from './integrity.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { roundDue, roundFrom, toRound } from './work.js';
 import { FILL_MAX, fenceBuilt, fenceGround, mendFence, yardRing } from './fence.js';
@@ -84,6 +84,12 @@ export function repairGoal(rt: ClientRuntime): Goal {
       const ringBuilt = fenceBuilt(rt, ctx.world, home).filter(b => b.state);
       if (!built.length && !ringBuilt.length) { done(ctx.world, 'repair', ctx.s.now); return 'nothing built near home to check'; }
       const plan = missingBuilt(built, await readCells(ctx, built.map(b => b.at)));
+      // a door going back stands on its threshold: put one in first where it is open (integrity.ts doorFloors)
+      const doors = plan.restore.filter(r => /_door$/.test(r.item));
+      if (doors.length) {
+        const floors = doorFloors(doors, await readCells(ctx, doors.map(r => ({ ...r.at, y: r.at.y - 1 }))), plan.restore);
+        plan.restore = [...floors, ...plan.restore].sort((a, b) => a.at.y - b.at.y || a.at.x - b.at.x || a.at.z - b.at.z);
+      }
       const fencePlan = ring && ringBuilt.length ? missingBuilt(ringBuilt, await readCells(ctx, ringBuilt.map(b => b.at))) : undefined;
       done(ctx.world, 'repair', ctx.s.now);
       // a bed of the bot's gone and none other slept in: its cells are the bed goal's to fill (home.ts bedGoal puts the

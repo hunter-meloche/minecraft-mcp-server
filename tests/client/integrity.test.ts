@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { missingBuilt } from '../../src/client/brain/integrity.js';
+import { doorFloors, missingBuilt } from '../../src/client/brain/integrity.js';
 import { readCells, repairGoal } from '../../src/client/brain/repair.js';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { WorldMemory } from '../../src/client/brain/memory.js';
@@ -30,7 +30,7 @@ test('missingBuilt: puts back what is gone, supports first, as the item that pla
   t.is(plan.occupied, 1);
 });
 
-test('missingBuilt: chests, doors and signs are reported, not placed; unknown, unloaded and crops are skipped', (t) => {
+test('missingBuilt: chests, beds and signs are reported, not placed; unknown, unloaded and crops are skipped', (t) => {
   const plan = missingBuilt([
     { at: at(0, 64, 0), state: 'chest[facing=north,type=single,waterlogged=false]' },
     { at: at(1, 64, 0), state: 'oak_door[facing=south,half=lower,hinge=left,open=false,powered=false]' },
@@ -42,12 +42,75 @@ test('missingBuilt: chests, doors and signs are reported, not placed; unknown, u
     { at: at(6, 64, 0), state: 'cobblestone' }, // unloaded
     { at: at(7, 65, 0), state: 'wheat[age=7]' }
   ], ['air', 'air', 'air', 'air', 'air', 'air', 'air', null, 'air']);
-  t.deepEqual(plan.restore, []);
+  // the door goes back as its lower half, the bot looking the way it faces (its upper half comes with it)
+  t.deepEqual(plan.restore, [
+    { at: at(1, 64, 0), state: 'oak_door[facing=south,half=lower,hinge=left,open=false,powered=false]', item: 'oak_door', facing: 'south' }
+  ]);
   t.deepEqual(plan.lost.map(l => [l.at.x, l.why]), [
-    [0, 'a container (what it held is gone)'], [1, 'doors and beds go back by hand'], [2, 'doors and beds go back by hand'],
-    [4, "its text or pattern can't be put back"]
+    [0, 'a container (what it held is gone)'], [2, 'beds go back by hand'], [4, "its text or pattern can't be put back"]
   ]);
   t.is(plan.occupied, 0);
+});
+
+test('repair: the homestead\'s door gone with its bed and threshold (live Nov 15): a floor, then the door from the chests, facing as built; the bed waits for the bed goal', async (t) => {
+  // live: a creeper took the door at (-540, 63, 2188), both halves, the bed by it and the ground under the door (never
+  // the bot's); 15 h later every round still said "not put back: oak_door ... (doors and beds go back by hand)", the
+  // doorway open by night, oak doors in the chests
+  const built = [
+    { at: at(-540, 63, 2188), state: 'oak_door[facing=south,half=lower,hinge=right,open=true,powered=false]' },
+    { at: at(-540, 64, 2188), state: 'oak_door[facing=south,half=upper,hinge=right,open=true,powered=false]' },
+    { at: at(-537, 63, 2192), state: 'white_bed[facing=south,occupied=false,part=foot]' },
+    { at: at(-537, 63, 2193), state: 'white_bed[facing=south,occupied=false,part=head]' }
+  ];
+  const home = at(-549, 63, 2183);
+  const placed: string[] = [];
+  const acts: string[] = [];
+  const taken: { slot: number; name: string; count: number }[] = [];
+  const rt = {
+    builtNear: () => built,
+    restoreBlock: async (p: { x: number; y: number; z: number }, item: string, facing?: string) => { placed.push(`${item} ${p.x},${p.y},${p.z} ${facing}`); return undefined; },
+    adoptStates: () => undefined
+  } as unknown as ClientRuntime;
+  const mem: WorldMemory = {
+    landmarks: { chests: [at(-551, 63, 2181)], farmland: [], bed: at(-545, 63, 2190) }, leash: 96,
+    chestItems: { '-551,63,2181': { oak_door: 2, cobblestone: 64 } }
+  };
+  const s = {
+    now: 10 * 60 * 60_000, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: home, dimension: 'overworld',
+    sleeping: false, raining: false, thundering: false, process: null, items: [], counts: new Map(), slotsUsed: 0,
+    home: { ...home, dimension: 'overworld' }, distHome: 0
+  } as Snapshot;
+  const ctx = {
+    s, world: mem, signal: new AbortController().signal,
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      acts.push(`${tool} ${a.item} ${a.count}`);
+      if (tool === 'take-from-chest') taken.push({ slot: 1, name: String(a.item), count: Number(a.count) });
+      return { ok: true, text: `Took ${a.count} ${a.item} from the chest at (-551, 63, 2181). It holds: oak_door x1, cobblestone x63.` };
+    },
+    call: (async (m: string, p: Record<string, number>) => {
+      if (m === 'inventory') return { items: taken };
+      if (m === 'world.region') return { blocks: Array(p.width * p.height * p.length).fill('air') };
+      throw new Error(`unexpected ${m}`);
+    }) as GoalContext['call'],
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    progress: () => undefined, gain: () => undefined
+  } as GoalContext;
+  const r = await repairGoal(rt).run(ctx);
+  t.deepEqual(acts, ['take-from-chest cobblestone 1', 'take-from-chest oak_door 1']);
+  // the threshold first, then the lower half only, the bot looking south as the door faced (the upper half comes with it)
+  t.deepEqual(placed, ['cobblestone -540,62,2188 undefined', 'oak_door -540,63,2188 south']);
+  t.is(r, 'put back 2/2 missing block(s); not put back: white_bed at -537,63,2192 (beds go back by hand)');
+});
+
+test('doorFloors: cobblestone under a door going back where its floor is open; none on ground, unloaded, under other blocks, or where the floor goes back itself', (t) => {
+  const door = (x: number) => ({ at: at(x, 63, 0), state: 'oak_door[facing=south,half=lower]', item: 'oak_door', facing: 'south' });
+  const plank = { at: at(9, 63, 0), state: 'oak_planks', item: 'oak_planks' };
+  const floorBack = { at: at(3, 62, 0), state: 'cobblestone', item: 'cobblestone' };
+  const restore = [door(0), door(1), door(2), door(3), door(4), plank];
+  t.deepEqual(doorFloors(restore, ['air', 'dirt', null, 'air', 'short_grass', 'air'], [...restore, floorBack]), [
+    { at: at(0, 62, 0), state: 'cobblestone', item: 'cobblestone' },
+    { at: at(4, 62, 0), state: 'cobblestone', item: 'cobblestone' }
+  ]);
 });
 
 test('protection keeps block states beside the keys; a file with keys only still loads', (t) => {

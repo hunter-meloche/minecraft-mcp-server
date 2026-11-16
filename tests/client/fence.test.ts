@@ -342,7 +342,7 @@ test('repair: the homestead\'s bed gone (live Nov 15, with a door): its two cell
   world.chestItems = { '-551,63,2181': { white_bed: 1 } };
   t.is(bedGoal.wants(snap(), world), null, 'no cells known: nothing for the bed goal before the round');
   const r = await repairGoal(h.rt).run(ctxFor(h, world));
-  t.regex(r, /white_bed at -537,63,2192 \(doors and beds go back by hand\)/);
+  t.regex(r, /white_bed at -537,63,2192 \(beds go back by hand\)/);
   t.deepEqual([world.zones!['home:bed'], world.zones!['home:bed-foot']], [[head], [foot]]);
   t.true(h.f.progress.some(x => /the bed at -537,63,2193 is gone/.test(x)));
   t.regex(bedGoal.wants(snap(), world) ?? '', /no bed: put one in/);

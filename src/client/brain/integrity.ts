@@ -17,7 +17,7 @@ export interface Lost { at: Pos; state: string; why: string }
 export interface IntegrityPlan {
   /** what to place, lowest first (a block's support goes back before it) */
   restore: Restore[];
-  /** missing, but left for someone to see to (a chest's contents, a door, a sign's text) */
+  /** missing, but left for someone to see to (a chest's contents, a bed, a sign's text) */
   lost: Lost[];
   /** missing cells that hold some other block now (left alone) */
   occupied: number;
@@ -38,7 +38,10 @@ const GROUND = /^(dirt|grass_block|dirt_path|farmland|podzol|mycelium|coarse_dir
 /** Missing, but not put back by the bot: why. */
 const NOT_RESTORED: [RegExp, string][] = [
   [/^(chest|trapped_chest|barrel|.*shulker_box)$/, 'a container (what it held is gone)'],
-  [/_door$|_bed$/, 'doors and beds go back by hand'],
+  // a door goes back like any block (its lower half, the bot looking its way; the upper half comes with it): left
+  // "by hand", the homestead's door at (-540, 63, 2188) stood open to the night 15 h after a creeper took it on
+  // Nov 15 (21:54Z), oak doors in the chests, the bot asleep a few blocks in. Beds are the bed goal's (repair.ts).
+  [/_bed$/, 'beds go back by hand'],
   [/_sign$|_banner$/, "its text or pattern can't be put back"]
 ];
 /** Gone without needing the bot: crops (the farm replants), fluids, fire, piston parts, the upper half of tall plants. */
@@ -91,4 +94,23 @@ export function lostBed(lost: Lost[]): { head: Pos; foot: Pos } | undefined {
     return { head: { x: l.at.x + step[0], y: l.at.y, z: l.at.z + step[1] }, foot: { ...l.at } };
   }
   return undefined;
+}
+
+/**
+ * The floor a door going back needs under it: cobblestone in each open cell (`under[i]`, the block under `restore[i]`
+ * as world.region gives it) under a door's lower half, unless that cell goes back itself (one of `all`). A door stands on a block or
+ * not at all, and its threshold is often ground the bot never built: live on Nov 16 the creeper's crater took the
+ * homestead door's threshold (-540, 62, 2188) with the door, and the server refused the door on air.
+ */
+export function doorFloors(restore: Restore[], under: (string | null)[], all: Restore[] = restore): Restore[] {
+  const going = new Set(all.map(r => `${r.at.x},${r.at.y},${r.at.z}`));
+  const floors: Restore[] = [];
+  restore.forEach((r, i) => {
+    const now = under[i];
+    const at = { x: r.at.x, y: r.at.y - 1, z: r.at.z };
+    if (!/_door$/.test(r.item) || !now || going.has(`${at.x},${at.y},${at.z}`)) return;
+    if (!isReplaceable({ name: idOf(now), getProperties: () => propsOf(now) })) return;
+    floors.push({ at, state: 'cobblestone', item: 'cobblestone' });
+  });
+  return floors;
 }
