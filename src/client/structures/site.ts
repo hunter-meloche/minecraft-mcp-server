@@ -53,22 +53,25 @@ export function keptSites(mem?: {
 }
 
 /**
- * The boxes of the placed structures, for a site search to stay off, but not those of a whole homestead (homeStorage):
- * its box is the yard itself. The homestead cleanup's record (2026-11-15, job #10) spans the whole fence ring, and
- * with its box kept off, structure-site found no spot inside the yard for any later improvement, and the portal site
- * (8 from every build) none either. What stands in the yard is still seen as built ground by the search, and each
- * build's own record keeps its own box. A structure that won't compile has no box.
+ * The boxes of the placed structures, for a site search to stay off, but not those of a whole homestead: its box is
+ * the yard itself. The homestead cleanup's record (2026-11-15, job #10) spans the whole fence ring, and with its box
+ * kept off, structure-site found no spot inside the yard for any later improvement, and the portal site (8 from every
+ * build) none either. What stands in the yard is still seen as built ground by the search, and each build's own record
+ * keeps its own box. A whole homestead is a homeStorage record whose box holds another build's whole box: homeStorage
+ * alone is not enough, as a storage house is home storage too (storehouse2, 2026-11-16), and skipped, later builds
+ * could be sited on top of it. A structure that won't compile has no box.
  */
 export function structureSiteBoxes<S extends { homeStorage?: boolean }>(structures: (S | null | undefined)[], boxOf: (s: S) => Rect): Rect[] {
-  const out: Rect[] = [];
+  const boxes: { s: S; b: Rect }[] = [];
   for (const s of structures) {
-    if (!s || s.homeStorage) continue;
+    if (!s) continue;
     try {
       const b = boxOf(s);
-      out.push({ x: b.x, z: b.z, width: b.width, length: b.length });
+      boxes.push({ s, b: { x: b.x, z: b.z, width: b.width, length: b.length } });
     } catch { /* no box */ }
   }
-  return out;
+  const holds = (a: Rect, b: Rect) => a !== b && b.x >= a.x && b.z >= a.z && b.x + b.width <= a.x + a.width && b.z + b.length <= a.z + a.length;
+  return boxes.filter(({ s, b }) => !(s.homeStorage && boxes.some(o => !o.s.homeStorage && holds(b, o.b)))).map(({ b }) => b);
 }
 
 const name = (s: string | null | undefined) => (s ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');

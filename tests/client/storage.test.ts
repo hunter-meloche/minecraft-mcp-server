@@ -54,6 +54,17 @@ test('extra chests go to the busiest category', (t) => {
   t.deepEqual(Object.values(assignChests([P(0), P(1), P(2), P(3)], cats)), ['stone', 'wood', 'stone', 'wood']);
 });
 
+test('extra chests go to the fullest category by slots, not by items', (t) => {
+  // live 2026-11-16: the gear chest full of one-per-slot tools, stone's of stackable cobblestone (881 in 14 slots); by
+  // items, every new chest of the second storage house went to stone
+  const cats = ['gear', 'stone'];
+  const contents: ChestContents = { [K(0)]: { iron_sword: 14, bow: 13 }, [K(1)]: { cobblestone: 881 } };
+  const prev = { [K(0)]: 'gear', [K(1)]: 'stone' };
+  t.deepEqual(assignChests([P(0), P(1), P(2)], cats, contents, prev)[K(2)], 'gear');
+  // and once gear has two, a third goes to stone (13.5 slots per gear chest, 14 per stone chest)
+  t.deepEqual(assignChests([P(0), P(1), P(2), P(3)], cats, contents, prev)[K(3)], 'stone');
+});
+
 test('deposits go to the category chest, keeping what the kit needs', (t) => {
   const assign = { [K(0)]: 'stone', [K(1)]: 'ores', [K(2)]: 'misc' };
   const items = [

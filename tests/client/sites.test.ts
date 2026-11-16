@@ -112,3 +112,17 @@ test('structureSiteBoxes: a whole homestead (homeStorage) keeps no box, the othe
   const boxes = structureSiteBoxes(all, s => { if (!s.b) throw new Error('no design'); return s.b; });
   t.deepEqual(boxes, [{ x: -542, z: 2175, width: 5, length: 5 }, { x: -560, z: 2200, width: 4, length: 4 }]);
 });
+
+test('structureSiteBoxes: a storage house that is home storage keeps its box; only the one holding other builds keeps none', (t) => {
+  // storehouse2 (2026-11-16) imported with homeStorage for its chests: skipped like the homestead, later improvement
+  // runs could site a build on top of it
+  const box = (x: number, z: number, width: number, length: number) => ({ x, y: 60, z, width, height: 9, length });
+  const all = [
+    { name: 'homestead', homeStorage: true, b: box(-567, 2119, 35, 97) },
+    { name: 'storehouse2', homeStorage: true, b: box(-563, 2189, 11, 9) },
+    { name: 'windmill', b: box(-542, 2175, 5, 5) }
+  ];
+  t.deepEqual(structureSiteBoxes(all, s => s.b), [{ x: -563, z: 2189, width: 11, length: 9 }, { x: -542, z: 2175, width: 5, length: 5 }]);
+  // a lone storage house (no other build in the world yet) keeps its box too
+  t.deepEqual(structureSiteBoxes([all[1]], s => s.b), [{ x: -563, z: 2189, width: 11, length: 9 }]);
+});

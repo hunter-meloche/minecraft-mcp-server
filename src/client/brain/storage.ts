@@ -111,11 +111,25 @@ function categoryTotals(contents: Record<string, number>[]): Record<string, numb
   return out;
 }
 
+/** The slots each category's things take in some chests, packed: a chest's stacks of one category count in it alone. */
+function categorySlots(contents: Record<string, number>[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const items of contents) {
+    const byCat: Record<string, Record<string, number>> = {};
+    for (const [n, k] of Object.entries(items)) (byCat[categoryOf(n)] ??= {})[n] = k;
+    for (const [c, its] of Object.entries(byCat)) out[c] = (out[c] ?? 0) + packedSlots(its);
+  }
+  return out;
+}
+
 /**
  * Which chest holds which category. Stable: a chest keeps the category it had in `previous` (moving a chestful is
  * slow), an unassigned chest that already mostly holds a category gets that one, and the rest go out in chest order.
  * Every category gets one chest (most-needed first, when there are too few); extra chests go to the categories with
- * the most items per chest, so the busiest category is the one that gets a second chest.
+ * the most slots used per chest, so the fullest category is the one that gets a second chest. Slots, not items: by
+ * items the stackable stone and wood (881 cobblestone, 14 slots) always outweighed a gear chest full of one-per-slot
+ * tools, and the second storage house's 12 chests (2026-11-16, built because gear and ores had no room) would have
+ * gone to stone and wood.
  */
 export function assignChests(chests: Pos[], categories: readonly string[] = CATEGORIES, contents: ChestContents = {}, previous: ChestAssign = {}): ChestAssign {
   const keys = [...new Set(chests.map(keyOf))];
@@ -154,10 +168,10 @@ export function assignChests(chests: Pos[], categories: readonly string[] = CATE
     if (!k) break;
     out[k] = c;
   }
-  const totals = categoryTotals(Object.values(contents));
+  const slots = categorySlots(Object.values(contents));
   for (const k of free()) {
     const n = (c: string) => Object.values(out).filter(v => v === c).length;
-    const per = (c: string) => (totals[c] ?? 0) / n(c);
+    const per = (c: string) => (slots[c] ?? 0) / n(c);
     // ties (nothing seen yet) spread the chests out, most-needed categories first
     out[k] = categories.reduce((a, b) => (per(b) > per(a) || (per(b) === per(a) && n(b) < n(a)) ? b : a), categories[0]);
   }
