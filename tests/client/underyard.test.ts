@@ -1123,7 +1123,8 @@ test.serial('within 64 of where it went down, the way back is the way it came: t
   t.deepEqual(await walkHome(toward.ctx, { timeoutMs: 600_000, upAt: { x: -492, y: 69, z: 2184 } }), { ok: true, text: 'Home' });
   t.deepEqual(toward.walks, ['goto -492,69,2184 range 1', ...byEast]);
   t.deepEqual(toward.tools, ['go-home']);
-  t.deepEqual(toward.said, ['no climb from (-517, -45, 2089): water over its head at (-517, 64, 2089); the walk home as it goes', 'up where it went down, (-492, 69, 2184), before the walk home',
+  t.deepEqual(toward.said, ['no climb from (-517, -45, 2089): water over its head at (-517, 64, 2089); the walk home as it goes',
+    'no climb aside either (15 spot(s): 15 water over its head)', 'up where it went down, (-492, 69, 2184), before the walk home',
     'into the yard by its east gate (-533, 63, 2183)']);
   t.deepEqual(underIt(toward.stood, world), []);
   const east = deepAt({ x: -520, y: -20, z: 2160 });
@@ -1183,7 +1184,8 @@ test.serial('the climb out is never made into danger: not at night (the shelter 
     await walkHome(r.ctx, { timeoutMs: 600_000 });
     t.deepEqual(r.tools, ['go-home'], liquid);
     t.deepEqual(rock.climbed, []);
-    t.deepEqual(r.said, [`no climb from (-517, -45, 2089): ${liquid} over its head at (-517, ${y}, 2089); the walk home as it goes`]);
+    t.deepEqual(r.said, [`no climb from (-517, -45, 2089): ${liquid} over its head at (-517, ${y}, 2089); the walk home as it goes`,
+      `no climb aside either (15 spot(s): 15 ${liquid} over its head)`, 'back to the mine start (-493, 69, 2183) before the walk home', 'into the yard by its east gate (-533, 63, 2183)']);
   }
   // in water or lava: getting out of it is the walk's (as it was)
   for (const st of [{ underWater: true }, { inLava: true }]) {
@@ -1235,7 +1237,8 @@ test.serial('the climb out is never made into danger: not at night (the shelter 
   const blind = walkingHome(deepAt(FAR), {}, world, { zones: 'fail' });
   await walkHome(blind.ctx, { timeoutMs: 600_000 });
   t.deepEqual(blind.tools, ['go-home']);
-  t.deepEqual(blind.said, ['no climb from (-517, -45, 2089): could not look for anyone\'s build over it; the walk home as it goes']);
+  t.deepEqual(blind.said, ['no climb from (-517, -45, 2089): could not look for anyone\'s build over it; the walk home as it goes',
+    'back to the mine start (-493, 69, 2183) before the walk home', 'into the yard by its east gate (-533, 63, 2183)']);
   // under the yard: no walk at all, and no climb (up through the lawn): out from under digs out to the side
   const pocket = walkingHome(livePocket(), {}, world);
   t.deepEqual(await walkHome(pocket.ctx, { timeoutMs: 600_000 }), { ok: false, text: 'under the yard at (-534, 8, 2182): out from under digs out to the side first' });
@@ -1279,6 +1282,17 @@ test.serial('no climb where it stands (a river over it, a mineshaft over it): a 
   await walkHome(lost.ctx, { timeoutMs: 600_000 });
   t.is(lost.said[2], 'did not get to (-544, 10, 2234)');
   t.deepEqual(lost.tools, ['go-home']);
+  // the live 17:48Z one: idle's walk back from under a lake wider than any spot aside (no trip, so no `upAt`), 107
+  // from the mine start. As it was, go-home's walk from down there, under the yard; now toward the mine start first,
+  // however far, as the trips' walks go toward where they went down, and home by the east gate from up there
+  const lakeAt = { x: -474, y: 14, z: 2077 };
+  const lake = deepAt(lakeAt);
+  sheetOver(lake, lakeAt, 47, 'water');
+  const l = walkingHome(lake, {}, world);
+  t.deepEqual(await walkHome(l.ctx, { timeoutMs: 600_000 }), { ok: true, text: 'Home' });
+  t.deepEqual(l.said, ['no climb from (-474, 14, 2077): water over its head at (-474, 47, 2077); the walk home as it goes', 'no climb aside either (16 spot(s): 16 water over its head)',
+    'back to the mine start (-493, 69, 2183) before the walk home', 'into the yard by its east gate (-533, 63, 2183)']);
+  t.deepEqual(underIt(l.stood, world), []);
   // the spots: never in the column or 8 round it, nor across it; the nearer ring first, and in it the nearer home
   const col = homeColumn(HOME, YARD);
   const by = { x: -520, y: -20, z: 2160 };

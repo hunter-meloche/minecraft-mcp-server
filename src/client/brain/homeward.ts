@@ -97,8 +97,8 @@ function crosses(col: Column, a: { x: number; z: number }, b: { x: number; z: nu
  * block it stood on at the mine start), or else the mine start, which is kept at home's level (pickMineStart): the
  * block over the ground there.
  */
-async function wayBack(ctx: GoalContext, feet: Pos, col: Column, upAt?: Pos): Promise<{ to: Pos; words: string } | undefined> {
-  const near = (q: { x: number; z: number }) => Math.hypot(q.x - feet.x, q.z - feet.z) <= BACK_WITHIN && !crosses(col, feet, q);
+async function wayBack(ctx: GoalContext, feet: Pos, col: Column, upAt?: Pos, within = BACK_WITHIN): Promise<{ to: Pos; words: string } | undefined> {
+  const near = (q: { x: number; z: number }) => Math.hypot(q.x - feet.x, q.z - feet.z) <= within && !crosses(col, feet, q);
   if (upAt) return near(upAt) ? { to: upAt, words: `up where it went down, ${fmt(upAt)}, before the walk home` } : undefined;
   const start = ctx.world.zones?.mine?.[0];
   if (!start || !near(start)) return undefined;
@@ -188,10 +188,17 @@ async function climbAside(ctx: GoalContext, feet: Pos, home: Pos, col: Column, h
   const zones = await lookZones(ctx);
   stopped();
   if (!zones) return undefined;
-  for (const spot of asideSpots(feet, col, home).slice(0, ASIDE_LOOKS)) {
+  const spots = asideSpots(feet, col, home).slice(0, ASIDE_LOOKS);
+  const why = new Map<string, number>();
+  for (const spot of spots) {
     const above = await seeAbove(ctx, spot);
     stopped();
-    if (noClimb(spot, above, zones)) continue;
+    const no = noClimb(spot, above, zones);
+    if (no) {
+      const kind = no.replace(/ at \(.*$/, '').replace(/ \(.*$/, '');
+      why.set(kind, (why.get(kind) ?? 0) + 1);
+      continue;
+    }
     ctx.progress(`a climb from ${fmt(spot)} instead, ${Math.round(Math.hypot(spot.x - feet.x, spot.z - feet.z))} aside`);
     const walk = await attempt(() => ctx.call<{ arrived?: boolean }>('goto', { ...spot, range: 2, timeoutMs: ASIDE_WALK_MS }, ASIDE_WALK_MS + 15_000));
     stopped();
@@ -207,6 +214,8 @@ async function climbAside(ctx: GoalContext, feet: Pos, home: Pos, col: Column, h
     stopped();
     return { at, climb: await climbOut(ctx, at, there, home, col, hour) };
   }
+  // (said, so a walk home that still goes under the ground tells why: live, a lake over the gold mine wider than 24)
+  ctx.progress(`no climb aside either (${spots.length} spot(s): ${[...why].map(([k, n]) => `${n} ${k}`).join(', ') || 'none away from the yard'})`);
   return undefined;
 }
 
@@ -312,13 +321,19 @@ export async function walkHome(ctx: GoalContext, opts: { timeoutMs: number; upAt
     }
   }
   if (climb === 'late') return { ok: false, night: true, text: `${depthOf(feet, above, home)}: no climb to the surface this late (it would come up after dark: the walk home climbs out by day)` };
-  // no climb made out here, after a trip that went down further off than the way back goes: toward where it went
-  // down all the same, a while, as every walk home after a trip did; never across the yard's column
-  const upAt = opts.upAt;
-  if (climb === 'not' && upAt && !back && !crosses(col, feet, upAt)) {
-    ctx.progress(`up where it went down, ${fmt(upAt)}, before the walk home`);
-    await attempt(() => ctx.call('goto', { ...upAt, range: 1, timeoutMs: WALK_BACK_MS }, WALK_BACK_MS + 15_000));
+  // no climb made out here, nor aside, after a trip that went down further off than the way back goes: toward where it
+  // went down all the same, a while, as every walk home after a trip did; never across the yard's column. With no
+  // trip (idle's, the retreat's walk) toward the mine start however far, the same way: live on Nov 16 a lake under
+  // the ground over the east iron mine, wider than any climb aside, sent idle's go-home from (-474, 14, 2077) under
+  // the yard, while the trip's walk from the same lake toward where it went down came home by the east gate
+  if (climb === 'not' && !back) {
+    const toward = await wayBack(ctx, feet, col, opts.upAt, Infinity);
     stopped();
+    if (toward) {
+      ctx.progress(toward.words);
+      await attempt(() => ctx.call('goto', { ...toward.to, range: 1, timeoutMs: WALK_BACK_MS }, WALK_BACK_MS + 15_000));
+      stopped();
+    }
   }
   return toHome(true);
 }
