@@ -226,6 +226,12 @@ export interface WorldMemory {
    * which chest slots hold it. Nothing else takes or uses those pieces
    */
   spareSet?: import('./chests.js').SpareSet;
+  /**
+   * The swap of armour sets at home (netherset.ts, D1): set while the Nether set is worn for a trip, with where the
+   * main set's pieces went (each by its chest and the chest's slot); the swap back at home takes them out again and
+   * lets this go
+   */
+  gearSwap?: import('./netherset.js').GearSwap;
 }
 
 export const DEFAULT_LEASH = 96;

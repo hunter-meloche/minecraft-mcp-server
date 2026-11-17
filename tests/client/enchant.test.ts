@@ -34,8 +34,10 @@ function table(items: InventoryItem[], opts: { regear?: boolean } = {}) {
   const calls: string[] = [];
   const held = new Set<number>();
   let inSlot: InventoryItem | undefined;
+  // (armour shows protection: the main chore takes no other offer for it, enchant.ts mainOffer)
+  const clue = () => (/_(helmet|chestplate|leggings|boots)$/.test(inSlot?.name ?? '') ? 'protection' : 'sharpness');
   const offers = () => (inSlot && /_(sword|pickaxe|helmet|chestplate|leggings|boots)$/.test(inSlot.name) && !inSlot.enchanted
-    ? [{ slot: 0, cost: 8, enchant: 'unbreaking' }, { slot: 1, cost: 19, enchant: 'sharpness' }, { slot: 2, cost: 30, enchant: 'sharpness' }]
+    ? [{ slot: 0, cost: 8, enchant: 'unbreaking' }, { slot: 1, cost: 19, enchant: clue() }, { slot: 2, cost: 30, enchant: clue() }]
     : [0, 1, 2].map(slot => ({ slot, cost: 0, enchant: null })));
   const ctx = {
     s: snap(items), world: { landmarks: { chests: [] }, leash: 96, zones: { 'enchanting:table': [TABLE] } } as unknown as WorldMemory,
@@ -131,6 +133,7 @@ test('enchant: a worn chestplate comes off at the table first, held off for the 
   t.is(enchantGoal.wants(ctx.s, ctx.world), 'level 59: enchant the diamond_chestplate (worn)');
   t.is(await enchantGoal.run(ctx), 'enchanted the diamond_chestplate: protection 4; worn again');
   t.deepEqual(calls, [
+    'inventory {}', // the books to turn the seed with, should no offer show protection (none in store here)
     'armor.unequip {"slot":"chest","holdMs":30000}',
     `enchant.open ${JSON.stringify(TABLE)}`,
     'enchant.put {"name":"diamond_chestplate","slot":9,"lapis":3}', // the first free of the main pocket, as the mod's shift-click
@@ -154,7 +157,7 @@ test('enchant: a run stopped after the piece came off still closes the table (it
     return r;
   }) as GoalContext['call'];
   await t.throwsAsync(brainRun.run({ signal: abort.signal }, () => enchantGoal.run(ctx)), { message: /aborted/ });
-  t.deepEqual(calls, ['armor.unequip {"slot":"chest","holdMs":30000}', 'enchant.close {}']);
+  t.deepEqual(calls.filter(c => c !== 'inventory {}'), ['armor.unequip {"slot":"chest","holdMs":30000}', 'enchant.close {}']);
   t.is(items.find(i => i.name === 'diamond_chestplate')?.slot, 38);
 });
 
@@ -171,7 +174,7 @@ test('enchant: a put after the piece came off that gets no offer still closes th
   const { ctx, calls } = table(items.map(i => (i.slot === 38 ? { ...i, enchanted: true } : i)));
   ctx.s = snap(items); // the snapshot says plain; the table finds it enchanted
   await t.throwsAsync(enchantGoal.run(ctx), { message: /no offer for the diamond_chestplate/ });
-  t.is(calls[0], 'armor.unequip {"slot":"chest","holdMs":30000}');
+  t.is(calls.filter(c => c !== 'inventory {}')[0], 'armor.unequip {"slot":"chest","holdMs":30000}');
   t.is(calls.at(-1), 'enchant.close {}');
 });
 

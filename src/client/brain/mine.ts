@@ -83,8 +83,10 @@ export function deepTripReady(s: TripCheck): { ok: boolean; why?: string } {
  * The Nether trip's kit. `food` is what it eats up to before the kit is fetched; `foodLeast` what it sets out with at
  * the least: the walk to the dump spot and back while the room is made costs a point (live, Nov 14: "not setting out:
  * food 19 < 20" after the meals and the room), and from 18 health still heals; the 40 food points go along.
+ * `firePotions`: the potions of fire resistance carried for the Guardian's hook (D1), while the home has them: none in
+ * stock keeps no trip home (nethersetup.ts fetchSetupKit), the barter being what brings them.
  */
-export const NETHER_TRIP = { health: 20, food: 20, foodLeast: 18, foodPoints: 40, pickaxes: 2, flintAndSteel: 1, blocks: 64, slotsFree: 12 } as const;
+export const NETHER_TRIP = { health: 20, food: 20, foodLeast: 18, foodPoints: 40, pickaxes: 2, flintAndSteel: 1, blocks: 64, slotsFree: 12, firePotions: 1 } as const;
 /** The blocks a Nether trip's cover and pillars are made of: blast-proof, and no falling block (the bridge's rule there). */
 export const NETHER_BLOCKS: readonly string[] = ['cobblestone', 'cobbled_deepslate', 'stone_bricks'];
 

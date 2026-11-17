@@ -388,7 +388,8 @@ public final class Nether {
 
     /**
      * How good a helmet is to wear here: in the Nether a golden one first (piglins leave a player in gold be), else the
-     * piece's own rank; back in the overworld the best helmet wins again by its rank.
+     * piece's own rank; back in the overworld the best helmet wins again by its rank. `nether`: dressed for it
+     * (Combat.dressedForNether): down there, or swapped into the Nether set at home before the portal.
      */
     static int helmetRank(String item, int rank, boolean nether) {
         return nether && "golden_helmet".equals(item) ? 1_000_000 + rank : rank;

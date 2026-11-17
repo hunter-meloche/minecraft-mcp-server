@@ -54,8 +54,54 @@ import static claudebridge.Json.*;
 public final class Foreign {
     private Foreign() { }
 
-    /** A marker as seen: where, what, and the most sky light beside it (15 out in the open, 0 in a cave or a cellar). */
-    record Mark(BlockPos pos, Block block, int sky) { }
+    /**
+     * A marker as seen: where, what, the most sky light beside it (15 out in the open, 0 in a cave or a cellar), and for
+     * a banner whether it is an ominous one (a pillager outpost's: no player's mark, the user's word of Nov 17).
+     */
+    record Mark(BlockPos pos, Block block, int sky, boolean ominous) { }
+
+    /**
+     * The ominous banner's layers as 26.3 makes it (Raid.getBannerComponentPatch; the jar's pillager_outpost/watchtower
+     * pieces hold the same on their white wall banners), "pattern color", in order: what is used when the client's
+     * registry cannot build Raid's own.
+     */
+    static final List<String> OMINOUS_LAYERS = List.of("minecraft:rhombus cyan", "minecraft:stripe_bottom light_gray", "minecraft:stripe_center gray",
+        "minecraft:border light_gray", "minecraft:stripe_middle black", "minecraft:half_horizontal light_gray", "minecraft:circle light_gray", "minecraft:border black");
+    /** Raid's own ominous banner's layers, read from the client's registry once (null: not yet, or it could not). */
+    private static List<String> ominousLayers;
+
+    /** A banner's layers as "pattern color" (pure but for the holders' names). */
+    static List<String> layerKeys(net.minecraft.world.level.block.entity.BannerPatternLayers l) {
+        List<String> out = new ArrayList<>();
+        for (var layer : l.layers()) out.add(layer.pattern().getRegisteredName() + " " + layer.color().getSerializedName());
+        return out;
+    }
+
+    /** An ominous banner (pure): a white one with the ominous banner's layers, all of them in their order, no more. */
+    static boolean ominous(String base, List<String> layers, List<String> want) {
+        return "white".equals(base) && layers.equals(want);
+    }
+
+    /** The ominous banner's layers: Raid's, built from the client's banner pattern registry, else OMINOUS_LAYERS. */
+    private static List<String> ominousLayers(ClientLevel level) {
+        if (ominousLayers != null) return ominousLayers;
+        try {
+            var patterns = level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BANNER_PATTERN);
+            var item = net.minecraft.world.entity.raid.Raid.getOminousBannerInstance(patterns);
+            var layers = item.get(net.minecraft.core.component.DataComponents.BANNER_PATTERNS);
+            ominousLayers = layers == null || layers.layers().isEmpty() ? OMINOUS_LAYERS : layerKeys(layers);
+        } catch (RuntimeException e) {
+            ominousLayers = OMINOUS_LAYERS;
+        }
+        return ominousLayers;
+    }
+
+    /** The banner at `at` is an ominous one (its block entity's base colour and patterns: the client has them). */
+    private static boolean ominousAt(ClientLevel level, BlockPos at, BlockState st) {
+        if (!(st.getBlock() instanceof net.minecraft.world.level.block.AbstractBannerBlock)) return false;
+        if (!(level.getBlockEntity(at) instanceof net.minecraft.world.level.block.entity.BannerBlockEntity b)) return false;
+        return ominous(b.getBaseColor().getSerializedName(), layerKeys(b.getPatterns()), ominousLayers(level));
+    }
 
     static final class Zone {
         int x1, y1, z1, x2, y2, z2;
@@ -294,7 +340,7 @@ public final class Foreign {
                             if (ownPortal.contains(at)) continue;
                         }
                         if (Protection.isOwn(at)) continue;
-                        marks.add(new Mark(at, st.getBlock(), skyBeside(level, at, side)));
+                        marks.add(new Mark(at, st.getBlock(), skyBeside(level, at, side), ominousAt(level, at, st)));
                     }
                 }
                 long key = (((long) cx) << 32) ^ (cz & 0xffffffffL);
@@ -543,12 +589,14 @@ public final class Foreign {
             for (Portal.Shape sh : foreignPortals(which)) out.add(sh.json());
             return obj("dimension", which, "portals", out);
         });
-        // {x1, z1, x2, z2, y1?, y2?, dimension?, match?: regex, max?: 64} -> {dimension, kinds: {name: count}, at: [{x, y,
-        // z, name}], chunks, of}: the markers the scans have seen in a box (on any walk this session: what each chunk held
+        // {x1, z1, x2, z2, y1?, y2?, dimension?, match?: regex, max?: 64} -> {dimension, kinds: {name: count}, ominous:
+        // {name: count}, at: [{x, y, z, name, ominous?}], chunks, of}: the markers the scans have seen in a box (on any
+        // walk this session: what each chunk held
         // when last looked at), counted by kind; `at` lists those whose name matches `match` (a village's bell, beds and
         // job sites), nearest the box's middle first, at most `max`; `chunks` of the box's `of` chunks were looked at. The
         // brain's courtesy judge of a village (P5c) reads round it for what only a player puts there (a sign, a rail,
-        // redstone, a portal): the zones name only their six commonest kinds, and a village's hundreds of planks hide a sign
+        // redstone, a portal): the zones name only their six commonest kinds, and a village's hundreds of planks hide a sign.
+        // `ominous`: of those kinds, the ominous banners (a pillager outpost's), which the judge takes for no player's mark
         s.register("foreign.marks", true, (p, c) -> {
             fresh(Minecraft.getInstance());
             String which = Names.strip(strParam(p, "dimension", Nether.here()));
@@ -560,7 +608,7 @@ public final class Foreign {
             Pattern pat = match == null || match.isEmpty() ? null : Pattern.compile(match);
             int max = Math.max(0, Math.min(512, intParam(p, "max", 64)));
             Dim dim = dim(which);
-            Map<String, Integer> kinds = new java.util.TreeMap<>();
+            Map<String, Integer> kinds = new java.util.TreeMap<>(), ominous = new java.util.TreeMap<>();
             List<Mark> hits = new ArrayList<>();
             int looked = 0, of = 0;
             for (int cx = x1 >> 4; cx <= x2 >> 4; cx++) for (int cz = z1 >> 4; cz <= z2 >> 4; cz++) {
@@ -574,6 +622,7 @@ public final class Foreign {
                     if (q.getX() < x1 || q.getX() > x2 || q.getZ() < z1 || q.getZ() > z2 || q.getY() < y1 || q.getY() > y2) continue;
                     String n = name(m.block());
                     kinds.merge(n, 1, Integer::sum);
+                    if (m.ominous()) ominous.merge(n, 1, Integer::sum);
                     if (pat != null && pat.matcher(n).matches()) hits.add(m);
                 }
             }
@@ -581,13 +630,56 @@ public final class Foreign {
             hits.sort(java.util.Comparator.comparingDouble(m -> Math.hypot(m.pos().getX() - mx, m.pos().getZ() - mz)));
             JsonObject k = new JsonObject();
             for (Map.Entry<String, Integer> e : kinds.entrySet()) k.addProperty(e.getKey(), e.getValue());
+            JsonObject om = new JsonObject();
+            for (Map.Entry<String, Integer> e : ominous.entrySet()) om.addProperty(e.getKey(), e.getValue());
             JsonArray at = new JsonArray();
             for (int i = 0; i < hits.size() && i < max; i++) {
                 JsonObject o = pos(hits.get(i).pos());
                 o.addProperty("name", name(hits.get(i).block()));
+                if (hits.get(i).ominous()) o.addProperty("ominous", true);
                 at.add(o);
             }
-            return obj("dimension", which, "kinds", k, "at", at, "chunks", looked, "of", of);
+            return obj("dimension", which, "kinds", k, "ominous", om, "at", at, "chunks", looked, "of", of);
+        });
+        // {x?, z?, r?: 96, max?: 32} -> {dimension, at: [{x, y, z, name, ominous?}], chunks}: the banners in the chunks
+        // the client holds within r of (x, z) (the bot, by default), read from their block entities now, the ominous ones
+        // (a pillager outpost's: `ominous`) first, then the nearest. The scans' markers reach only SCAN_RADIUS round the bot, and a walk out
+        // judges an outpost ahead from farther (the brain's villagemove.ts dangerAt: a banner 64 to 111 ahead was unknown
+        // at a stop, and the next leg walked to within 15 of it). `chunks`: those held of the box's
+        s.register("foreign.banners", true, (p, c) -> {
+            Minecraft mc = Minecraft.getInstance();
+            ClientLevel level = mc.level;
+            if (mc.player == null || level == null) throw new IllegalStateException("not in a world");
+            int x = intParam(p, "x", mc.player.getBlockX()), z = intParam(p, "z", mc.player.getBlockZ());
+            int r = Math.max(1, Math.min(160, intParam(p, "r", 96)));
+            int max = Math.max(0, Math.min(256, intParam(p, "max", 32)));
+            long r2 = (long) r * r;
+            List<Mark> hits = new ArrayList<>();
+            int held = 0;
+            for (int cx = (x - r) >> 4; cx <= (x + r) >> 4; cx++) for (int cz = (z - r) >> 4; cz <= (z + r) >> 4; cz++) {
+                LevelChunk ch = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
+                if (ch == null) continue;
+                held++;
+                for (var be : ch.getBlockEntities().values()) {
+                    if (!(be instanceof net.minecraft.world.level.block.entity.BannerBlockEntity)) continue;
+                    BlockPos q = be.getBlockPos();
+                    long dx = q.getX() - x, dz = q.getZ() - z;
+                    if (dx * dx + dz * dz > r2 || Protection.isOwn(q)) continue;
+                    BlockState st = be.getBlockState();
+                    hits.add(new Mark(q, st.getBlock(), 0, ominousAt(level, q, st)));
+                }
+            }
+            // (the ominous ones first, then the nearest: a village's or a player's dozens of banners never crowd them out)
+            hits.sort(java.util.Comparator.comparing((Mark m) -> !m.ominous())
+                .thenComparingDouble(m -> Math.hypot(m.pos().getX() - x, m.pos().getZ() - z)));
+            JsonArray at = new JsonArray();
+            for (int i = 0; i < hits.size() && i < max; i++) {
+                JsonObject o = pos(hits.get(i).pos());
+                o.addProperty("name", name(hits.get(i).block()));
+                if (hits.get(i).ominous()) o.addProperty("ominous", true);
+                at.add(o);
+            }
+            return obj("dimension", Nether.here(), "at", at, "chunks", held);
         });
         // {positions: [[x, y, z], ...]} -> {inside: [bool, ...]}: which are in someone else's build
         s.register("foreign.at", true, (p, c) -> {

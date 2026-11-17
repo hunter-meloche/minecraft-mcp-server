@@ -19,6 +19,7 @@ import { kitDecline, oreTrip, tripCheck, type OreWant } from './deep.js';
 import { kitNeeds, tier } from './kit.js';
 import { WOODS_DIRS, kitSteps } from './chores.js';
 import { ownItems } from './community.js';
+import { withSwapped } from './netherset.js';
 import { NEAR_HOME } from './pockets.js';
 import { STRING_KEEP, allItems, recipeFor, stillShort } from './progress.js';
 import { WATER_FROM_HOME, cutStand, dropDeadCells, findWildCane, liveCells, plantCane, wildCane } from './cane.js';
@@ -410,7 +411,7 @@ const tripKit: WorkTask = {
   },
   ready: (s, world, variant) => {
     const part = PARTS[variant];
-    const needs = kitNeeds(ownItems(s.items, world), freeChestTotals(world)).filter(n => part.kinds.includes(n.kind));
+    const needs = kitNeeds(withSwapped(ownItems(s.items, world), world), freeChestTotals(world)).filter(n => part.kinds.includes(n.kind));
     if (!needs.some(n => n.plan.some(st => 'take' in st || 'craft' in st))) {
       const short: Record<string, number> = {};
       for (const n of needs) for (const st of n.plan) if ('gather' in st) for (const [k, v] of Object.entries(st.gather)) short[k] = (short[k] ?? 0) + v;

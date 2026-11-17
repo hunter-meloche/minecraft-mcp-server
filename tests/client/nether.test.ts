@@ -247,7 +247,8 @@ test('the Nether kit: whole and fed, 40 food points, the golden helmet, a shield
   // Nether kit (F3: its own keep, not the home kit's)
   const w = liveWorld();
   w.progress!.carryCap = { oak_planks: 64 };
-  t.deepEqual(stashKeep(w, 'nether').keep, new Set(['obsidian', 'flint_and_steel', 'golden_helmet', 'shield', ...NETHER_BLOCKS]));
+  // (and the potions: the one of fire resistance for the Guardian's hook, D1)
+  t.deepEqual(stashKeep(w, 'nether').keep, new Set(['obsidian', 'flint_and_steel', 'golden_helmet', 'shield', 'potion', ...NETHER_BLOCKS]));
   t.is(stashKeep(w, 'nether').cap?.oak_planks, undefined);
   t.is(stashKeep(w).cap?.oak_planks, 64, 'at home for anything else, the project\'s cap as ever');
 });

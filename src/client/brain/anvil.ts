@@ -1,8 +1,9 @@
 import { brainRun, type ChestStack, type InventoryItem, type ItemEnchantment } from '../tools.js';
 import { fromGate, no, onHomeLevel, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
-import { carriedKit, gearKind, tier, type GearKind } from './kit.js';
-import { freeChestTotals, key, peekChest, sameStack, storedStacks, takeFromChests, takeSlot } from './chests.js';
+import { better, carriedKit, gearKind, tier, type ArmourKind, type GearKind } from './kit.js';
+import { freeChestTotals, key, kindChests, peekChest, sameStack, storeStackAt, storedStacks, takeFromChests, takeSlot } from './chests.js';
+import { NETHER_WANTED, isNetherPiece, netherSetPiece, storedNetherPieces } from './netherset.js';
 // (enchant.ts takes bookOfUse from here: each uses the other's exports inside functions only)
 import { plainLeft, wornSlot } from './enchant.js';
 import { workshopAnvil } from './workshop.js';
@@ -168,8 +169,13 @@ const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 export const ANVIL_ORDER = ['pickaxe', 'chestplate', 'leggings', 'helmet', 'boots', 'sword'] as const;
 export type AnvilKind = typeof ANVIL_ORDER[number];
 
+/**
+ * The main set's armour: protection 4, which excludes fire protection (the Nether set's: netherset.ts NETHER_WANTED).
+ * A fire protection book never goes on it (spoils: it would shut protection out for good), and the anvil puts the
+ * protection books on the main set only (a Nether piece has fire protection, which a protection book cannot join).
+ */
 const ARMOUR_WANTED = { mending: 1, protection: 4, unbreaking: 3 };
-/** The enchantments wanted on each kind, at the level wanted: a book goes on when it adds or raises one of them. */
+/** The enchantments wanted on each kind of the main set, at the level wanted: a book goes on when it adds or raises one of them. */
 export const WANTED: Readonly<Record<AnvilKind, Readonly<Record<string, number>>>> = {
   pickaxe: { mending: 1, unbreaking: 3, efficiency: 5, fortune: 3 },
   sword: { mending: 1, sharpness: 5, unbreaking: 3, looting: 3 },
@@ -299,22 +305,75 @@ function inUse(items: InventoryItem[], kind: AnvilKind): InventoryItem | undefin
 }
 
 /**
- * What a book would spoil: a curse put on, or an enchantment that shuts a wanted one out for good (blast protection
- * where protection is wanted, silk touch on a pickaxe without fortune, smite on a sword without sharpness).
+ * A piece the anvil sees to, with what it wants: the main set's piece in use (inUse: the kit's best of the kind, not
+ * the Nether set's), or the Nether set's piece of the kind (netherset.ts: fire protection on it), carried or worn,
+ * else the best of it in the home chests (`at`: its chest, the piece's `slot` the chest's own), where it lies between
+ * trips. The pieces of both sets are enchanted (the table's first: a plain one is no subject).
  */
-function spoils(kind: AnvilKind, before: ItemEnchantment[] | undefined, after: ItemEnchantment[]): boolean {
+interface Subject { piece: InventoryItem; kind: AnvilKind; wanted: Wanted; at?: Pos }
+
+const unbound = (i: InventoryItem) => !i.enchantments?.some(e => e.name === 'binding_curse');
+
+/** The Nether set's pieces, by ANVIL_ORDER: a carried or worn one of a kind first, else the best of it in the chests (`stored`). */
+function netherSubjects(items: InventoryItem[], stored: { chest: Pos; stack: ChestStack }[]): Subject[] {
+  const out: Subject[] = [];
+  for (const kind of ANVIL_ORDER) {
+    if (!NETHER_WANTED[kind as ArmourKind]) continue;
+    const ofKind = (i: InventoryItem) => gearKind(i.name) === kind && netherSetPiece(i) && unbound(i);
+    const carried = items.filter(i => ofKind(i) && (i.slot < 36 || wornSlot(i))).sort(better)[0];
+    if (carried) { out.push({ piece: carried, kind, wanted: wantedFor(carried) }); continue; }
+    const inChest = stored.filter(f => ofKind(f.stack)).sort((a, b) => better(a.stack, b.stack))[0];
+    if (inChest) out.push({ piece: inChest.stack, kind, wanted: wantedFor(inChest.stack), at: inChest.chest });
+  }
+  return out;
+}
+
+/** The main set's pieces in use, by ANVIL_ORDER. */
+function mainSubjects(items: InventoryItem[]): Subject[] {
+  return ANVIL_ORDER.flatMap(kind => {
+    const piece = inUse(items, kind);
+    return piece && !isNetherPiece(piece) ? [{ piece, kind, wanted: wantedFor(piece) }] : [];
+  });
+}
+
+/**
+ * Every piece the anvil sees to, the Nether set's first: the user's "prioritize getting fire resistance gear for
+ * nether in general" (D1). A book never serves both (protection and fire protection exclude each other), but a
+ * mending or unbreaking book goes to the Nether set first.
+ */
+const subjects = (items: InventoryItem[], stored: { chest: Pos; stack: ChestStack }[]): Subject[] => [...netherSubjects(items, stored), ...mainSubjects(items)];
+
+type Wanted = Readonly<Record<string, number>>;
+
+/**
+ * What a piece of its kind wants: the Nether set's (netherset.ts NETHER_WANTED: fire protection 4, unbreaking 3, mending
+ * 1, the boots feather falling 4) for a piece with fire protection or the golden helmet, the main set's (WANTED) for
+ * the rest.
+ */
+export function wantedFor(piece: Pick<InventoryItem, 'name' | 'enchantments'>): Wanted {
+  const kind = kindOf(piece.name);
+  if (!kind) return {};
+  return isNetherPiece(piece) ? NETHER_WANTED[kind as ArmourKind] ?? {} : WANTED[kind];
+}
+
+/**
+ * What a book would spoil: a curse put on, or an enchantment that shuts a wanted one out for good (blast protection
+ * where protection is wanted, fire protection on the main set, protection on the Nether set, silk touch on a pickaxe
+ * without fortune, smite on a sword without sharpness).
+ */
+function spoils(wanted: Wanted, before: ItemEnchantment[] | undefined, after: ItemEnchantment[]): boolean {
   return after.some(e => !levelOf(before, e.name) &&
-    (/_curse$/.test(e.name) || Object.keys(WANTED[kind]).some(w => clash(e.name, w) && !levelOf(after, w))));
+    (/_curse$/.test(e.name) || Object.keys(wanted).some(w => clash(e.name, w) && !levelOf(after, w))));
 }
 
 /** The wanted enchantments a result raises (up to the level wanted), at the level it has them. */
-function raised(kind: AnvilKind, before: ItemEnchantment[] | undefined, after: ItemEnchantment[]): ItemEnchantment[] {
-  return Object.entries(WANTED[kind])
+function raised(wanted: Wanted, before: ItemEnchantment[] | undefined, after: ItemEnchantment[]): ItemEnchantment[] {
+  return Object.entries(wanted)
     .filter(([name, want]) => Math.min(levelOf(after, name), want) > Math.min(levelOf(before, name), want))
     .map(([name]) => ({ name, level: levelOf(after, name) }));
 }
-const gain = (kind: AnvilKind, before: ItemEnchantment[] | undefined, after: ItemEnchantment[]) =>
-  raised(kind, before, after).reduce((n, e) => n + Math.min(e.level, WANTED[kind][e.name]) - Math.min(levelOf(before, e.name), WANTED[kind][e.name]), 0);
+const gain = (wanted: Wanted, before: ItemEnchantment[] | undefined, after: ItemEnchantment[]) =>
+  raised(wanted, before, after).reduce((n, e) => n + Math.min(e.level, wanted[e.name]) - Math.min(levelOf(before, e.name), wanted[e.name]), 0);
 
 /** Where the book or the diamonds of a job are: carried (`slot`, a pocket), in a chest (`chest`, `slot` its own), or in the chests by count alone (neither). */
 export interface AnvilSource { name: string; count: number; slot?: number; chest?: Pos; enchantments?: ItemEnchantment[]; repairCost?: number }
@@ -322,7 +381,10 @@ export interface AnvilSource { name: string; count: number; slot?: number; chest
 /** The job the plan chose: what it is, the piece and what goes with it, what it should cost and may cost. */
 export interface AnvilPlan {
   job: 'repair' | 'mending' | 'book';
+  /** the piece: carried or worn, or (with `at`) in that chest, its `slot` the chest's own */
   piece: InventoryItem;
+  /** the chest the piece lies in (the Nether set's between trips): taken out by its slot for the job, put back after */
+  at?: Pos;
   add: AnvilSource;
   /** the cost as the plan works it out by the game's rules (the anvil's own shown cost is what counts: useAnvil) */
   cost: number;
@@ -371,9 +433,22 @@ function leftAlone(tried: NonNullable<AnvilMemory['tried']>, k: string, cap: num
   return t.why !== 'over the cap' || !(cap >= (t.cost ?? Infinity));
 }
 
-/** Pocket slots a job fills on its way: the piece off its armour slot, the book or the diamonds out of a chest. */
-export const slotsFor = (j: Pick<AnvilPlan, 'piece' | 'add'>) =>
-  (wornSlot(j.piece) ? 1 : 0) + (j.add.chest || j.add.slot === undefined ? 1 : 0);
+/** Pocket slots a job fills on its way: the piece off its armour slot or out of its chest, the book or the diamonds out of a chest. */
+export const slotsFor = (j: Pick<AnvilPlan, 'piece' | 'add' | 'at'>) =>
+  (j.at || wornSlot(j.piece) ? 1 : 0) + (j.add.chest || j.add.slot === undefined ? 1 : 0);
+
+/** A piece the plan works on is worn (its armour slot): never one in a chest, whose slot is the chest's own. */
+const wornHere = (j: Pick<AnvilPlan, 'piece' | 'at'>) => (j.at ? undefined : wornSlot(j.piece));
+
+/**
+ * What a piece is repaired with: diamonds for diamond, gold ingots for gold (the Nether set's golden helmet: 77 of
+ * durability, and the leave nether goal turns a trip home at 20% of it), none for the rest here.
+ */
+export const repairWith = (name: string): 'diamond' | 'gold_ingot' | undefined =>
+  (name.startsWith('diamond_') ? 'diamond' : name.startsWith('golden_') ? 'gold_ingot' : undefined);
+
+/** Gold ingots the anvil leaves in the chests: the barter's reserve (netherbarter.ts GOLD_RESERVE: the netherite's 16 and a golden helmet's 5). */
+export const GOLD_KEPT = 21;
 
 export interface PlanOptions {
   /** world.anvil.tried */
@@ -385,6 +460,8 @@ export interface PlanOptions {
    * cover it (the reserve is a count, and a take by the slot takes whatever the stack holds); no limit when not given
    */
   diamonds?: number;
+  /** the same for the gold ingots a golden piece's repair takes: the chests' free ones over GOLD_KEPT; no limit when not given */
+  gold?: number;
   /**
    * the pockets less what a community mission is owed (ownItems), for a repair's diamonds: what is gathered for a
    * mission is the community chest's until it is handed over, and a delivery that failed leaves it carried for a
@@ -396,15 +473,18 @@ export interface PlanOptions {
 }
 
 /**
- * The next anvil job, pure: the pockets (`items`, worn armour too), the stacks in the chests (`stored`: books and
- * diamonds, storedStacks) and the level. In this order:
- * 1. a worn enchanted piece (below REPAIR_BELOW) mended with the diamonds it needs, the most worn of the first kind in
- *    ANVIL_ORDER first: an enchanted piece that breaks takes its enchantments with it;
- * 2. a mending book onto the next piece in use without mending, by ANVIL_ORDER;
- * 3. a book that adds or raises a WANTED enchantment on the piece in use, by ANVIL_ORDER, the one that raises most first.
+ * The next anvil job, pure: the pockets (`items`, worn armour too), the stacks in the chests (`stored`: books,
+ * diamonds, gold ingots and the Nether set's pieces, storedStacks) and the level. Of the pieces it sees to (subjects:
+ * the Nether set's first, carried, worn or in its chest, then the main set's in use), in this order:
+ * 1. a worn enchanted piece (below REPAIR_BELOW) mended with the diamonds (gold ingots for the golden helmet) it needs:
+ *    the Nether set's first, then the most worn of the first kind in ANVIL_ORDER: an enchanted piece that breaks takes
+ *    its enchantments with it;
+ * 2. a mending book onto the next piece without mending;
+ * 3. a book that adds or raises an enchantment its set wants (WANTED for the main set, NETHER_WANTED for the Nether
+ *    set's), the one that raises most first.
  * Never a job that costs more than costCap, nor a pair tried to no avail (world.anvil.tried), nor a book that spoils a
- * piece; a piece worked on REPAIR_COST_SKIP before gets no more books (step 3). The books carried come before the
- * chests' (nothing to fetch).
+ * piece (a fire protection book on the main set, a protection book on the Nether set's); a piece worked on
+ * REPAIR_COST_SKIP before gets no more books (step 3). The books carried come before the chests' (nothing to fetch).
  */
 export function anvilPlan(items: InventoryItem[], stored: { chest: Pos; stack: ChestStack }[], xpLevel: number, opts: PlanOptions = {}): AnvilPlan | undefined {
   const cap = costCap(items, xpLevel);
@@ -416,14 +496,27 @@ export function anvilPlan(items: InventoryItem[], stored: { chest: Pos; stack: C
     if (j.cost > cap || leftAlone(tried, k, cap, now) || slotsFor(j) > (opts.free ?? Infinity)) return undefined;
     return { ...j, cap, key: k };
   };
-  const diamondsFor = (n: number): AnvilSource | undefined => {
-    const carried = (opts.own ?? items).filter(i => i.slot < 36 && i.name === 'diamond' && i.count >= n).sort((a, b) => b.count - a.count)[0];
-    if (carried) return { name: 'diamond', count: n, slot: carried.slot };
-    const inChest = (opts.diamonds === undefined || opts.diamonds >= n) && stored.find(f => f.stack.name === 'diamond' && f.stack.count >= n);
-    if (inChest) return { name: 'diamond', count: n, chest: inChest.chest, slot: inChest.stack.slot };
-    return (opts.diamonds ?? 0) >= n ? { name: 'diamond', count: n } : undefined;
+  const materialFor = (name: 'diamond' | 'gold_ingot', n: number): AnvilSource | undefined => {
+    const limit = name === 'diamond' ? opts.diamonds : opts.gold;
+    const carried = (opts.own ?? items).filter(i => i.slot < 36 && i.name === name && i.count >= n).sort((a, b) => b.count - a.count)[0];
+    if (carried) return { name, count: n, slot: carried.slot };
+    const inChest = (limit === undefined || limit >= n) && stored.find(f => f.stack.name === name && f.stack.count >= n);
+    if (inChest) return { name, count: n, chest: inChest.chest, slot: inChest.stack.slot };
+    return (limit ?? 0) >= n ? { name, count: n } : undefined;
   };
-  // 1. mended with diamonds: diamond pieces only (netherite takes netherite ingots: P6)
+  const diamondsFor = (n: number) => materialFor('diamond', n);
+  const nether = netherSubjects(items, stored);
+  const all = [...nether, ...mainSubjects(items)];
+  // 1. mended: the Nether set's first (in its chest too), then the main set's as before, diamond pieces only
+  // (netherite takes netherite ingots: P6)
+  for (const sub of nether) {
+    const with_ = repairWith(sub.piece.name);
+    if (!with_ || !(durability(sub.piece) < REPAIR_BELOW)) continue;
+    const n = repairUnits(sub.piece);
+    const add = n ? materialFor(with_, n) : undefined;
+    const j = add && job({ job: 'repair', piece: sub.piece, ...(sub.at ? { at: sub.at } : {}), add, cost: (sub.piece.repairCost ?? 0) + n, for: [] });
+    if (j) return j;
+  }
   for (const kind of ANVIL_ORDER) {
     const worn = items.filter(i => workable(i) === kind && i.name.startsWith('diamond_') && durability(i) < REPAIR_BELOW)
       .sort((a, b) => durability(a) - durability(b));
@@ -441,26 +534,24 @@ export function anvilPlan(items: InventoryItem[], stored: { chest: Pos; stack: C
       .map(f => ({ name: f.stack.name, count: 1, chest: f.chest, slot: f.stack.slot, enchantments: f.stack.enchantments, repairCost: f.stack.repairCost }))
   ];
   // 2. mending, whatever the piece's earlier work: from then on it mends itself
-  for (const kind of ANVIL_ORDER) {
-    const piece = inUse(items, kind);
-    if (!piece || levelOf(piece.enchantments, 'mending')) continue;
+  for (const { piece, wanted, at } of all) {
+    if (levelOf(piece.enchantments, 'mending')) continue;
     for (const add of books.filter(b => levelOf(b.enchantments, 'mending'))) {
       const r = bookOnto(piece, add);
-      if (!r || !levelOf(r.enchantments, 'mending') || spoils(kind, piece.enchantments, r.enchantments)) continue;
-      const j = job({ job: 'mending', piece, add, cost: r.cost, for: [{ name: 'mending', level: 1 }] });
+      if (!r || !levelOf(r.enchantments, 'mending') || spoils(wanted, piece.enchantments, r.enchantments)) continue;
+      const j = job({ job: 'mending', piece, ...(at ? { at } : {}), add, cost: r.cost, for: [{ name: 'mending', level: 1 }] });
       if (j) return j;
     }
   }
   // 3. the books that raise what is wanted
-  for (const kind of ANVIL_ORDER) {
-    const piece = inUse(items, kind);
-    if (!piece || (piece.repairCost ?? 0) >= REPAIR_COST_SKIP) continue;
+  for (const { piece, wanted, at } of all) {
+    if ((piece.repairCost ?? 0) >= REPAIR_COST_SKIP) continue;
     const options = books.flatMap(add => {
       const r = bookOnto(piece, add);
-      return r && !spoils(kind, piece.enchantments, r.enchantments) ? [{ add, r, gain: gain(kind, piece.enchantments, r.enchantments) }] : [];
+      return r && !spoils(wanted, piece.enchantments, r.enchantments) ? [{ add, r, gain: gain(wanted, piece.enchantments, r.enchantments) }] : [];
     }).filter(o => o.gain > 0).sort((a, b) => b.gain - a.gain || a.r.cost - b.r.cost);
     for (const o of options) {
-      const j = job({ job: 'book', piece, add: o.add, cost: o.r.cost, for: raised(kind, piece.enchantments, o.r.enchantments) });
+      const j = job({ job: 'book', piece, ...(at ? { at } : {}), add: o.add, cost: o.r.cost, for: raised(wanted, piece.enchantments, o.r.enchantments) });
       if (j) return j;
     }
   }
@@ -468,31 +559,44 @@ export function anvilPlan(items: InventoryItem[], stored: { chest: Pos; stack: C
 }
 
 /**
- * Whether the anvil has a use for a book: it would put mending on a piece in use without it, or raise a wanted
- * enchantment on one (and spoil nothing), whatever the levels now. What the enchant chore keeps BOOK_STOCK of: counted
- * by name, six books it had no use for (bane of arthropods, fire protection 2) would have stopped the books for good.
+ * Whether the anvil has a use for a book: it would put mending on a piece it sees to without it, or raise an
+ * enchantment that piece's set wants (and spoil nothing), whatever the levels now: the main set's pieces in use, and
+ * the Nether set's carried, worn or in the chests (`stored`: storedNetherPieces). What the enchant chore keeps
+ * BOOK_STOCK of: counted by name, six books it had no use for (bane of arthropods, fire protection 2 before the Nether
+ * set) would have stopped the books for good.
  */
-export function bookOfUse(items: InventoryItem[], book: Pick<InventoryItem, 'enchantments' | 'repairCost'>): boolean {
-  return ANVIL_ORDER.some(kind => {
-    const piece = inUse(items, kind);
-    const r = piece && bookOnto(piece, book);
-    if (!piece || !r || spoils(kind, piece.enchantments, r.enchantments)) return false;
+export function bookOfUse(items: InventoryItem[], book: Pick<InventoryItem, 'enchantments' | 'repairCost'>, stored: { chest: Pos; stack: ChestStack }[] = []): boolean {
+  return subjects(items, stored).some(({ piece, wanted }) => {
+    const r = bookOnto(piece, book);
+    if (!r || spoils(wanted, piece.enchantments, r.enchantments)) return false;
     if (levelOf(r.enchantments, 'mending') && !levelOf(piece.enchantments, 'mending')) return true;
-    return (piece.repairCost ?? 0) < REPAIR_COST_SKIP && gain(kind, piece.enchantments, r.enchantments) > 0;
+    return (piece.repairCost ?? 0) < REPAIR_COST_SKIP && gain(wanted, piece.enchantments, r.enchantments) > 0;
   });
 }
 
-/** The job in words, for the want: `protection 4 onto the diamond_chestplate (worn)`. */
+/**
+ * The job in words, for the want: `protection 4 onto the diamond_chestplate (worn)`, `fire_protection 4 onto the nether
+ * set's diamond_boots (in its chest)`.
+ */
 export function describe(p: AnvilPlan): string {
-  const worn = wornSlot(p.piece) ? ' (worn)' : '';
-  if (p.job === 'repair') return `repair the ${p.piece.name}${worn} (${Math.floor(durability(p.piece) * 100)}% left) with ${p.add.count} diamonds`;
-  return `${named(p.for)} onto the ${p.piece.name}${worn}`;
+  const where = p.at ? ' (in its chest)' : wornSlot(p.piece) ? ' (worn)' : '';
+  const the = isNetherPiece(p.piece) ? 'the nether set\'s' : 'the';
+  if (p.job === 'repair') return `repair ${the} ${p.piece.name}${where} (${Math.floor(durability(p.piece) * 100)}% left) with ${p.add.count} ${p.add.name === 'diamond' ? 'diamonds' : 'gold ingots'}`;
+  return `${named(p.for)} onto ${the} ${p.piece.name}${where}`;
 }
+
+/** What the plan reads in the chests: the books, the diamonds and gold ingots of a repair, the Nether set's pieces. */
+const plannedStacks = (world: WorldMemory) => [
+  ...storedStacks(world, st => st.name === 'enchanted_book' || st.name === 'diamond' || st.name === 'gold_ingot'),
+  ...storedNetherPieces(world)
+];
 
 /** The plan for the pockets and the chests as they are now; `free`: the slots it may fill, leaving the stash its yard room (ROOM.yard). */
 export function planFor(s: Snapshot, world: WorldMemory, free = 36 - s.slotsUsed - ROOM.yard): AnvilPlan | undefined {
-  const stored = storedStacks(world, st => st.name === 'enchanted_book' || st.name === 'diamond');
-  return anvilPlan(s.items, stored, s.xpLevel ?? 0, { tried: triedOf(world), now: s.now, diamonds: freeChestTotals(world).diamond ?? 0, own: ownItems(s.items, world), free });
+  const stock = freeChestTotals(world);
+  return anvilPlan(s.items, plannedStacks(world), s.xpLevel ?? 0, {
+    tried: triedOf(world), now: s.now, diamonds: stock.diamond ?? 0, gold: Math.max(0, (stock.gold_ingot ?? 0) - GOLD_KEPT), own: ownItems(s.items, world), free
+  });
 }
 
 /**
@@ -507,11 +611,11 @@ export function unseenBooks(world: WorldMemory): Pos[] {
   });
 }
 
-/** Unseen books to look over: none looked over in the last LOOK_EVERY, and a piece in use the levels could see to. */
+/** Unseen books to look over: none looked over in the last LOOK_EVERY, and a piece (of either set) the levels could see to. */
 function lookDue(s: Snapshot, world: WorldMemory): boolean {
   const last = world.anvil?.lookedAt;
   return !!unseenBooks(world).length && !(s.now - (typeof last === 'number' ? last : 0) < LOOK_EVERY) &&
-    costCap(s.items, s.xpLevel ?? 0) >= 1 && ANVIL_ORDER.some(k => inUse(s.items, k));
+    costCap(s.items, s.xpLevel ?? 0) >= 1 && subjects(s.items, storedNetherPieces(world)).length > 0;
 }
 
 /** An anvil to put down: one carried or stored, or 31 iron for one (ingots, blocks of nine, raw iron where a furnace smelts it). */
@@ -672,25 +776,39 @@ export const anvilGoal: Goal = {
       mem.gone = { ...at };
       return `the anvil at ${fmt(at)} is gone: one goes down there next`;
     }
-    const worn = wornSlot(plan.piece);
-    const out = await useAnvil(ctx, {
-      at, input: { name: plan.piece.name, ...(worn ? { worn } : { slot: plan.piece.slot }) },
-      additional: { name: plan.add.name, slot, count: plan.add.count }, maxCost: plan.cap, wants: wantsFor(plan)
-    });
-    const back = !worn ? '' : `; ${out.wore.includes(plan.piece.name) ? 'worn again' : 'not worn again: anvil.close put nothing on'}`;
+    const worn = wornHere(plan);
+    // the Nether set's piece out of its chest by its slot (the one with fire protection 3, not the first of its name),
+    // and back in after, whatever the anvil made of it: it lies there between trips
+    const pocketSlot = plan.at ? await fetchPiece(ctx, plan.at, plan.piece) : plan.piece.slot;
+    // (in the run only: a run the brain gave up leaves it carried, and the stash puts it away with the rest)
+    const returnPiece = async () => { if (plan.at && !ctx.signal.aborted) await putBackPiece(ctx, plan.piece.name).catch(() => undefined); };
+    let out: AnvilOutcome;
+    try {
+      out = await useAnvil(ctx, {
+        at, input: { name: plan.piece.name, ...(worn ? { worn } : { slot: pocketSlot }) },
+        additional: { name: plan.add.name, slot, count: plan.add.count }, maxCost: plan.cap, wants: wantsFor(plan)
+      });
+    } catch (e) {
+      await returnPiece();
+      throw e;
+    }
+    await returnPiece();
+    const back = !worn ? (plan.at ? '; back into the chests' : '') : `; ${out.wore.includes(plan.piece.name) ? 'worn again' : 'not worn again: anvil.close put nothing on'}`;
+    const the = isNetherPiece(plan.piece) ? 'the nether set\'s' : 'the';
     if (!out.taken) {
       // remembered, so the next run takes the next job and never this pair again (the book or the diamonds stay
       // carried: the plan counts the pockets' books first, and the stash puts them away in time)
       (mem.tried ??= {})[plan.key] = { why: out.why, at: ctx.s.now, ...(out.status.cost ? { cost: out.status.cost } : {}) };
       forget(mem, ctx.s.now);
-      return `left the ${plan.piece.name} as it was: ${out.text}${back}`;
+      return `left ${the} ${plan.piece.name} as it was: ${out.text}${back}`;
     }
     const t = out.take;
     const used = t.used ?? plan.add.count;
     const gained = t.enchantments.filter(e => e.level > levelOf(plan.piece.enchantments, e.name));
+    const what = plan.add.name === 'gold_ingot' ? `gold ingot${used === 1 ? '' : 's'}` : `diamond${used === 1 ? '' : 's'}`;
     const text = plan.job === 'repair'
-      ? `repaired the ${plan.piece.name} with ${used} diamond${used === 1 ? '' : 's'} (cost ${t.cost})`
-      : `${named(gained.length ? gained : plan.for)} onto the ${plan.piece.name} (cost ${t.cost}, level ${t.levelBefore} -> ${t.levelAfter})`;
+      ? `repaired ${the} ${plan.piece.name} with ${used} ${what} (cost ${t.cost})`
+      : `${named(gained.length ? gained : plan.for)} onto ${the} ${plan.piece.name} (cost ${t.cost}, level ${t.levelBefore} -> ${t.levelAfter})`;
     ctx.progress(text);
     let wear = '';
     if (t.anvil && AIR.test(t.anvil)) {
@@ -700,3 +818,26 @@ export const anvilGoal: Goal = {
     return `${text}${wear}${back}`;
   }
 };
+
+/**
+ * A piece in a chest (the Nether set's) into the pockets for the anvil: by its slot there (takeSlot: that stack, or the
+ * same one moved within the chest), then found in the pockets by what it is (its name and enchantments). Returns its
+ * pocket slot; throws when it did not come.
+ */
+async function fetchPiece(ctx: GoalContext, chest: Pos, piece: InventoryItem): Promise<number> {
+  const got = await takeSlot(ctx, chest, piece.slot, 1);
+  if (got < 1) throw new Error(`the ${piece.name} was not in the chest at ${fmt(chest)} any more`);
+  const mine = (await ctx.call<{ items: InventoryItem[] }>('inventory')).items.find(i => i.slot < 36 && sameStack(i, piece));
+  if (!mine) throw new Error(`the ${piece.name} is not in the pockets after the take`);
+  return mine.slot;
+}
+
+/**
+ * The Nether set's piece back into the gear chests by its pocket slot after the anvil (with what the anvil put on it,
+ * or as it was): of the pieces of its name carried, the Nether set's (fire protection on it). Left carried when no
+ * chest takes it: the stash puts it away (the kit's best is the main set's, so it is a spare piece to the stash).
+ */
+async function putBackPiece(ctx: GoalContext, name: string): Promise<void> {
+  const mine = (await ctx.call<{ items: InventoryItem[] }>('inventory')).items.filter(i => i.slot < 36 && i.name === name && isNetherPiece(i));
+  for (const p of mine) await storeStackAt(ctx, p.name, p.slot, kindChests(ctx.world, p.name));
+}

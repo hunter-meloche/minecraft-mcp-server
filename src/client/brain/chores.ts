@@ -6,6 +6,7 @@ export { outsideBy } from './goals.js';
 import { breadToBake, CHEST_SPARE, COOKS_TO, FOOD_TARGET } from './food.js';
 import { BREED_STOCK } from './animals.js';
 import { owedItems, ownItems } from './community.js';
+import { withSwapped } from './netherset.js';
 // (deep.ts comes in through community.ts already; its goal is asked inside a function only)
 import { deepTrip } from './deep.js';
 import { NETHER_BLOCKS, NETHER_TRIP } from './mine.js';
@@ -149,10 +150,11 @@ const readyPoints = (name: string): number => {
 
 /**
  * What of the Nether kit (mine.ts NETHER_TRIP) is kept by name: the frame's obsidian, the fire starter, the gold, the
- * shield, the blocks. (Made at the call: nothing imported is read as this module loads, the brain's modules reaching
- * each other round about.)
+ * shield, the blocks, and the potions (the one of fire resistance for the Guardian's hook, D1: every potion is
+ * `potion` by name, and the bot brews none yet, so the barter's are the only ones it carries). (Made at the call:
+ * nothing imported is read as this module loads, the brain's modules reaching each other round about.)
  */
-const netherKit = () => ['obsidian', 'flint_and_steel', 'golden_helmet', 'shield', ...NETHER_BLOCKS];
+const netherKit = () => ['obsidian', 'flint_and_steel', 'golden_helmet', 'shield', 'potion', ...NETHER_BLOCKS];
 
 /**
  * What a trip to the Nether leaves carried (the pockets rule's `nether` room, and the setup's and the look's own room
@@ -914,18 +916,19 @@ export const kit: Goal = {
   wants: (s, world) => {
     if (!awakeAtHome(s)) return null;
     if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return 'look in the home chests';
-    const needs = kitNeeds(ownItems(s.items, world), freeChestTotals(world)).filter(doable);
+    const needs = kitNeeds(withSwapped(ownItems(s.items, world), world), freeChestTotals(world)).filter(doable);
     return needs.length ? `needs ${needs.map(label).join(', ')}` : null;
   },
   // not worth stopping a run of the work queue about the yard for: it ends within minutes, and the kit takes over at
   // the hand-over. The work queue's `trip kit` is such a run, and does the kit's own steps from out in the yard: as
   // it came to the chests, the kit wanted the same and stopped it every time ("stopping work: trip kit: kit is more
-  // urgent"), a run booked empty for the walk. A trip out is the brain's to rule on (brain.ts)
-  cuts: () => !(afield.work && !afield.trip),
+  // urgent"), a run booked empty for the walk. A trip out is the brain's to rule on (brain.ts), but never one dressed
+  // for the Nether (netherset.ts: the swap at home is its run's last kit step; a want then stopped the trip by home)
+  cuts: (_s, world) => !(afield.work && (!afield.trip || world.gearSwap?.wearing === 'nether')),
   run: async ctx => {
     await refreshChests(ctx, 0);
     // what it carries for a community mission is not its own to craft with
-    const plan = async () => kitNeeds(ownItems((await ctx.call<{ items: Snapshot['items'] }>('inventory')).items, ctx.world), freeChestTotals(ctx.world));
+    const plan = async () => kitNeeds(withSwapped(ownItems((await ctx.call<{ items: Snapshot['items'] }>('inventory')).items, ctx.world), ctx.world), freeChestTotals(ctx.world));
     let needs = await plan();
     // what comes out of the chests needs room in the pockets. Home from a trip down at 36/36, every take came back
     // empty and the craft after it failed: "missing ingredients for diamond_helmet: needs diamond x5 (have 0)" with
@@ -966,7 +969,7 @@ async function runStep(ctx: GoalContext, step: PlanStep): Promise<string | undef
  */
 export async function kitSteps(ctx: GoalContext, kinds: readonly string[]): Promise<string[]> {
   const inv = await ctx.call<{ items: Snapshot['items'] }>('inventory');
-  const needs = kitNeeds(ownItems(inv.items, ctx.world), freeChestTotals(ctx.world)).filter(n => kinds.includes(n.kind) && doable(n));
+  const needs = kitNeeds(withSwapped(ownItems(inv.items, ctx.world), ctx.world), freeChestTotals(ctx.world)).filter(n => kinds.includes(n.kind) && doable(n));
   const did: string[] = [];
   for (const need of needs) {
     for (const step of need.plan) {
@@ -1013,7 +1016,7 @@ function stockRows(s: Snapshot, world: WorldMemory): { rows: { name: string; sho
   const have = (re: RegExp) => [...s.counts].filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0) +
     Object.entries(chest).filter(([n]) => re.test(n)).reduce((a, [, k]) => a + k, 0);
   const extra: Record<string, number> = {};
-  for (const n of kitNeeds(s.items, chest)) {
+  for (const n of kitNeeds(withSwapped(s.items, world), chest)) {
     for (const st of n.plan) if ('gather' in st) for (const [k, v] of Object.entries(st.gather)) extra[k] = (extra[k] ?? 0) + v;
   }
   // raw iron at home is iron the smelter turns into ingots: not a reason to mine more

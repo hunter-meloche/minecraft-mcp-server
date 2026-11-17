@@ -33,7 +33,7 @@ import type { Zone } from './courtesy.js';
 import type { WorkResult } from './work.js';
 import { clock } from './idlelog.js';
 import { readBox } from './milestones.js';
-import { freeChestTotals, peekChest, takeFromChests } from './chests.js';
+import { freeChestTotals, peekChest, storedStacks, takeFromChests, takeSlot } from './chests.js';
 import { COOKS_TO, readyFoodPoints } from './food.js';
 import { holdHarmless } from './fluidpick.js';
 import { look } from './pockets.js';
@@ -41,9 +41,10 @@ import { putAway, stashKeep } from './chores.js';
 import { homePortal } from './portal.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit } from './mine.js';
 import {
-  NETHER, OVERWORLD, REFUSED_SPOTS, SEARCH, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells,
+  NETHER, OVERWORLD, REFUSED_SPOTS, SEARCH, isFirePotion, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells,
   scaled, spotFault, type PortalShape, type SetupSpot
 } from './nether.js';
+import { wearNetherSet } from './netherset.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -768,7 +769,9 @@ export async function findKit(ctx: GoalContext, names: readonly string[]): Promi
  * The Nether kit at home before the walk to the portal (mine.ts NETHER_TRIP and the frame's obsidian): what is short of
  * it out of the chests (never the spare set: takeFromChests leaves its pieces), food enough for 40 points, room made
  * again for the trip's 12 free slots with the Nether's own keep (the kit and nothing else), the golden helmet last (the
- * home stash would put it away as spare gear); eaten to full first, healed last. The golden helmet, the flint and
+ * home stash would put it away as spare gear) with a potion of fire resistance where the home has one (D1); eaten to
+ * full first, healed last, and then, nothing else short, dressed in the Nether set (netherset.ts wearNetherSet: the
+ * main set into the chests). The golden helmet, the flint and
  * steel and the frame's obsidian are looked for in the chests (findKit) where neither the pockets nor the memory hold
  * them, and again where a take found none where the memory said. Undefined when the bot is ready, else what it is
  * still short of, said only after all that.
@@ -840,7 +843,9 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
   // the trip's room with the Nether's own keep: its kit and nothing of what the bot carries for life at home (chores.ts
   // stashKeep; with the home kit kept the live room stored nothing and the trip did not set out, 9 slots free of 12)
   const helmet = total(items, ['golden_helmet']) > 0;
-  if (freeSlots(items) < NETHER_TRIP.slotsFree + (helmet ? 0 : 1)) {
+  const potion = () => items.some(i => i.slot >= 0 && i.slot < 36 && isFirePotion(i));
+  const potionDue = !potion() && storedStacks(ctx.world, isFirePotion).length > 0;
+  if (freeSlots(items) < NETHER_TRIP.slotsFree + (helmet ? 0 : 1) + (potionDue ? 1 : 0)) {
     await putAway(ctx, await look(ctx), stashKeep(ctx.world, 'nether')).catch(e => {
       ctx.progress(`making room for the nether kit: ${(e as Error).message}`);
     });
@@ -848,6 +853,14 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
   }
   if (!helmet) { await takeFromChests(ctx, 'golden_helmet', 1); await refresh(); }
   if (lacking().includes('golden_helmet') && !looked.has('golden_helmet')) { await seek(['golden_helmet']); await takeFromChests(ctx, 'golden_helmet', 1); await refresh(); }
+  // a potion of fire resistance for the Guardian's hook (client-mod Nether.fireResistance: drunk the moment the bot
+  // burns or stands in lava), on every trip while the home has one: down there every trip may meet lava, a ghast's fire
+  // or a fall into a lake. By its slot and its contents (every potion is `potion`), the long one first; the stash's
+  // Nether keep keeps it (chores.ts netherKit). None in stock is no reason to stay home: the barter is what brings them
+  if (potionDue && !potion()) {
+    const f = storedStacks(ctx.world, isFirePotion).sort((a, b) => Number(/^long_/.test(b.stack.potion ?? '')) - Number(/^long_/.test(a.stack.potion ?? '')))[0];
+    if (f && await takeSlot(ctx, f.chest, f.stack.slot, Math.min(f.stack.count, NETHER_TRIP.firePotions)).catch(() => 0)) await refresh();
+  }
   // fed again just before it goes, and the 40 points made up again if that meal ate into them: the room's walks (the
   // dump spot and back) and a fight at the portal by night cost the points the first meals gave (live, Nov 15:
   // "not setting out: food 17 < 18", twice)
@@ -869,7 +882,10 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
     ...(carried(s.items, ['obsidian']) < obsidian ? [`${carried(s.items, ['obsidian'])} obsidian < ${obsidian}`] : []),
     ...(freeSlots(s.items) < NETHER_TRIP.slotsFree ? [`${freeSlots(s.items)} free slots < ${NETHER_TRIP.slotsFree}`] : [])
   ];
-  return why.length ? why.join('; ') : undefined;
+  if (why.length) return why.join('; ');
+  // last, once nothing else keeps it home: the Nether set on and the main set in the chests (netherset.ts), so a death
+  // down there loses that set only. Never down there: this is the one place the trips dress for it
+  return wearNetherSet(ctx);
 }
 
 // ------------------------------------------------------------------------------------------------ the run

@@ -86,9 +86,11 @@ export interface WorkTask {
   /**
    * what it could do now, each with its distance from home in blocks; sync, reads only. `first`: a place known to hold
    * what the task is after (a stand of cane found before): tried ahead of the others whatever their turn, and its runs
-   * do not move the turn on
+   * do not move the turn on. `needMs`: what of the day this variant needs, ms, where the task's own count (needMs: there
+   * and back, at `backPace` when given) is not it: the villagers rung's searches walk home at a walk, and its moves
+   * from out to 640 need the look round the village too (villagemove.ts)
    */
-  variants(s: Snapshot, world: WorldMemory): { id: string; dist: number; first?: true }[];
+  variants(s: Snapshot, world: WorldMemory): { id: string; dist: number; first?: true; needMs?: number }[];
   /** null = ready; sync, reads only, no calls */
   ready(s: Snapshot, world: WorldMemory, variant: string): Decline | null;
   /** what it says with no variant at all (default: `unneeded`, nothing to do) */
@@ -410,10 +412,13 @@ export interface Bound { blocks: number; name: string }
  * out of the yard by the north gate ...`); `short` when the run's time ran out before the side's end, so the side was
  * not looked along to the leash. `side` may also be one of the four bearings between the sides (`north-east`...: the
  * villages' search, villagemove.ts), its stops as far apart across the ground, its way out by a gate on either of its
- * two sides.
+ * two sides. `from`: the side was looked along to this many blocks out by an earlier run (the villages' search out to
+ * 640 does not fit one day: it goes on the next): the stops nearer home are walked through, not looked from; `pass`
+ * is what is done at each of those instead (the search's look for danger), and what it returns ends the walk as a find.
  */
 export async function alongSide<T>(ctx: GoalContext, side: HomeSide | Bearing, what: string, look: () => Promise<T | undefined>,
-  enough: () => boolean = () => false, bound: Bound = { blocks: ctx.world.leash, name: 'the leash' }): Promise<{ found?: T; text: string; short?: true }> {
+  enough: () => boolean = () => false, bound: Bound = { blocks: ctx.world.leash, name: 'the leash' }, from = 0,
+  pass?: () => Promise<T | undefined>): Promise<{ found?: T; text: string; short?: true }> {
   const home = ctx.s.home!;
   const last = bound.blocks - SIDE_MARGIN;
   // (a block across the ground a block out: a bearing between two sides goes 1/sqrt 2 along each)
@@ -431,14 +436,15 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide | Bearing, w
     const edge = Array.from({ length: bound.blocks }, (_, i) => i + 1).find(wild);
     if (edge !== undefined) legs.push(edge);
   }
-  let out = 0;
+  // (as far as the side has been looked along: by an earlier run, then by this one)
+  let out = Math.max(0, Math.min(from, last));
   let me: { x: number; z: number } = ctx.s.position;
   for (const d of legs) {
     if (ctx.signal.aborted) throw new Error('aborted');
     if (d > 0) {
       // (not "none within the leash": the rest of the side was never seen, and its mark must not say it was)
       if (enough()) return { text: `no ${what} seen ${side} ${out ? `as far as ${out} blocks out` : 'from home'}: the run's time ran out`, short: true };
-      ctx.progress(`looking ${side} for ${what}, ${d} blocks out`);
+      ctx.progress(d < from ? `out ${side} past what was looked along before, ${d} blocks out` : `looking ${side} for ${what}, ${d} blocks out`);
       const stop = stopAt(d);
       // out by this side's own gate, or not at all. Shut, the side gets the dry mark a side with none gets (the turn
       // goes on to the next side, and a gate that stays shut waits the longer each time): as untried the same side
@@ -460,6 +466,13 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide | Bearing, w
         return { text: `no ${what} ${side} within ${bound.name}: got no further than ${got} blocks out` };
       }
     }
+    // (looked along already, by an earlier run: walked through on the way out, legs at a time, and the side's last
+    // stop is looked from whatever)
+    if (d < from && d !== legs[legs.length - 1]) {
+      const met = d > 0 && pass ? await pass() : undefined;
+      if (met !== undefined) return { found: met, text: '' };
+      continue;
+    }
     out = d;
     const found = await look();
     if (found !== undefined) return { found, text: '' };
@@ -471,7 +484,7 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide | Bearing, w
  * What `pick` answers for a task: the variant to run (its place in the task's turn, its distance, why; `first`: one
  * tried ahead of the turn, whose run leaves the turn where it is), or the one reason the task does not ask to run.
  */
-export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean; first?: true } | { decline: Decline };
+export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean; first?: true; needMs?: number } | { decline: Decline };
 
 const isTrip = (task: WorkTask) => task.reach === 'far' || task.reach === 'deep' || task.reach === 'nether';
 /** A trip whose budget is the day's clock, not its own: down the mine, or to the Nether. */
@@ -537,12 +550,12 @@ function common(task: WorkTask, s: Snapshot, world: WorldMemory): Decline | null
  * return home. A Nether trip that could not be home by dusk does not set out (nether.ts netherBudgetMs: until the
  * leave nether goal's own hour, less the way through the portals).
  */
-function lateFor(task: WorkTask, dist: number, s: Snapshot): Decline | null {
+function lateFor(task: WorkTask, dist: number, s: Snapshot, need?: number): Decline | null {
   if (task.reach === 'nether') {
     const left = netherBudgetMs(s.timeOfDay);
     return left < NETHER_WORTH_MS ? { cause: 'late', text: `${task.name} needs ${NETHER_WORTH_MS / MINUTE} min down there and home by dusk, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
   }
-  if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(needMs(dist, task.reach, task.backPace)));
+  if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(need ?? needMs(dist, task.reach, task.backPace)));
   const left = tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
   // (rounded down, as deep.ts does: a tick too late is "2.9 left", not "3.0")
   return left < DEEP_WORTH ? { cause: 'late', text: `${task.name} needs ${DEEP_WORTH / MINUTE} min, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
@@ -556,11 +569,11 @@ function lateFor(task: WorkTask, dist: number, s: Snapshot): Decline | null {
  * Counted as a walk, a fetch from 200 out could set out at tod 7140 with 111 s to bring home a cow 133 s off on the
  * lead: let go on the way.
  */
-function budgetFor(task: WorkTask, dist: number, s: Snapshot): number {
+function budgetFor(task: WorkTask, dist: number, s: Snapshot, need?: number): number {
   if (task.reach === 'deep') return tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
   if (task.reach === 'nether') return netherBudgetMs(s.timeOfDay);
   const day = ticksToMs(daylightLeft(s.timeOfDay));
-  if (task.backPace) return Math.max(0, Math.min(Math.max(task.budgetMs, needMs(dist, task.reach, task.backPace)), day - 15_000));
+  if (task.backPace) return Math.max(0, Math.min(Math.max(task.budgetMs, need ?? needMs(dist, task.reach, task.backPace)), day - 15_000));
   return Math.max(0, Math.min(task.budgetMs, day - dist / 3 * 1000 - 15_000));
 }
 
@@ -610,12 +623,15 @@ function choose(task: WorkTask, s: Snapshot, world: WorldMemory): Choice {
     const until = mark && !mark.early ? mark.at + dryWait(mark.n, task.terrain) : 0;
     if (until > s.now) { dry.push({ id: v.id, until }); continue; }
     // the hour is asked last: it is the reason only for a variant nothing else stands in the way of
-    const l = lateFor(task, v.dist, s);
+    const l = lateFor(task, v.dist, s, v.needMs);
     if (l) { if (!late || v.dist < late.dist) late = { dist: v.dist, d: l }; continue; }
     const where = task.reach === 'yard' ? 'in the yard' : task.reach === 'deep' ? 'under ground' : task.reach === 'nether' ? 'in the nether' : `${Math.round(v.dist)} blocks out`;
     const tried = mark?.early ? `, let go early after ${mark.n} dry` : mark ? `, ${mark.n} dry before` : '';
     const below = demotedBy(task, mark, w, world);
-    return { variant: v.id, index, dist: v.dist, demoted: !!below, why: `${where}${tried}${below ? ` (${below})` : ''}`, ...(v.first ? { first: true as const } : {}) };
+    return {
+      variant: v.id, index, dist: v.dist, demoted: !!below, why: `${where}${tried}${below ? ` (${below})` : ''}`, ...(v.first ? { first: true as const } : {}),
+      ...(v.needMs !== undefined ? { needMs: v.needMs } : {})
+    };
   }
   // one answer for the task: that of the variant that got furthest
   if (late) return { decline: late.d };
@@ -748,14 +764,14 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
   try {
     const c = pick(task, ctx.s, ctx.world);
     if ('decline' in c) return `nothing to do after all (${c.decline.cause}: ${c.decline.text})`;
-    const { variant, dist } = c;
+    const { variant, dist, needMs: need } = c;
     trip.variant = variant;
     const key = `${task.name}:${variant}`;
     // the put-away may have taken minutes and changed what is carried: from here on it is the fresh look that counts
     const s = await makeRoom(ctx, task.room);
-    const off = (s !== ctx.s ? task.ready(s, ctx.world, variant) : null) ?? lateFor(task, dist, s);
+    const off = (s !== ctx.s ? task.ready(s, ctx.world, variant) : null) ?? lateFor(task, dist, s, need);
     if (off) return `[${variant}] not setting out: ${off.text}`;
-    let budgetMs = budgetFor(task, dist, s);
+    let budgetMs = budgetFor(task, dist, s, need);
     if (task.reach !== 'deep' && task.reach !== 'nether') {
       // the brain stops the run at its timeout, counted from its start: a put-away of a minute or two and the full
       // budget after it ran past that while still mining, and what it had mined was never told (a deep trip's
@@ -763,7 +779,7 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
       const spent = now() - startedAt;
       const left = timeLeftFor(task, dist, spent);
       // (a run that brings its find home needs the whole way there and back: cut short, it lets it go out there)
-      const least = task.backPace ? needMs(dist, task.reach, task.backPace) : MIN_WORK[task.reach];
+      const least = task.backPace ? need ?? needMs(dist, task.reach, task.backPace) : MIN_WORK[task.reach];
       if (left < least) return `[${variant}] not setting out: making room took ${Math.round(spent / 1000)} s, too little of the run's time is left`;
       budgetMs = Math.min(budgetMs, left);
     }
@@ -1076,7 +1092,7 @@ export function releaseOldestDry(world: WorldMemory, now: number, s: Snapshot, t
       const key = `${task.name}:${v.id}`;
       const m = marks[key];
       if (!m || m.early || m.freed || m.at + dryWait(m.n) <= now) continue;
-      if (task.ready(s, world, v.id) || lateFor(task, v.dist, s)) continue;
+      if (task.ready(s, world, v.id) || lateFor(task, v.dist, s, v.needMs)) continue;
       if (!oldest || m.at < oldest.at) oldest = { key, at: m.at };
     }
   }

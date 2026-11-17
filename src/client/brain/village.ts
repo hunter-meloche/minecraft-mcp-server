@@ -17,8 +17,13 @@ import { cellOf } from './boatroute.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
-/** How far from home villages are looked for and moved from (the user's word, Nov 13). */
-export const VILLAGE_RANGE = 384;
+/**
+ * How far from home villages are looked for and moved from: 384 was the user's word of Nov 13; on Nov 17 they let it go
+ * to 640 (the eight bearings out to 384 found two villages, both judged someone's). A search out to 640 and back is
+ * more than one day's work with its looks, and goes on from where it stopped the next run (`searched`); a move from out
+ * there must come home with its villager by the day's end (villagemove.ts moveNeedMs), or it is not set out on.
+ */
+export const VILLAGE_RANGE = 640;
 /** The fewest villagers a village has for one to be taken from it. */
 export const VILLAGE_MIN = 5;
 /** Within this of the world spawn every village is someone's (the server's spawn town and its neighbours). */
@@ -53,6 +58,24 @@ export const JOB_NEAR = 2;
 export const NO_BOAT_WAIT = 24 * HOUR;
 /** A village too small, or not all seen, is looked at again after this. */
 export const WAIT_AGAIN = 6 * HOUR;
+/**
+ * A pillager outpost (a build with an ominous banner, of nothing but what the game builds an outpost of) is danger, not
+ * someone's: its pillagers spawn round it all day and shoot from 32 off (26.3 Pillager FOLLOW_RANGE). No villager by
+ * it is taken, the boat's way home keeps this far off it, and the walks out and the looks round a village turn back
+ * from one within this and a stop on, its banner read where it hangs about 96 round the bot (villagemove.ts
+ * outpostNear: a move's walk out comes no nearer than about 40, a search's 56). One by a village is no outpost but a
+ * player's trophy: another build to the judge (the game keeps outposts 10 chunks off a village).
+ */
+export const OUTPOST_CLEAR = 48;
+/** Illagers (an outpost's, a patrol's, a raid's): one seen this near a village's area makes the move wait for another day. */
+export const ILLAGER = /^(pillager|vindicator|evoker|illusioner|ravager)$/;
+/**
+ * The judge's version on a verdict (`judged.v`). Version 2 (the user's word of Nov 17): a village's own outbuildings
+ * (village-made, in its area) are its own. A word of someone's given before it for another build may be wrong under it:
+ * such a site is looked at and judged again, once. (Not one for banners: an ominous banner by a village is a player's
+ * raid trophy, a mark like any banner, as before: rejudge.)
+ */
+export const JUDGE_V = 2;
 /** Villages kept that are not someone's (the newest); those judged someone's are kept apart, up to THEIRS_KEPT. */
 const SITES = 8;
 /**
@@ -76,6 +99,42 @@ const OUT_OF_YARD = 48;
 
 /** A villager's job site blocks (26.3): an unemployed villager by one may be about to take it. */
 export const JOB_SITE = /^(lectern|composter|barrel|blast_furnace|smoker|cartography_table|brewing_stand|cauldron|water_cauldron|lava_cauldron|powder_snow_cauldron|fletching_table|grindstone|loom|smithing_table|stonecutter)$/;
+/**
+ * What a natural village is built of, of the blocks the bridge's scans record (Foreign.MARKER): every such block in
+ * the 26.3 jar's village pieces (data/minecraft/structure/village/**: all five kinds of village, their streets, decor
+ * and lamps), with the crops its farms' processors put in (carrots, potatoes, beetroots, melon and pumpkin stems) and
+ * the hay its decor piles. Not here, though some pieces hold them: a chest, a sign (two taiga houses), a banner (the
+ * savanna's): an outbuilding with one of those is no village's to the judge, the courteous side (the user's word, Nov
+ * 17: "no chest, sign, banner or other block only a player puts down"). A build in a village's area of these alone,
+ * near its own marks, is one of its outbuildings (a stable, a hay pile, a lamp, a pen), not another build.
+ */
+export const VILLAGE_MADE: ReadonlySet<string> = new Set([
+  'acacia_door', 'acacia_fence', 'acacia_fence_gate', 'acacia_planks', 'acacia_pressure_plate', 'acacia_slab', 'acacia_stairs', 'barrel', 'bell', 'blast_furnace',
+  'blue_bed', 'blue_carpet', 'bookshelf', 'brewing_stand', 'bricks', 'campfire', 'cartography_table', 'chiseled_sandstone', 'cobblestone_slab', 'cobblestone_stairs',
+  'cobblestone_wall', 'composter', 'crafting_table', 'cut_sandstone', 'cyan_bed', 'diorite_slab', 'diorite_stairs', 'diorite_wall', 'farmland', 'fletching_table',
+  'furnace', 'glass_pane', 'granite_stairs', 'granite_wall', 'green_bed', 'green_carpet', 'grindstone', 'hay_block', 'iron_bars', 'jungle_button', 'jungle_door',
+  'jungle_fence', 'jungle_fence_gate', 'jungle_trapdoor', 'ladder', 'lantern', 'lectern', 'light_blue_glazed_terracotta', 'light_gray_wool', 'lime_bed', 'lime_carpet',
+  'lime_glazed_terracotta', 'loom', 'melon_stem', 'oak_door', 'oak_fence', 'oak_fence_gate', 'oak_planks', 'oak_pressure_plate', 'oak_slab', 'oak_stairs',
+  'oak_trapdoor', 'orange_bed', 'orange_carpet', 'orange_glazed_terracotta', 'orange_stained_glass_pane', 'potted_cactus', 'potted_dandelion', 'potted_dead_bush',
+  'potted_poppy', 'potted_spruce_sapling', 'pumpkin_stem', 'purple_bed', 'purple_carpet', 'red_bed', 'red_carpet', 'sandstone_slab', 'sandstone_stairs',
+  'sandstone_wall', 'smithing_table', 'smoker', 'smooth_sandstone', 'smooth_sandstone_slab', 'smooth_sandstone_stairs', 'smooth_stone', 'smooth_stone_slab',
+  'spruce_door', 'spruce_fence', 'spruce_fence_gate', 'spruce_planks', 'spruce_pressure_plate', 'spruce_slab', 'spruce_stairs', 'spruce_trapdoor', 'stone_bricks',
+  'stone_button', 'stonecutter', 'stripped_acacia_log', 'stripped_oak_log', 'stripped_oak_wood', 'stripped_spruce_log', 'stripped_spruce_wood', 'torch',
+  'wall_torch', 'water_cauldron', 'wheat', 'white_bed', 'white_carpet', 'white_glazed_terracotta', 'white_stained_glass_pane', 'white_wool', 'yellow_bed',
+  'yellow_carpet', 'yellow_glazed_terracotta', 'yellow_stained_glass_pane', 'yellow_wool',
+  'carrots', 'potatoes', 'beetroots', 'attached_melon_stem', 'attached_pumpkin_stem'
+]);
+/**
+ * What a pillager outpost is built of, of the scans' markers (the jar's data/minecraft/structure/pillager_outpost/**:
+ * the watchtower, its plate and features), its white wall banners all ominous ones (the bridge tells them apart:
+ * Foreign.java). Anything else in a build with an ominous banner (a hopper, a rail, a player's banner) is someone's raid
+ * farm, another build.
+ */
+export const OUTPOST_MADE: ReadonlySet<string> = new Set([
+  'birch_planks', 'chest', 'cobblestone_slab', 'cobblestone_stairs', 'cobblestone_wall', 'crafting_table', 'dark_oak_fence', 'dark_oak_planks', 'dark_oak_slab',
+  'dark_oak_stairs', 'hay_block', 'mossy_cobblestone_slab', 'mossy_cobblestone_stairs', 'mossy_cobblestone_wall', 'torch', 'white_wall_banner', 'white_wool'
+]);
+const BANNER = /_banner$/;
 /** What tells a village from the scans' markers: its bell, its beds, its job sites. */
 export const VILLAGE_MARK = /^(bell|.*_bed|lectern|composter|barrel|blast_furnace|smoker|cartography_table|brewing_stand|cauldron|water_cauldron|fletching_table|grindstone|loom|smithing_table|stonecutter)$/;
 /**
@@ -124,7 +183,14 @@ export interface VillageSite {
    * the courtesy judge's last word: `free` (villagers may be taken), `theirs` (someone's: left alone, for good), `wait`
    * (too small, or not all of it seen: looked at again after WAIT_AGAIN)
    */
-  judged?: { at: number; kind: 'free' | 'theirs' | 'wait'; why: string };
+  judged?: {
+    at: number; kind: 'free' | 'theirs' | 'wait'; why: string;
+    /**
+     * which rule gave a word of someone's (`build`: another build by it; `banner`: banners alone were what only a
+     * player puts down; `marker`, `player`, `spawn`, `villager`), and the judge's version (JUDGE_V; none: before it)
+     */
+    rule?: TheirsRule; v?: number;
+  };
   /** no boat way home found from it (the rails fallback's): why, and when (tried again after NO_BOAT_WAIT) */
   noBoat?: { at: number; why: string };
   /** the rails fallback's dry run then (railroute.ts: planned only, never laid): its plan in short, or why none */
@@ -154,6 +220,31 @@ export interface VillagesMemory {
   open?: { at: Pos; block: string }[];
   /** the bot's own boat out in the world (vehicle.place's uuid, and where): a move cut short left it there */
   boat?: { uuid: string; at: Pos; since: number };
+  /**
+   * how far out each bearing's search has looked (blocks from home), and when: a search out to 640 that the day cut
+   * short goes on from there the next run (dropped once the bearing is done, or turned back from)
+   */
+  searched?: Record<string, { out: number; at: number }>;
+}
+
+/** Which of the judge's rules made a village someone's. */
+export type TheirsRule = 'spawn' | 'player' | 'marker' | 'banner' | 'villager' | 'build';
+
+/**
+ * A word of someone's the judge of today may undo (pure): given before JUDGE_V for another build by the village (the
+ * user's word of Nov 17: a village's own outbuildings are its own). Read from the rule kept, or, for a word older than
+ * the rules kept, from what it said. Every other word of someone's (a player seen, the spawn, a sign, a banner, a
+ * villager named or traded with) stays for good. Banners alone too, ominous or not: the user's word of Nov 17 took an
+ * ominous banner for a pillager outpost's, no player's mark, but 26.3's worldgen never puts an outpost within 10
+ * chunks of a village (pillager_outposts' exclusion_zone, about 130 blocks from its bell), farther than the judge's
+ * marks reach (its area and MARKERS_NEAR, about 120): one there was hung by a player, a raid captain's banner (it
+ * drops every time, with the raid's pattern the bridge reads as ominous), and judged someone's as ever (live: the
+ * north-west village's white_wall_banner, Nov 15).
+ */
+export function rejudge(s: Pick<VillageSite, 'judged'>): boolean {
+  const j = s.judged;
+  if (!j || j.kind !== 'theirs' || (fin(j.v) && j.v >= JUDGE_V)) return false;
+  return (j.rule ?? (/^another build /.test(j.why) ? 'build' : undefined)) === 'build';
 }
 
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -230,7 +321,10 @@ export function siteNow(sites: readonly VillageSite[], s: VillageSite): VillageS
  */
 function foldSites(sites: VillageSite[], inPlace: boolean): { sites: VillageSite[]; into: Map<VillageSite, VillageSite> } {
   const into = new Map<VillageSite, VillageSite>();
-  const judged = sites.filter(s => s.judged).sort((a, b) => Number(b.judged!.kind === 'theirs') - Number(a.judged!.kind === 'theirs') || b.judged!.at - a.judged!.at);
+  // (someone's for good before someone's to be judged again: a fold keeps the first one's word, and a player seen by
+  // one site of a village must not be lost to the newer word of another site's stable)
+  const weight = (s: VillageSite) => (s.judged!.kind !== 'theirs' ? 0 : rejudge(s) ? 1 : 2);
+  const judged = sites.filter(s => s.judged).sort((a, b) => weight(b) - weight(a) || b.judged!.at - a.judged!.at);
   if (!judged.length) return { sites, into };
   const rank = new Map(judged.map((s, i) => [s, i] as const));
   const kept = new Map<VillageSite, VillageSite>();
@@ -302,6 +396,10 @@ function clean(raw: unknown, yard?: WorldMemory['yard'], inPlace = false): Villa
     if (open.length) out.open = open;
   }
   if (r.boat && typeof r.boat.uuid === 'string' && isPos(r.boat.at) && fin(r.boat.since)) out.boat = r.boat;
+  if (r.searched && typeof r.searched === 'object') {
+    const searched = Object.fromEntries(Object.entries(r.searched).filter(([, q]) => q && fin(q.out) && fin(q.at) && q.out > 0 && q.out < VILLAGE_RANGE));
+    if (Object.keys(searched).length) out.searched = searched;
+  }
   return out;
 }
 
@@ -316,7 +414,7 @@ export function villagesOf(world: WorldMemory): VillagesMemory {
   if (v === c) return v;
   v.sites = c.sites;
   v.players = c.players;
-  for (const key of ['hall', 'last', 'open', 'boat'] as const) {
+  for (const key of ['hall', 'last', 'open', 'boat', 'searched'] as const) {
     if (c[key] === undefined) delete v[key];
     else (v as unknown as Record<string, unknown>)[key] = c[key];
   }
@@ -371,8 +469,9 @@ export function noteSeen(world: WorldMemory, seen: readonly Seen[], now: number,
   for (const at of spots) {
     for (const site of v.sites) {
       const d = horiz(site, at);
-      if (site.judged?.kind === 'theirs' || d > PLAYER_CLEAR + AREA_GROW) continue;
-      site.judged = { at: now, kind: 'theirs', why: `a player was seen ${Math.round(d)} from it, at (${at.x}, ${at.y}, ${at.z}) (${clock(now)})` };
+      // (a word of someone's to be judged again is no word for good: a player seen makes it one)
+      if ((site.judged?.kind === 'theirs' && !rejudge(site)) || d > PLAYER_CLEAR + AREA_GROW) continue;
+      site.judged = { at: now, kind: 'theirs', why: `a player was seen ${Math.round(d)} from it, at (${at.x}, ${at.y}, ${at.z}) (${clock(now)})`, rule: 'player', v: JUDGE_V };
     }
   }
   v.sites = trimSites(v.sites);
@@ -434,10 +533,13 @@ export function siteOf(world: WorldMemory, variant: string): VillageSite | undef
 }
 export const variantOf = (s: { x: number; z: number }) => `village ${s.x},${s.z}`;
 
-/** A site the move may go to now: within range, not someone's, no recent failure of the boat's way, not waiting. Pure. */
+/**
+ * A site the rung may go to now: within range, not someone's (but for a word of someone's to be judged again, which is
+ * gone to for a look: rejudge), no recent failure of the boat's way, not waiting. Pure.
+ */
 export function siteOpen(site: VillageSite, home: { x: number; z: number }, now: number): boolean {
   if (horiz(site, home) > VILLAGE_RANGE) return false;
-  if (site.judged?.kind === 'theirs') return false;
+  if (site.judged?.kind === 'theirs') return rejudge(site);
   if (site.judged?.kind === 'wait' && now - site.judged.at < WAIT_AGAIN) return false;
   return !(site.noBoat && now - site.noBoat.at < NO_BOAT_WAIT);
 }
@@ -459,9 +561,14 @@ export interface VillageLook {
   penned: ReadonlySet<number>;
   /** the markers' kinds in the village's area and MARKERS_NEAR round it, and how much of it the scans have seen */
   kinds: Record<string, number>;
+  /**
+   * of those, the ominous banners, by kind (the bridge reads their patterns): a mark all the same (judgeVillage: in that
+   * window one is a player's raid trophy, never an outpost's)
+   */
+  ominous?: Record<string, number>;
   looked: { chunks: number; of: number };
-  /** others' builds as the bridge knows them (foreign.zones) */
-  zones: readonly Zone[];
+  /** others' builds as the bridge knows them (foreign.zones), those near the village with all they are built of */
+  zones: readonly LookZone[];
   /** the players remembered (and those in this look) */
   players: readonly { x: number; z: number; at: number }[];
   /** the world spawn (status.spawn) */
@@ -473,10 +580,23 @@ export interface VillageLook {
   unread?: string[];
 }
 
+/**
+ * A build of others as the look saw it: the bridge's zone, and for one near the village every marker in its box read
+ * (foreign.marks: the zone names only its six commonest kinds), with how many of them are ominous banners. Not read
+ * (or read short of its markers: chunks since unloaded), it is no village's outbuilding and no outpost.
+ */
+export type LookZone = Zone & { all?: Record<string, number>; ominous?: number };
+
 /** The judge's word on a village. */
 export type Verdict =
-  | { kind: 'free'; why: string; area: Area; own: Zone[]; candidates: Seen[]; villagers: number }
-  | { kind: 'theirs'; why: string; area?: Area }
+  | { kind: 'free'; why: string; area: Area; own: Zone[]; candidates: Seen[]; villagers: number; outposts: Zone[] }
+  /**
+   * `sure: false`: a word of someone's that rests on what the look could not read whole (a build by it, near its own
+   * marks, whose markers did not all read: it may be one of the village's own). It is kept as someone's (the
+   * courteous side), but not as today's judge's for good:
+   * judged again on a later look (rejudge)
+   */
+  | { kind: 'theirs'; why: string; area?: Area; rule: TheirsRule; sure?: false }
   | { kind: 'wait'; why: string; area?: Area }
   | { kind: 'none'; why: string };
 
@@ -524,66 +644,118 @@ const zoneOff = (a: Area, z: Zone) => Math.hypot(Math.max(0, a.x1 - z.x2, z.x1 -
 const at = (p: { x: number; y?: number; z: number }) => `(${Math.floor(p.x)}, ${p.y === undefined ? '' : `${Math.floor(p.y)}, `}${Math.floor(p.z)})`;
 const list = (k: Record<string, number>) => Object.entries(k).map(([n, c]) => `${n} x${c}`).join(', ');
 
+/** A zone's markers read whole (pure): every one the bridge counted in it (`markers`), and some. */
+function readWhole(z: LookZone): z is LookZone & { all: Record<string, number> } {
+  if (!z.all) return false;
+  const n = Object.values(z.all).reduce((a, b) => a + (fin(b) ? b : 0), 0);
+  return n > 0 && (!fin(z.markers) || n >= z.markers);
+}
+
+/** A build of nothing but what a natural village is built of (pure): no chest, sign, banner or player's block in it. */
+export const villageMade = (z: LookZone): boolean => readWhole(z) && Object.entries(z.all).every(([n, c]) => !(c > 0) || VILLAGE_MADE.has(n));
+
+/**
+ * A pillager outpost (pure): an ominous banner in it, nothing in it but what the game builds an outpost of, and no
+ * banner in it but ominous ones. One with a player's block or banner in it is someone's (a raid farm), another build.
+ */
+export function outpostMade(z: LookZone): boolean {
+  if (!readWhole(z) || !fin(z.ominous) || z.ominous <= 0) return false;
+  const banners = Object.entries(z.all).filter(([n]) => BANNER.test(n)).reduce((a, [, c]) => a + (fin(c) ? c : 0), 0);
+  return banners <= z.ominous && Object.entries(z.all).every(([n, c]) => !(c > 0) || OUTPOST_MADE.has(n));
+}
+
 /**
  * The courtesy judge (pure): someone's (`theirs`, left alone for good) for any of the plan's rules, in this order: near
- * the world spawn; a player seen within 64 of its area, ever; a player-only marker in it or within 16; a villager named,
- * riding something, on a lead, penned in, or above the first level (only a player's trades, or a player's cure, give
- * a villager the xp: a village makes every one at level 1, so one traded with is a village someone uses); another build
- * of others within ZONES_NEAR of it. Its own houses are the surface zones within OWN_NEAR of its bell or a bed or job
- * site chained to the bell (coreMarks): a build anyone else put up by it, a bed in it or not, is another build, and so
- * is an outbuilding of its own with none of those (a lone pen, a field): the courteous side. Then `wait` (looked at
- * again later): its bell not seen, a call that did not answer, not all of it seen by the scans yet, or fewer than
- * VILLAGE_MIN villagers in it (the box round its own marks, grown by AREA_GROW: one by a player's house beside it is
- * not the village's). `none`: no bell, bed, job site or villager seen there at all. Else `free`, with the villagers that
- * may be taken (unemployed adults in it, no nitwit, none by a job site block), and its own zones (the way home leaves
- * those out of its FROM_ZONES rule).
+ * the world spawn; a player seen within 64 of its area, ever; a player-only marker in it or within 16 (a banner too, an
+ * ominous one as well: no outpost is that near a village, rejudge); a villager named, riding something, on a lead,
+ * penned in, or above the first level (only a player's trades, or a player's cure, give a villager the xp: a village
+ * makes every one at level 1, so one traded with is a village someone uses); another build of others within
+ * ZONES_NEAR of it. Its own houses are the surface zones within OWN_NEAR of its bell or a bed or job site chained to
+ * the bell (coreMarks), and its outbuildings (the user's word of Nov 17): a build that meets its area, within CHAIN of
+ * one of those marks, of nothing but what a natural village is built of (VILLAGE_MADE: a stable, a hay pile, a lamp, a
+ * pen, a field; live on Nov 15 the west village's hay stable was taken for someone's). A build anyone else put up by
+ * it, a bed in it or not, is another build, and so is one with a chest, a sign, a banner or a player's block in it, one
+ * not read whole, and one farther out (a player's hay barn beside it): the courteous side. A pillager outpost by it
+ * (outpostMade) is danger: no villager within OUTPOST_CLEAR of it is taken, and the move keeps that far off it
+ * (villagemove.ts); within ZONES_NEAR it is another build all the same (the game keeps its outposts 10 chunks off a
+ * village: one that near is a player's, with a trophy banner). A word of someone's on a build not read whole by its
+ * own marks, is `sure: false`: judged again later. Then
+ * `wait` (looked at again later): its bell not seen, a call that did not answer, not
+ * all of it seen by the scans yet, illagers about (within OUTPOST_CLEAR of it), or fewer than VILLAGE_MIN villagers in
+ * it (the box round its own marks, grown by AREA_GROW: one by a player's house beside it is not the village's).
+ * `none`: no bell, bed, job site or villager seen there at all. Else `free`, with the villagers that may be taken
+ * (unemployed adults in it, no nitwit, none by a job site block or an outpost), its own zones (the way home leaves
+ * those out of its FROM_ZONES rule) and the outposts by it.
  */
 export function judgeVillage(look: VillageLook): Verdict {
   const villagers = look.seen.filter(e => e.name === 'villager' && isPos(e.position));
   const area = villageArea(look);
   if (!area || (!look.bells.length && !look.beds.length && !look.jobs.length && !villagers.length)) return { kind: 'none', why: 'no bell, bed, job site or villager there' };
-  const theirs = (why: string): Verdict => ({ kind: 'theirs', why, area });
+  const theirs = (why: string, rule: TheirsRule, sure = true): Verdict => ({ kind: 'theirs', why, area, rule, ...(sure ? {} : { sure: false as const }) });
   const wait = (why: string): Verdict => ({ kind: 'wait', why, area });
   if (look.spawn) {
     const d = offArea(area, look.spawn);
-    if (d < SPAWN_CLEAR) return theirs(`within ${SPAWN_CLEAR} of the world spawn (${Math.round(d)} off)`);
+    if (d < SPAWN_CLEAR) return theirs(`within ${SPAWN_CLEAR} of the world spawn (${Math.round(d)} off)`, 'spawn');
   }
   const player = look.players.map(p => ({ p, d: offArea(area, p) })).filter(x => x.d < PLAYER_CLEAR).sort((a, b) => a.d - b.d)[0];
-  if (player) return theirs(`a player was seen ${Math.round(player.d)} from it, at ${at(player.p)} (${clock(player.p.at)})`);
+  if (player) return theirs(`a player was seen ${Math.round(player.d)} from it, at ${at(player.p)} (${clock(player.p.at)})`, 'player');
+  // (an ominous banner too: within this window it is a player's raid trophy, never an outpost's (rejudge))
   const marks = Object.fromEntries(Object.entries(look.kinds).filter(([n, c]) => c > 0 && PLAYER_ONLY.test(n)));
-  if (Object.keys(marks).length) return theirs(`what only a player puts down in it or within ${MARKERS_NEAR}: ${list(marks)}`);
+  if (Object.keys(marks).length) {
+    const banners = Object.keys(marks).every(n => BANNER.test(n));
+    return theirs(`what only a player puts down in it or within ${MARKERS_NEAR}: ${list(marks)}`, banners ? 'banner' : 'marker');
+  }
   for (const e of villagers) {
     const who = `a villager ${at(e.position!)}`;
-    if (e.named) return theirs(`${who} is named${e.customName ? ` (${e.customName})` : ''}`);
-    if (e.vehicle) return theirs(`${who} rides a ${e.vehicle}`);
-    if (e.leashed) return theirs(`${who} is on a lead`);
-    if (look.penned.has(e.id)) return theirs(`${who} is penned in (it can walk to fewer than ${PENNED_ROOM} cells)`);
-    if (fin(e.level) && e.level > 1) return theirs(`${who} is at level ${e.level}: a player trades here`);
+    if (e.named) return theirs(`${who} is named${e.customName ? ` (${e.customName})` : ''}`, 'villager');
+    if (e.vehicle) return theirs(`${who} rides a ${e.vehicle}`, 'villager');
+    if (e.leashed) return theirs(`${who} is on a lead`, 'villager');
+    if (look.penned.has(e.id)) return theirs(`${who} is penned in (it can walk to fewer than ${PENNED_ROOM} cells)`, 'villager');
+    if (fin(e.level) && e.level > 1) return theirs(`${who} is at level ${e.level}: a player trades here`, 'villager');
   }
   // its own builds: those by its bell and the marks chained to it (without its bell seen, nothing tells them apart)
   const core = coreMarks(look);
   if (!look.bells.length) return wait('its bell not seen yet (every village has one at its meeting point)');
   const surface = look.zones.filter(z => z.surface ?? true);
-  const own = surface.filter(z => core.some(m => zoneDistance(m, z) <= OWN_NEAR));
-  const other = surface.filter(z => !own.includes(z)).map(z => ({ z, d: zoneOff(area, z) })).filter(x => x.d < ZONES_NEAR).sort((a, b) => a.d - b.d)[0];
-  if (other) return theirs(`another build ${Math.round(other.d)} from it (x ${other.z.x1}..${other.z.x2}, z ${other.z.z1}..${other.z.z2}${other.z.sample ? `, ${other.z.sample}` : ''})`);
+  const houses = surface.filter(z => core.some(m => zoneDistance(m, z) <= OWN_NEAR));
+  const rest = surface.filter(z => !houses.includes(z));
+  const outposts = rest.filter(outpostMade);
+  // (its outbuildings: in its area, near its own marks, village-made)
+  const byMarks = (z: LookZone) => zoneOff(area, z) === 0 && core.some(m => zoneDistance(m, z) <= CHAIN);
+  const outbuildings = rest.filter(z => !outposts.includes(z) && byMarks(z) && villageMade(z));
+  const own = [...houses, ...outbuildings];
+  // (an outpost within ZONES_NEAR is another build too: the game never puts one there (the jar's pillager_outposts
+  // structure set keeps 10 chunks off a village), so one of outpost blocks with an ominous banner that near is a
+  // player's, the banner a raid captain's for a trophy: a shed of dark oak with a chest and a crafting table passes)
+  const other = rest.filter(z => !own.includes(z)).map(z => ({ z, d: zoneOff(area, z) })).filter(x => x.d < ZONES_NEAR).sort((a, b) => a.d - b.d)[0];
+  // (not sure: one by its own marks not read whole, of nothing known but what a village is built of, may be its own)
+  const known = (z: LookZone) => [...Object.entries(z.all ?? {}).filter(([, c]) => c > 0).map(([n]) => n), ...(z.sample ? [z.sample] : []), ...(z.kinds ?? []).map(k => k.replace(/ x\d+$/, ''))];
+  const unsure = (z: LookZone) => byMarks(z) && !readWhole(z) && known(z).every(n => VILLAGE_MADE.has(n));
+  if (other) return theirs(`another build ${Math.round(other.d)} from it (x ${other.z.x1}..${other.z.x2}, z ${other.z.z1}..${other.z.z2}${other.z.sample ? `, ${other.z.sample}` : ''})`, 'build', !unsure(other.z));
   if (look.unread?.length) return wait(`${look.unread.join(' and ')} not read`);
   if (look.looked.chunks < look.looked.of) return wait(`not all of it seen yet (${look.looked.chunks} of ${look.looked.of} chunks)`);
+  // (danger, not courtesy: illagers by it now, an outpost's or a patrol's, and the move waits for another day)
+  const illagers = look.seen.filter(e => ILLAGER.test(e.name) && isPos(e.position) && offArea(area, e.position) < OUTPOST_CLEAR);
+  if (illagers.length) return wait(`${illagers.length} illager(s) about (a ${illagers[0].name} at ${at(illagers[0].position!)}): no move by pillagers`);
   const inner = boxRound(core)!;
   const ours = villagers.filter(e => offArea(inner, e.position!) === 0);
   if (ours.length < VILLAGE_MIN) return wait(`${ours.length} villager(s) seen${ours.length < villagers.length ? ` in it (${villagers.length - ours.length} more round it)` : ''}, ${VILLAGE_MIN} or more wanted`);
-  const counts = { employed: 0, babies: 0, nitwits: 0, byJob: 0 };
+  const counts = { employed: 0, babies: 0, nitwits: 0, byJob: 0, byOutpost: 0 };
   const candidates = ours.filter(e => {
     if (e.baby) { counts.babies++; return false; }
     if (e.profession === 'nitwit') { counts.nitwits++; return false; }
     if (e.profession !== 'none') { counts.employed++; return false; }
     if (byJobSite(e, look.jobs)) { counts.byJob++; return false; }
+    if (outposts.some(z => zoneDistance(e.position!, z) < OUTPOST_CLEAR)) { counts.byOutpost++; return false; }
     return true;
   });
-  const said = Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k === 'byJob' ? 'by a job site' : k}`).join(', ');
+  const words = { byJob: 'by a job site', byOutpost: 'by a pillager outpost' } as Record<string, string>;
+  const said = Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${n} ${words[k] ?? k}`).join(', ');
+  const near = outposts.map(z => ({ z, d: zoneOff(area, z) })).sort((a, b) => a.d - b.d)[0];
+  const danger = near ? `; a pillager outpost ${Math.round(near.d)} from it (x ${near.z.x1}..${near.z.x2}, z ${near.z.z1}..${near.z.z2}): kept ${OUTPOST_CLEAR} off` : '';
   return {
-    kind: 'free', area, own, candidates, villagers: ours.length,
-    why: `${ours.length} villagers, ${candidates.length} unemployed adult(s) to take${said ? ` (${said})` : ''}`
+    kind: 'free', area, own, candidates, villagers: ours.length, outposts,
+    why: `${ours.length} villagers, ${candidates.length} unemployed adult(s) to take${said ? ` (${said})` : ''}${danger}`
   };
 }
 
@@ -640,17 +812,18 @@ export function pennedIn(block: (x: number, y: number, z: number) => string | nu
 
 /**
  * brain-status, `Villagers:`: the switch; the hall and the villagers in it (as last counted); the villages known, and
- * how each was judged; the last move.
+ * how each was judged (`far`: a free one too far from home for a day's move, villagemove.ts tooFarFrom); the last move.
  */
-export function villagersLine(world: WorldMemory, now: number): string {
+export function villagersLine(world: WorldMemory, now: number, far?: (site: VillageSite) => boolean): string {
   const v = peekVillages(world);
   const hall = world.zones?.hall?.[0];
   const ago = (t: number) => { const m = Math.round((now - t) / MINUTE); return m < 1 ? 'just now' : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
   const hallText = !hall ? 'no villager hall yet'
     : `the hall at (${hall.x}, ${hall.y}, ${hall.z}): ${v.hall ? `${v.hall.count} of ${HALL_WANTS} villagers (counted ${ago(v.hall.at)})` : `not counted yet (${HALL_WANTS} wanted)`}`;
-  const kinds = v.sites.map(s => (s.noBoat && now - s.noBoat.at < NO_BOAT_WAIT ? 'no boat way' : s.judged?.kind ?? 'not judged'));
+  const kinds = v.sites.map(s => (s.noBoat && now - s.noBoat.at < NO_BOAT_WAIT ? 'no boat way'
+    : s.judged?.kind === 'free' && far?.(s) ? 'free but too far for a day\'s move' : s.judged?.kind ?? 'not judged'));
   const tally = [...new Set(kinds)].map(k => `${kinds.filter(x => x === k).length} ${k}`).join(', ');
-  const theirs = v.sites.filter(s => s.judged?.kind === 'theirs').map(s => `(${s.x}, ${s.z}): ${s.judged!.why}`).slice(0, 2);
+  const theirs = v.sites.filter(s => s.judged?.kind === 'theirs').map(s => `(${s.x}, ${s.z}): ${s.judged!.why}${rejudge(s) ? ' (to be judged again: an older word)' : ''}`).slice(0, 2);
   const villages = v.sites.length ? `${v.sites.length} village(s) known (${tally})${theirs.length ? `; someone's: ${theirs.join('; ')}` : ''}` : 'no village known';
   // (the rails fallback's last dry run, from a village the boat found no way home from)
   const dry = v.sites.find(s => s.rails && typeof s.rails.text === 'string' && fin(s.rails.at) && now - s.rails.at < NO_BOAT_WAIT);
@@ -658,5 +831,8 @@ export function villagersLine(world: WorldMemory, now: number): string {
   const open = v.open?.length ? `; ${v.open.length} block(s) of the hall or the fence still open` : '';
   const boat = v.boat ? `; its boat left at ${at(v.boat.at)}` : '';
   const last = v.last ? `; last move ${clock(v.last.at)}: ${v.last.text}` : '';
-  return `Villagers: moves ${movesOn(world) ? 'on' : 'off'}; ${hallText}; ${villages}${rails}${open}${boat}${last}`;
+  // (a search the day cut short, to go on from there)
+  const searched = Object.entries(v.searched ?? {}).map(([b, q]) => `${b} to ${q.out}`);
+  const half = searched.length ? `; searched part way (out of ${VILLAGE_RANGE}): ${searched.join(', ')}` : '';
+  return `Villagers: moves ${movesOn(world) ? 'on' : 'off'}; ${hallText}; ${villages}${rails}${open}${boat}${half}${last}`;
 }

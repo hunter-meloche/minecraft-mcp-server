@@ -209,8 +209,15 @@ export function firePotions(items: { name: string; count: number; potion?: strin
  * for a portal made again, ender pearls, and quartz. The barter brings every one of them (quartz too, a few at a time:
  * the quartz work mines it, 32 a trip); what else it brings (gravel, blackstone, nuggets, string, spectral arrows,
  * fire charges, soul speed books or boots) is the stash's to keep or put away, by its own rules.
+ *
+ * Fire resistance 12, up from 4 (D1, the user's "prioritize getting fire resistance gear for nether in general"): a
+ * day's use is 6 (one carried on each of the day's two trips for the Guardian's hook, NETHER_TRIP.firePotions; the
+ * debris trip's DEBRIS_POTIONS 2, drunk; the fortress's FIRE_POTIONS 2), and twice that keeps a day of use from
+ * emptying the stock. The barter goes on while any target is short (netherShort), so the potions keep it bartering
+ * after the rest are met: about 3.4 in 100 barters bring one (the 26.3 jar's piglin_bartering: its two fire resistance
+ * entries, 8 + 8 of 469), some two a day at the gold chore's 64 ingots.
  */
-export const NETHER_STOCK = { fire_resistance: 4, soul_sand: 16, leather: 16, obsidian: 20, ender_pearl: 16, quartz: 64 } as const;
+export const NETHER_STOCK = { fire_resistance: 12, soul_sand: 16, leather: 16, obsidian: 20, ender_pearl: 16, quartz: 64 } as const;
 export type NetherStockKind = keyof typeof NETHER_STOCK;
 
 /**

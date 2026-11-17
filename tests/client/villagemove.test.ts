@@ -9,10 +9,10 @@ import type { Zone } from '../../src/client/brain/courtesy.js';
 import { Brain, decide } from '../../src/client/brain/brain.js';
 import { Ground, cellOf, checkLeg, entryOf, footprint, keepOff, planRoute, settle, yardEntry, yardPanel, type Entry } from '../../src/client/brain/boatroute.js';
 import {
-  HALL_WANTS, VILLAGE_RANGE, foldedInto, judgeVillage, knownVillage, noteSeen, noteVillage, peekVillages, pennedIn, siteOpen, villagersLine, villagesOf, type Seen,
-  type VillageLook
+  HALL_WANTS, JUDGE_V, OUTPOST_CLEAR, VILLAGE_MADE, VILLAGE_RANGE, ZONES_NEAR, foldedInto, judgeVillage, knownVillage, noteSeen, noteVillage, outpostMade, peekVillages, pennedIn, rejudge, siteOpen,
+  villagersLine, villagesOf, type LookZone, type Seen, type VillageLook, type VillageSite
 } from '../../src/client/brain/village.js';
-import { BOAT_PACE, MOVE_BUDGET, closeUpGoal, homeMs, lastRailPlan, villagersTask } from '../../src/client/brain/villagemove.js';
+import { BOAT_PACE, DAY_MS, MOVE_BUDGET, closeUpGoal, homeMs, lastRailPlan, lookNeedMs, moveNeedMs, searchNeedMs, tooFarFrom, tooFarWord, villagersTask } from '../../src/client/brain/villagemove.js';
 import { railsText } from '../../src/client/brain/railroute.js';
 import { pick, workGoals } from '../../src/client/brain/work.js';
 import { LADDER } from '../../src/client/brain/worktasks.js';
@@ -129,7 +129,8 @@ class Land {
   blocks = new Map<string, string>();
   villagers: Villager[];
   players: Seen[] = [];
-  marks: { name: string; at: Pos }[];
+  /** the markers the scans saw (a banner's `ominous`: the bridge read it as a pillager outpost's, Foreign.java) */
+  marks: { name: string; at: Pos; ominous?: true }[];
   zones: Zone[];
   boat?: Boat;
   riding = false;
@@ -140,6 +141,11 @@ class Land {
   reads = 0;
   constructor(public world: WorldMemory, public opts: {
     stopAt?: { leg: number; reason: string }; offBy?: { leg: number; dx: number }; looked?: number; noUnload?: boolean; houses?: { x1: number; z1: number; x2: number; z2: number }[];
+    /**
+     * the scans' reach (foreign.marks: only the markers this near the bot, as Foreign.scan's 48 round it), and `oldJar`:
+     * no foreign.banners (unset: the banners in the chunks held, 96 round the bot, read where they hang)
+     */
+    scans?: number; oldJar?: boolean;
     /** the brain stops the run as this drive (from 1) gets under way: its signal aborted, the bridge's cancel ends the drive halfway */
     abortAt?: { leg: number; abort: AbortController };
     /**
@@ -258,14 +264,25 @@ class Land {
         return { positions: this.marks.filter(m => m.name === p.block && horiz(m.at, this.me) <= max).map(m => ({ ...m.at })) };
       }
       case 'foreign.zones': return { dimension: 'overworld', zones: this.zones.map(z => ({ ...z })) };
+      case 'foreign.banners': {
+        if (this.opts.oldJar) return {};
+        const at = this.marks.filter(m => /_banner$/.test(m.name) && horiz(m.at, this.me) <= 96 && horiz(m.at, { x: n('x'), z: n('z') }) <= n('r'))
+          .map(q => ({ ...q.at, name: q.name, ...(q.ominous ? { ominous: true } : {}) }));
+        return { dimension: 'overworld', at, chunks: 1 };
+      }
       case 'foreign.marks': {
-        const inBox = (q: Pos) => q.x >= n('x1') && q.x <= n('x2') && q.z >= n('z1') && q.z <= n('z2') && (p.y1 === undefined || q.y >= n('y1')) && (p.y2 === undefined || q.y <= n('y2'));
+        const seen = (q: Pos) => this.opts.scans === undefined || horiz(q, this.me) <= this.opts.scans;
+        const inBox = (q: Pos) => seen(q) && q.x >= n('x1') && q.x <= n('x2') && q.z >= n('z1') && q.z <= n('z2') && (p.y1 === undefined || q.y >= n('y1')) && (p.y2 === undefined || q.y <= n('y2'));
         const re = p.match ? new RegExp(String(p.match)) : undefined;
-        const kinds: Record<string, number> = {};
-        for (const m of this.marks.filter(q => inBox(q.at))) kinds[m.name] = (kinds[m.name] ?? 0) + 1;
+        const kinds: Record<string, number> = {}, ominous: Record<string, number> = {};
+        for (const m of this.marks.filter(q => inBox(q.at))) {
+          kinds[m.name] = (kinds[m.name] ?? 0) + 1;
+          if (m.ominous) ominous[m.name] = (ominous[m.name] ?? 0) + 1;
+        }
         const chunks = Math.floor(n('x2') / 16) - Math.floor(n('x1') / 16) + 1, rows = Math.floor(n('z2') / 16) - Math.floor(n('z1') / 16) + 1;
         const of = chunks * rows;
-        return { kinds, at: re ? this.marks.filter(q => inBox(q.at) && re.test(q.name)).map(q => ({ ...q.at, name: q.name })) : [], chunks: this.opts.looked ?? of, of };
+        const at = re ? this.marks.filter(q => inBox(q.at) && re.test(q.name)).map(q => ({ ...q.at, name: q.name, ...(q.ominous ? { ominous: true } : {}) })) : [];
+        return { kinds, ominous, at, chunks: this.opts.looked ?? of, of };
       }
       case 'goto': {
         const careful = p.careful === true;
@@ -663,7 +680,7 @@ test('the switch off: the rung offers nothing and says so, at any hour, with or 
   }
 });
 
-test('the rung\'s gates: no hall, the hall full (as counted under half an hour ago), rain, a move\'s openings not put back; else the villages known first, then the four sides and the four bearings between them to 384', (t) => {
+test('the rung\'s gates: no hall, the hall full (as counted under half an hour ago), rain, a move\'s openings not put back; else the villages known first, then the four sides and the four bearings between them to the range (640 since Nov 17)', (t) => {
   const s = snap(KIT());
   t.like(pick(villagersTask, s, hallWorld({ zones: {} })), { decline: { cause: 'unneeded', text: 'no villager hall yet' } });
   const full = hallWorld();
@@ -678,7 +695,7 @@ test('the rung\'s gates: no hall, the hall full (as counted under half an hour a
   t.like(pick(villagersTask, s, open), { decline: { text: '1 block(s) of the hall or the fence left open by a move: close up first' } });
   // the village known first (its distance the day it needs), then the sides out to the range
   t.deepEqual(villagersTask.variants(s, hallWorld()).map(v => `${v.id} ${v.dist}${v.first ? ' first' : ''}`),
-    ['village -556,1880 303 first', ...SEARCHES.map(b => `${b} 384`)]);
+    ['village -556,1880 303 first', ...SEARCHES.map(b => `${b} ${VILLAGE_RANGE}`)]);
   // someone's: never again; its boat way failed today: not until tomorrow; too small: in 6 hours; beyond the range: not at all
   const w = hallWorld();
   const site = w.villages!.sites[0];
@@ -691,9 +708,12 @@ test('the rung\'s gates: no hall, the hall full (as counted under half an hour a
   t.deepEqual(villagersTask.variants(s, w).map(v => v.id)[0], 'village -556,1880');
   w.villages!.sites.push({ x: -549, y: 63, z: 2183 - VILLAGE_RANGE - 10, seenAt: T0 });
   t.false(villagersTask.variants(s, w).some(v => v.id === `village -549,${2183 - VILLAGE_RANGE - 10}`));
-  // the day it needs: there at 3 a second, back at the boat's 2 on land, and a minute's work
-  t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 6000 }), hallWorld()), { decline: { cause: 'late' } });
-  t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 4000 }), hallWorld()), { variant: 'village -556,1880' });
+  // the day a move needs: there at 3 a second, the look round the village (a minute), back at the boat's 2 on land with
+  // a third more for its turns, and the yard's minute (418 s from 303 out); a search's first stretch needs 145 s (out
+  // 128 and back at a walk, and a minute)
+  t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 2500 }), hallWorld()), { variant: 'village -556,1880' });
+  t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 3000 }), hallWorld()), { variant: 'north' }, 'the move late (400 s left), a search not');
+  t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 8500 }), hallWorld()), { decline: { cause: 'late' } });
 });
 
 test('the rung only looks: asked over hours, weathers, switches and memories, the world is left as it was', (t) => {
@@ -988,7 +1008,7 @@ test('the villager-moves switch on the brain: said in the log with who turned it
   brain.setEnabled(false);
 });
 
-test('with the switch on, the bells the bridge\'s scans saw on any walk (within 384 of home, not by the yard) become village sites, asked every 10 minutes; off, nothing is asked', async (t) => {
+test('with the switch on, the bells the bridge\'s scans saw on any walk (within the range of home, 640, not by the yard) become village sites, asked every 10 minutes (in four quarters: the bridge reads 1024 across at most); off, nothing is asked', async (t) => {
   let now = T0;
   const asked: Record<string, unknown>[] = [];
   const rt = {
@@ -1015,13 +1035,16 @@ test('with the switch on, the bells the bridge\'s scans saw on any walk (within 
   brain.setVillagerMoves(true, 'the lead');
   now += 11 * MINUTE;
   await brain.tick();
-  t.like(asked[0], { x1: HOME.x - 384, x2: HOME.x + 384, z1: HOME.z - 384, z2: HOME.z + 384, match: '^bell$' });
-  // the village 303 out; not the bell by the yard's north fence, nor the one 500 out
-  t.deepEqual(world.villages!.sites.map(q => `${q.x},${q.y},${q.z} ${q.bells}`), ['-556,63,1880 1']);
-  t.regex(brain.status(), /villagers: 1 village\(s\) seen on the walks \(their bells\), within 384 of home/);
+  t.is(asked.length, 4);
+  t.like(asked[0], { x1: HOME.x - 640, x2: HOME.x, z1: HOME.z - 640, z2: HOME.z, match: '^bell$' });
+  t.like(asked[3], { x1: HOME.x + 1, x2: HOME.x + 640, z1: HOME.z + 1, z2: HOME.z + 640, match: '^bell$' });
+  for (const a of asked) t.true((Number(a.x2) - Number(a.x1) + 1) * (Number(a.z2) - Number(a.z1) + 1) <= 1024 * 1024, 'a box the bridge reads');
+  // the village 303 out and the one 500 out (within 640 now); not the bell by the yard's north fence
+  t.deepEqual(world.villages!.sites.map(q => `${q.x},${q.y},${q.z} ${q.bells}`), ['-556,63,1880 1', '-549,70,1683 1']);
+  t.regex(brain.status(), /villagers: 2 village\(s\) seen on the walks \(their bells\), within 640 of home/);
   now += 5 * MINUTE;
   await brain.tick();
-  t.is(asked.length, 1, 'not again within 10 minutes');
+  t.is(asked.length, 4, 'not again within 10 minutes');
   brain.setEnabled(false);
 });
 
@@ -1114,7 +1137,11 @@ test('the bridge\'s foreign.marks: registered, every chunk the scans look at cou
   t.regex(src, /if \(ch == null\) continue;\n\s+dim\.looked\.add\(/);
   t.regex(src, /e\.getValue\(\)\.byChunk\.clear\(\);\n\s+e\.getValue\(\)\.looked\.clear\(\);/);
   const marks = src.slice(src.indexOf('s.register("foreign.marks"'), src.indexOf('s.register("foreign.at"'));
-  t.regex(marks, /return obj\("dimension", which, "kinds", k, "at", at, "chunks", looked, "of", of\);/);
+  t.regex(marks, /return obj\("dimension", which, "kinds", k, "ominous", om, "at", at, "chunks", looked, "of", of\);/);
+  // the ominous banners (a pillager outpost's) told apart as each chunk is scanned, and said by kind and on each banner listed
+  t.regex(src, /marks\.add\(new Mark\(at, st\.getBlock\(\), skyBeside\(level, at, side\), ominousAt\(level, at, st\)\)\);/);
+  t.regex(marks, /if \(m\.ominous\(\)\) ominous\.merge\(n, 1, Integer::sum\);/);
+  t.regex(marks, /if \(hits\.get\(i\)\.ominous\(\)\) o\.addProperty\("ominous", true\);/);
 });
 
 test('every block the judge reads in a village (its bell, beds and job sites; what only a player puts down) is one the bridge\'s scans record as a marker (minecraft-data 26.3)', async (t) => {
@@ -1323,7 +1350,7 @@ test('the side search walks on past a village already judged (someone\'s here): 
   t.like(peekVillages(world).sites[0].judged, { kind: 'theirs' });
   const from = land.log.length;
   const r = await villagersTask.run(land.ctx(), 'north', MOVE_BUDGET, () => land.t);
-  t.is(r.text, 'no village north within the village range (384 from home)');
+  t.is(r.text, 'no village north within the village range (640 from home)');
   t.is(r.mark, undefined, 'no "first": the side waits longer each dry run');
   t.false(land.log.slice(from).some(l => /^goto \(-556, 63, 1880\)/.test(l)), 'not walked over to');
   t.false(land.said.some(l => /looking round the village/.test(l)));
@@ -1436,9 +1463,14 @@ test('one village, one verdict: the live run of Nov 15 (its villagers noted at t
   const sites = peekVillages(world).sites;
   t.is(sites.length, 1, JSON.stringify(sites));
   t.like(sites[0], { x: -693, y: 63, z: 2262, bells: 1, beds: 3, jobs: 2, villagers: 11, judged: { kind: 'theirs' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
-  // no move sets out for it (live, the next run did: "start work: villagers: village -700,2301: 192 blocks out")
-  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
-  t.notRegex(String((pick(villagersTask, snap(KIT(), { now: land.t }), world) as { variant?: string }).variant), /^village /);
+  // no move sets out for it (live, the next run did: "start work: villagers: village -700,2301: 192 blocks out"). Its
+  // stable read none of its 40 markers (the scans hold none of them here): someone's, but not for good (D1: it may be
+  // the village's own), so the one run offered for it is a look again, never a move
+  t.like(sites[0].judged, { kind: 'theirs', rule: 'build', v: undefined });
+  t.true(rejudge(sites[0]));
+  const vs2 = villagersTask.variants(snap(KIT(), { now: land.t }), world);
+  t.deepEqual(vs2.map(v => v.id), ['village -693,2262', ...SEARCHES]);
+  t.like(vs2[0], { needMs: lookNeedMs(Math.hypot(-693 - HOME.x, 2262 - HOME.z)) });
   // and the west side walks on past it next time, as past any village judged
   t.truthy(knownVillage(world, { x: -700, z: 2301 }));
   t.truthy(knownVillage(world, { x: -760, z: 2300 }), 'inside its area, 77 from its bell');
@@ -1457,7 +1489,9 @@ test('one village, one verdict: the sites the live run left (the bell\'s someone
   });
   const before = JSON.stringify(world);
   t.deepEqual(peekVillages(world).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-693,2262 theirs']);
-  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES, 'no move offered for either');
+  // (no move offered for either: its own site is offered for a look, its word of someone's (another build, the judge
+  // before Nov 17) to be judged again; the two folded into it are not offered at all)
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), ['village -693,2262', ...SEARCHES], 'no move offered for either');
   t.is(JSON.stringify(world), before, 'the gates write nothing');
   const judged = world.villages!.sites[0];
   villagesOf(world);
@@ -1467,7 +1501,7 @@ test('one village, one verdict: the sites the live run left (the bell\'s someone
   // bell, as the south-west search would pass them, are that village too (no site made for them: a trip out for nothing)
   noteSeen(world, [1, 2, 3].map(i => ({ id: 10 + i, name: 'villager', position: { x: -765.5 - i, y: 69, z: 2262.5 } })), T0 - 4 * MINUTE);
   t.deepEqual(world.villages!.sites, [judged], 'no site of their own');
-  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES);
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), ['village -693,2262', ...SEARCHES]);
   t.truthy(knownVillage(world, { x: -768, z: 2262 }));
   // seen again in its area (77 from its bell): no new site, the village's own is that
   judged.area = { x1: -776, z1: 2235, x2: -636, z2: 2325 };
@@ -1661,7 +1695,7 @@ test('one village, one verdict, its ground kept: a site someone\'s that a fold m
   t.deepEqual(villagersTask.variants(snap(KIT()), w2).map(v => v.id), SEARCHES);
 });
 
-test('the search\'s bearings: the four sides, then the four between them (the quarters a side\'s line never sees), each out to 384 by a gate on its own sides, its dry mark written as a side\'s', async (t) => {
+test('the search\'s bearings: the four sides, then the four between them (the quarters a side\'s line never sees), each out to the range (640) by a gate on its own sides, its dry mark written as a side\'s', async (t) => {
   const world = hallWorld({ villages: { sites: [], players: [] } });
   world.zones!['fence:gate']!.push({ x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 });
   const land = new Land(world, { houses: [] });
@@ -1675,19 +1709,19 @@ test('the search\'s bearings: the four sides, then the four between them (the qu
     logs.push(land.log.slice(from));
   }
   t.deepEqual(texts.map(x => /^\[([a-z-]+)\]/.exec(x)?.[1]), SEARCHES);
-  t.is(texts[4], '[north-east] no village north-east within the village range (384 from home); back home');
+  t.is(texts[4], '[north-east] no village north-east within the village range (640 from home); back home');
   // each dry, its mark as a side's: once each, the turn on to the next
   t.deepEqual(Object.keys(world.work!.dry).sort(), SEARCHES.map(b => `villagers:${b}`).sort());
   for (const b of SEARCHES) t.like(world.work!.dry[`villagers:${b}`], { n: 1 }, b);
-  // the north-east's stops: 32 apart across the ground along its line, the last 16 inside the range (368 out), out of
+  // the north-east's stops: 32 apart across the ground along its line, the last 16 inside the range (624 out), out of
   // the yard by the east gate (of the north and east gates, the shorter way)
-  const stops = [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 368].map(d => `(${Math.round(HOME.x + d / Math.SQRT2)}, 63, ${Math.round(HOME.z - d / Math.SQRT2)})`);
+  const stops = [...Array.from({ length: 19 }, (_, i) => (i + 1) * 32), 624].map(d => `(${Math.round(HOME.x + d / Math.SQRT2)}, 63, ${Math.round(HOME.z - d / Math.SQRT2)})`);
   t.deepEqual(logs[4].filter(l => stops.some(s => l.startsWith(`goto ${s}`))).map(l => /^goto (\([^)]*\))/.exec(l)![1]), stops);
-  t.is(Math.round(Math.hypot(Math.round(HOME.x + 368 / Math.SQRT2) - HOME.x, Math.round(HOME.z - 368 / Math.SQRT2) - HOME.z)), 368);
+  t.is(Math.round(Math.hypot(Math.round(HOME.x + 624 / Math.SQRT2) - HOME.x, Math.round(HOME.z - 624 / Math.SQRT2) - HOME.z)), 624);
   t.true(land.said.includes('out of the yard by its east gate (-533, 63, 2183)'), land.said.filter(l => /out of the yard/.test(l)).join(' | '));
-  t.true(land.said.includes('villagers: looking north-east for a village, out to 384'));
-  // and the south-west's by the south or west gate, its last stop 368 out to the south-west
-  t.true(logs[6].some(l => l.startsWith(`goto (${Math.round(HOME.x - 368 / Math.SQRT2)}, 63, ${Math.round(HOME.z + 368 / Math.SQRT2)})`)), logs[6].join(' | '));
+  t.true(land.said.includes('villagers: looking north-east for a village, out to 640'));
+  // and the south-west's by the south or west gate, its last stop 624 out to the south-west
+  t.true(logs[6].some(l => l.startsWith(`goto (${Math.round(HOME.x - 624 / Math.SQRT2)}, 63, ${Math.round(HOME.z + 624 / Math.SQRT2)})`)), logs[6].join(' | '));
 });
 
 /** The live yard's builds (brain.json, Nov 15) as zones, what a way across the yard keeps off, and its four gates. */
@@ -2072,4 +2106,435 @@ test('a gate in the fence straight out from the hall\'s panel: the way in across
     land.said.filter(l => /way into the hall/.test(l)).join(' | '));
   t.is(land.block(-556, 63, 2119), GATE);
   t.deepEqual(land.villagers.filter(e => inHall({ x: Math.floor(e.position.x), y: 63, z: Math.floor(e.position.z) })).map(e => e.id), [107]);
+});
+
+// ------------------------------------------------------------------------------------------------ the user's decisions of Nov 17 (D1)
+
+/** The west village's hay stable as the bridge's zone, read whole (live, nearby-builds: hay x24, planks x23, wall torches x8, fences x6). */
+const STABLE = (over: Partial<LookZone> = {}): LookZone => ({
+  x1: -703, y1: 64, z1: 2315, x2: -670, y2: 75, z2: 2344, markers: 61, surface: true, sample: 'hay_block',
+  all: { hay_block: 24, oak_planks: 23, wall_torch: 8, oak_fence: 6 }, ...over
+});
+
+/** The west village as a look round it sees it (Nov 15): its bell, beds, job sites, its villagers in three knots, its stable. */
+function westLook(over: Partial<VillageLook> = {}): VillageLook {
+  const land = new Land(hallWorld(), { houses: [] });
+  const vs = westVillage(land);
+  return {
+    bells: land.marks.filter(m => m.name === 'bell').map(m => m.at), beds: land.marks.filter(m => /_bed$/.test(m.name)).map(m => m.at),
+    jobs: land.marks.filter(m => /lectern|composter/.test(m.name)).map(m => ({ name: m.name, at: m.at })),
+    seen: vs, penned: new Set(), kinds: { oak_planks: 200, white_bed: 3, bell: 1, lectern: 1, composter: 1, hay_block: 24, wall_torch: 8, oak_fence: 6 },
+    looked: { chunks: 30, of: 30 }, zones: [STABLE()], players: [], spawn: { x: SPAWN.x, z: SPAWN.z }, ...over
+  };
+}
+
+test('D1 the village\'s own outbuildings: the live hay stable (in its area, by its beds, of hay, planks, wall torches and fences) is the village\'s own, not another build; read short, it is another build as before', (t) => {
+  const v = judgeVillage(westLook());
+  t.is(v.kind, 'free', v.why);
+  if (v.kind !== 'free') return;
+  t.is(v.why, '5 villagers, 3 unemployed adult(s) to take (2 employed)');
+  t.is(v.own.length, 1, 'the stable is its own: the way home is not kept 16 off it');
+  t.like(v.own[0], { x1: -703, z1: 2315, sample: 'hay_block' });
+  // (not read whole: no read, a read short of its markers (chunks unloaded since), nothing read: someone's, as on Nov 15)
+  const live = 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)';
+  for (const z of [STABLE({ all: undefined }), STABLE({ all: { hay_block: 24, oak_planks: 23 } }), STABLE({ all: {} })]) t.like(judgeVillage(westLook({ zones: [z] })), { kind: 'theirs', why: live, rule: 'build' });
+  // every block of it one a natural village is built of
+  for (const n of ['hay_block', 'oak_planks', 'wall_torch', 'oak_fence', 'lantern', 'farmland', 'wheat', 'carrots', 'white_wool', 'glass_pane', 'white_bed', 'composter']) t.true(VILLAGE_MADE.has(n), n);
+  for (const n of ['chest', 'spruce_wall_sign', 'white_wall_banner', 'brown_wall_banner', 'birch_planks', 'dark_oak_planks', 'hopper', 'rail', 'white_concrete']) t.false(VILLAGE_MADE.has(n), n);
+});
+
+test('D1 a player\'s build by a village stays another build: a hay barn beside it (off its area, or 40 from its marks), the stable with a chest, a sign, a banner or a player\'s block in it; and every other rule as it was', (t) => {
+  const theirs = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'theirs' ? `${v.rule}: ${v.why}` : `not theirs: ${v.kind} ${v.why}`; };
+  // a player's hay barn just beside the village: 34 off its area (z 2326), of the same hay and planks
+  t.is(theirs(westLook({ zones: [STABLE({ z1: 2360, z2: 2380 })] })), 'build: another build 34 from it (x -703..-670, z 2360..2380, hay_block)');
+  // meeting its area but 40 and more from every mark of its own (a barn at its edge, east of the knot of farmers)
+  t.is(theirs(westLook({ zones: [STABLE({ x1: -652, x2: -640, z1: 2240, z2: 2250 })] })), 'build: another build 0 from it (x -652..-640, z 2240..2250, hay_block)');
+  // the stable itself with something only a player (or a looted village house) has in it
+  for (const [n, c] of [['chest', 1], ['spruce_wall_sign', 1], ['white_wall_banner', 1], ['birch_planks', 4], ['hopper', 1]] as const) {
+    t.is(theirs(westLook({ zones: [STABLE({ markers: 61 + c, all: { ...STABLE().all, [n]: c } })] })), 'build: another build 0 from it (x -703..-670, z 2315..2344, hay_block)', n);
+  }
+  // a mineshaft under it is the world's, a player's house beside the live village someone's, as before
+  const house: Zone = { x1: -529, y1: 59, z1: 1880, x2: -520, y2: 70, z2: 1892, markers: 40, surface: true, sample: 'cobblestone' };
+  t.is(theirs(freeLook({ zones: [...VILLAGE_ZONES(), house] })), 'build: another build 0 from it (x -529..-520, z 1880..1892, cobblestone)');
+  const named = VILLAGERS();
+  named[3] = { ...named[3], named: true, customName: 'Bob' };
+  t.is(theirs(freeLook({ seen: named })), 'villager: a villager (-546, 63, 1872) is named (Bob)');
+  t.is(theirs(freeLook({ kinds: { ...freeLook().kinds, oak_sign: 1 } })), 'marker: what only a player puts down in it or within 16: oak_sign x1');
+  t.is(theirs(freeLook({ players: [{ x: -560, z: 1900, at: T0 }] })), 'player: a player was seen 0 from it, at (-560, 1900) (14:00)');
+  t.is(theirs(freeLook({ spawn: { x: -556, z: 2100 } })), 'spawn: within 256 of the world spawn (186 off)');
+});
+
+test('D1 recheck: an ominous banner in a village or within 16 of it is a player\'s mark like any banner (26.3 keeps every pillager outpost 10 chunks off a village, beyond the marks\' window: one there is a raid captain\'s, a trophy), for good', (t) => {
+  const banner = { ...freeLook().kinds, white_wall_banner: 1 };
+  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
+  t.false('sure' in judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 } })), 'for good');
+  t.like(judgeVillage(freeLook({ kinds: banner })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, white_wall_banner: 2 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', why: 'what only a player puts down in it or within 16: white_wall_banner x2' });
+  // a banner and a sign: a player's mark that is not banners alone
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 } })), { kind: 'theirs', rule: 'marker' });
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'marker', why: 'what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1' });
+});
+
+/** A pillager outpost as the bridge's zone, read whole: its watchtower's dark oak, cobblestone walls, its loot chest, four ominous banners. */
+const OUTPOST = (over: Partial<LookZone> = {}): LookZone => ({
+  x1: -500, y1: 60, z1: 1860, x2: -490, y2: 90, z2: 1870, markers: 70, surface: true, sample: 'dark_oak_planks',
+  all: { dark_oak_planks: 40, cobblestone_wall: 12, dark_oak_fence: 8, white_wall_banner: 4, chest: 1, torch: 3, birch_planks: 2 }, ominous: 4, ...over
+});
+
+test('D1 a pillager outpost by a village is danger, not someone\'s: its distance said, the way home kept 48 off it; one within 48 of it is another build (a trophy banner: the game keeps outposts 10 chunks off a village); a raid farm on one is someone\'s; illagers by the village make it wait', (t) => {
+  // 60 off the live village's area (x2 -517): no other build within 48, the village free, the outpost listed for the way home
+  const FAR = { x1: -457, x2: -447 };
+  const v = judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST(FAR)] }));
+  t.is(v.kind, 'free', v.why);
+  if (v.kind !== 'free') return;
+  t.is(v.outposts.length, 1);
+  t.false(v.own.some(z => z.sample === 'dark_oak_planks'), 'not the village\'s own: the way home keeps off it');
+  t.is(v.why, '7 villagers, 2 unemployed adult(s) to take (2 employed, 1 babies, 1 nitwits, 1 by a job site); a pillager outpost 60 from it (x -457..-447, z 1860..1870): kept 48 off');
+  t.true(60 >= ZONES_NEAR && 60 < ZONES_NEAR + OUTPOST_CLEAR, 'within what the look reads whole');
+  // 17 off it (no outpost the game would put there: a player's with a raid captain's banner): another build, someone's
+  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST()] })), { kind: 'theirs', rule: 'build', why: 'another build 17 from it (x -500..-490, z 1860..1870, dark_oak_planks)' });
+  // a dark oak shed with two chests, a crafting table, torches and a trophy ominous banner, 17 off: someone's, as any build there
+  const shed = OUTPOST({ markers: 9, sample: 'torch', all: { chest: 2, crafting_table: 1, torch: 4, dark_oak_planks: 1, white_wall_banner: 1 }, ominous: 1 });
+  t.true(outpostMade(shed), 'of outpost blocks alone, with an ominous banner');
+  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), shed] })), { kind: 'theirs', rule: 'build' });
+  // a raid farm built on one (a hopper, rails), or a player's banner beside the ominous ones: someone's
+  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ markers: 74, all: { ...OUTPOST().all, hopper: 2, rail: 2 } })] })), { kind: 'theirs', rule: 'build' });
+  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ markers: 71, all: { ...OUTPOST().all, white_wall_banner: 5 } })] })), { kind: 'theirs', rule: 'build' });
+  // no ominous banner read in it: another build
+  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ ominous: undefined })] })), { kind: 'theirs', rule: 'build' });
+  // a pillager by the village: it waits (danger now); one 100 off it is no matter
+  const pillager: Seen = { id: 300, name: 'pillager', position: { x: -505.5, y: 63, z: 1880.5 } };
+  t.like(judgeVillage(freeLook({ seen: [...VILLAGERS(), pillager] })), { kind: 'wait', why: '1 illager(s) about (a pillager at (-506, 63, 1880)): no move by pillagers' });
+  t.is(judgeVillage(freeLook({ seen: [...VILLAGERS(), { ...pillager, position: { x: -417.5, y: 63, z: 1880.5 } }] })).kind, 'free');
+  // the rules of someone's come first: a named villager with a pillager by is someone's
+  const named = VILLAGERS().map((e, i) => (i ? e : { ...e, named: true }));
+  t.is(judgeVillage(freeLook({ seen: [...named, pillager] })).kind, 'theirs');
+});
+
+test('D1 judged again: a word of someone\'s given before Nov 17 for another build is looked at again, once; every other stays for good (banners alone too: no outpost is within the judge\'s reach of a village), and a player seen by one makes it for good', (t) => {
+  const theirs = (why: string, more: Partial<NonNullable<VillageSite['judged']>> = {}): Pick<VillageSite, 'judged'> => ({ judged: { at: T0, kind: 'theirs', why, ...more } });
+  t.true(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)')), 'the west village (Nov 15)');
+  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1')), 'the north-west one (Nov 15): a mark, ominous or not');
+  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, brown_banner x2')));
+  t.false(rejudge(theirs('whatever it said', { rule: 'banner' })));
+  t.true(rejudge(theirs('whatever it said', { rule: 'build' })));
+  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1')));
+  t.false(rejudge(theirs('a player was seen 20 from it, at (-560, 63, 1810) (13:00)')));
+  t.false(rejudge(theirs('within 256 of the world spawn (100 off)')));
+  t.false(rejudge(theirs('a villager (-546, 63, 1872) is named (Bob)')));
+  t.false(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: JUDGE_V })), 'judged by today\'s judge: for good');
+  t.false(rejudge({ judged: { at: T0, kind: 'wait', why: 'another build' } }));
+  t.false(rejudge({}));
+  // the gate lets it through for a look, a word for good does not
+  const site: VillageSite = { x: -693, y: 63, z: 2262, seenAt: T0, ...theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)') };
+  t.true(siteOpen(site, HOME, T0));
+  t.false(siteOpen({ ...site, ...theirs('a player was seen 20 from it') }, HOME, T0));
+  // a player seen by it makes it someone's for good (the old word was none such)
+  const world = hallWorld({ villages: { sites: [{ ...site }], players: [] } });
+  noteSeen(world, [{ id: 9, name: 'player', position: { x: -690, y: 63, z: 2300 } }], T0 + MINUTE);
+  t.like(peekVillages(world).sites[0].judged, { kind: 'theirs', rule: 'player', v: JUDGE_V });
+  t.false(rejudge(peekVillages(world).sites[0]));
+  // two sites of one village, the newer word to be judged again, the older a player's: one site, the player's word kept
+  const w2 = hallWorld({
+    villages: {
+      sites: [{ x: -693, y: 63, z: 2262, seenAt: T0, ...theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)') },
+        { x: -700, y: 63, z: 2301, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'a player was seen 10 from it, at (-700, 63, 2311) (13:00)' } }],
+      players: []
+    }
+  });
+  t.deepEqual(peekVillages(w2).sites.map(s => s.judged?.why), ['a player was seen 10 from it, at (-700, 63, 2311) (13:00)']);
+  t.deepEqual(villagersTask.variants(snap(KIT()), w2).map(v => v.id), SEARCHES);
+});
+
+/** The live west village in the stand-in world, its stable standing as the scans' markers (61 of them) in the zone's box. */
+function westStable(land: Land, extra: { name: string; n: number }[] = []): void {
+  westVillage(land);
+  const z = STABLE();
+  let i = 0;
+  for (const [name, n] of [...Object.entries(z.all!), ...extra.map(e => [e.name, e.n] as const)]) {
+    for (let k = 0; k < n; k++, i++) land.marks.push({ name, at: { x: z.x1 + 4 + (i % 26), y: 66, z: z.z1 + 4 + Math.floor(i / 26) } });
+  }
+  // (the bridge's zone: its box and its count; what it is built of is read by the look)
+  land.zones = [{ x1: z.x1, y1: z.y1, z1: z.z1, x2: z.x2, y2: z.y2, z2: z.z2, surface: true, sample: z.sample, markers: 61 + extra.reduce((a, e) => a + e.n, 0) }];
+}
+
+test('D1 judged again live: the west village (someone\'s on Nov 15 by its hay stable) is looked at and judged free, nothing touched, the move offered next; with a chest in the stable it is someone\'s for good', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  world.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, bells: 1, beds: 3, jobs: 2, seenAt: T0 - HOUR,
+    judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  const land = new Land(world, { houses: [] });
+  westStable(land);
+  // offered first, as a look (no boat, no move): the day it needs a walk's there and back and the look
+  const vs = villagersTask.variants(snap(KIT(), { now: land.t }), world);
+  const dist = Math.hypot(-693 - HOME.x, 2262 - HOME.z);
+  t.like(vs[0], { id: 'village -693,2262', first: true, needMs: lookNeedMs(dist) });
+  const text = await rung(land).run(land.ctx());
+  t.is(text, '[village -693,2262] judged the village at (-693, 63, 2262) again (was someone\'s: another build 0 from it (x -703..-670, z 2315..2344, hay_block)): '
+    + 'free (5 villagers, 3 unemployed adult(s) to take (2 employed)): the move next run; back home');
+  t.deepEqual(acted(land), [], 'no villager taken, nothing dug');
+  t.false(land.items.some(i => i.name === 'oak_boat' && i.count !== 1), 'the boat not used');
+  const site = peekVillages(world).sites.find(s => s.x === -693)!;
+  t.like(site.judged, { kind: 'free', v: JUDGE_V });
+  t.false(rejudge(site));
+  // the move offered next (after the look's mark), its day the move's
+  const later = snap(KIT(), { now: land.t + 2 * HOUR });
+  t.like(villagersTask.variants(later, world)[0], { id: 'village -693,2262', first: true, needMs: moveNeedMs(dist) });
+
+  // the same with a chest in the stable: someone's, for good, never offered again
+  const w2 = hallWorld({ villages: { sites: [], players: [] } });
+  w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  w2.villages!.sites.push({ x: -693, y: 63, z: 2262, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' } });
+  const l2 = new Land(w2, { houses: [] });
+  westStable(l2, [{ name: 'chest', n: 1 }]);
+  const t2 = await rung(l2).run(l2.ctx());
+  t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: another build .*\): someone's, left alone: another build 0 from it \(x -703\.\.-670, z 2315\.\.2344, hay_block\); back home$/);
+  t.like(peekVillages(w2).sites[0].judged, { kind: 'theirs', rule: 'build', v: JUDGE_V });
+  t.deepEqual(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2).map(v => v.id), SEARCHES);
+});
+
+test('D1 the range is 640: a village known 500 out is offered for a look, but no move sets out from farther than a day holds (the walk out, the look, the boat home by dusk: about 447 by land)', (t) => {
+  t.is(VILLAGE_RANGE, 640);
+  // the day's sums: a work day of 575 s less 15 s; a move from 303 out 418 s, from 400 out 513 s, from 500 out 612 s:
+  // no move from past about 447 by land
+  t.is(DAY_MS, 560_000);
+  t.is(moveNeedMs(303), Math.round(303 / 3 * 1000) + 60_000 + homeMs({ x: 0, z: 0 }, [{ x: 303, z: 0 }]));
+  t.true(moveNeedMs(440) <= DAY_MS && moveNeedMs(455) > DAY_MS, `${moveNeedMs(440)} ${moveNeedMs(455)}`);
+  t.true(lookNeedMs(VILLAGE_RANGE) <= DAY_MS, 'a look at any village in the range fits a day');
+  t.is(searchNeedMs(0), Math.round(2 * 128 / 3 * 1000) + 60_000);
+  t.is(searchNeedMs(600), Math.round(2 * 640 / 3 * 1000) + 60_000, 'no further than the range');
+  const w = hallWorld({ villages: { sites: [
+    { x: -549, y: 63, z: 2183 - 400, villagers: 6, seenAt: T0 }, { x: -549, y: 63, z: 2183 + 500, villagers: 6, seenAt: T0 },
+    { x: -549 - 500, y: 63, z: 2183, villagers: 6, seenAt: T0, judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x 1..2, z 1..2, hay_block)' } }
+  ], players: [] } });
+  const vs = villagersTask.variants(snap(KIT()), w);
+  t.deepEqual(vs.filter(v => v.first).map(v => `${v.id} ${v.dist}`), ['village -549,1783 400', 'village -1049,2183 500'], 'the free one 500 out not offered: too far for the boat by land in a day');
+  // from tod 0 the move from 400 out sets out (517 s of the 575)
+  t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 0 }), w), { variant: 'village -549,1783' });
+  // a free one past that is said so, not "the move next run" (the find, the look again) nor a plain "free" in brain-status
+  t.is(tooFarWord(400), undefined);
+  t.is(tooFarWord(447), undefined);
+  t.is(tooFarWord(500), 'but too far for a day\'s move (500 from home: it needs 612 s, the day has 560 s)');
+  const judged = { at: T0, kind: 'free' as const, why: '6 villagers', v: JUDGE_V };
+  const w2 = hallWorld({ villages: { sites: [{ x: -549, y: 63, z: 2183 - 400, seenAt: T0, judged }, { x: -549, y: 63, z: 2183 + 500, seenAt: T0, judged }], players: [] } });
+  t.regex(villagersLine(w2, T0, tooFarFrom(HOME)), /; 2 village\(s\) known \(1 free, 1 free but too far for a day's move\)/);
+  t.regex(villagersLine(w2, T0), /; 2 village\(s\) known \(2 free\)/, 'no home known: as before');
+});
+
+test('D1 a search out to 640 goes on the next run from where the day stopped it: the stops it looked from not looked again, the bearing ahead of the turn till done, then dropped', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  const land = new Land(world, { houses: [] });
+  land.villagers = [];
+  land.marks = [];
+  // (a run with 2 min of its budget: the walk home from the next stop must still fit)
+  const r1 = await villagersTask.run(land.ctx(), 'north', 120_000, () => land.t);
+  t.true(r1.mark === 'same', r1.text);
+  t.regex(r1.text, /^no village seen north as far as \d+ blocks out: the run's time ran out$/);
+  const out = peekVillages(world).searched?.north?.out ?? 0;
+  t.true(out > 64 && out < VILLAGE_RANGE, String(out));
+  t.regex(villagersLine(world, land.t), new RegExp(`searched part way \\(out of 640\\): north to ${out}`));
+  // the next run's turn: north first, its day a walk out past it and 128 on
+  const vs = villagersTask.variants(snap(KIT(), { now: land.t }), world);
+  t.like(vs[0], { id: 'north', first: true, needMs: searchNeedMs(out) });
+  t.deepEqual(vs.slice(1).map(v => v.id), SEARCHES.filter(b => b !== 'north'));
+  // run two, its whole budget: out past what it looked along, then on to the range
+  const from = land.said.length;
+  const r2 = await villagersTask.run(land.ctx(), 'north', MOVE_BUDGET, () => land.t);
+  t.is(r2.text, 'no village north within the village range (640 from home)');
+  const said = land.said.slice(from);
+  t.true(said.includes(`villagers: looking north for a village, out to 640 (looked along to ${out} before: on from there)`), said.join(' | '));
+  t.true(said.some(l => /^out north past what was looked along before, \d+ blocks out$/.test(l)));
+  const looked = said.filter(l => /^looking north for village, \d+ blocks out$/.test(l)).map(l => Number(/(\d+) blocks/.exec(l)![1]));
+  t.true(looked.length > 0 && looked.every(d => d >= out), looked.join(','));
+  t.is(peekVillages(world).searched, undefined, 'done: dropped');
+});
+
+test('D1 pillagers: a search turns back from a pillager outpost ahead, a move\'s walk out from a pillager in sight; nothing taken, nothing touched', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  const land = new Land(world, { houses: [] });
+  land.villagers = [];
+  // an outpost's ominous banner 200 north of the north gate, a player's plain one 100 north
+  land.marks = [{ name: 'white_wall_banner', at: { x: -549, y: 70, z: 1919 }, ominous: true }, { name: 'white_wall_banner', at: { x: -549, y: 66, z: 2019 } }];
+  const r = await villagersTask.run(land.ctx(), 'north', MOVE_BUDGET, () => land.t);
+  t.regex(r.text, /^turned back north at \(-549, 63, (19[89]\d|20\d\d)\), \d+ from home: a pillager outpost \(its ominous banner at \(-549, 70, 1919\), \d+ off\)$/);
+  t.is(r.mark, undefined, 'the bearing dry: waits as a side with nothing');
+  t.false(land.log.some(l => /^goto \(-549, 63, 19[0-4]\d\)/.test(l)), 'never walked within 48 of it');
+  t.is(peekVillages(world).searched, undefined);
+  // the move to the live village 300 north: a pillager in sight on the way out turns it back before the village
+  const w2 = hallWorld();
+  const l2 = new Land(w2);
+  l2.players.push({ id: 77, name: 'pillager', position: { x: -560.5, y: 63, z: 2010.5 } });
+  const r2 = await villagersTask.run(l2.ctx(), 'village -556,1880', MOVE_BUDGET, () => l2.t);
+  t.regex(r2.text, /^turned back at \(-55\d, 63, 20\d\d\) on the way out to the village at \(-556, 63, 1880\): a pillager at \(-561, 63, 2010\), \d+ off$/);
+  t.is(r2.mark, undefined, 'turned back by danger: the dry mark\'s wait grows, not the same 20 minutes');
+  t.deepEqual(acted(l2), []);
+});
+
+// ------------------------------------------------------------------------------------------------ D1's review fixes
+
+const gotoZ = (land: Land) => land.log.map(l => /^goto \(-?\d+, -?\d+, (-?\d+)\)/.exec(l)).filter((m): m is RegExpExecArray => !!m).map(m => Number(m[1]));
+
+test('D1 fix: an ominous banner the scans have not seen yet (they reach 48 round the bot) is read where it hangs, 96 round it: the search turns back from it 64 to 111 ahead, never walking within 48 of it; an older jar reads the scans as before', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  const land = new Land(world, { houses: [], scans: 48 });
+  land.villagers = [];
+  // 49 past the stop (z 1967) where the scans first could see it: from there the old reads walked the next leg to 17 off
+  land.marks = [{ name: 'white_wall_banner', at: { x: -549, y: 70, z: 1918 }, ominous: true }];
+  const r = await villagersTask.run(land.ctx(), 'north', MOVE_BUDGET, () => land.t);
+  t.regex(r.text, /^turned back north at \(-549, 63, \d+\), \d+ from home: a pillager outpost \(its ominous banner at \(-549, 70, 1918\), \d+ off\)$/);
+  t.true(Number(/, (\d+) off\)$/.exec(r.text)![1]) >= OUTPOST_CLEAR, r.text);
+  t.false(gotoZ(land).some(z => z < 1918 + OUTPOST_CLEAR), gotoZ(land).join(','));
+  // (an older jar: no foreign.banners, the scans' markers: turned back all the same, but nearer)
+  const old = new Land(hallWorld({ villages: { sites: [], players: [] } }), { houses: [], scans: 48, oldJar: true });
+  old.villagers = [];
+  old.marks = land.marks.map(m => ({ ...m, at: { ...m.at } }));
+  t.regex((await villagersTask.run(old.ctx(), 'north', MOVE_BUDGET, () => old.t)).text, /^turned back north at .*: a pillager outpost/);
+});
+
+test('D1 fix: a search going on from an earlier run looks for danger at the stops it walks through (a pillager by one turns it back), and its day\'s end counts the walk home from where it is, not from home', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [], searched: { north: { out: 400, at: T0 - HOUR } } } });
+  const land = new Land(world, { houses: [] });
+  land.villagers = [];
+  land.marks = [];
+  land.players.push({ id: 77, name: 'pillager', position: { x: -549.5, y: 63, z: 2000.5 } });
+  const r = await villagersTask.run(land.ctx(), 'north', MOVE_BUDGET, () => land.t);
+  t.regex(r.text, /^turned back north at \(-549, 63, 20\d\d\), \d+ from home: a pillager at \(-550, 63, 2000\), \d+ off$/);
+  t.true(land.said.some(l => /^out north past what was looked along before, \d+ blocks out$/.test(l)));
+  t.false(land.said.some(l => /^looking north for village, \d+ blocks out$/.test(l)), 'never got to a stop to look from');
+  // a slow walk through (gates, ground: a block a second): it turns back while the walk home still fits the run
+  const w2 = hallWorld({ villages: { sites: [], players: [], searched: { north: { out: 600, at: T0 - HOUR } } } });
+  const l2 = new Land(w2, { houses: [] });
+  l2.villagers = [];
+  l2.marks = [];
+  const walk = (l2 as unknown as { walk: (to: { x: number; z: number }, y?: number) => void }).walk.bind(l2);
+  (l2 as unknown as { walk: (to: { x: number; z: number }, y?: number) => void }).walk = (to, y) => { const t0 = l2.t; walk(to, y); l2.t = t0 + (l2.t - t0) * 4; };
+  const budget = 240_000;
+  const began = l2.t;
+  const r2 = await villagersTask.run(l2.ctx(), 'north', budget, () => l2.t);
+  t.is(r2.text, 'no village seen north as far as 600 blocks out: the run\'s time ran out');
+  t.is(r2.mark, 'same');
+  const left = budget - (l2.t - began), back = horiz(l2.me, HOME) / 3 * 1000;
+  t.true(back <= left + 15_000, `${Math.round(horiz(l2.me, HOME))} out with ${Math.round(left / 1000)} s left`);
+  t.is(peekVillages(w2).searched?.north?.out, 600, 'on from there next run');
+});
+
+/** The rung's run for a site, its clock the stand-in world's (the snapshot at that time too, for the wrapper's marks). */
+const rungAt = (land: Land) => rung(land).run(land.ctx({ s: snap(land.items, { now: land.t }) }));
+
+test('D1 fix: an ominous banner by a village is the judge\'s, not an outpost to turn back from (the game keeps its outposts 10 chunks off a village): the re-look gets to the village, the search finds it; an outpost on the way still turns the walk back, its wait growing each time', async (t) => {
+  // the west village to judge again, a player's trophy (ominous) banner in it, by the stable
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  const old = { at: T0 - HOUR, kind: 'theirs' as const, why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' };
+  world.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, bells: 1, beds: 3, jobs: 2, seenAt: T0 - HOUR, judged: { ...old }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  const land = new Land(world, { houses: [] });
+  westStable(land);
+  const trophy = { name: 'white_wall_banner', at: { x: -690, y: 66, z: 2300 }, ominous: true as const };
+  land.marks.push(trophy);
+  const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
+  // (the walk got there, not turned back by it; the judge then calls the trophy what it is: a player's mark)
+  t.regex(r.text, /^judged the village at \(-693, 63, 2262\) again .*: someone's, left alone: what only a player puts down in it or within 16: white_wall_banner x1$/);
+  // the search west finds it with the banner in it (a village not known yet)
+  const w2 = hallWorld({ villages: { sites: [], players: [] } });
+  w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  const l2 = new Land(w2, { houses: [] });
+  westStable(l2);
+  l2.marks.push({ ...trophy });
+  const r2 = await villagersTask.run(l2.ctx(), 'west', MOVE_BUDGET, () => l2.t);
+  t.regex(r2.text, /^found a village at \(-693, 63, 2262\): someone's, left alone: what only a player puts down in it or within 16: white_wall_banner x1$/);
+  // an outpost on the way out (79 off the village's area): turned back with no mark, so the wrapper's dry mark grows
+  const w3 = hallWorld({ villages: { sites: [], players: [] } });
+  w3.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  w3.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, seenAt: T0 - HOUR, judged: { ...old }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  const l3 = new Land(w3, { houses: [] });
+  westStable(l3);
+  l3.marks.push({ name: 'white_wall_banner', at: { x: -600, y: 70, z: 2142 }, ominous: true });
+  const r3 = await villagersTask.run(l3.ctx(), 'village -693,2262', MOVE_BUDGET, () => l3.t);
+  t.regex(r3.text, /^turned back at .* on the way out to the village at \(-693, 63, 2262\): a pillager outpost \(its ominous banner at \(-600, 70, 2142\), \d+ off\)$/);
+  t.is(r3.mark, undefined);
+  t.regex(await rungAt(l3), /turned back .*: a pillager outpost/);
+  t.like(w3.work!.dry['villagers:village -693,2262'], { n: 1 });
+  l3.t += 21 * MINUTE;
+  t.regex(await rungAt(l3), /turned back .*: a pillager outpost/);
+  t.like(w3.work!.dry['villagers:village -693,2262'], { n: 2 }, 'the wait 40 minutes now, not 20 again');
+});
+
+test('D1 fix: a re-look keeps the walk home: no viewpoint walked to that the day would not bring it home from; a village found too late in the day is looked at on the next run, from that stop', async (t) => {
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  world.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, seenAt: T0 - HOUR,
+    judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  // (not all of it seen from its middle: the look would walk round it)
+  const land = new Land(world, { houses: [], looked: 1 });
+  westStable(land);
+  const budget = 110_000;
+  const began = land.t;
+  const r = await villagersTask.run(land.ctx(), 'village -693,2262', budget, () => land.t);
+  t.regex(r.text, /^judged the village at \(-693, 63, 2262\) again .*: not all of it seen yet/);
+  t.false(land.said.some(l => /^villagers: looking round the village from/.test(l)), land.said.join(' | '));
+  t.true(horiz(land.me, HOME) / 3 * 1000 <= budget - (land.t - began), 'home by the run\'s end');
+  // with the whole day: it walks round it as before
+  const w2 = hallWorld({ villages: { sites: [], players: [] } });
+  w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  w2.villages!.sites.push({ ...world.villages!.sites[0], judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' } });
+  const l2 = new Land(w2, { houses: [], looked: 1 });
+  westStable(l2);
+  await villagersTask.run(l2.ctx(), 'village -693,2262', MOVE_BUDGET, () => l2.t);
+  t.true(l2.said.some(l => /^villagers: looking round the village from/.test(l)));
+  // the search: a village in sight with too little of the day left to walk over, look and come home
+  const w3 = hallWorld({ villages: { sites: [], players: [] } });
+  w3.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  const l3 = new Land(w3, { houses: [] });
+  westStable(l3);
+  const r3 = await villagersTask.run(l3.ctx(), 'west', 100_000, () => l3.t);
+  t.regex(r3.text, /^a village in sight at \(-693, 63, 2262\), but the day is too short to walk over and look at it: the next run, from (\d+) out$/);
+  t.is(r3.mark, 'same');
+  const out = peekVillages(w3).searched?.west?.out;
+  t.true(!!out && r3.text.endsWith(`from ${out} out`), String(out));
+  t.false(peekVillages(w3).sites.some(s => s.judged), 'not judged: looked at next run');
+});
+
+test('D1 fix: a word of someone\'s on what the look could not read whole is not sealed by today\'s judge: the stable\'s read failed (judged again later, after the dry mark\'s wait); banners are for good, whatever the jar says of them', async (t) => {
+  // the judge: sure or not
+  const banner = { ...freeLook().kinds, white_wall_banner: 1 };
+  t.false('sure' in judgeVillage(freeLook({ kinds: banner })), 'an older jar (no word of ominous ones): for good all the same');
+  t.false('sure' in judgeVillage(freeLook({ kinds: banner, ominous: {} })), 'the bridge said: none of them ominous');
+  t.false('sure' in judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 } })), 'a sign: for good');
+  t.like(judgeVillage(westLook({ zones: [STABLE({ all: undefined })] })), { kind: 'theirs', rule: 'build', sure: false });
+  t.false('sure' in judgeVillage(westLook({ zones: [STABLE({ all: { chest: 1 } })] })), 'read short, but a chest in it: no village\'s own');
+  t.false('sure' in judgeVillage(westLook({ zones: [STABLE({ all: undefined, z1: 2360, z2: 2380 })] })), 'off its area: someone\'s whatever it holds');
+  // live: the stable's read fails on the re-look
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  world.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, seenAt: T0 - HOUR,
+    judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  const land = new Land(world, { houses: [] });
+  westStable(land);
+  const call = land.call.bind(land);
+  land.call = (m, p = {}) => { if (m === 'foreign.marks' && p.x1 === -703 && p.z1 === 2315) throw new Error('timed out'); return call(m, p); };
+  const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
+  t.is(r.text, 'judged the village at (-693, 63, 2262) again (was someone\'s: another build 0 from it (x -703..-670, z 2315..2344, hay_block)): '
+    + 'someone\'s, left alone: another build 0 from it (x -703..-670, z 2315..2344, hay_block) (not all of it read: judged again later)');
+  t.is(r.mark, undefined);
+  const site = peekVillages(world).sites[0];
+  t.like(site.judged, { kind: 'theirs', rule: 'build', v: undefined });
+  t.true(rejudge(site), 'judged again later');
+  // read whole next time: free, for good
+  land.call = call;
+  const r2 = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
+  t.regex(r2.text, /: free \(/);
+  t.like(peekVillages(world).sites[0].judged, { kind: 'free', v: JUDGE_V });
+  // an older jar: no ominous field on foreign.marks, a plain white banner by the village: someone's, for good
+  const w3 = hallWorld({ villages: { sites: [], players: [] } });
+  w3.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  w3.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, seenAt: T0 - HOUR,
+    judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  const l3 = new Land(w3, { houses: [], oldJar: true });
+  westStable(l3);
+  l3.marks.push({ name: 'white_wall_banner', at: { x: -690, y: 66, z: 2300 } });
+  const call3 = l3.call.bind(l3);
+  l3.call = (m, p = {}) => { const out = call3(m, p) as Record<string, unknown>; if (m === 'foreign.marks') delete out.ominous; return out; };
+  await villagersTask.run(l3.ctx(), 'village -693,2262', MOVE_BUDGET, () => l3.t);
+  t.like(peekVillages(w3).sites[0].judged, { kind: 'theirs', rule: 'banner', v: JUDGE_V });
+  t.false(rejudge(peekVillages(w3).sites[0]));
 });

@@ -1401,8 +1401,10 @@ test('F3: a Nether trip\'s room keeps its own kit, not the home kit: the setup\'
   const s = snap(atTheSetup());
   t.is(s.slotsUsed, 27);
   const w = world();
-  // for life at home all of it stays but the frame's obsidian and the flint and steel (two slots: the setup kept those too)
-  t.is(pockets(s, w).loose, 2);
+  // for life at home all of it stays but the frame's obsidian and the flint and steel (two slots: the setup kept those too),
+  // and since D1 the fire protection helmet: the Nether set's, which the kit at home ranks below the main set's worn one
+  // (kit.ts better), so it goes in the chests and the main one stays the kit's
+  t.is(pockets(s, w).loose, 3);
   // a Nether trip's own keep: the seeds, the dirt, the buckets, the spare helmet, the raw food and the junk go (11
   // slots); the kit stays, and the home kit's tools with it (the axe, the shovel, the hoe: put away, the kit goal would
   // take them back at once and stop the trip for it, turn about)

@@ -45,10 +45,11 @@ import { penFences } from './yardgates.js';
 import { holdHarmless, unsafeInHand } from './fluidpick.js';
 import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 import { netherSparesGoal, regearGoal } from './regear.js';
+import { homeSetGoal } from './netherset.js';
 import { oneSpareSet } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 import { homeBed } from './villagers.js';
-import { closeUpGoal } from './villagemove.js';
+import { closeUpGoal, tooFarFrom } from './villagemove.js';
 import { VILLAGE_RANGE, movesOn, noteBells, noteSeen, villagersLine, villagesOf, type Seen } from './village.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
@@ -206,7 +207,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -500,7 +501,7 @@ export class Brain {
     // the Nether: the switch, the stage, the clean trips, the deaths, the portals known
     if (world) this.measure('status', () => lines.push(netherLine(world, this.now())));
     // the villagers: the switch, the hall and its villagers, the villages known and judged, the last move
-    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now())));
+    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined)));
     if (world) this.measure('status', () => {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
@@ -711,12 +712,20 @@ export class Brain {
     if (!movesOn(world) || s.dimension !== OVERWORLD || !s.home || this.now() - this.villagesAt < 10 * 60_000) return;
     this.villagesAt = this.now();
     const home = s.home;
-    const r = await this.rt.call<{ at?: { x: number; y: number; z: number; name: string }[] }>('foreign.marks', {
-      x1: home.x - VILLAGE_RANGE, z1: home.z - VILLAGE_RANGE, x2: home.x + VILLAGE_RANGE, z2: home.z + VILLAGE_RANGE, match: '^bell$', max: 64
-    }).catch(() => undefined);
-    if (!Array.isArray(r?.at)) return;
+    // (the range's box in its four quarters: 640 round home is 1281 across, and the bridge reads a box of 1024 at most)
+    const bells: { x: number; y: number; z: number; name: string }[] = [];
+    let answered = false;
+    for (const [qx, qz] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
+      const x1 = qx < 0 ? home.x - VILLAGE_RANGE : home.x + 1, z1 = qz < 0 ? home.z - VILLAGE_RANGE : home.z + 1;
+      const x2 = qx < 0 ? home.x : home.x + VILLAGE_RANGE, z2 = qz < 0 ? home.z : home.z + VILLAGE_RANGE;
+      const r = await this.rt.call<{ at?: { x: number; y: number; z: number; name: string }[] }>('foreign.marks', { x1, z1, x2, z2, match: '^bell$', max: 64 }).catch(() => undefined);
+      if (!Array.isArray(r?.at)) continue;
+      answered = true;
+      bells.push(...r.at);
+    }
+    if (!answered) return;
     this.measure('villages', () => {
-      const fresh = noteBells(world, r.at!.filter(m => m.name === 'bell'), this.now(), home);
+      const fresh = noteBells(world, bells.filter(m => m.name === 'bell'), this.now(), home);
       if (fresh) this.note(`villagers: ${fresh} village(s) seen on the walks (their bells), within ${VILLAGE_RANGE} of home`);
     });
   }

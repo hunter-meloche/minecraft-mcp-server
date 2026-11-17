@@ -402,6 +402,33 @@ public final class Interact {
             return r;
         });
 
+        // which armour set the gear check dresses in (Combat.wearSet), and dressed so at once: "nether" (the fire
+        // protection pieces and the golden helmet first: the brain's swap at home before the portal) or "main" (the
+        // rest first, the default after every start: the swap back at home). A swap of piece for piece, never a piece
+        // taken off, so nothing is refused with a hostile near: what was worn goes into the pocket slot the new piece
+        // came from. Holds (armor.unequip's) are not heeded: the swap is no table's or anvil's. Without `set` it only
+        // says. Replies with the set, what went on (`wore`) and every armour slot worn (its index 36-39, the piece)
+        s.register("armor.wearset", true, (p, c) -> {
+            LocalPlayer pl = player();
+            String set = strParam(p, "set", null);
+            com.google.gson.JsonArray wore = new com.google.gson.JsonArray();
+            if (set != null) {
+                if (!set.equals("main") && !set.equals("nether")) throw new IllegalArgumentException("set must be main or nether");
+                Combat.wearSet = set;
+                for (String n : Combat.equipBestArmor(false)) wore.add(n);
+            }
+            com.google.gson.JsonArray worn = new com.google.gson.JsonArray();
+            Inventory inv = pl.getInventory();
+            for (int i = 39; i >= 36; i--) {
+                ItemStack st = inv.getItem(i);
+                if (!st.isEmpty()) worn.add(Handlers.withDetail(obj("slot", i, "name", Names.item(st), "count", st.getCount()), st));
+            }
+            JsonObject r = obj("set", Combat.wearSet);
+            r.add("wore", wore);
+            r.add("worn", worn);
+            return r;
+        });
+
         s.register("item.equip", true, (p, c) -> {
             LocalPlayer pl = player();
             String name = required(p, "name");

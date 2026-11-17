@@ -20,6 +20,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.tags.EnchantmentTags;
 import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.item.enchantment.ItemEnchantments;
 
 import java.util.ArrayList;
@@ -210,12 +211,54 @@ public final class Combat {
     }
 
     /**
-     * How good a piece is to wear in its slot here: armorRank, but in the Nether a golden helmet first (piglins leave
-     * a player in gold alone); back in the overworld the best helmet wins again by armorRank.
+     * Which of its two armour sets the gear check dresses the bot in (armor.wearset, the brain's swap at home: D1 of the
+     * progression plan). "main", the default and what every client start begins with: the protection set, a piece with
+     * fire protection (the Nether set's) ranked below any other of its tier, so the Guardian never puts a Nether piece on
+     * at home over the main one (the table or the anvil works on one carried, and its levels may be more). "nether": the
+     * Nether set first, the fire protection pieces and the golden helmet, from the swap at home before the portal. In
+     * the Nether itself the Nether set comes first whatever this says (a restart down there begins with "main").
+     */
+    static volatile String wearSet = "main";
+
+    /** A Nether set piece over any other, in the Nether or dressed for it: below the golden helmet's lead (Nether.helmetRank). */
+    static final int NETHER_SET_FIRST = 500_000;
+    /** A Nether set piece under any other of its tier at home: still above a piece of the tier below (diamond over iron). */
+    static final int MAIN_SET_FIRST = 500;
+
+    /** Dressed for the Nether: down there, or the swap at home has asked for it (armor.wearset "nether"). */
+    static boolean dressedForNether(boolean inNether, String set) {
+        return inNether || "nether".equals(set);
+    }
+
+    /**
+     * A piece's rank for its set (pure): a fire protection piece (the Nether set's: protection and fire protection
+     * exclude each other, so the main set never has it) first when dressed for the Nether, else after the others of its
+     * tier. Nothing worn (rank 0) stays 0.
+     */
+    static int setRank(int rank, boolean fireProtected, boolean dressedForNether) {
+        if (!fireProtected || rank <= 0) return rank;
+        return dressedForNether ? rank + NETHER_SET_FIRST : rank - MAIN_SET_FIRST;
+    }
+
+    static boolean fireProtected(ItemStack s) {
+        if (s.isEmpty()) return false;
+        for (var en : s.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY).entrySet()) {
+            if (en.getKey().is(Enchantments.FIRE_PROTECTION)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * How good a piece is to wear in its slot here: armorRank, the set's order on top (setRank), and dressed for the
+     * Nether a golden helmet first (piglins leave a player in gold alone: the golden helmet is the Nether set's
+     * helmet, so the swap at home puts it on before the portal and the main set's diamond helmet stays home); back
+     * home and swapped back the best helmet wins again by armorRank.
      */
     static int wearRank(String slot, ItemStack s, boolean nether) {
-        int rank = armorRank(s);
-        return slot.equals("helmet") && !s.isEmpty() ? Nether.helmetRank(Names.item(s), rank, nether) : rank;
+        if (s.isEmpty()) return armorRank(s);
+        boolean dressed = dressedForNether(nether, wearSet);
+        int rank = setRank(armorRank(s), fireProtected(s), dressed);
+        return slot.equals("helmet") ? Nether.helmetRank(Names.item(s), rank, dressed) : rank;
     }
 
     /** `only`: just these armour slots (inventory index 36-39), or all of them when null. */

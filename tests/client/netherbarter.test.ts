@@ -58,9 +58,9 @@ async function afterSetup(opts: Parameters<typeof game>[1] = {}, gold = 60) {
   return { w, first, later, f };
 }
 
-/** Every barter target met but soul sand (none): 4 potions of fire resistance carried, the rest in the chests. */
+/** Every barter target met but soul sand (none): the target's potions of fire resistance carried (12 since D1), the rest in the chests. */
 function onlySoulSand(w: WorldMemory, inv: InventoryItem[]) {
-  inv.push({ slot: 33, name: 'potion', count: 4, potion: 'fire_resistance' });
+  inv.push({ slot: 33, name: 'potion', count: NETHER_STOCK.fire_resistance, potion: 'fire_resistance' });
   Object.assign(w.chestItems![DROPS], { leather: 16, ender_pearl: 16 });
   w.chestItems![STONE2].obsidian = 20;
 }
@@ -967,8 +967,8 @@ test.serial('ingots tossed and lost (burnt, or taken by a piglin off to the side
 
 // ------------------------------------------------------------------------------------------------ the targets and the gate
 
-test('the Nether stock: fire resistance 4 (any form, by its contents), soul sand 16, leather 16, obsidian 20, ender pearls 16, quartz 64; carried and stored together', (t) => {
-  t.deepEqual({ ...NETHER_STOCK }, { fire_resistance: 4, soul_sand: 16, leather: 16, obsidian: 20, ender_pearl: 16, quartz: 64 });
+test('the Nether stock: fire resistance 12 (any form, by its contents; 4 before D1: a day\'s use of 6, twice over), soul sand 16, leather 16, obsidian 20, ender pearls 16, quartz 64; carried and stored together', (t) => {
+  t.deepEqual({ ...NETHER_STOCK }, { fire_resistance: 12, soul_sand: 16, leather: 16, obsidian: 20, ender_pearl: 16, quartz: 64 });
   t.deepEqual(BARTER_FOR, ['fire_resistance', 'soul_sand', 'leather', 'obsidian', 'ender_pearl']);
   const w = setupWorld();
   w.chestStacks = { [DROPS]: [{ slot: 3, name: 'splash_potion', count: 1, potion: 'fire_resistance' }, { slot: 4, name: 'potion', count: 2, potion: 'water' }] };
@@ -978,7 +978,7 @@ test('the Nether stock: fire resistance 4 (any form, by its contents), soul sand
   t.is(netherStock('fire_resistance', s, w), 2);
   t.is(netherStock('soul_sand', s, w), 16);
   t.is(netherStock('leather', s, w), 7);
-  t.deepEqual(netherShort(s, w, BARTER_FOR).map(x => `${x.kind} ${x.have}/${x.want}`), ['fire_resistance 2/4', 'leather 7/16', 'obsidian 10/20', 'ender_pearl 0/16']);
+  t.deepEqual(netherShort(s, w, BARTER_FOR).map(x => `${x.kind} ${x.have}/${x.want}`), ['fire_resistance 2/12', 'leather 7/16', 'obsidian 10/20', 'ender_pearl 0/16']);
   // what a build job holds in the chests is not the home's
   w.reserved = { 1: { soul_sand: 10 } } as never;
   t.true(netherStock('soul_sand', s, w) <= 16);
@@ -1009,8 +1009,8 @@ test('the stage gate: nothing of the barter before stage 1, before the link or w
   const full = structuredClone(w);
   Object.assign(full.chestItems![DROPS], { leather: 16, ender_pearl: 16, soul_sand: 16 });
   full.chestItems![STONE2].obsidian = 20;
-  full.chestStacks = { [DROPS]: [{ slot: 0, name: 'potion', count: 4, potion: 'long_fire_resistance' }] };
-  t.deepEqual(barterReady(s, full), { cause: 'stocked', text: 'every barter target met (fire resistance 4/4, soul_sand 16/16, leather 16/16, obsidian 20/20, ender_pearl 16/16)' });
+  full.chestStacks = { [DROPS]: [{ slot: 0, name: 'potion', count: NETHER_STOCK.fire_resistance, potion: 'long_fire_resistance' }] };
+  t.deepEqual(barterReady(s, full), { cause: 'stocked', text: 'every barter target met (fire resistance 12/12, soul_sand 16/16, leather 16/16, obsidian 20/20, ender_pearl 16/16)' });
   // (the rung stocked once the quartz work, beside the barter at stage 1, is at its target too)
   full.chestItems![ORES].quartz = 64;
   t.like(rung().declines!(s, full), { cause: 'stocked' });
@@ -1086,7 +1086,7 @@ test('the gold chore: raw gold smelted for bartering while a target is short, up
   const full = goldWorld(990, 0);
   Object.assign(full.chestItems![DROPS], { leather: 16, ender_pearl: 16, soul_sand: 16 });
   full.chestItems![STONE2].obsidian = 20;
-  full.chestStacks = { [DROPS]: [{ slot: 0, name: 'potion', count: 4, potion: 'fire_resistance' }] };
+  full.chestStacks = { [DROPS]: [{ slot: 0, name: 'potion', count: NETHER_STOCK.fire_resistance, potion: 'fire_resistance' }] };
   t.is(goldWant(pm, full), null);
   const early = goldWorld(990, 0);
   netherOf(early).stage = 0;
