@@ -470,6 +470,8 @@ test('glut is dropped, not stored; a kind a bill needs is never glut', async t =
     carrot: 640, potato: 320, poisonous_potato: 0, beetroot: 320, beetroot_seeds: 64, wheat: 256, wheat_seeds: 128, bread: 640,
     melon_slice: 320, pumpkin: 64, sugar_cane: 512, kelp: 64, cactus: 64, bamboo: 64, sweet_berries: 64,
     apple: 128, beef: 256, porkchop: 128, chicken: 64, mutton: 128, egg: 32, feather: 128, rotten_flesh: 64, spider_eye: 32, bone: 192,
+    // (and since the evening's fishing, anti-idle step 6: its fish raw, some 570 a real day)
+    cod: 256, salmon: 128, pufferfish: 32, tropical_fish: 32,
     ...Object.fromEntries(wool.map(c => [`${c}_wool`, 128]))
   });
   const s = snap(glutLoad());

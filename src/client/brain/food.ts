@@ -5,8 +5,9 @@ import type { Pos, WorldMemory } from './memory.js';
 import { collectFurnace, farmAll } from './chores.js';
 import { oreAside } from './project.js';
 import { FOOD_CARRY } from './pockets.js';
-import { chestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
+import { chestTotals, freeChestTotals, peekChest, rememberReply, takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
+import { BREED_STOCK } from './animals.js';
 import { placeNearHome } from './firsts.js';
 import { underNow } from './underyard.js';
 import { goHome, walkHome } from './homeward.js';
@@ -67,6 +68,21 @@ const RETREAT_FROM = 16;
 
 /** Nothing ready to eat while hungry or hurt: worse than being out at dusk (it went to bed at 7 health, food 8). */
 const starving = (s: Snapshot) => readyFoodPoints(s.counts) < 3 && (s.food <= 14 || s.health < 10);
+
+/**
+ * Bread to bake from `carried` wheat, with `stored` more in the home chests: only from what is beyond the pens' stock
+ * (BREED_STOCK, carried and stored together), which the pens round takes out of the chests to breed from. Every 3
+ * wheat went into bread before, the pens round's leftover with it, and the cow pen said "need 2 wheat to breed (have
+ * 0)" every round on Nov 15 with 723 bread stored. Starving, all of it: staying alive comes before a calf.
+ */
+export function breadToBake(carried: number, stored: number, starve = false): number {
+  const kept = Number.isFinite(stored) && stored > 0 ? stored : 0;
+  const spare = starve ? carried : Math.min(carried, carried + kept - BREED_STOCK);
+  return Number.isFinite(spare) && spare > 0 ? Math.floor(spare / 3) : 0;
+}
+
+/** Wheat in the chests beyond the pens' stock, as last seen: what the bake may take out of them (starving, all of it). */
+const wheatSpare = (world: WorldMemory, starve: boolean) => Math.max(0, (freeChestTotals(world).wheat ?? 0) - (starve ? 0 : BREED_STOCK));
 
 export const food: Goal = {
   name: 'food',
@@ -161,6 +177,15 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
   const filled = () => readyFoodPoints(have) >= fill;
   const refresh = async () => { have = await counts(ctx); };
   const foods = foodsFor26();
+  // the pens' wheat stays out of the bake (breadToBake), unless the bot is starving
+  const starve = starving(ctx.s);
+  const bake = async () => {
+    const n = breadToBake(have.get('wheat') ?? 0, freeChestTotals(ctx.world).wheat ?? 0, starve);
+    if (!n) return;
+    const r = await ctx.act('craft-item', { outputItem: 'bread', amount: n });
+    if (r.ok) say(`baked ${n} bread`);
+    await refresh();
+  };
 
   // 1. the home chests
   for (const chest of useChests ? landmarks.chests : []) {
@@ -185,8 +210,10 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
       if (r.ok) say(`took ${want} ${name}`);
       await refresh();
     }
-    if (Object.keys(inside).includes('wheat') && !enough()) {
-      const r = await ctx.act('take-from-chest', { ...chest, item: 'wheat', count: 27 });
+    // (the wheat beyond the pens' stock only: the round takes that out of the chests to breed from)
+    const wheat = Math.min(27, inside.wheat ?? 0, wheatSpare(ctx.world, starve));
+    if (wheat > 0 && !enough()) {
+      const r = await ctx.act('take-from-chest', { ...chest, item: 'wheat', count: wheat });
       rememberReply(ctx.world, chest, r.text);
       if (r.ok) say('took wheat');
       await refresh();
@@ -199,12 +226,7 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
   }
 
   // 2. bread from wheat
-  const wheat = have.get('wheat') ?? 0;
-  if (!enough() && wheat >= 3) {
-    const r = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(wheat / 3) });
-    if (r.ok) say(`baked ${Math.floor(wheat / 3)} bread`);
-    await refresh();
-  }
+  if (!enough()) await bake();
 
   // 3. cook what it carries
   let cleared = false;
@@ -269,12 +291,7 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
     // the cooking also failing the goal finished every 20 s with nothing, instead of failing and waiting
     if (readyFoodPoints(have) + (have.get('wheat') ?? 0) > before) say(`farmed (${r.text.slice(0, 80)})`);
     else ctx.progress(`farmed, nothing to eat from it (${r.text.slice(0, 80)})`);
-    const w = have.get('wheat') ?? 0;
-    if (w >= 3) {
-      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: Math.floor(w / 3) });
-      if (b.ok) say(`baked ${Math.floor(w / 3)} bread`);
-      await refresh();
-    }
+    await bake();
   }
 
   // 5. fish (a rod wears out: make another from string and sticks, the chests' included)
@@ -356,14 +373,27 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
 }
 
 
-/** Craft a fishing rod (3 sticks, 2 string) from what's carried and in the home chests; true when it has one. */
-export async function makeRod(ctx: GoalContext): Promise<boolean> {
+/**
+ * Craft a fishing rod (3 sticks, 2 string) from what's carried and in the home chests; true when it has one.
+ * `keepString`: string that stays, carried and stored together (the leads' for the evening's fishing rung, fish.ts:
+ * the pens walk the cows home on them); with less beyond it than a rod takes, none is made. `careful`: the walk to the
+ * home table is on foot only first (the rod is made at the table's 3 x 3 grid, and the craft's own walk is Baritone's,
+ * which may place and break on the way: A11).
+ */
+export async function makeRod(ctx: GoalContext, opts: { keepString?: number; careful?: boolean } = {}): Promise<boolean> {
   const count = async (n: string) => (await ctx.call<{ items: { name: string; count: number }[] }>('inventory')).items
     .filter(i => i.name === n).reduce((a, i) => a + i.count, 0);
+  const keep = opts.keepString ?? 0;
+  if (keep > 0 && (await count('string')) + (freeChestTotals(ctx.world).string ?? 0) - keep < 2) return false;
   if ((await count('string')) < 2) await takeFromChests(ctx, 'string', 2 - (await count('string')));
   if ((await count('stick')) < 3) await takeFromChests(ctx, 'stick', 3 - (await count('stick')));
   if ((await count('stick')) < 3) await ctx.act('craft-item', { outputItem: 'stick', amount: 1 });
   if ((await count('string')) < 2 || (await count('stick')) < 3) return false;
+  const table = ctx.world.landmarks.table;
+  if (opts.careful && table) {
+    await ctx.call('goto', { ...table, range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    if (ctx.signal.aborted) throw new Error('aborted');
+  }
   return (await ctx.act('craft-item', { outputItem: 'fishing_rod', amount: 1 })).ok;
 }
 

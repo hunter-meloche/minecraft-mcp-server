@@ -37,7 +37,6 @@ import { communityStatus, donateGoal, missionGoal } from './community.js';
 import { yardGrowGoal, yardGrowStatus } from './yardgrow.js';
 import { storageGoal } from './storehouse.js';
 import { bedGoal } from './home.js';
-import { spareGoal } from './spare.js';
 import { clearOut, dryBlocked, ladderOf, pick, releaseOldestDry, shareHolds, skippedLine, taskOf, workGoals, workLine, workTick } from './work.js';
 import { NEAR_HOME, out as afield } from './pockets.js';
 import { statusAnswer } from './chatstatus.js';
@@ -207,7 +206,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), spareGoal, returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -434,10 +433,11 @@ export class Brain {
     if (this.idleStage === 0 && idle >= IDLE_FIRST) {
       this.idleStage = 1;
       const held = [...this.retryAt].filter(([g, t]) => t > this.now() && !this.looping(g)).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
-      // the marks of what was looked for and not found (`fruitless:*`) stay, the stock trips' like spare time's:
-      // letting them go only sent the bot straight back to where there was nothing (2026-11-08: "spare time: 0 iron
-      // ... Unable to find any path" every 3.5 min for an hour; 2026-11-10: "let go of fruitless:sugar_cane" every 10
-      // to 20 min all day, each one more fruitless cane walk); they lapse by themselves
+      // the marks of what was looked for and not found (`fruitless:*`) stay, the stock trips' as spare time's did
+      // (retired in anti-idle step 6): letting them go only sent the bot straight back to where there was nothing
+      // (2026-11-08: "spare time: 0 iron ... Unable to find any path" every 3.5 min for an hour; 2026-11-10: "let
+      // go of fruitless:sugar_cane" every 10 to 20 min all day, each one more fruitless cane walk); they lapse by
+      // themselves
       this.letGoAll();
       this.note(`idle ${mins} min by day: let go of ${held.join(', ') || 'nothing (nothing was held)'}`);
       return;

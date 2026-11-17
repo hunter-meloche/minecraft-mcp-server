@@ -393,14 +393,30 @@ export interface StashOptions {
   oneSlot?: (name: string) => number;
 }
 
-/** Carried up to this many, the rest dropped: junk, or worth a few (dirt fills holes, seeds and saplings replant). */
+/**
+ * Carried up to this many, the rest dropped: junk, or worth a few (dirt fills holes, seeds and saplings replant). The
+ * lily pad, the bowl and the tripwire hook are the fishing rung's junk (fish.ts CATCH): it brings up some 60 of the
+ * junk table a real day, and nothing here has a use for those three (stored, they filled the misc chest, which stood
+ * full on Nov 14, and then rode in the pockets: "no chest took it").
+ */
 const DROP_BEYOND: [RegExp, number][] = [
-  [/^leaf_litter$/, 0], [/^poisonous_potato$/, 0], [/^rotten_flesh$/, 8], [/^dirt$/, 64], [/^(wheat|beetroot)_seeds$/, 32], [/_sapling$/, 16]
+  [/^leaf_litter$/, 0], [/^poisonous_potato$/, 0], [/^rotten_flesh$/, 8], [/^dirt$/, 64], [/^(wheat|beetroot)_seeds$/, 32], [/_sapling$/, 16],
+  [/^(lily_pad|bowl|tripwire_hook)$/, 0]
 ];
+/** An enchanted piece (an enchanted book's stored enchantments do not count: it is no piece). */
+const enchantedPiece = (i: InventoryItem) => !!(i.enchanted || i.enchantments?.length);
 /** Kept one of (the extra ones go in the chest). */
 const KEEP_ONE = new Set(['fishing_rod', 'bucket', 'water_bucket', 'shield']);
 /** Of those, what a trip of its own kit leaves at home (StashOptions.trip): all but the fishing rod. */
 const tripLeaves = (name: string) => KEEP_ONE.has(name) && name !== 'fishing_rod';
+/**
+ * What the stash puts away by its pocket slot (chores.ts stashList and putAway: storeStack takes that stack and no
+ * other), never by name: the fishing rods beyond the one kept. The fishing rung brings one up in about a hundred
+ * catches, and the keeper is the enchanted one; a deposit by name takes the first of the name, the keeper as like as
+ * not, so the extras stayed carried for good, a slot each, until the mine and the Nether had no room to set out. A
+ * second shield, which nothing brings in, stays carried as before.
+ */
+export const storedBySlot = (name: string): boolean => name === 'fishing_rod';
 
 /**
  * What to put in the home chest and what to throw away, from the main inventory (slots 0-35; worn armour and the
@@ -429,10 +445,18 @@ export function stashPlan(items: InventoryItem[], opts: StashOptions = {}): { de
       // kit took it back out again and again (chest items carry no durability, so it looked like an upgrade)
       const b = best[gearKind(i.name)!];
       if (isWorn(i) && (!b || tier(i.name) > tier(b.name))) continue;
+      // the leather boots the fishing rung brings up with its junk (fish.ts CATCH: never enchanted), one in about a
+      // hundred catches, each a slot of the gear chest: thrown at the dump. The throw is by name (the bridge's
+      // item.drop takes the first of it), so only while no pair carried is enchanted, which is kept whatever it is
+      if (i.name === 'leather_boots' && !opts.keep?.has(i.name) && !main.some(o => o.name === 'leather_boots' && enchantedPiece(o))) {
+        drop.push({ name: i.name, count: 1, slot: i.slot });
+        continue;
+      }
       deposit.push({ name: i.name, count: 1, slot: i.slot });
     } else if (KEEP_ONE.has(i.name) && i.maxDamage) {
-      // Damageable, one per slot: keep the one with the most use left.
-      const keeper = main.filter(o => o.name === i.name).sort((a, b) => left(b) - left(a))[0];
+      // Damageable, one per slot: keep an enchanted one (a fishing rod with lure or luck of the sea, which the fishing
+      // rung's treasure brings up: quicker bites, more treasure), then the one with the most use left.
+      const keeper = main.filter(o => o.name === i.name).sort((a, b) => Number(enchantedPiece(b)) - Number(enchantedPiece(a)) || left(b) - left(a))[0];
       if (i !== keeper) deposit.push({ name: i.name, count: i.count, slot: i.slot });
     } else totals.set(i.name, (totals.get(i.name) ?? 0) + i.count);
   }

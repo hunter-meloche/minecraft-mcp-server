@@ -9,6 +9,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.projectile.FishingHook;
 import net.minecraft.world.entity.player.StackedItemContents;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractFurnaceMenu;
@@ -189,6 +190,80 @@ public final class Interact {
         int to = first >= 0 ? first : freeHotbarSlot(inv);
         if (p.containerMenu != p.inventoryMenu) p.closeContainer();
         click(p.inventoryMenu, inventoryMenuSlot(at), to, ContainerInput.SWAP);
+    }
+
+    /** An enchanted fishing rod in the main inventory (0-35), its index; -1 with none. */
+    static int enchantedRod(Inventory inv) {
+        for (int i = 0; i < 36; i++) {
+            ItemStack st = inv.getItem(i);
+            if (st.isEnchanted() && Names.item(st).equals("fishing_rod")) return i;
+        }
+        return -1;
+    }
+
+    /** Ticks a catch takes to fly from the hook to the bot (about a second): the fish reply waits that long after the last bite. */
+    static final int CATCH_LANDS = 25;
+
+    /**
+     * The game's open-water rule of the fishing hook (FishingHook.calculateOpenWater, private: the treasure loot's
+     * `in_open_water`), or null where this jar's game has none by that name.
+     */
+    static java.lang.reflect.Method openWaterRule() {
+        try {
+            java.lang.reflect.Method m = FishingHook.class.getDeclaredMethod("calculateOpenWater", BlockPos.class);
+            m.setAccessible(true);
+            return m;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The fishing rod out of the main hand, so the server drops the hook (it does once its owner holds no rod) and
+     * nothing is reeled in: an empty hotbar slot first, else one with neither a rod nor a bucket or fire starter in it
+     * (an empty bucket's use takes up the first water it meets). Nothing is clicked with what comes into the hand.
+     */
+    static void rodOutOfHand(LocalPlayer pl) {
+        Inventory inv = pl.getInventory();
+        int pick = -1;
+        for (int k = 1; k <= 7 && pick < 0; k++) if (inv.getItem(k).isEmpty()) pick = k;
+        for (int k = 0; k <= 8 && pick < 0; k++) {
+            String n = Names.item(inv.getItem(k));
+            if (!n.equals("fishing_rod") && !n.equals("bucket") && !Hazards.isHazard(n)) pick = k;
+        }
+        if (pick >= 0) inv.setSelectedSlot(pick);
+    }
+
+    /**
+     * No player, nor anything living that is someone's (named, tamed, on a lead: Handlers.marks, as world.entities says
+     * them), nearer than this to a cast's line from the eye to the water (fish.ts CAST_CLEAR): a hook pulls what it catches.
+     */
+    static final double CAST_CLEAR = 8;
+
+    /** Who stands within CAST_CLEAR of the line from the eye to `aim`, in the brain's words (fish.ts nearCast), or null. */
+    static String nearCast(LocalPlayer pl, Vec3 aim) {
+        Vec3 eye = pl.getEyePosition();
+        for (net.minecraft.world.entity.Entity e : pl.level().getEntities(pl, new net.minecraft.world.phys.AABB(eye, aim).inflate(CAST_CLEAR))) {
+            if (!(e instanceof net.minecraft.world.entity.LivingEntity) || !e.isAlive()) continue;
+            boolean player = e instanceof net.minecraft.world.entity.player.Player;
+            if (!player) {
+                JsonObject mk = new JsonObject();
+                Handlers.marks(mk, e, pl);
+                if (!mk.has("named") && !mk.has("tamed") && !mk.has("leashed")) continue;
+            }
+            Vec3 ab = aim.subtract(eye), ap = e.position().subtract(eye);
+            double len = ab.lengthSqr(), f = len > 0 ? Math.max(0, Math.min(1, ap.dot(ab) / len)) : 0;
+            double d = e.position().distanceTo(eye.add(ab.scale(f)));
+            if (d <= CAST_CLEAR) return (player ? "a player" : "someone's " + Names.entity(e)) + " " + Math.round(d) + " blocks from the cast";
+        }
+        return null;
+    }
+
+    /** The empty slots of the main 36 (the hotbar and the pockets: where a catch goes). */
+    static int freeSlots(Inventory inv) {
+        int n = 0;
+        for (int k = 0; k < 36; k++) if (inv.getItem(k).isEmpty()) n++;
+        return n;
     }
 
     public static int select(String name) {
@@ -955,7 +1030,19 @@ public final class Interact {
             return BridgeServer.LATER;
         });
 
-        // fish at a water block: cast, reel in when a fish bites, repeat `times` (recast after 45 s without a bite)
+        // fish at a water block: cast, reel in when a fish bites, repeat `times` (recast after 45 s without a bite). The
+        // brain's `cancel` ends it as well: a run it gave up on went on casting to its timeout before, the rod taken back
+        // into the hand over whatever ran next. A hook that caught something in its flight (an animal, someone's dog, a
+        // player) is let go, never reeled in, since the reel pulls what the hook holds: the rod goes out of the hand (the
+        // server drops a hook whose owner holds no rod) until the hook is gone, and the call ends there, so that no other
+        // cast goes out along a line someone stands in before the brain has looked (a dropped item caught is no one: the
+        // casts go on). Nor does a cast go out with no free slot for its catch (a book, a saddle, a name tag stacks with
+        // nothing: one fished up into full pockets lay on the shore till it despawned): `full`; nor while a player or
+        // someone's animal stands within 8 of its line (one walked onto the shore mid-call was hooked by the next
+        // recast before): `blocked`, their words. `open`: the bites whose cast bobbed in
+        // open water by the game's own rule (FishingHook.calculateOpenWater, run here on the client's copy of the same
+        // blocks): treasure is fished up only there; -1 where it cannot be read. After the last bite the reply waits for
+        // the catch to fly in (about a second), so `gained` holds it.
         s.register("fish", true, (p, c) -> {
             Minecraft mc = Minecraft.getInstance();
             if (find(player().getInventory(), "fishing_rod") < 0) throw new IllegalArgumentException("no fishing_rod in inventory");
@@ -966,27 +1053,66 @@ public final class Interact {
             Map<String, Integer> before = Processes.inventoryCounts(mc);
             java.lang.reflect.Field bitingField;
             try {
-                bitingField = net.minecraft.world.entity.projectile.FishingHook.class.getDeclaredField("biting");
+                bitingField = FishingHook.class.getDeclaredField("biting");
                 bitingField.setAccessible(true);
             } catch (ReflectiveOperationException e) { throw new IllegalStateException("cannot read the fishing hook: " + e); }
             final java.lang.reflect.Field biting = bitingField;
+            final java.lang.reflect.Method openWater = openWaterRule();
+            final long cancels = Processes.cancels;
+            // an enchanted rod carried is the one fished with (lure, luck of the sea: quicker bites, more treasure)
+            int enchanted = enchantedRod(player().getInventory());
+            if (enchanted >= 0 && !player().getMainHandItem().isEnchanted()) select("fishing_rod", enchanted);
             handsBusy = true;
             Ticker.add(new Ticker.Task() {
-                int age = 0, castAt = -1, wait = 0, caught = 0, casts = 0;
+                int age = 0, castAt = -1, wait = 0, caught = 0, casts = 0, open = 0, lastBite = -1, letGoAt = -1;
+                /** this cast's hook in open water at every look since it settled (the server ANDs it the same way) */
+                boolean castOpen = true, looked = false, openKnown = openWater != null;
+                /** the hook let go of something other than a dropped item (letGoAt) */
+                boolean letGoLiving = false;
+                /** the call ended before a cast: no free slot for its catch (`full`), or who stood by its line (`blocked`) */
+                boolean full = false;
+                String blocked = null;
                 final java.util.ArrayDeque<String> stale = new java.util.ArrayDeque<>(); // where recalled hooks were
+                final java.util.LinkedHashSet<String> letGo = new java.util.LinkedHashSet<>();
                 @Override public boolean tick(Minecraft m) {
                     LocalPlayer pl = m.player;
-                    if (pl == null) { c.fail("not in a world"); return true; }
-                    if (++age > timeout || caught >= times) return finish(m);
+                    if (pl == null) { handsBusy = false; c.fail("not in a world"); return true; }
+                    if (Processes.cancels != cancels) return finish(m);
+                    if (++age > timeout || caught >= times) {
+                        // (the catch flies to the bot from the hook: no new cast meanwhile)
+                        if (lastBite >= 0 && age - lastBite < CATCH_LANDS && age <= timeout + CATCH_LANDS) return false;
+                        return finish(m);
+                    }
                     if (wait > 0) { wait--; return false; }
+                    // a mob at arm's length is the Guardian's to fight, its weapon in hand: no rod taken back into the
+                    // hand meanwhile (each swap back reset its swing, and the hits never came), no cast. The hook out
+                    // when the weapon came into the hand is dropped by the server, and nothing is pulled
+                    if (Guardian.meleeTarget(pl) != null) return false;
+                    // a hook let go: no rod back in the hand until the server has dropped it. Then, where it held
+                    // anyone (an animal, someone's dog, a player), the call ends: they may still stand in the cast's
+                    // line, and the cast that came next hooked them again, about once a second to the call's end. The
+                    // brain looks round before it casts again (fish.ts nearCast). A dropped item the hook caught (the
+                    // last catch flying in) is no one: cast again
+                    if (letGoAt >= 0) {
+                        if (pl.fishing != null && age - letGoAt < 60) return false;
+                        letGoAt = -1;
+                        if (letGoLiving) return finish(m);
+                    }
                     if (!Names.item(pl.getMainHandItem()).equals("fishing_rod")) {
                         if (find(pl.getInventory(), "fishing_rod") < 0) return finish(m); // it broke
-                        select("fishing_rod");
+                        select("fishing_rod", enchantedRod(pl.getInventory()));
                         wait = 2;
                         return false;
                     }
                     var hook = pl.fishing;
                     if (hook == null) {
+                        // a free slot for this cast's catch: the last one let land first where it may take the last
+                        // slot (and `gained` hold it)
+                        int free = freeSlots(pl.getInventory());
+                        if (free < 2 && lastBite >= 0 && age - lastBite < CATCH_LANDS) return false;
+                        if (free < 1) { full = true; return finish(m); }
+                        blocked = nearCast(pl, aim);
+                        if (blocked != null) return finish(m);
                         pl.lookAt(EntityAnchorArgument.Anchor.EYES, aim);
                         // cast two ticks later, once the rotation has gone out
                         Ticker.add(new Ticker.Task() {
@@ -1000,6 +1126,16 @@ public final class Interact {
                         wait = 4;
                         castAt = age + 2;
                         casts++;
+                        castOpen = true;
+                        looked = false;
+                        return false;
+                    }
+                    if (hook.getHookedIn() != null) {
+                        letGo.add(Names.entity(hook.getHookedIn()));
+                        letGoLiving |= !(hook.getHookedIn() instanceof net.minecraft.world.entity.item.ItemEntity);
+                        letGoAt = age;
+                        rodOutOfHand(pl);
+                        wait = 2;
                         return false;
                     }
                     boolean bite;
@@ -1008,6 +1144,14 @@ public final class Interact {
                     // look for water just under it; every good cast was reeled back after 3 s before
                     boolean onWater = hook.isInWater() || m.level.getFluidState(BlockPos.containing(hook.getX(), hook.getY() - 0.3, hook.getZ()))
                         .is(net.minecraft.tags.FluidTags.WATER);
+                    // its open water looked at once a second while it bobs and waits (not at the bite itself: the bite
+                    // pulls the hook under, a block lower than where it waited)
+                    if (onWater && !bite && openKnown && (age - castAt) % 20 == 0) {
+                        try {
+                            castOpen &= (Boolean) openWater.invoke(hook, hook.blockPosition());
+                            looked = true;
+                        } catch (ReflectiveOperationException | RuntimeException e) { openKnown = false; }
+                    }
                     boolean expired = age - castAt > 900 || (age - castAt > 60 && !onWater);
                     if (bite || expired) {
                         if (!bite) {
@@ -1016,7 +1160,11 @@ public final class Interact {
                                 onWater ? " on water" : "", hook.onGround() ? " on ground" : "", age - castAt));
                         }
                         m.gameMode.useItem(pl, InteractionHand.MAIN_HAND); // reel in
-                        if (bite) caught++;
+                        if (bite) {
+                            caught++;
+                            lastBite = age;
+                            if (looked && castOpen) open++;
+                        }
                         wait = 15;
                     }
                     return false;
@@ -1024,9 +1172,23 @@ public final class Interact {
 
                 boolean finish(Minecraft m) {
                     handsBusy = false;
-                    if (m.player != null && m.player.fishing != null) m.gameMode.useItem(m.player, InteractionHand.MAIN_HAND);
+                    LocalPlayer pl = m.player;
+                    // reeled in, unless the hook holds something: then let go (the reel would pull it). Only with the
+                    // rod in the hand: out of it (a let-go's wait run out, the Guardian's weapon in hand at a cancel)
+                    // the use would be of whatever is there, food, a bow, a pearl; the server drops a hook whose owner
+                    // holds no rod anyway
+                    if (pl != null && pl.fishing != null) {
+                        if (pl.fishing.getHookedIn() != null) { letGo.add(Names.entity(pl.fishing.getHookedIn())); rodOutOfHand(pl); }
+                        else if (Names.item(pl.getMainHandItem()).equals("fishing_rod")) m.gameMode.useItem(pl, InteractionHand.MAIN_HAND);
+                    }
                     Map<String, Integer> gained = Processes.gained(before, Processes.inventoryCounts(m));
-                    c.ok(obj("bites", caught, "casts", casts, "gained", gained, "seconds", Json.round(age / 20.0), "recalled", String.join("; ", stale)));
+                    com.google.gson.JsonArray let = new com.google.gson.JsonArray();
+                    for (String n : letGo) let.add(n);
+                    JsonObject reply = obj("bites", caught, "casts", casts, "gained", gained, "seconds", Json.round(age / 20.0), "recalled", String.join("; ", stale),
+                        "open", openKnown ? open : -1, "letGo", let);
+                    if (full) reply.addProperty("full", true);
+                    if (blocked != null) reply.addProperty("blocked", blocked);
+                    c.ok(reply);
                     return true;
                 }
             });

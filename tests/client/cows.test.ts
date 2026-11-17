@@ -10,6 +10,10 @@ import { leaveYard } from '../../src/client/brain/yardgates.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import sinon from 'sinon';
 import { fetchForPens, pens, penWay, standsClear } from '../../src/client/brain/pens.js';
+import { BREED_STOCK } from '../../src/client/brain/animals.js';
+import { freeChestTotals } from '../../src/client/brain/chests.js';
+import { stashList } from '../../src/client/brain/chores.js';
+import { breadToBake } from '../../src/client/brain/food.js';
 import { out as afield } from '../../src/client/brain/pockets.js';
 import { LADDER } from '../../src/client/brain/worktasks.js';
 import { DRY_WAIT, alongSide, dryUntil, markDry, needMs, penCount, pick, sitesOf, workGoals, workOf, workTick, type WorkTask } from '../../src/client/brain/work.js';
@@ -1632,6 +1636,29 @@ test('a pens round the brain gives up on the way to the gate says so, not that t
   const w2 = liveWorld();
   const pb = new Pasture([cow(61, -557, 2166), cow(62, -554, 2168)], w2, [...KIT, { slot: 3, name: 'wheat', count: 10 }], { abortOnWalk: { to: '-555,2172', abort: () => undefined } });
   t.is(await pens.run(pb.ctx(w2)), 'cow: could not get into the pen by its gate (-555, 63, 2171)');
+});
+
+// (serial: the game's clock is faked for the breeding cooldown)
+test.serial('the pens round breeds from the wheat the bake keeps: none carried, the chests\' 16 taken out, a pair fed; the rest no bread is baked from, the stash puts it back, and the next round feeds from it again', async (t) => {
+  // live on Nov 15: "cow: need 2 wheat to breed (have 0)" every round, every 3 wheat baked into bread
+  const clock = sinon.useFakeTimers({ now: Date.now(), toFake: ['Date'] });
+  t.teardown(() => clock.restore());
+  const world = liveWorld({}, { [k(FARM_CHEST)]: { wheat: BREED_STOCK } });
+  const pa = new Pasture([cow(351, -556, 2167), cow(352, -554, 2168)], world, [...KIT]);
+  t.is(await pens.run(pa.ctx(world)), 'cow: fed 2 to breed; cow: 0 cow ready to breed');
+  t.deepEqual(pa.log.filter(l => l.startsWith('take-from-chest') || l.startsWith('entity.use') || l === 'a calf is born'),
+    ['take-from-chest wheat 16', 'entity.use #352 wheat', 'entity.use #351 wheat', 'a calf is born']);
+  t.is(pa.count('wheat'), 14);
+  t.is(freeChestTotals(world).wheat ?? 0, 0, 'the chest\'s memory: all 16 out');
+  // the 14 left are the pens' still: neither the food goal nor the farm round bakes them, and the stash stores them
+  t.is(breadToBake(pa.count('wheat'), freeChestTotals(world).wheat ?? 0), 0);
+  t.deepEqual(stashList(look(pa.items), world).deposit.filter(e => e.name === 'wheat'), [{ name: 'wheat', count: 14 }]);
+  // after the game's 5 minutes, carried as they are: no take, the same pair fed again from them
+  clock.tick(6 * MINUTE);
+  t.is(await pens.run(pa.ctx(world)), 'cow: fed 2 to breed; cow: 0 cow ready to breed');
+  t.is(pa.log.filter(l => l.startsWith('take-from-chest')).length, 1);
+  t.is(pa.count('wheat'), 12);
+  t.is(pa.cows.filter(c => c.baby).length, 2);
 });
 
 /**

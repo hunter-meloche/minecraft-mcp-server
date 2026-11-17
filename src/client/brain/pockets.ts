@@ -1,6 +1,6 @@
 import type { InventoryItem } from '../tools.js';
 import { nearHome, no, onHomeLevel, outsideBy, type Decline, type GoalContext, type Snapshot } from './goals.js';
-import { key, storeSlots } from './chests.js';
+import { key, kindChests, storeSlots } from './chests.js';
 import { roomFor } from './storage.js';
 import type { WorldMemory } from './memory.js';
 import { activityAt } from './schedule.js';
@@ -51,8 +51,8 @@ const WOOL = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pin
  * Enough of these in the chests (the stored total at or over the number) and the stash throws what more it would
  * store at the dump spot instead, as junk is thrown. Two kinds come in by the hundred and never stop: what digging
  * turns up (with the storage house full of cobblestone, 1205 stored, the pockets had nowhere to go), and what the
- * farm, the trees, the pens and the mobs bring in day after day. Live on Nov 14 the produce had filled the storage
- * house (3233 carrots, 1154 sugar cane, 991 bread, 310 wheat stored): the stash failed "nothing could be put away" 44
+ * farm, the trees, the pens, the mobs and the fishing bring in day after day. Live on Nov 14 the produce had filled
+ * the storage house (3233 carrots, 1154 sugar cane, 991 bread, 310 wheat stored): the stash failed "nothing could be put away" 44
  * times in four hours with 27-34 slots carried, every carried kind farm output or food, and no trip down the mine
  * went for six hours (it wants 10 free). What the bot keeps carried stays carried (a stack of each food, FOOD_CARRY;
  * seeds for the farm, the stash's own keep): only what the stash would put away beyond that goes.
@@ -70,6 +70,9 @@ export const GLUT: Record<string, number> = {
   melon_slice: 320, pumpkin: 64, sugar_cane: 512, kelp: 64, cactus: 64, bamboo: 64, sweet_berries: 64,
   // the trees, and the pens' animals raw
   apple: 128, beef: 256, porkchop: 128, chicken: 64, mutton: 128, egg: 32, feather: 128,
+  // the fishing rung's fish, raw (fish.ts): some 570 a real day in the evenings, the cod and salmon cooked by the food
+  // goal as it needs them; the pufferfish poisons (the brewing's one day), the tropical fish is a single point
+  cod: 256, salmon: 128, pufferfish: 32, tropical_fish: 32,
   // what the mobs drop
   rotten_flesh: 64, spider_eye: 32, bone: 192,
   ...Object.fromEntries(WOOL.map(w => [w, 128]))
@@ -139,6 +142,15 @@ export function stashReach(s: Snapshot, world: WorldMemory, kind?: RoomKind): St
     }
     add(e.name, e.count - left);
     if (left > 0 && !stuck.includes(e.name)) stuck.push(e.name);
+  }
+  // the fishing rods beyond the keeper, each by its slot into the first of the three chests storeStack tries (those
+  // of its kind first) with room for it
+  for (const e of work.bySlot) {
+    const k = kindChests(world, e.name).slice(0, 3).map(key).find(c => roomFor(held[c] ??= {}, e.name, slots(c)) >= e.count);
+    if (k) {
+      held[k][e.name] = (held[k][e.name] ?? 0) + e.count;
+      add(e.name, e.count);
+    } else if (!stuck.includes(e.name)) stuck.push(e.name);
   }
   for (const e of work.drop) add(e.name, e.count);
   const main = s.items.filter(i => i.slot >= 0 && i.slot < SLOTS).sort((a, b) => a.slot - b.slot);

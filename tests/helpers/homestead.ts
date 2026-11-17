@@ -106,8 +106,11 @@ const LAST_DONE_AGO: Record<string, number> = {
 
 /** The home rounds and the chores with a time of their own: what "done a minute ago" or "overdue" sets. */
 export const ROUNDS = ['stash', 'tidy', 'sort', 'repair', 'lights', 'signs', 'furnace', 'farm', 'structures', 'storage', 'trees', 'pens', 'cane', 'chests', 'pens-fetch'];
-/** What the stock trips and spare time found nothing of lately, and when they last went: the same for them. */
-export const TRIES = ['fruitless:sugar_cane', 'spare:iron', 'fruitless:spare:iron'];
+/**
+ * What the stock trips found nothing of lately: the same for them. (Spare time's marks, `spare:iron` and its fruitless
+ * one, stay above as brain.json holds them; nothing reads them since spare time was retired in anti-idle step 6.)
+ */
+export const TRIES = ['fruitless:sugar_cane'];
 
 /** The live world, fresh each call. */
 export function liveWorld(): WorldMemory {
@@ -303,7 +306,7 @@ export interface Cell {
 
 /**
  * Every cell: the live and the depleted home (its far variants `far` dry), the home rounds done a minute ago or an
- * hour ago (the stock trips' and spare time's tries a minute ago either way: they are not rounds), a round's haul or
+ * hour ago (the stock trips' tries a minute ago either way: they are not rounds), a round's haul or
  * kept things only, the pockets, the hour, the project blocked or not, the kit ready or short of torches. At home.
  */
 export function grid(goals: Goal[], far: string[]): Cell[] {

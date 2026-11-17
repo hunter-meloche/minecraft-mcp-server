@@ -14,7 +14,6 @@ import { chestAssignment, stash } from '../../src/client/brain/chores.js';
 import { kitNeeds } from '../../src/client/brain/kit.js';
 import { backoffMs, journal, progressOf } from '../../src/client/brain/progress.js';
 import { chestLabels, misplaced } from '../../src/client/brain/storage.js';
-import { spareTask } from '../../src/client/brain/spare.js';
 import { donationPlan } from '../../src/client/brain/community.js';
 import { diamondsWanted } from '../../src/client/brain/deep.js';
 import { addSite, dropSite, dryUntil, markDry, notePen, sitesOf, taskOf, tierOf, toRound, workGoals, workOf, type WorkResult, type WorkTask } from '../../src/client/brain/work.js';
@@ -25,12 +24,13 @@ import { BED, HOME, KEPT, MINUTE, T0, WORN, ladderWith, laterRungs, liveWorld } 
 /**
  * "Seven days at the measured rates": the real brain with the real goal list on a fake clock, the live homestead, a
  * game day after another (the nights slept through as the live bot sleeps them). The runs are stand-ins that take
- * their measured time on that clock and come out as the live log has them come out (fetch 0/3, wild cane 1/19, spare
- * time's iron 4/32, deep trips 9/12 with something, coal 19/22): for a rung of the work queue only its task's run is a
- * stand-in, so the real wrapper books its marks, probation and gain; for every other goal its run, setting the marks
- * the real run sets. The stash and the walk home are the real ones, on the stand-in game's chest tools. The ground
- * round home is the lake east of the yard as it stood on Nov 12 (Shore, below): in the day's transcript at the end
- * the cane patch, the cane round and the cows rung run their own code over it.
+ * their measured time on that clock and come out as the live log has them come out (fetch 0/3, wild cane 1/19, deep
+ * trips 9/12 with something, coal 19/22; spare time's iron, 4/32, went with spare time in anti-idle step 6): for a
+ * rung of the work queue only its task's run is a stand-in, so the real wrapper books its marks, probation and gain;
+ * for every other goal its run, setting the marks the real run sets. The stash and the walk home are the real ones, on
+ * the stand-in game's chest tools. The ground round home is the lake east of the yard as it stood on Nov 12 (Shore,
+ * below): in the day's transcript at the end the cane patch, the cane round and the cows rung run their own code over
+ * it.
  */
 
 const SECOND = 1000;
@@ -220,6 +220,9 @@ class Game {
   }
 }
 
+/** The fishing rung's water in the lake below, and its stand on the west shore. */
+const LAKE_WATER: Pos = { x: -509, y: 56, z: 2199 };
+const LAKE_STAND: Pos = { x: -513, y: 57, z: 2199 };
 /** The lake east of the yard as it stood on Nov 12: sunk to y 56 round (-508, 2199), 9 x 9. */
 const POND = { x1: -512, x2: -504, z1: 2195, z2: 2203, y: 56 };
 /** The patch's five old cells at y 63 (the fixture's): the lake has gone from beside them. */
@@ -569,19 +572,6 @@ function goalRuns({ game, rng }: Week): Record<string, (ctx: GoalContext) => Pro
       journal(run.world, s.now, `an enchanting room: build the enchanting room blocked (${text})`);
       return `an enchanting room - build the enchanting room: ${text}`;
     },
-    'spare time': async ctx => {
-      const t = spareTask(ctx.s, ctx.world);
-      if (!t) return 'nothing to stockpile';
-      done(ctx.world, `spare:${t.name}`, ctx.s.now);
-      await game.walk(outThere(rng, 60));
-      await wait(rng.between(10, 40) * SECOND, ctx.signal);
-      // the iron round home is mined out: 4 runs of 32 brought any
-      const got = rng.chance(t.name === 'iron' ? 4 / 32 : 9 / 10) ? rng.int(4, 24) : 0;
-      if (got) game.add(t.name === 'iron' ? 'raw_iron' : t.name === 'coal' ? 'coal' : 'oak_log', got);
-      else done(ctx.world, `fruitless:spare:${t.name}`, ctx.s.now);
-      await ctx.act('go-home');
-      return `spare time: ${got} ${t.name}${got ? '' : ' (Mined for 10.05s: nothing gained. Baritone: Unable to find any path)'}; back home`;
-    },
     donate: async ctx => {
       const c = ctx.world.community!;
       c.lastDonation = ctx.s.now;
@@ -781,7 +771,20 @@ function taskRuns({ game, rng }: Week): Record<string, WorkTask['run']> {
       return back(`a ${target} site ${variant}`, 1);
     },
     yard: async (ctx) => { await wait(rng.between(60, 200) * SECOND, ctx.signal); return back('tilled 9 cell(s)', 9); },
-    fish: async (ctx) => { await wait(rng.between(60, 200) * SECOND, ctx.signal); const n = rng.int(0, 6); game.add('cod', n); return back(`caught ${n}`, n); }
+    // as the real rung's run (fish.ts): out to its stand on the lake's shore, 43 out, and its budget there, a catch every
+    // 20 to 30 s (told as they come), the water kept as its site (its distance is the rung's from then on)
+    fish: async (ctx, _variant, budgetMs, now) => {
+      const began = now();
+      if (!await game.walk(LAKE_STAND)) throw new Error('aborted');
+      let n = 0;
+      while (budgetMs - (now() - began) >= 30 * SECOND) {
+        await wait(rng.between(20, 30) * SECOND, ctx.signal);
+        n += game.add(rng.chance(0.3) ? 'salmon' : 'cod', 1);
+        ctx.gain(1);
+      }
+      addSite(ctx.world, 'fish', LAKE_WATER);
+      return back(`${n} catch(es) at ${at(LAKE_WATER)} from ${at(LAKE_STAND)}`, n);
+    }
   };
 }
 
@@ -893,13 +896,11 @@ async function week(t: ExecutionContext, tasks: WorkTask[], days: number, seed: 
 
 /**
  * The goals that keep a time of their own: how long they leave after a run that went to the end (min), and which of
- * those runs count (spare time waits after a trip that found nothing; one that found some may go again at once; the
- * project waits its longest back-off, 24 min, after each try short of cane and leather).
+ * those runs count (the project waits its longest back-off, 24 min, after each try short of cane and leather).
  */
 const CADENCE: Record<string, { every: number; after?: RegExp }> = {
   lights: { every: 20 }, tidy: { every: 20 }, repair: { every: 20 }, signs: { every: 20 }, sort: { every: 30 }, farm: { every: 20 }, trees: { every: 20 },
-  cane: { every: 20 }, pens: { every: 30 }, storage: { every: 30 }, donate: { every: 180 }, project: { every: 24 },
-  'spare time': { every: 40, after: /: 0 iron/ }
+  cane: { every: 20 }, pens: { every: 30 }, storage: { every: 30 }, donate: { every: 180 }, project: { every: 24 }
 };
 
 /** Runs that came sooner after the one before than the goal's time allows. */
@@ -987,9 +988,12 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   // within the seeds' own spread. Nine trips since the cows go out to their range, 256, past the leash: each side is
   // walked to 240 before it is given up, and where a cow was found and lost, out there, is `in sight` next. Eight
   // since every walk out of the yard and home into it goes by a gate (yardgates.ts): the walks round to the gates take
-  // their time, and the week's last, east, no longer fits)
+  // their time, and the week's last, east, no longer fits. Nine since the evening's fishing rung (anti-idle step 6):
+  // its runs take the evenings' ends, and the week's days fall differently after the first; east fits again. Eight
+  // since spare time was retired (step 6 too): its one run, an iron trip of 50 s on day 5's afternoon, drew from the
+  // week's generator, so every draw after it falls differently; the last, north, is the one the week's end stops)
   const cows = step5Week(t, { lines, runs, game, world }, account);
-  t.deepEqual(cows, ['north', 'in sight', 'east', 'in sight', 'south', 'west', 'north', 'in sight'], account);
+  t.deepEqual(cows, ['north', 'in sight', 'east', 'in sight', 'south', 'west', 'in sight', 'north'], account);
   // the coal fills the afternoons while it is short of 128, its dry marks let go after 30 s of standing idle (the
   // full shore's never: it is written down, and the patch asks no more)
   t.true(lines.some(l => l.text.endsWith('on dry marks: let go of surface:coal')), account);
@@ -1003,9 +1007,18 @@ test.serial('seven days at the measured rates, with the ladder as it stands (its
   // evening's and the probation's): days 2 to 4 0%, 8.4% and 0% (late), days 5 to 7 15.5% together, and day 7 13.6%,
   // late 75 s alone (its morning, held on the deep rung's probation before, goes to the cows' walk north to 240).
   // With the walks by the gates: days 2 to 4 the same, days 5 to 7 15.3% together, day 7 14.6%, late 80 s alone.
-  // The empty time is the cow fetch at its measured rate (517 s, all of it, since it goes out to 240: a side where one
-  // was found and lost comes round again after 20 min), the tree and light rounds' empty rounds, and a deep trip that
-  // finds nothing (3 of 12)
+  // With the evening's fishing rung (anti-idle step 6, its run the stand-in above at the real run's rate): days 2 to 4
+  // 0%, 8.4% and 0%, days 5 to 7 6.4% together, day 7 4.6%, late 25 s alone; what is left is the tail of an evening
+  // whose far rung (the surface coal, before its late bound) ran on into it, too short for the walk to the lake and
+  // half a minute there. With spare time retired: days 1 to 4 the same, days 5 to 7 16.7% together (18.2%, 12.9% and
+  // 18.9%), day 7 late 104 s alone. Its iron trips (this home holds 93 iron, under its cap of 96; the live chests
+  // held 8224 on Nov 15, and it had not run since Nov 12) took up afternoon gaps no rung fills here: the cows rung
+  // late (its 5.3 min walk to 256), the coal stocked or dry and the deep window shut, half a minute or so before the
+  // evening opens at tod 8520, and the evening's end after the fishing. Over seeds 20261112 to 20261151 the week's
+  // idle went from 6.8% to 8.4% (seed by seed 1.6 points more, sd 2.1), days 5 to 7 from 10.3% to 13.7%, day 7 from
+  // 14.3% to 17.8% (under 10% on 14 seeds, 20 before), nearly all of it late. The empty time is the cow fetch at its
+  // measured rate (517 s, all of it, since it goes out to 240: a side where one was found and lost comes round again
+  // after 20 min), the tree and light rounds' empty rounds, and a deep trip that finds nothing (3 of 12)
   t.true(days.slice(1, 4).every(d => share(d, d.idleMs) < 0.15), account);
   const held = days.slice(4, 7);
   t.true(held.reduce((n, d) => n + d.idleMs, 0) / held.reduce((n, d) => n + d.workMs, 0) < 0.40, account);
@@ -1163,9 +1176,12 @@ test.serial('a game day on the live homestead, the step-5 rungs and the cane rou
   t.is(game.count('lead'), 2);
   // and no walk for wild cane: the patch grows it
   t.deepEqual(said(/^start work: cane:/), []);
-  // the home rounds' stand-ins walk home first as their real runs do: once, at first light from the bed 16 out, where
-  // the furnace check takes over on arrival (no mark written) and the round runs again from home after the farm
-  t.deepEqual(said(/^\w+: \d+ blocks from home in the yard: home first, on foot$/), ['repair: 16 blocks from home in the yard: home first, on foot']);
+  // the home rounds' stand-ins walk home first as their real runs do: at first light from the bed 16 out, where the
+  // furnace check takes over on arrival (no mark written) and the round runs again from home after the farm; and on the
+  // second evening from 15 out, where the storage round cut the fishing rung's walk home once it was in by the gate
+  t.deepEqual(said(/^\w+: \d+ blocks from home in the yard: home first, on foot$/), ['repair: 16 blocks from home in the yard: home first, on foot',
+    'repair: 15 blocks from home in the yard: home first, on foot']);
+  t.deepEqual(said(/^work: fish: \[water\] .*; stopped on the walk home \(its marks are written\)$/).length, 1);
   t.deepEqual(said(/^(start|stopping|done) (repair|smelt|farm)\b/).slice(0, 8).map(l => l.replace(/:.*$/, '').replace(/ in \d+s$/, '')),
     ['start repair', 'stopping repair', 'start smelt', 'done smelt', 'start farm', 'done farm', 'start repair', 'done repair']);
 });

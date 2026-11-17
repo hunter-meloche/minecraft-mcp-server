@@ -822,6 +822,17 @@ test('fish finds open water, walks there and reports the catch', async (t) => {
   t.like(request.getCalls().find(c => c.args[0] === 'world.findBlocks')!.args[1], { block: 'water', openAbove: true });
 });
 
+test('fish says how many bites were in open water and what the hook let go, where the bridge tells it', async (t) => {
+  const { run } = setup({
+    inventory: { items: [{ slot: 2, name: 'fishing_rod', count: 1 }], selectedSlot: 0, held: null },
+    'world.region': { blocks: [...Array(81).fill('dirt'), ...Array(81).fill('grass_block'), ...Array(162).fill('air')] },
+    goto: { arrived: true, reason: 'done', seconds: 2, baritone: [], at: { x: 3, y: 63, z: 1 }, distance: 2 },
+    fish: { bites: 2, casts: 3, gained: { cod: 2 }, seconds: 40, open: 2, letGo: ['sheep'] }
+  });
+  t.is((await run('fish', { times: 2, x: 9, y: 62, z: 1 })).text,
+    'Fished at (9, 62, 1) for 40s: 2 bite(s) in 3 cast(s), caught cod x2. 2 of the bites in open water (treasure comes only from open water). Let go of what the hook caught: sheep.');
+});
+
 test('collect-items walks onto drops near a point and swims to unreachable ones', async (t) => {
   let invCalls = 0;
   let listed = 0;

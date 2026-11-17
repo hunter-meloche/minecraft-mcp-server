@@ -1812,10 +1812,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         if (d < best) { best = d; shore = { x: box.x + dx, y: box.y + dy + 1, z: box.z + dz }; }
       }
       await goNear(shore ?? water, shore ? 0 : 3).catch(() => undefined);
-      const r = await call<{ bites: number; casts: number; gained: Record<string, number>; seconds: number; recalled?: string }>('fish', { ...water, times, timeoutMs }, timeoutMs + 15_000);
+      const r = await call<{ bites: number; casts: number; gained: Record<string, number>; seconds: number; recalled?: string; open?: number; letGo?: string[] }>('fish', { ...water, times, timeoutMs }, timeoutMs + 15_000);
       const gained = Object.entries(r.gained).map(([n, c]) => `${n} x${c}`).join(', ');
       const missed = r.casts > r.bites * 2 + 2 && r.recalled ? ` Casts that missed the water: ${r.recalled}.` : '';
-      return factory.createResponse(`Fished at ${fmt(water)} for ${r.seconds}s: ${r.bites} bite(s) in ${r.casts} cast(s), caught ${gained || 'nothing'}.${missed}`);
+      // (from the bridge that reads the game's open-water rule: treasure is fished up only there)
+      const open = typeof r.open === 'number' && r.open >= 0 && r.bites ? ` ${r.open} of the bites in open water (treasure comes only from open water).` : '';
+      const let_ = r.letGo?.length ? ` Let go of what the hook caught: ${r.letGo.join(', ')}.` : '';
+      return factory.createResponse(`Fished at ${fmt(water)} for ${r.seconds}s: ${r.bites} bite(s) in ${r.casts} cast(s), caught ${gained || 'nothing'}.${open}${let_}${missed}`);
     }
   );
 

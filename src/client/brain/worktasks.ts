@@ -3,8 +3,8 @@
  * first. The cane patch grown on the lake shore, cows for the pen while it holds fewer than a pair (out past the
  * leash: the herd is farmed for good) and wild cane while the project waits on cane, the kit for a trip down from out
  * in the yard, a villager brought home by boat to its hall (villagemove.ts, behind the villager-moves switch), a trip
- * down for every ore the home keeps, and coal from the surface. Each says why it does not run when it does not; the
- * wrapper books what each brought in and walks home.
+ * down for every ore the home keeps, coal from the surface, and in the evening fishing by the lake. Each says why it
+ * does not run when it does not; the wrapper books what each brought in and walks home.
  *
  * Gates only read: every total is counted afresh on each look (the chests as last seen with the pockets), so stock
  * that is used, given away or taken opens its target again at once. Nothing here is used at the module's top level:
@@ -20,7 +20,7 @@ import { kitNeeds, tier } from './kit.js';
 import { WOODS_DIRS, kitSteps } from './chores.js';
 import { ownItems } from './community.js';
 import { NEAR_HOME } from './pockets.js';
-import { allItems, recipeFor, stillShort } from './progress.js';
+import { STRING_KEEP, allItems, recipeFor, stillShort } from './progress.js';
 import { WATER_FROM_HOME, cutStand, dropDeadCells, findWildCane, liveCells, plantCane, wildCane } from './cane.js';
 import type { Zone } from './courtesy.js';
 import { PEN_FOOD } from './animals.js';
@@ -36,6 +36,7 @@ import { quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
 import { scoutOpen, scoutReady, scoutRun } from './netherscout.js';
 import { debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
 import { villagersTask } from './villagemove.js';
+import { eveningFrom, fishDist, fishLate, fishRun, isEvening } from './fish.js';
 
 const MINUTE = 60_000;
 
@@ -82,7 +83,7 @@ export function workKeeps(item: string, tierNow: number): { items: readonly stri
 }
 
 /**
- * Every home chest looked into: what is in them counts only then (as spare time trusts them only then). A half-read
+ * Every home chest looked into: what is in them counts only then (as the stock trips trust them only then). A half-read
  * chest list looks like "nothing stored", and the rungs would go for what the chests already hold. The kit goal looks
  * into them first thing at home.
  */
@@ -602,18 +603,18 @@ const deep: WorkTask = {
 
 /** A round of the surface mining: between rounds the run looks where the bot has got to, ms. */
 const SURFACE_SLICE = 90_000;
-/** The most one surface run asks for, as spare time did: the next run goes on from there. */
+/** The most one surface run asks for, as the retired spare time did: the next run goes on from there. */
 const SURFACE_WANT = 24;
 /** Less of the budget than this left: no other round. */
 const SURFACE_LAST = 20_000;
 
 /**
- * Rung 6. Coal from the surface, near home (spare time's way: the mine tool walks out of the home area to the nearest
- * it knows of, here no further than the leash), until the home has 128, 24 at most a run. Where that is is not known
- * (no site is kept yet), so the day must leave time for a walk to the leash and back. The surface ore only: deepslate
- * coal lies deep down, where a trip needs the deep kit, and this rung asks none. In rounds of 90 s, and the run comes
- * back as soon as one finds the bot beyond the leash (within a round Baritone's miner follows the vein where it goes:
- * the mod has no bound on it).
+ * Rung 6. Coal from the surface, near home (the stock trips' way: the mine tool walks out of the home area to the
+ * nearest it knows of, here no further than the leash), until the home has 128, 24 at most a run. Where that is is not
+ * known (no site is kept yet), so the day must leave time for a walk to the leash and back. The surface ore only:
+ * deepslate coal lies deep down, where a trip needs the deep kit, and this rung asks none. In rounds of 90 s, and the
+ * run comes back as soon as one finds the bot beyond the leash (within a round Baritone's miner follows the vein where
+ * it goes: the mod has no bound on it).
  */
 const surface: WorkTask = {
   name: 'surface',
@@ -669,4 +670,45 @@ const surface: WorkTask = {
   }
 };
 
-export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, villagersTask, nether, deep, surface];
+// ------------------------------------------------------------------------------------------------ fish
+
+/**
+ * Why there is no rod to fish with, or null: one carried, one in the chests (beyond what a build job holds there), or
+ * the makings of one, 3 sticks and 2 string beyond the leads' (STRING_KEEP: the pens walk the cows home on them; the
+ * string comes in only as the mobs drop it). The chests not all looked into: a half-read list shows none.
+ */
+function rodWhy(s: Snapshot, world: WorldMemory): Decline | null {
+  if ((s.counts.get('fishing_rod') ?? 0) > 0) return null;
+  if (!allLooked(world)) return unread;
+  const free = freeChestTotals(world);
+  if ((free.fishing_rod ?? 0) > 0) return null;
+  const string = (s.counts.get('string') ?? 0) + (free.string ?? 0);
+  const sticks = (s.counts.get('stick') ?? 0) + (free.stick ?? 0);
+  if (string - STRING_KEEP >= 2 && sticks >= 3) return null;
+  const lack = string - STRING_KEEP < 2 ? `${string} string (a rod takes 2 beyond the ${STRING_KEEP} kept for the leads)` : `${sticks} sticks (a rod takes 3)`;
+  return { cause: 'kit', text: `no fishing rod, and ${lack}` };
+}
+
+/**
+ * Rung 7. The evening's: fishing (fish.ts), once no far rung fits the day (from tod 8520 at the leash of 96: the
+ * same bound that books the evening's idle time `late`, about 110 s of every live day on Nov 15) and while the walk to
+ * the water and back and half a minute at it (fish.ts fishLate) still fit before the walk home at dusk: no fishing at
+ * night. By the open water nearest home (the lake east of the yard), from a stand on its shore reached on foot, with
+ * a rod carried, taken from the chests or made (never of the leads' string). Gain is the catches: fish (food),
+ * treasure for the anvil (enchanted books: Mending among them), and the junk the stash keeps or throws away (fish.ts
+ * CATCH).
+ */
+const fish: WorkTask = {
+  name: 'fish',
+  rank: 7,
+  reach: 'near',
+  room: 'yard',
+  budgetMs: 4 * MINUTE,
+  variants: (s, world) => (isEvening(s, world) ? [{ id: 'water', dist: fishDist(s, world) }] : []),
+  none: (_s, world) => ({ cause: 'unneeded', text: `fish: the evening's, from tod ${Math.ceil(eveningFrom(world.leash))} (no far rung fits the day then)` }),
+  // (the hour after the rod: a rung with no rod to fish with is not idle for being late)
+  ready: (s, world) => rodWhy(s, world) ?? fishLate(s, fishDist(s, world)),
+  run: (ctx, _variant, budgetMs, now) => fishRun(ctx, budgetMs, now)
+};
+
+export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, villagersTask, nether, deep, surface, fish];

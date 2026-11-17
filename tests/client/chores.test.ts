@@ -388,7 +388,9 @@ test('lights: the band outside the fence leaves out the dark spots a torch it to
 });
 
 test('farm: a daily round from the middle of the farmland, wheat baked into bread', async (t) => {
-  const w = world({ landmarks: { chests: [CHEST], farmland: [{ x: 4, y: 63, z: 4 }, { x: 6, y: 63, z: 4 }], furnace: undefined } });
+  // (the pens' stock of wheat already in the chest: the harvest's is baked; with less stored the bake leaves the pens
+  // theirs, tests/client/wheat.test.ts)
+  const w = world({ landmarks: { chests: [CHEST], farmland: [{ x: 4, y: 63, z: 4 }, { x: 6, y: 63, z: 4 }], furnace: undefined }, chestItems: { '1,64,0': { wheat: 16 } } });
   const s = snap(gear());
   t.is(farm.wants(s, w), 'daily round: the farm');
   const acts: string[] = [];

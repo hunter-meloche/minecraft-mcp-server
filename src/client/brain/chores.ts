@@ -3,14 +3,15 @@ import { foodsFor26, type InventoryItem } from '../tools.js';
 import { fromGate, nearHome, no, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 // lives with the goal that walks the bot back to the yard now (goals.ts cannot import from here); still found here
 export { outsideBy } from './goals.js';
-import { CHEST_SPARE, COOKS_TO, FOOD_TARGET } from './food.js';
+import { breadToBake, CHEST_SPARE, COOKS_TO, FOOD_TARGET } from './food.js';
+import { BREED_STOCK } from './animals.js';
 import { owedItems, ownItems } from './community.js';
 // (deep.ts comes in through community.ts already; its goal is asked inside a function only)
 import { deepTrip } from './deep.js';
 import { NETHER_BLOCKS, NETHER_TRIP } from './mine.js';
-import { chestSlots, chestTotals, freeChestTotals, key, peekChest, rememberReply, storeInChests, takeFromChests, withoutSpare } from './chests.js';
+import { chestSlots, chestTotals, freeChestTotals, key, kindChests, peekChest, rememberReply, storeInChests, storeStack, takeFromChests, withoutSpare } from './chests.js';
 import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, stackSize, type ChestAssign, type Deposit } from './storage.js';
-import { KIT, kitNeeds, stashPlan, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
+import { KIT, kitNeeds, stashPlan, storedBySlot, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
 import { DUG, FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, look, makeRoom, noRoom, out as afield, room, stashReach, type RoomKind } from './pockets.js';
 import { inTorchReach, planTorches, spawnableCells, yardBox } from './lighting.js';
@@ -388,9 +389,10 @@ export function stashList(s: Snapshot, world: WorldMemory, keep: StashOptions = 
   if (!dumpsJunk(s)) plan.drop = [];
   // only what can really go: a worse duplicate of a kept tool shares its name, and store-in-chest can't tell them
   // apart, so it stays carried; and a project's materials stay (a full pocket of planks for the storage house had the
-  // stash stop the build over and over, storing nothing)
+  // stash stop the build over and over, storing nothing). The fishing rods beyond the keeper go by their slot
+  // (stashWork's bySlot), which takes that rod and no other
   const dupes = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).length > 1;
-  plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name));
+  plan.deposit = plan.deposit.filter(e => e.slot === undefined || !dupes(e.name) || storedBySlot(e.name));
   // enough of it in the chests already: thrown away with the junk, not stored (the storage house filled up with
   // cobblestone, then with the farm's carrots, cane and bread, and then nothing had room). Only what the plan would
   // put away goes: the stack of each food it keeps carried, and the seeds, stay. The wheat left over from a pens
@@ -446,12 +448,20 @@ export interface StashWork {
   drop: StashEntry[];
   /** kinds of things with no room left in their chests (sorted storage only) */
   full?: string[];
+  /**
+   * each one stack by its pocket slot into a chest, the chests of its kind first (kit.ts storedBySlot: the fishing
+   * rods beyond the keeper), never by name: a deposit by name could take the keeper
+   */
+  bySlot: StashEntry[];
 }
 
 /** The stash's work for these pockets. It looks and never writes: `assign` is the chests' kinds when the caller has them. */
 export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = stashKeep(world), assign?: ChestAssign): StashWork {
-  const { deposit, drop } = stashList(s, world, keep);
-  if (world.landmarks.chests.length < 3) return { moves: [], rest: deposit, drop };
+  const list = stashList(s, world, keep);
+  const drop = list.drop;
+  const bySlot = list.deposit.filter(e => e.slot !== undefined && storedBySlot(e.name));
+  const deposit = list.deposit.filter(e => !bySlot.includes(e));
+  if (world.landmarks.chests.length < 3) return { moves: [], rest: deposit, drop, bySlot };
   // sorted: each kind of thing to its own chest
   assign ??= assignChests(world.landmarks.chests, CATEGORIES, world.chestItems ?? {}, world.chestAssign ?? {});
   // (summed by name: a trip of its own kit puts away the few of a junk kept for home, and a fill's or a project's
@@ -461,7 +471,7 @@ export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = 
   const total = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
   const sorted = depositPlan(s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, world.chestItems ?? {},
     chestSlots(world));
-  return { moves: sorted.moves, rest: sorted.unplaced, drop, full: sorted.full };
+  return { moves: sorted.moves, rest: sorted.unplaced, drop, full: sorted.full, bySlot };
 }
 
 /**
@@ -485,6 +495,8 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
   }
   if (sorts) world.storageFull = work.full ?? [];
   for (const e of work.rest) stored += await storeInChests(ctx, e.name, e.count);
+  // (an enchanted one's stack is remembered by the chest it went into: the fishing rung takes it back out by it)
+  for (const e of work.bySlot) if (await storeStack(ctx, e.name, e.slot!, kindChests(world, e.name))) stored += e.count;
   done(world, 'stash', s.now);
   let dropped = 0;
   // what kept it from doing all of its list, for a caller that needed the room (said, not thrown: what went in the
@@ -1355,8 +1367,8 @@ export const lights: Goal = {
 
 /**
  * The crops farmland grows, by their block, and what each is stored as (GLUT caps those). The farm round bakes its
- * wheat into bread, unless the bread is at its cap (then the wheat is stored): so the wheat is a full crop only with
- * both at their caps. The seeds are left out: beyond a few they are junk.
+ * wheat beyond the pens' stock into bread, unless the bread is at its cap (then the wheat is stored): so the wheat is
+ * a full crop only with both at their caps. The seeds are left out: beyond a few they are junk.
  */
 const CROP_YIELD: Record<string, string[]> = {
   wheat: ['wheat', 'bread'], carrots: ['carrot'], potatoes: ['potato'], beetroots: ['beetroot'],
@@ -1403,25 +1415,22 @@ export function larderFull(s: Snapshot, world: WorldMemory): string | null {
   return atCaps(s, world, [...new Set(yields.flat())]);
 }
 
-/**
- * The wheat kept for the cow pen's breeding: the pens round feeds 2 a pair and takes 16 out at a time. The farm baked
- * every bit of its wheat into bread (558 bread stored, under its cap of 640), the plot drifted to carrots and potatoes
- * (Baritone replants with whatever seed it carries, and the stash puts the wheat seeds away), and with those over their
- * caps the round waited: from Nov 15 the pen never bred again, "cow: need 2 wheat to breed (have 0)", 178 rounds.
- */
-export const PEN_WHEAT = 16;
 
 /** The plot grew wheat when a round last looked at it. */
 const cropsWheat = (world: WorldMemory) => !!world.farmCrops?.crops?.includes('wheat');
 
 /**
- * The cow pen is short of wheat (one for cows, and less than PEN_WHEAT stored and carried), and the wheat seeds there
- * are to sow (stored and carried). A look only.
+ * The cow pen is short of wheat (one for cows, and less than the pens' BREED_STOCK stored and carried: the stock the
+ * bake leaves, food.ts breadToBake), and the wheat seeds there are to sow (stored and carried). A look only. The farm
+ * baked every bit of its wheat into bread (558 bread stored, under its cap of 640), the plot drifted to carrots and
+ * potatoes (Baritone replants with whatever seed it carries, and the stash puts the wheat seeds away), and with those
+ * over their caps the round waited: from Nov 15 the pen never bred again, "cow: need 2 wheat to breed (have 0)", 178
+ * rounds. (The chests' free wheat, as the bake counts it: not a build job's.)
  */
 export function penWheat(s: Snapshot, world: WorldMemory): { short: boolean; seeds: number } {
-  const stored = chestTotals(world);
+  const stored = freeChestTotals(world);
   const n = (name: string) => (stored[name] ?? 0) + (s.counts.get(name) ?? 0);
-  return { short: !!world.zones?.['pen:cow']?.length && n('wheat') < PEN_WHEAT, seeds: n('wheat_seeds') };
+  return { short: !!world.zones?.['pen:cow']?.length && n('wheat') < BREED_STOCK, seeds: n('wheat_seeds') };
 }
 
 /**
@@ -1475,7 +1484,8 @@ const farmGate = (s: Snapshot, world: WorldMemory): Gate => {
 };
 
 /**
- * Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat. Not while every
+ * Each morning: harvest what's ripe and replant (crops left ripe just sit there), and bake the wheat beyond the pens'
+ * stock (the stash puts that away, and the pens round takes it out again to breed from). Not while every
  * crop the plot grows is stored over its cap (larderFull): the harvest would go to the dump, and the stash's walks out
  * there with it (live on Nov 14, 3233 carrots stored and every round's carrots carried with nowhere to go). It harvests
  * again once one of them is under its cap; the ripe crops wait in the plot meanwhile.
@@ -1506,14 +1516,17 @@ export const farm: Goal = {
     const r = await farmAll(ctx, pen.short ? 'wheat_seeds' : undefined);
     const inv = await ctx.call<{ items: { name: string; count: number }[] }>('inventory');
     const wheat = inv.items.filter(i => i.name === 'wheat').reduce((a, i) => a + i.count, 0);
-    // what the pen is short of stays wheat: into the chests with the stash, for the pens round
-    const kept = pen.short ? Math.min(wheat, PEN_WHEAT - (chestTotals(ctx.world).wheat ?? 0)) : 0;
-    const bake = Math.floor((wheat - Math.max(0, kept)) / 3);
+    // what the pens are short of stays wheat: into the chests with the stash, for the pens round
+    // (breadToBake, the one rule of every bake: the round baked whatever wheat it carried, the pens round's leftover
+    // too, "carrot x174; baked 5 bread" on Nov 14, and the pens had none left to breed from)
+    const stored = freeChestTotals(ctx.world).wheat ?? 0;
+    const loaves = breadToBake(wheat, stored);
+    const kept = Math.min(wheat - 3 * loaves, BREED_STOCK - stored);
     let baked = '';
     // not into bread the chests hold enough of: that would go to the dump, the wheat itself to the chests
-    if (bake >= 1 && !atCaps(ctx.s, ctx.world, ['bread'])) {
-      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: bake });
-      if (b.ok) baked = `; baked ${bake} bread`;
+    if (loaves > 0 && !atCaps(ctx.s, ctx.world, ['bread'])) {
+      const b = await ctx.act('craft-item', { outputItem: 'bread', amount: loaves });
+      if (b.ok) baked = `; baked ${loaves} bread`;
     }
     if (kept > 0) baked += `; kept ${kept} wheat for the cows`;
     baked = sow + baked;

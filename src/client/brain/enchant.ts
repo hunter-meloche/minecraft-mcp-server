@@ -4,10 +4,9 @@ import type { Milestone, MilestoneState } from './progress.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { buildStep, siteStep } from './milestones.js';
 import { enchantRoom, type Side } from './blueprints.js';
-import { chestTotals, freeChestTotals, key, sameStack, storeStack, storedStacks, takeFromChests } from './chests.js';
+import { chestTotals, freeChestTotals, kindChests, sameStack, storeStack, storedStacks, takeFromChests } from './chests.js';
 import { prepare } from './project.js';
 import { billKinds } from './chores.js';
-import { categoryOf, stackSize } from './storage.js';
 // (anvil.ts takes plainLeft and wornSlot from here: each uses the other's exports inside functions only)
 import { bookOfUse } from './anvil.js';
 import { gearKind, tier } from './kit.js';
@@ -254,12 +253,7 @@ export function bookFor(s: Snapshot, world: WorldMemory): { from: 'carried' | 's
  * and the two after it were full, and the first four books stayed carried ("no chest took it", live Nov 14).
  */
 export function bookChests(world: WorldMemory): Pos[] {
-  const kind = categoryOf('enchanted_book');
-  const own = (c: Pos) => world.chestAssign?.[key(c)] === kind;
-  // by its stacks or its totals, the more of the two (a take's reply keeps only the stacks it left alone)
-  const used = (c: Pos) => Math.max(world.chestStacks?.[key(c)]?.length ?? 0,
-    Object.entries(world.chestItems?.[key(c)] ?? {}).reduce((n, [name, k]) => n + Math.ceil(k / stackSize(name)), 0));
-  return [...world.landmarks.chests].sort((a, b) => Number(own(b)) - Number(own(a)) || used(a) - used(b));
+  return kindChests(world, 'enchanted_book');
 }
 
 /**

@@ -4,7 +4,7 @@ import type { Pos, WorldMemory } from './memory.js';
 import type { Milestone, MilestoneState } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
 import { pen, type Side } from './blueprints.js';
-import { inPen, nextAnimalAction, PEN_FOOD, penState, type Animal, type Pen, type PenKind } from './animals.js';
+import { BREED_STOCK, inPen, nextAnimalAction, PEN_FOOD, penState, type Animal, type Pen, type PenKind } from './animals.js';
 import { prepareBill } from './project.js';
 import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
@@ -289,7 +289,7 @@ async function holdFor(ctx: GoalContext, kind: PenKind): Promise<{ hold?: Hold; 
   const words = Object.entries(short).filter(([k]) => k !== 'lead').map(([k, v]) => `${v} ${k}`).join(', ');
   const why = `no lead to be had (${words ? `short of ${words} for one` : 'none carried or stored, and none would craft'})`;
   for (const f of PEN_FOOD[kind]) if ((await carried(ctx, f)) >= 2) return { hold: { food: f }, why };
-  for (const f of PEN_FOOD[kind]) if (await takeFromChests(ctx, f, 16)) return { hold: { food: f }, why };
+  for (const f of PEN_FOOD[kind]) if (await takeFromChests(ctx, f, BREED_STOCK)) return { hold: { food: f }, why };
   return { why: `${why}, and no ${PEN_FOOD[kind][0]} to lure one with` };
 }
 
@@ -1215,9 +1215,10 @@ export const pens: Goal = {
       const where = penOf(ctx.world, kind);
       if (!where) continue;
       const { p, way } = where;
-      // food for it from the chests (wheat from the farm), and shears for the sheep
+      // food for it from the chests (the farm's wheat, of which the bake leaves the pens BREED_STOCK), and shears for
+      // the sheep
       const food = PEN_FOOD[kind];
-      if (!food.some(f => (ctx.s.counts.get(f) ?? 0) >= 2)) for (const f of food) if (await takeFromChests(ctx, f, 16)) break;
+      if (!food.some(f => (ctx.s.counts.get(f) ?? 0) >= 2)) for (const f of food) if (await takeFromChests(ctx, f, BREED_STOCK)) break;
       if (kind === 'sheep' && !ctx.s.counts.get('shears')) await prepareBill(ctx, { shears: 1 }).catch(() => undefined);
       const visit = way ? penVisit(ctx, p, way) : undefined;
       // (every walk in the pen goes to its inside cells, at the gate's height)

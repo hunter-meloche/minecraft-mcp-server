@@ -255,14 +255,14 @@ test('the Nether kit: whole and fed, 40 food points, the golden helmet, a shield
 // ------------------------------------------------------------------------------------------------ the rung
 
 test('the nether rung: 4.5 between the trip kit and the deep rung, its work the setup and the look (P2b); it says the switch is off, what the setup\'s kit is short of, or that there is no work once linked, and never wants', (t) => {
-  // (the villagers rung, P5c, at 4.4 just above it)
-  t.deepEqual(LADDER.map(r => `${r.name} ${r.rank}`), ['cane patch 1', 'cows 2', 'cane 3', 'trip kit 4', 'villagers 4.4', 'nether 4.5', 'deep 5', 'surface 6']);
+  // (the villagers rung, P5c, at 4.4 just above it; the evening's fishing, anti-idle step 6, at the foot)
+  t.deepEqual(LADDER.map(r => `${r.name} ${r.rank}`), ['cane patch 1', 'cows 2', 'cane 3', 'trip kit 4', 'villagers 4.4', 'nether 4.5', 'deep 5', 'surface 6', 'fish 7']);
   // (P3a adds the barter and the quartz at stage 1, P3b the scouting and the debris at stage 2)
   t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
   const goals = workGoals(() => undefined, LADDER, () => T0);
   const rung = goals.find(g => g.name === 'work: nether')!;
-  // the others keep their places (the deep rung 14, the unblockers 17 and 16)
-  t.deepEqual(goals.map(g => g.priority), [18, 17, 16, 15, 14.6, 14.5, 14, 13]);
+  // the others keep their places (the deep rung 14, the unblockers 17 and 16; the evening's fishing 12 at the foot)
+  t.deepEqual(goals.map(g => g.priority), [18, 17, 16, 15, 14.6, 14.5, 14, 13, 12]);
   const s = lookAt(KIT, 1000);
   t.deepEqual(rung.declines!(s, liveWorld()), { cause: 'unneeded', text: 'nether trips are off' });
   t.deepEqual(rung.declines!(s, portalWorld(false)), { cause: 'unneeded', text: 'nether trips are off' });

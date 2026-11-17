@@ -2,7 +2,7 @@ import { brainRun, type ChestContents, type ChestStack } from '../tools.js';
 import type { GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { holdHarmless, isHazard } from './fluidpick.js';
-import { CHEST_SLOTS, packedSlots, roomFor } from './storage.js';
+import { CHEST_SLOTS, categoryOf, packedSlots, roomFor, stackSize } from './storage.js';
 
 /** The home chests as the brain last saw them (every open updates its memory). */
 
@@ -196,6 +196,20 @@ export async function storeStackAt(ctx: GoalContext, name: string, slot: number,
     }
   }
   return undefined;
+}
+
+/**
+ * The home chests in the order one stack of `name` goes into them by its slot (storeStack): those the stash keeps its
+ * kind in first (storage.ts), the fullest of a kind as last seen after the emptier (enchant.ts bookChests, the books';
+ * chores.ts putAway, the fishing rods beyond the one kept).
+ */
+export function kindChests(world: WorldMemory, name: string): Pos[] {
+  const kind = categoryOf(name);
+  const own = (c: Pos) => world.chestAssign?.[key(c)] === kind;
+  // by its stacks or its totals, the more of the two (a take's reply keeps only the stacks it left alone)
+  const used = (c: Pos) => Math.max(world.chestStacks?.[key(c)]?.length ?? 0,
+    Object.entries(world.chestItems?.[key(c)] ?? {}).reduce((n, [item, k]) => n + Math.ceil(k / stackSize(item)), 0));
+  return [...world.landmarks.chests].sort((a, b) => Number(own(b)) - Number(own(a)) || used(a) - used(b));
 }
 
 /** Everything in the home chests together, as last seen. */

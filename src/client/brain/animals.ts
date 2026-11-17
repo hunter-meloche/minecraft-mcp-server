@@ -19,6 +19,13 @@ export const PEN_FOOD: Readonly<Record<PenKind, readonly string[]>> = {
   chicken: ['wheat_seeds', 'beetroot_seeds', 'melon_seeds', 'pumpkin_seeds', 'torchflower_seeds'],
   pig: ['carrot', 'potato', 'beetroot']
 };
+/**
+ * The breeding food the home keeps for the pens, carried and stored together: what the pens round takes out of the
+ * chests when it carries less than a pair's (pens.ts), and of the wheat, what the bake leaves (food.ts breadToBake).
+ * Eight pairs: the round breeds up to three pairs a pen. Before it every 3 wheat went into bread, the pens round's
+ * leftover too, and the cow pen said "need 2 wheat to breed (have 0)" every round on Nov 15, 723 bread stored.
+ */
+export const BREED_STOCK = 16;
 /** How far to look for strays to lure (animals follow held food from about 10 blocks; the bot walks to the rest). */
 export const LURE_RANGE = 32;
 /**

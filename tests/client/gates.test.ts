@@ -115,7 +115,7 @@ const SAID = ['away', 'health', 'pockets', 'late', 'kit', 'project', 'dry', 'sto
  */
 const KIND: Record<string, RoomKind> = { project: 'project', build: 'project', 'deep trip': 'deep', stock: 'trip', cane: 'yard', pens: 'yard', trees: 'yard' };
 /** The same for the rungs of the work queue on the real goal list (worktasks.ts). */
-const WORK_KIND: Record<string, RoomKind> = { 'work: trip kit': 'yard', 'work: deep': 'deep', 'work: surface': 'trip' };
+const WORK_KIND: Record<string, RoomKind> = { 'work: trip kit': 'yard', 'work: deep': 'deep', 'work: surface': 'trip', 'work: fish': 'yard' };
 
 test('wants is null exactly when declines is not: the ten gated goals over pockets x hour x project blocked or not x at home, at the far end of the yard or 50 out; and full pockets are the reason only where the stash could make no room', (t) => {
   const goals = gated();
