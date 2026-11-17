@@ -1245,7 +1245,10 @@ export const pens: Goal = {
             out.push(`${kind}: ${h.hold && 'food' in h.hold ? `${h.why}: ` : ''}${r.text}`);
             if (r.penned) ctx.gain(r.penned);
           } else if (visit && !(await visit.enter())) {
-            out.push(`${kind}: could not get into the pen by its gate (${way!.gate.x}, ${way!.gate.y}, ${way!.gate.z})`);
+            // (a round the brain gave up on the way, for the farm round most often, is no gate it could not get in by:
+            // 28 such lines by Nov 17, each one read as a broken gate by whoever read the log)
+            const g = `(${way!.gate.x}, ${way!.gate.y}, ${way!.gate.z})`;
+            out.push(ctx.signal.aborted ? `${kind}: given up on the way to the pen's gate ${g}` : `${kind}: could not get into the pen by its gate ${g}`);
             break;
           } else if (a.kind === 'breed') {
             let fed = 0;

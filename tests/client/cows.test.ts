@@ -128,6 +128,8 @@ class Pasture {
       lag?: number; showsLate?: number; stopShort?: number;
       /** abort the run as soon as this gate is opened */
       abortOnOpen?: { gate: Pos; abort: () => void };
+      /** a walk to this cell ("x,z") is given up before it gets anywhere: the run aborted, the walk failed */
+      abortOnWalk?: { to: string; abort: () => void };
       /** the first walk on the lead that ends within `within` of home waits there for `until` (the test looks then); `at` says when it has */
       holdNear?: { within: number; until: Promise<void>; at?: () => void };
       /**
@@ -399,6 +401,7 @@ class Pasture {
           this.careful.push(!!p.careful);
           const to = p.xz ? { x: Number(p.x) + 0.5, y: 63, z: Number(p.z) + 0.5 } : mid(at(p));
           this.log.push(`goto ${p.careful ? 'careful ' : ''}${Math.floor(to.x)},${Math.floor(to.z)}`);
+          if (this.opts.abortOnWalk?.to === `${Math.floor(to.x)},${Math.floor(to.z)}`) { this.opts.abortOnWalk.abort(); throw new Error('aborted'); }
           const caveColumn = Math.floor(to.x) === -549 && Math.floor(to.z) >= 2103 && Math.floor(to.z) <= 2151 && horiz(this.me, to) > 16;
           if (this.opts.caves && p.xz && ((this.pastYard(this.me) && !this.pastYard(to)) || caveColumn)) {
             this.me = { x: -535.5, y: 21, z: 2155.5 };
@@ -1615,6 +1618,20 @@ test.serial('the pens round breeds its pair from inside the pen: fed with wheat,
   t.is(await pens.run(pa.ctx(world)), 'cow: fed 2 to breed; cow: 0 cow ready to breed');
   t.is(pa.cows.filter(c => c.baby).length, 2);
   t.false(pa.isOpen(GATE));
+});
+
+// (cows of their own: the round's record of who was fed is the module's, and the test above fed 51 and 52)
+test('a pens round the brain gives up on the way to the gate says so, not that the gate would not let it in (live, Nov 17: farm is more urgent, then "could not get into the pen by its gate", 28 times by then)', async (t) => {
+  const world = liveWorld();
+  const herd = [cow(61, -557, 2166), cow(62, -554, 2168)];
+  const ac = new AbortController();
+  const pa = new Pasture(herd, world, [...KIT, { slot: 3, name: 'wheat', count: 10 }], { abortOnWalk: { to: '-555,2172', abort: () => ac.abort() } });
+  t.is(await pens.run(pa.ctx(world, ac.signal)), 'cow: given up on the way to the pen\'s gate (-555, 63, 2171)');
+  t.false(pa.log.some(l => l.startsWith('entity.use')));
+  // a walk that fails with the round still on: that is the gate it could not get in by
+  const w2 = liveWorld();
+  const pb = new Pasture([cow(61, -557, 2166), cow(62, -554, 2168)], w2, [...KIT, { slot: 3, name: 'wheat', count: 10 }], { abortOnWalk: { to: '-555,2172', abort: () => undefined } });
+  t.is(await pens.run(pb.ctx(w2)), 'cow: could not get into the pen by its gate (-555, 63, 2171)');
 });
 
 /**
