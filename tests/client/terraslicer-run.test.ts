@@ -227,3 +227,21 @@ test('provisionStep: makes stairs from the free logs while the bill\'s own logs 
   t.true((w.chestItems!['1,64,1'].oak_log ?? 0) >= 45, 'the bill\'s own logs were not used');
   t.true((await provisionStep(ctx, job(), bill, [])).ready);
 });
+
+test('runLoad: shut in where it stands (no careful step anywhere), it walks out plainly once, and builds on', async t => {
+  const w = world({});
+  const inv = new Map([['oak_planks', 5]]);
+  const calls: string[] = [];
+  const gotos: Record<string, unknown>[] = [];
+  // live 2026-11-17: in a trench its own digs opened over a hidden hole, every careful walk went nowhere
+  const { ctx } = fakeCtx(w, inv, calls, { goto: p => { gotos.push(p); return { arrived: !p.careful }; } });
+  const stations: Station[] = [
+    { at: { x: 5, y: 64, z: 0 }, walk: 1, object: 0, actions: [place(6, 64, 0)] },
+    { at: { x: 9, y: 64, z: 0 }, walk: 1, object: 0, actions: [place(10, 64, 0)] }
+  ];
+  const r = await runLoad(ctx, job(), pathOf(stations, []), { from: 0, to: 2, items: { oak_planks: 2 }, slots: 1, scaffold: 0 });
+  t.deepEqual(gotos.map(p => !!p.careful), [true, false, true], 'one plain walk, after the first careful one went nowhere');
+  t.is(r.stations, 1, 'the first station built from where the plain walk took it');
+  t.deepEqual(r.unreached, ['9,64,0'], 'the second: careful again (once a load), and still unreached');
+  t.is(r.placed, 1);
+});

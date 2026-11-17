@@ -80,6 +80,7 @@ export async function runLoad(ctx: GoalContext, job: BuildJob, path: Toolpath, l
   const fail = (a: Action, why: string) => r.failed.push({ at: a.at, why, station });
   let misses = 0;
   let broken = false;
+  let freed = false;
   for (let i = load.from; i < load.to && !broken; i++) {
     if (ctx.signal.aborted) return stop();
     const s = path.stations[i];
@@ -87,8 +88,20 @@ export async function runLoad(ctx: GoalContext, job: BuildJob, path: Toolpath, l
     ctx.progress(`${job.structure}: station ${i + 1} of ${path.stations.length} at (${s.at.x}, ${s.at.y}, ${s.at.z}): ${s.actions.length} step(s)`);
     const pos = (await ctx.status()).position;
     if (!pos || !same(floorP(pos), s.at)) {
-      const g = await ctx.call<{ arrived: boolean }>('goto', { ...s.at, range: 0, careful: true, timeoutMs: 45_000 }, 60_000).catch(() => ({ arrived: false }));
+      let g = await ctx.call<{ arrived: boolean }>('goto', { ...s.at, range: 0, careful: true, timeoutMs: 45_000 }, 60_000).catch(() => ({ arrived: false }));
       if (ctx.signal.aborted) return stop();
+      // not a step from where it stood: it is shut in there (a pit), and no careful walk will ever get it out. Once a
+      // load, a plain walk then, that may climb or dig its way (the bridge's guards keep its builds and the yard's
+      // ground). Live 2026-11-17: paths-north dug its cells at y 62 over a hidden 2-high hole, the bot ended in the
+      // trench, and four runs in 12 s found Baritone 8 nodes, every station "could not walk", till the LOOP backoff
+      // and the next goal's plain walk took it out.
+      const after = g.arrived ? undefined : (await ctx.status()).position;
+      if (!g.arrived && !freed && pos && after && Math.hypot(after.x - pos.x, after.y - pos.y, after.z - pos.z) < 1) {
+        freed = true;
+        ctx.progress(`${job.structure}: shut in at (${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)}): a plain walk out to station ${i + 1}`);
+        g = await ctx.call<{ arrived: boolean }>('goto', { ...s.at, range: 0, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
+        if (ctx.signal.aborted) return stop();
+      }
       if (!g.arrived) {
         r.unreached.push(key(s.at));
         for (const a of s.actions) fail(a, 'could not walk to the spot to do it from');
