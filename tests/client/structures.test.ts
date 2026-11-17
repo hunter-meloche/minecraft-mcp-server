@@ -172,6 +172,19 @@ test('import: built blocks only, a chest by its facing, a sign with its text; wh
   t.is(ch.removed.length, 0);
 });
 
+test('import: a box not (wholly) loaded is refused, not read as air (the 11-17 yard import from far off)', async (t) => {
+  const { importDesign } = await import('../../src/client/structures/importer.js');
+  const box = { x: 10, y: 63, z: 20, width: 3, height: 2, length: 3 };
+  // all of it out of sight: world.region gives null everywhere, which read as "nothing built in that box"
+  t.throws(() => importDesign('yard', box, new Array(18).fill(null), {}), { message: /18 of the box's 18 cell\(s\) are not loaded/ });
+  // half loaded: the planks seen, the far half null; read as air, that half would drop out of the file
+  const blocks: (string | null)[] = new Array(18).fill('minecraft:oak_planks');
+  for (let i = 9; i < 18; i++) blocks[i] = null;
+  t.throws(() => importDesign('yard', box, blocks, {}), { message: /9 of the box's 18 cell\(s\) are not loaded/ });
+  // loaded but empty still says so
+  t.throws(() => importDesign('yard', box, new Array(18).fill('minecraft:air'), {}), { message: 'nothing built in that box' });
+});
+
 test('sameBlock: a gate opened from the other side is the same gate', (t) => {
   t.is(sameBlock('birch_fence_gate[facing=south]', 'birch_fence_gate[facing=north,in_wall=false,open=false,powered=false]'), 'same');
   t.is(sameBlock('birch_fence_gate[facing=south]', 'birch_fence_gate[facing=east,in_wall=false,open=false,powered=false]'), 'state');

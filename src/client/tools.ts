@@ -1495,6 +1495,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         r.placed.length ? `Placed-looking blocks (${r.placed.length} cluster(s)):\n${r.placed.slice(0, 25).map(c => `- ${fmtC(c)}`).join('\n')}${r.placed.length > 25 ? `\n- ... ${r.placed.length - 25} more` : ''}` : 'No placed-looking blocks.',
         r.pits.length ? `Open pits (${r.pits.length} column(s)): ${r.pits.slice(0, 20).map(p => `(${p.x}, ${p.surface}, ${p.z}) ${p.around - p.surface} deep`).join('; ')}${r.pits.length > 20 ? ' ...' : ''}` : 'No open pits.'
       ];
+      // a far area reads as air where its chunks aren't loaded: an all-flat map that looked like a bug (11-17)
+      if (r.unloaded) lines.unshift(`Not loaded: ${Math.round(100 * r.unloaded / blocks.length)}% of the area (the bot is ${Math.round(Math.hypot(me.x - cx, me.z - cz))} blocks from its centre); those parts read as empty air below.`);
       if (map) lines.push(`Map, x ${box.x}..${box.x + box.width - 1} left to right, z ${box.z} at the top:\n${r.map.join('\n')}`);
       return factory.createResponse(lines.join('\n'));
     }

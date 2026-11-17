@@ -43,3 +43,10 @@ test('survey draws a map of what tops each column', (t) => {
   t.is(r.map[0], 'T0a0x0000');
   t.is(r.map[8], '00000000~');
 });
+
+test('survey counts the cells not loaded (null), so a far area does not pass for flat empty land', (t) => {
+  const { box, b } = world();
+  t.is(survey(box, b).unloaded, 0);
+  const far: (string | null)[] = b.map((s, i) => (i % 9 < 4 ? null : s)); // the west 4 columns out of sight
+  t.is(survey(box, far).unloaded, 4 * 9 * 7);
+});

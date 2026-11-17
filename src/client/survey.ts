@@ -16,6 +16,8 @@ export interface Survey {
   pits: Pit[];
   /** one row per z (north to south), one character per x: what tops each column */
   map: string[];
+  /** cells world.region gave as null (chunks not loaded): they read as air, so a far area surveys as flat nothing */
+  unloaded: number;
 }
 
 const name = (state: string | null | undefined) => (state ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
@@ -126,5 +128,5 @@ export function survey(box: Box, blocks: (string | null)[], isProtected: (p: Pos
     }
     map.push(row);
   }
-  return { surface: { min: box.y + (known[0] ?? 0), max: box.y + (known.at(-1) ?? 0), median: box.y + median }, trees, water, placed, pits, map };
+  return { surface: { min: box.y + (known[0] ?? 0), max: box.y + (known.at(-1) ?? 0), median: box.y + median }, trees, water, placed, pits, map, unloaded: blocks.filter(b => b === null).length };
 }

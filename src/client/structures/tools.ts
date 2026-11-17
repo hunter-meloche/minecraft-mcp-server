@@ -316,12 +316,14 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
       dryRun: z.boolean().optional().describe('Only show what would change')
     },
     async ({ name, box, keepTerrain, saveDesignAs, homeStorage, dryRun }: { name: string; box?: { x: number; y: number; z: number; width: number; height: number; length: number }; keepTerrain?: boolean; saveDesignAs?: string; homeStorage?: boolean; dryRun?: boolean }) => {
+      let scanned = box;
       try {
         const w = await world();
         const old = store.loadStructure(w, name);
         const oldCells = old ? compile(designOf(old.design), old.anchor, old.rotation ?? 0) : undefined;
         const b = box ?? oldCells?.box;
         if (!b) return factory.createErrorResponse(`No structure called "${name}": give box to import something already built`);
+        scanned = b;
         if (b.width * b.height * b.length > 262_144) return factory.createErrorResponse('The box is too big to scan in one go (at most 262144 cells)');
         const blocks = await readBox(rt, b);
         const { signs: found } = await rt.call<{ signs: { x: number; y: number; z: number; lines: string[] }[] }>('signs.read', { ...b }, 30_000);
@@ -352,7 +354,14 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         store.saveState(w, name, st);
         return factory.createResponse(`${lines.join('\n')}\nSaved "${name}": the file now matches the world.`);
       } catch (e) {
-        return factory.createErrorResponse((e as Error).message);
+        const msg = (e as Error).message;
+        if (/not loaded/.test(msg)) {
+          const st = await rt.status().catch(() => undefined);
+          const b = scanned;
+          const far = st?.position && b ? Math.round(Math.hypot(st.position.x - (b.x + b.width / 2), st.position.z - (b.z + b.length / 2))) : undefined;
+          return factory.createErrorResponse(`${msg}${far !== undefined ? `: the bot is ${far} blocks from the box's middle` : ''}; nothing imported, come nearer and import again`);
+        }
+        return factory.createErrorResponse(msg);
       }
     }
   );

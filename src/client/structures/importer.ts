@@ -47,6 +47,10 @@ function letters(states: string[]): Map<string, string> {
  */
 export function importDesign(name: string, box: Box, blocks: (string | null)[], signs: Record<string, string[]>, opts: { keepTerrain?: boolean } = {}): { design: Design; anchor: { x: number; y: number; z: number } } {
   const { width: w, height: h, length: l } = box;
+  // world.region gives null where the chunk isn't loaded: read as air, an unloaded part would drop out of the file, and
+  // a box wholly out of sight read as "nothing built" (the 11-17 improvement run, importing the yard from far off)
+  const unloaded = blocks.filter(s => s === null).length;
+  if (unloaded) throw new Error(`${unloaded} of the box's ${blocks.length} cell(s) are not loaded (too far from the bot to see)`);
   const at = (x: number, y: number, z: number) => (blocks[x + z * w + y * w * l] ?? '').replace(/^minecraft:/, '');
   // the terrain under it: in each column, the natural blocks from the bottom up to the first that isn't
   const terrainTop = new Map<string, number>();
