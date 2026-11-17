@@ -229,7 +229,7 @@ test('the setup\'s gate: open until linked; held a day after a trip that came ba
   const s = lookAt(KIT, 1000);
   t.true(setupOpen(w));
   // (P3a adds the barter and the quartz at stage 1, P3b the scouting and the debris at stage 2)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
   // the kit: the golden helmet, the flint and steel and the obsidian from the chests; the shield worn, three pickaxes
   t.deepEqual(setupShort(s, w), []);
   t.is(setupReady(s, w), null);

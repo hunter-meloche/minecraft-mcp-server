@@ -463,6 +463,12 @@ public final class Combat {
                     if (shield && (RANGED.contains(Names.entity(victim)) || Names.entity(victim).equals("creeper"))) { p.lookAt(EntityAnchorArgument.Anchor.EYES, victim.getEyePosition()); shieldUp(); }
                     return false;
                 }
+                // a blaze: the swing in a gap of its fire, the shield up toward it while a fireball of its comes (P3c)
+                if (Names.entity(victim).equals("blaze") && !Nether.blazeSwing(Nether.smallFireballComing(m, p), shield)) {
+                    p.lookAt(EntityAnchorArgument.Anchor.EYES, victim.getEyePosition());
+                    shieldUp();
+                    return false;
+                }
                 shieldDown();
                 holdWeapon(victim);
                 String held = p.getMainHandItem().isEmpty() ? "fist" : Names.item(p.getMainHandItem());

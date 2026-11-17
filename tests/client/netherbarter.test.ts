@@ -1189,7 +1189,7 @@ test('the gold chore and the barter on the brain\'s own list: the chore at 67 (a
     t.is(rung().wants(lookAt(KIT, tod), liveWorld()), null);
   }
   // (P3a's quartz beside the barter, P3b's scouting and debris at stage 2)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
 });
 
 test('the barter\'s memory as brain.json may hold it: made whole, the rest let go', (t) => {

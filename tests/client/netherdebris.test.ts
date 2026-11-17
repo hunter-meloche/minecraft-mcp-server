@@ -465,7 +465,7 @@ test.serial('P3b: a ghast come about as it steps onto the place it would dig fro
 // ------------------------------------------------------------------------------------------------ the gate
 
 test('the debris\'s gate: nothing before stage 2, before the link or without its own portal; with no potion of fire resistance in stock it stays shut and says so (a splash one or another kind none); a diamond or netherite pickaxe; held with the barter for the day; its gates write nothing', (t) => {
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
   const w = setupWorld();
   const n = netherOf(w);
   Object.assign(n, { portal: { x: OWN.x, y: OWN.y, z: OWN.z }, linked: true, stage: 1, stageTrips: 2, cleanTrips: 3 });

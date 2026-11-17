@@ -7,7 +7,10 @@
  * (netherquartz.test.ts) what a dug quartz ore drops, where it comes to rest; for the scouting
  * (netherscout.test.ts) the biome the status says at the bot's feet; and for the debris (netherdebris.test.ts) the
  * potions in the chests by their stacks (a withdraw by slot), a potion drunk and the effect it gives, what a dug
- * ancient debris drops and what the bot held to dig it.
+ * ancient debris drops and what the bot held to dig it; and for the fortress (netherfortress.test.ts) the bridge's
+ * fight (the nearest of the kind killed, a blaze's rod dropped where it died), what a nether wart and a soul sand dug
+ * drop, the wither on the bot; and for the tunnelling (nethertunnel.ts) a block put down there as a dig opens the
+ * rock (lava come in), and a block placed into lava (the game's: lava is replaceable).
  */
 import type { InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
@@ -138,6 +141,10 @@ export function game(world: WorldMemory, opts: {
   biome?: (p: Pos) => string | undefined;
   /** a potion drunk does not take (the use ends before it is drunk: nothing goes, no effect) */
   drinkFails?: boolean;
+  /** the bridge's fight never kills (a blaze that stays out of reach) */
+  fightMisses?: boolean;
+  /** called after each block dug down there, with a way to put a block in the Nether (a test lets lava in as the rock opens) */
+  onDig?: (at: Pos, put: (p: Pos, b: string) => void) => void;
 } = {}) {
   const did: string[] = [];
   const said: string[] = [];
@@ -150,8 +157,8 @@ export function game(world: WorldMemory, opts: {
   // the Nether as an earlier trip left it: what it dug and built there, the portal it lit
   for (const c of opts.after?.changed ?? []) over[c.dim].set(k(c.at), c.to);
   for (const l of opts.after?.lit ?? []) if (l.dim === NETHER && !lit.some(x => x.dim === l.dim && x.x === l.x && x.y === l.y && x.z === l.z)) lit.push({ ...l });
-  /** `fire`: the fire resistance on the bot, s (a test lowers it); `heldSlot`: the pocket item.select named by slot */
-  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20, fire: 0, heldSlot: -1 };
+  /** `fire`: the fire resistance on the bot, s (a test lowers it); `heldSlot`: the pocket item.select named by slot; `wither`: the wither on it (a test sets it); `food`: as the status says it */
+  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20, food: 20, fire: 0, heldSlot: -1, wither: false };
   /** each block dug down there, with what the bot held to dig it */
   const dugWith: string[] = [];
   const own: { dimension: string; x: number; y: number; z: number }[] = [];
@@ -291,8 +298,9 @@ export function game(world: WorldMemory, opts: {
     progress: (x: string) => { said.push(x); },
     status: async () => {
       const biome = state.dim === NETHER ? opts.biome?.(feet()) : undefined;
-      const effects = state.fire > 0 ? { effects: [{ name: 'fire_resistance', amplifier: 0, seconds: state.fire }] } : {};
-      return { inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: state.health, food: 20, timeOfDay: 1000, ...(biome ? { biome } : {}), ...effects };
+      const list = [...(state.fire > 0 ? [{ name: 'fire_resistance', amplifier: 0, seconds: state.fire }] : []), ...(state.wither ? [{ name: 'wither', amplifier: 0, seconds: 8 }] : [])];
+      const effects = list.length ? { effects: list } : {};
+      return { inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: state.health, food: state.food, timeOfDay: 1000, ...(biome ? { biome } : {}), ...effects };
     },
     call: async (m: string, p: Record<string, unknown> = {}) => {
       const at = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
@@ -388,6 +396,25 @@ export function game(world: WorldMemory, opts: {
         }
         return { result: 'Pass', success: false, hand: null, entity: mob.name, id: mob.id };
       }
+      // the bridge's fight: the one named by its id ('#71'), or the nearest of the kind, within its distance killed,
+      // where it stood; a blaze drops a rod there. A blaze is never walked after (Nether.noChase): one past the swing's
+      // 3.2 (feet to feet) stays out of reach, and the fight ends unreachable
+      if (m === 'fight') {
+        const target = String(p.target);
+        const off = (x: Mob) => Math.hypot(x.position.x - state.pos.x, x.position.y - state.pos.y, x.position.z - state.pos.z);
+        const near = mobs.filter(x => off(x) <= Number(p.maxDistance ?? 16));
+        const mob = target.startsWith('#') ? near.find(x => x.id === Number(target.slice(1)))
+          : near.filter(x => x.name === target).sort((a, b) => Math.hypot(a.position.x - state.pos.x, a.position.z - state.pos.z) - Math.hypot(b.position.x - state.pos.x, b.position.z - state.pos.z))[0];
+        const kind = mob?.name ?? target;
+        did.push(`fight ${kind}${mob ? ` #${mob.id}` : ''} (min health ${p.minHealth}, retreat ${p.retreat})`);
+        if (!mob || opts.fightMisses || (mob.name === 'blaze' && off(mob) > 3.2)) return { outcome: mob ? 'unreachable' : 'none', kills: [], unreachable: mob ? [kind] : [] };
+        mobs.splice(mobs.indexOf(mob), 1);
+        const at = { x: Math.floor(mob.position.x), y: Math.floor(mob.position.y), z: Math.floor(mob.position.z) };
+        let y = at.y;
+        while (y > 1 && !solid(get(state.dim, { x: at.x, y: y - 1, z: at.z }))) y--;
+        if (kind === 'blaze') drops.push({ id: nextId++, item: 'blaze_rod', count: 1, position: { x: at.x + 0.5, y, z: at.z + 0.5 } });
+        return { outcome: 'done', kills: [kind], dropsAt: at, health: state.health };
+      }
       if (m === 'goto') {
         walks.push({ dim: state.dim, to: at, careful: !!p.careful });
         // (GoalNear: a standing cell within the range will do)
@@ -407,9 +434,11 @@ export function game(world: WorldMemory, opts: {
         set(state.dim, at, 'air', `dug from ${fmt(feet())}`);
         did.push(`dig ${name(b)} ${fmt(at)}`);
         if (state.dim === NETHER) dugWith.push(`${name(b)} ${k(at)} with ${state.held}`);
+        if (state.dim === NETHER) opts.onDig?.(at, (q, to) => set(NETHER, q, to, 'test'));
         // a quartz ore's quartz, an ancient debris itself: down through the open cells under it to the first floor, in
         // the middle of its column
-        const drop = name(b) === 'nether_quartz_ore' ? { item: 'quartz', count: opts.quartz ?? 2 } : name(b) === 'ancient_debris' ? { item: 'ancient_debris', count: 1 } : undefined;
+        const drop = name(b) === 'nether_quartz_ore' ? { item: 'quartz', count: opts.quartz ?? 2 } : name(b) === 'ancient_debris' ? { item: 'ancient_debris', count: 1 }
+          : name(b) === 'nether_wart' ? { item: 'nether_wart', count: 2 } : name(b) === 'soul_sand' ? { item: 'soul_sand', count: 1 } : undefined;
         if (drop && state.dim === NETHER && drop.count > 0) {
           let y = at.y;
           while (y > 1 && !solid(get(state.dim, { x: at.x, y: y - 1, z: at.z }))) y--;
@@ -446,7 +475,7 @@ export function game(world: WorldMemory, opts: {
       }
       if (tool === 'place-block') {
         const item = String(a.item);
-        if (name(get(state.dim, at)) !== 'air') return { ok: true, text: `There's already a block (${get(state.dim, at)}) at ${fmt(at)}` };
+        if (!['air', 'lava'].includes(name(get(state.dim, at)))) return { ok: true, text: `There's already a block (${get(state.dim, at)}) at ${fmt(at)}` };
         const sides = [[0, -1, 0], [0, 0, -1], [0, 0, 1], [1, 0, 0], [-1, 0, 0], [0, 1, 0]].map(([dx, dy, dz]) => get(state.dim, { x: at.x + dx, y: at.y + dy, z: at.z + dz }));
         if (!sides.some(solid)) return { ok: true, text: `Failed to place block at ${fmt(at)}: nothing solid next to it to place against` };
         if (reach(at) > 5.2) return { ok: true, text: `Failed to place block at ${fmt(at)}: too far` };

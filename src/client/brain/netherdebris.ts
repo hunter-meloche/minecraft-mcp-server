@@ -136,9 +136,10 @@ export interface DebrisView { centre: Box; floor: number; where: string; portal:
  * Why a debris may not be mined that the ground alone says, pure, or null: lava or fire within LAVA_GAP of it every
  * way (or the ground there not all read: an unloaded chunk might hold either); within PLACED_GAP of a block someone
  * placed; no face open to air (buried: what no player sees, and the dig would be a tunnel's); under a block that falls;
- * a floor (open over it) with no firm ground under it (the dig would open a hole to a drop or a cave).
+ * a floor (open over it) with no firm ground under it (the dig would open a hole to a drop or a cave). The tunnelling
+ * judges the debris its tunnels bare by it too (nethertunnel.ts).
  */
-function bareFault(g: Grid, p: Pos, placed: Pos[]): string | null {
+export function bareFault(g: Grid, p: Pos, placed: Pos[]): string | null {
   let unread = false;
   for (let dx = -LAVA_GAP; dx <= LAVA_GAP; dx++) for (let dy = -LAVA_GAP; dy <= LAVA_GAP; dy++) for (let dz = -LAVA_GAP; dz <= LAVA_GAP; dz++) {
     const c = cellOf(blockAt(g, add(p, dx, dy, dz)));
@@ -362,9 +363,9 @@ const freeSlots = (items: InventoryItem[]) => 36 - new Set(items.filter(i => i.s
  * The debris trip's own kit, after the Nether kit (fetchSetupKit made its room): a pickaxe that takes debris out of the
  * chests where none is carried, and the potions of fire resistance up to DEBRIS_POTIONS carried, each by its slot in
  * the chest (takeSlot: by its contents, never by its name: every potion is `potion`), the long ones first. Undefined
- * when it has both, else what it is short of.
+ * when it has both, else what it is short of (the tunnelling's kit too: nethertunnel.ts).
  */
-async function fetchDebrisKit(ctx: GoalContext): Promise<string | undefined> {
+export async function fetchDebrisKit(ctx: GoalContext): Promise<string | undefined> {
   let items = await inventory(ctx);
   if (!debrisPick(items)) {
     for (const name of DEBRIS_PICKS) if (await takeFromChests(ctx, name, 1).catch(() => 0)) break;

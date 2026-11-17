@@ -36,6 +36,8 @@ import { barterOpen, barterReady, barterRun } from './netherbarter.js';
 import { quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
 import { scoutOpen, scoutReady, scoutRun } from './netherscout.js';
 import { debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
+import { fortressOpen, fortressReady, fortressRun } from './netherfortress.js';
+import { tunnelOpenAt, tunnelReady, tunnelRun } from './nethertunnel.js';
 import { villagersTask } from './villagemove.js';
 import { eveningFrom, fishDist, fishLate, fishRun, isEvening } from './fish.js';
 
@@ -525,8 +527,39 @@ const debrisWork: NetherWork = {
   run: (ctx, budgetMs, now) => debrisRun(ctx, budgetMs, now)
 };
 
-/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz, stage 2's scouting and debris; P3c adds the rest at its stage. */
-export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork, scoutWork, debrisWork];
+/**
+ * `fortress` (P3c, netherfortress.ts): from stage 3 with no potion (the user's strict rules of Nov 17: nether.ts
+ * NETHER_STAGES says what each work needs), to a natural fortress a scouting leg found, by that leg's way: at full
+ * health and food in the Nether set with a shield, blazes fought from the shield and wither skeletons with the sword,
+ * home at once under 10 health, with the wither, on a hold, at its time or where the way on needs fire resistance;
+ * blaze rods, a few wart, some soul sand and its chests' loot while the rods or the wart are short. A death on one
+ * turns the fortress trips off until the lead switches them back.
+ */
+const fortressWork: NetherWork = {
+  id: 'fortress',
+  stage: 3,
+  open: world => fortressOpen(world),
+  ready: (s, world) => fortressReady(s, world),
+  run: (ctx, budgetMs, now) => fortressRun(ctx, budgetMs, now)
+};
+
+/**
+ * `tunnel` (P3c, nethertunnel.ts, the user's decision 5 of Nov 17): from stage 3, while the home is short of the
+ * netherite's 16 ancient debris and a potion of fire resistance is in stock: 1x2 tunnels from its own portal down to
+ * y 15 and along it, read ahead (no lava within 2, no cave beside, the Nether's rock only, 16 from every build), the
+ * debris they bare mined under the fire resistance it drinks at the tunnel's face, 4 at most a trip; kept so later
+ * trips go on from them. The open-face debris (`debris`) stays as it is.
+ */
+const tunnelWork: NetherWork = {
+  id: 'tunnel',
+  stage: 3,
+  open: world => tunnelOpenAt(world),
+  ready: (s, world) => tunnelReady(s, world),
+  run: (ctx, budgetMs, now) => tunnelRun(ctx, budgetMs, now)
+};
+
+/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz, stage 2's scouting and debris, stage 3's fortress and tunnelling; P6 adds the bastion. */
+export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork, scoutWork, debrisWork, fortressWork, tunnelWork];
 
 /** The home portal is lit and the bot's own: the portal milestone is done and the portal known. */
 const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).includes('nether-portal') && !!homePortal(world);

@@ -103,6 +103,11 @@ public final class Nether {
      */
     static String noChase(String mob, boolean onGround, boolean lavaNear, int fall) {
         if (FLYING.contains(mob) || (mob.equals("blaze") && !onGround)) return "flying";
+        // (P3c's strict rules, the user's of Nov 17: a blaze is fought from the shield where the bot stands, never walked
+        // after by Baritone, on the ground or not: a fortress's bridges are ledges over lava. A blaze that sees the bot
+        // holds its distance and only fires, so the fortress trip walks in to one itself, carefully, over ground it has
+        // judged (netherfortress.ts blazeStance), and the fight swings once it is within reach)
+        if (mob.equals("blaze")) return "a blaze: fought from the shield";
         if (lavaNear) return "by lava";
         if (fall > MAX_FALL) return "across a drop of " + fall;
         return null;
@@ -211,6 +216,30 @@ public final class Nether {
         if (distance > FIREBALL_RANGE || closing <= 0) return Fireball.NONE;
         if (distance <= reach && !swung) return Fireball.SWING;
         return shield ? Fireball.SHIELD : Fireball.LOOK;
+    }
+
+    /** A blaze's small fireball this near the eye and coming at the bot: the shield stays up, the swing waits for the gap. */
+    static final double BLAZE_FIRE_RANGE = 6;
+
+    /**
+     * A swing at a blaze now, pure: only in a gap of its fire (no small fireball within BLAZE_FIRE_RANGE coming at the
+     * bot), with a shield to hold up meanwhile; with no shield the swing is the only guard there is.
+     */
+    static boolean blazeSwing(boolean fireballComing, boolean shield) {
+        return !shield || !fireballComing;
+    }
+
+    /** Live: a blaze's small fireball within BLAZE_FIRE_RANGE of the eye, coming at the bot (its motion toward it). */
+    static boolean smallFireballComing(Minecraft mc, LocalPlayer p) {
+        Vec3 eye = p.getEyePosition();
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (!(e instanceof net.minecraft.world.entity.projectile.hurtingprojectile.SmallFireball fb) || !fb.isAlive()) continue;
+            double d = Math.sqrt(fb.getBoundingBox().distanceToSqr(eye));
+            if (d > BLAZE_FIRE_RANGE) continue;
+            Vec3 to = eye.subtract(fb.getBoundingBox().getCenter());
+            if (to.lengthSqr() < 1e-6 || fb.getDeltaMovement().dot(to.normalize()) > 0) return true;
+        }
+        return false;
     }
 
     private static final Set<Integer> SWUNG = new HashSet<>();

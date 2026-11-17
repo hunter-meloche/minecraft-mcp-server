@@ -259,7 +259,7 @@ test('the nether rung: 4.5 between the trip kit and the deep rung, its work the 
   // (the villagers rung, P5c, at 4.4 just above it; the evening's fishing, anti-idle step 6, at the foot)
   t.deepEqual(LADDER.map(r => `${r.name} ${r.rank}`), ['cane patch 1', 'cows 2', 'cane 3', 'trip kit 4', 'villagers 4.4', 'nether 4.5', 'deep 5', 'surface 6', 'fish 7']);
   // (P3a adds the barter and the quartz at stage 1, P3b the scouting and the debris at stage 2)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
   const goals = workGoals(() => undefined, LADDER, () => T0);
   const rung = goals.find(g => g.name === 'work: nether')!;
   // the others keep their places (the deep rung 14, the unblockers 17 and 16; the evening's fishing 12 at the foot)

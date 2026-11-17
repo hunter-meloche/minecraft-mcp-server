@@ -15,7 +15,8 @@ import net.minecraft.world.entity.Entity;
  * while a zombie hits the bot (it died that way), and resumes it afterwards. Melee mobs in reach: stand still and let
  * the Guardian's melee reflex swing. Further away or ranged (skeletons, pillagers): close in. Creepers: back off.
  * Off at 6 HP or less (the emergency wall-in / flee handles that), during attack-entity fights, and when auto-defend
- * is off. Never after a target out of reach that flies (a ghast, a phantom, a blaze in the air) or, in the Nether,
+ * is off. Never after a target out of reach that flies (a ghast, a phantom), a blaze (in the air or not: fought from
+ * the shield where the bot stands, P3c) or, in the Nether,
  * stands by lava or across a drop deeper than Baritone falls (Nether.chaseRefusal): the job goes on, and the shield
  * guard has it when idle. A creeper is never let go that way: it is run from, not chased.
  */

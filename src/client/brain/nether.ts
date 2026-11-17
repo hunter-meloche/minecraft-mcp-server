@@ -68,6 +68,54 @@ export interface SetupSpot { x: number; y: number; z: number; axis: 'x' | 'z'; s
  */
 export type TripEnd = 'clean' | 'turned back' | 'not linked' | 'stranded' | 'a death' | 'cut short';
 
+/**
+ * The fortress trips' own (P3c, netherfortress.ts): `off` once a death came on one (the user's strict rules of Nov 17:
+ * the trips there stop for good until the lead switches them back, the nether-trips tool's `fortress`), on top of the
+ * death ladder that holds every trip; the trip under way, `from` its start and `to` its end (real ms: a death between
+ * the two is a death there, booked by netherTick as the runtime tells it, after the run saw itself gone); the natural
+ * chests it emptied (never opened again); the fortresses refused for good, and why (a block only a player puts there
+ * within 16 of it, a player seen by it).
+ */
+export interface FortressMemory {
+  off?: { at: number; why: string };
+  trip?: { from: number; to?: number };
+  looted?: Pos[];
+  /** by its site, and the box of its zone as the trip saw it (a later leg logs the same fortress by another middle) */
+  refused?: (Pos & { why: string; at: number; box?: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number } })[];
+}
+/** Chests emptied and fortresses refused, kept at most. */
+export const FORTRESS_KEPT = 32;
+/**
+ * A fortress trip whose end was never written is over this long after its start (real ms): its run's end is written
+ * only where it stands out of the Nether, and a restart or a crash mid-trip writes none (live, a trip left open would
+ * book any later death down there, a barter's or a quartz trip's, as the fortress's and turn the fortress trips off).
+ * The nether rung's run stops at 12 min, and the leave nether walk home after a cut takes some more.
+ */
+export const FORTRESS_TRIP_CAP_MS = 30 * 60_000;
+
+/** Which way a tunnel's step goes across the ground: north (-z), east (+x), south (+z), west (-x). */
+export type Heading = 'n' | 'e' | 's' | 'w';
+/**
+ * One of its tunnels for ancient debris (P3c, nethertunnel.ts): from `start` (a trunk's mouth on the ground by its
+ * portal, or the cell of the trunk a branch leaves it at) by its steps, a letter a step (`way`: n e s w a level step
+ * that way, N E S W a step down that way), first `head`; `from`: the trunk a branch leaves (its index in the list:
+ * tunnels are never taken out of it, so the index holds); `shut`: why its end goes no further (lava ahead, a cave, its
+ * length), so later trips go on from another; `cut`: the first of its cells a walk found unsound (lava come by it),
+ * past which it and every branch beyond it are let be; `failed`: the end it stood at when a dig or a step there did
+ * not go (a timeout, out of sight, a mob in the way: no verdict on the rock), the trip ended and the tunnel left open
+ * for the next; a second failure at that same end shuts it (a real blockage does not come back every trip).
+ */
+export interface Tunnel { start: Pos; head: Heading; way: string; from?: number; shut?: string; cut?: number; failed?: Pos }
+/**
+ * Its tunnels from its own portal (`portal`: moved, they are let go), the cobblestone it put in their walls against
+ * lava (its own, not someone's), and the debris it dug out of their walls (the holes are its own, no caves).
+ */
+export interface TunnelMemory { portal: Pos; list: Tunnel[]; plugs?: Pos[]; dug?: Pos[] }
+/** Tunnels kept at most, the steps of one, and its own plugs (and the debris holes). */
+export const TUNNELS_KEPT = 24;
+export const TUNNEL_STEPS = 160;
+export const PLUGS_KEPT = 64;
+
 /** Kept in brain.json per world (`world.nether`). */
 export interface NetherMemory {
   /** the nether-trips switch: anything that goes through a portal waits for it (off, undefined, as it ships) */
@@ -126,6 +174,10 @@ export interface NetherMemory {
   legs?: ScoutLeg[];
   /** the barter work's hold, the gold chore's day, how the gold is given (P3a: netherbarter.ts) */
   barter?: BarterMemory;
+  /** the fortress trips' switch after a death, the trip under way, the chests emptied, the fortresses refused (P3c: netherfortress.ts) */
+  fortress?: FortressMemory;
+  /** its tunnels for ancient debris at y 8-22, from its own portal: later trips go on from them (P3c: nethertunnel.ts) */
+  tunnels?: TunnelMemory;
   /**
    * the golden helmet as the last look down there saw it, carried or worn: its durability left of all of it, and when.
    * Gone at a later look with no death since, it broke (netherTick says so); let go of once it is seen home with it
@@ -170,21 +222,34 @@ export const SITES = 32;
 
 // ------------------------------------------------------------------------------------------------ the stages
 
-/** Potions of fire resistance in stock for the last stage: one drunk for a fortress or a bastion, one more for the way back. */
+/** Potions of fire resistance in stock for the bastion (P6): one drunk for it, one more for the way back. */
 export const FIRE_POTIONS = 2;
 
 /**
  * The stage ramp (P2b of the progression plan). Stage 0 is the setup (its own Nether-side portal, linked) and then a
  * short look from its hut; each stage after it opens once the clean trips reach its count: 1 after 2 (P3a: barter,
- * quartz), 2 after 4 (P3b: debris, scout), 3 after 6 with potions of fire resistance in stock too (P3c/P6: fortress,
- * bastion, each fought with one drunk). A clean trip is one that did its work down there (netherEnd): live on Nov 15
- * stage 2 came of a barter and a quartz trip that went through to the hut and straight back (ghasts 20 and 12 off),
- * which had shown nothing of what stage 2 asks of the bot. The nether rung's work says its own stage (worktasks.ts
- * NETHER_WORK).
+ * quartz), 2 after 4 (P3b: debris, scout), 3 after 6 (P3c: the fortress, the tunnelling for debris; P6: the bastion). A clean trip is one that did
+ * its work down there (netherEnd): live on Nov 15 stage 2 came of a barter and a quartz trip that went through to the
+ * hut and straight back (ghasts 20 and 12 off), which had shown nothing of what stage 2 asks of the bot.
+ *
+ * `work` says what each kind of work opened at a stage needs besides (the nether rung's work reads it: worktasks.ts
+ * NETHER_WORK): the fortress no potion (the user's decision 6 of Nov 17, "go with strict rules": its own rules in
+ * netherfortress.ts; stage 3 waited on 2 potions of fire resistance from Nov 15, and the potions wait on the brewing
+ * stand, which waits on the fortress's blaze rods), the bastion FIRE_POTIONS in stock (P6: one drunk for it). The
+ * debris drinks one too, and the tunnelling for it at y 8-22 (P3c, the user's decision 5 of Nov 17): their own ready
+ * says so (netherdebris.ts, nethertunnel.ts).
  */
-export const NETHER_STAGES: readonly { stage: number; trips: number; potions?: number }[] = [
-  { stage: 1, trips: 2 }, { stage: 2, trips: 4 }, { stage: 3, trips: 6, potions: FIRE_POTIONS }
+export const NETHER_STAGES: readonly { stage: number; trips: number; work: Readonly<Record<string, { potions?: number }>> }[] = [
+  { stage: 1, trips: 2, work: { barter: {}, quartz: {} } },
+  { stage: 2, trips: 4, work: { scout: {}, debris: {} } },
+  { stage: 3, trips: 6, work: { fortress: {}, tunnel: {}, bastion: { potions: FIRE_POTIONS } } }
 ];
+
+/** What a kind of work down there needs by the ramp, pure: the stage it opens at and the potions of fire resistance in stock it waits on (0: none). Undefined for a kind the ramp does not open (stage 0's setup and look). */
+export function stageNeeds(work: string): { stage: number; potions: number } | undefined {
+  const at = NETHER_STAGES.find(s => Object.hasOwn(s.work, work));
+  return at && { stage: at.stage, potions: at.work[work].potions ?? 0 };
+}
 
 /** The clean trips a stage stands at (0 for stage 0): where a death in the Nether puts the count back to. */
 export const tripsForStage = (stage: number): number => (stage <= 0 ? 0 : NETHER_STAGES[Math.min(stage, NETHER_STAGES.length) - 1].trips);
@@ -212,7 +277,7 @@ export function firePotions(items: { name: string; count: number; potion?: strin
  *
  * Fire resistance 12, up from 4 (D1, the user's "prioritize getting fire resistance gear for nether in general"): a
  * day's use is 6 (one carried on each of the day's two trips for the Guardian's hook, NETHER_TRIP.firePotions; the
- * debris trip's DEBRIS_POTIONS 2, drunk; the fortress's FIRE_POTIONS 2), and twice that keeps a day of use from
+ * debris trip's DEBRIS_POTIONS 2, drunk; the bastion's FIRE_POTIONS 2; the fortress drinks none), and twice that keeps a day of use from
  * emptying the stock. The barter goes on while any target is short (netherShort), so the potions keep it bartering
  * after the rest are met: about 3.4 in 100 barters bring one (the 26.3 jar's piglin_bartering: its two fire resistance
  * entries, 8 + 8 of 469), some two a day at the gold chore's 64 ingots.
@@ -321,6 +386,43 @@ function clean(raw: unknown): NetherMemory {
     if (isObj(smelted) && fin(smelted.day) && fin(smelted.n)) barter.smelted = { day: smelted.day, n: Math.max(0, Math.floor(smelted.n)) };
     if (fin(b.untaken) && b.untaken > 0) barter.untaken = Math.floor(b.untaken);
     if (Object.keys(barter).length) m.barter = barter;
+  }
+  const f = r.fortress;
+  if (isObj(f)) {
+    const fortress: FortressMemory = {};
+    if (isObj(f.off) && fin(f.off.at)) fortress.off = { at: f.off.at, why: typeof f.off.why === 'string' ? f.off.why.slice(0, TRIP_TEXT) : '' };
+    if (isObj(f.trip) && fin(f.trip.from)) fortress.trip = { from: f.trip.from, ...(fin(f.trip.to) ? { to: f.trip.to } : {}) };
+    const looted = (Array.isArray(f.looted) ? f.looted : []).map(posOf).filter((p): p is Pos => !!p).slice(-FORTRESS_KEPT);
+    if (looted.length) fortress.looted = looted;
+    const refused = (Array.isArray(f.refused) ? f.refused : []).flatMap(x => {
+      const p = posOf(x);
+      if (!p || !isObj(x) || !fin(x.at)) return [];
+      const b = x.box;
+      const box = isObj(b) && fin(b.x1) && fin(b.y1) && fin(b.z1) && fin(b.x2) && fin(b.y2) && fin(b.z2) ? { x1: b.x1, y1: b.y1, z1: b.z1, x2: b.x2, y2: b.y2, z2: b.z2 } : undefined;
+      return [{ ...p, why: typeof x.why === 'string' ? x.why.slice(0, TRIP_TEXT) : '', at: x.at, ...(box ? { box } : {}) }];
+    }).slice(-FORTRESS_KEPT);
+    if (refused.length) fortress.refused = refused;
+    if (Object.keys(fortress).length) m.fortress = fortress;
+  }
+  const tn = r.tunnels;
+  const tportal = isObj(tn) ? posOf(tn.portal) : undefined;
+  if (isObj(tn) && tportal) {
+    // (in order, up to the first one that is not sound: a branch names its trunk by its place in the list)
+    const list: Tunnel[] = [];
+    for (const x of Array.isArray(tn.list) ? tn.list.slice(0, TUNNELS_KEPT) : []) {
+      const s = isObj(x) ? posOf(x.start) : undefined;
+      if (!isObj(x) || !s || typeof x.head !== 'string' || !/^[nesw]$/.test(x.head) || typeof x.way !== 'string' || !/^[nesw]*$/i.test(x.way)) break;
+      const from = fin(x.from) && Number.isInteger(x.from) && x.from >= 0 && x.from < list.length ? x.from : undefined;
+      if (x.from !== undefined && from === undefined) break;
+      list.push({
+        start: s, head: x.head as Heading, way: x.way.slice(0, TUNNEL_STEPS), ...(from !== undefined ? { from } : {}),
+        ...(typeof x.shut === 'string' ? { shut: x.shut.slice(0, TRIP_TEXT) } : {}), ...(fin(x.cut) && x.cut >= 0 ? { cut: Math.floor(x.cut) } : {}),
+        ...(posOf(x.failed) ? { failed: posOf(x.failed)! } : {})
+      });
+    }
+    const kept = (v: unknown) => (Array.isArray(v) ? v : []).map(posOf).filter((p): p is Pos => !!p).slice(-PLUGS_KEPT);
+    const plugs = kept(tn.plugs), dug = kept(tn.dug);
+    m.tunnels = { portal: tportal, list, ...(plugs.length ? { plugs } : {}), ...(dug.length ? { dug } : {}) };
   }
   const arrival = posOf(r.arrival);
   if (arrival) m.arrival = arrival;
@@ -681,11 +783,11 @@ export function netherKitDecline(s: Snapshot, who = 'nether'): Decline | null {
 
 // ------------------------------------------------------------------------------------------------ the tick
 
-/** The next stage's count in words: `1/2 clean trips to stage 1`, and the potions the last one wants; at the top, so. */
+/** The next stage's count in words: `1/2 clean trips to stage 1`; at the top, so. */
 function toNext(n: Pick<NetherMemory, 'stage' | 'stageTrips'>): string {
   const next = NETHER_STAGES[n.stage];
   if (!next) return 'the top stage';
-  return `${n.stageTrips}/${next.trips} clean trips to stage ${next.stage}${next.potions ? ` (and ${next.potions} potions of fire resistance in stock)` : ''}`;
+  return `${n.stageTrips}/${next.trips} clean trips to stage ${next.stage}`;
 }
 
 /**
@@ -703,16 +805,14 @@ function dropStage(n: NetherMemory): string | undefined {
 }
 
 /**
- * The stage up as its clean trips (and for the last, the potions of fire resistance in stock) allow, one line a stage:
- * only with the two sides linked (stage 0 is the setup's). `potions` is asked only when the last stage is next.
+ * The stage up as its clean trips allow, one line a stage: only with the two sides linked (stage 0 is the setup's).
+ * What a kind of work opened there needs besides (the bastion's potions) is its own gate's (NETHER_STAGES `work`).
  */
-function raiseStage(n: NetherMemory, potions: () => number): string[] {
+function raiseStage(n: NetherMemory): string[] {
   const lines: string[] = [];
   for (let next = NETHER_STAGES[n.stage]; next && n.linked === true && n.stageTrips >= next.trips; next = NETHER_STAGES[n.stage]) {
-    const have = next.potions ? potions() : 0;
-    if (next.potions && have < next.potions) break;
     n.stage = next.stage;
-    lines.push(`nether: stage ${next.stage} after ${n.stageTrips} clean trips${next.potions ? `, ${have} potions of fire resistance in stock` : ''}`);
+    lines.push(`nether: stage ${next.stage} after ${n.stageTrips} clean trips`);
   }
   return lines;
 }
@@ -747,8 +847,24 @@ export function netherTick(s: Snapshot, world: WorldMemory, d: DeathSeen | undef
     lines.push(`nether: a death at nether ${fmt(where)}: no trips until ${clock(d.time + NETHER_HOLDS.afterDeathMs)}`);
     const dropped = dropStage(n);
     if (dropped) lines.push(dropped);
+    // on a fortress trip (between its start and its end): the fortress trips stop for good, whatever the ladder says
+    // after it (the user's strict rules: "trips stop after a death"); the lead switches them back
+    const ft = n.fortress?.trip;
+    if (ft && d.time >= ft.from && d.time <= (ft.to ?? ft.from + FORTRESS_TRIP_CAP_MS) && !n.fortress?.off) {
+      n.fortress!.off = { at: d.time, why: `a death on a fortress trip at nether ${fmt(where)}` };
+      lines.push(`nether: a death on a fortress trip: fortress trips off until the lead switches them back`);
+    }
   }
-  lines.push(...raiseStage(n, () => firePotions(s.items, world)));
+  // a fortress trip's end where its run could not write it: cut short down there (leave nether's abort: the dusk,
+  // under 6 health), the walk home after it is the trip's still, and it ends at the first look home after the bot went in
+  // (a death told a tick late is still inside it); a trip left open by a restart ends at FORTRESS_TRIP_CAP_MS
+  const open = n.fortress?.trip;
+  if (open && open.to === undefined) {
+    const cap = open.from + FORTRESS_TRIP_CAP_MS;
+    if (s.now >= cap) open.to = cap;
+    else if (s.dimension !== NETHER && (n.enteredAt ?? -Infinity) >= open.from) open.to = s.now;
+  }
+  lines.push(...raiseStage(n));
   const deaths = n.deaths.filter(x => s.now - x.at < NETHER_HOLDS.offWithinMs);
   if (deaths.length !== n.deaths.length) n.deaths = deaths;
   // as the third in 3 days comes, and only then: turned on again after it (the lead's call), the switch stays on
@@ -913,6 +1029,16 @@ export async function netherHome(ctx: GoalContext): Promise<{ ok: boolean; text:
 
 /** Under this health or food the bot goes home from the Nether, whatever it is doing there. */
 const LEAVE_HEALTH = 12;
+/**
+ * A run down there that bounds the bot's health itself (the fortress: it leaves under its own 10, the user's "below
+ * half", and walks back by the cells it walked out, the only way there it knows): while it runs, leaveWhy's health rule
+ * waits down to `floor` (the Guardian's emergency at 6), so 12 does not cut the run mid-fight and leave the bot to
+ * netherHome's one walk to a portal that may be out of the client's loaded chunks (a fortress some 110 out). Set and
+ * cleared by that run (in a finally).
+ */
+export const ownHealth: { floor?: number } = {};
+/** The health down to which a run that bounds its own lets leaveWhy wait (the Guardian's emergency: Guardian.java, health 6 under attack). */
+export const OWN_HEALTH_FLOOR = 6;
 const LEAVE_FOOD = 10;
 /** A worn piece with less left than this goes home (the gold helmet is first: piglins turn on a bot without it). */
 const LEAVE_WEAR = 0.2;
@@ -929,14 +1055,14 @@ function wornThrough(s: Snapshot): string | undefined {
 }
 
 /**
- * Why the bot should go home from the Nether now, or null (never outside it): hurt (health under 12) or hungry (food
- * under 10); the day near its end (home by dusk: LEAVE_LEAD_TICKS before the return home, and at night); the trips
+ * Why the bot should go home from the Nether now, or null (never outside it): hurt (health under 12, under 6 while a
+ * run that bounds its own health is under way: ownHealth) or hungry (food under 10); the day near its end (home by dusk: LEAVE_LEAD_TICKS before the return home, and at night); the trips
  * held (the switch off, a death hold); a worn piece gone or under 20%; or no work run under way (a restart, the LLM's
  * hand-back, a run that stopped: nothing down there is the bot's to do but a trip's).
  */
 export function leaveWhy(s: Snapshot, world: WorldMemory): string | null {
   if (s.dimension !== NETHER) return null;
-  if (s.health < LEAVE_HEALTH) return `health ${Math.round(s.health)}: home from the nether`;
+  if (s.health < (ownHealth.floor ?? LEAVE_HEALTH)) return `health ${Math.round(s.health)}: home from the nether`;
   if (s.food < LEAVE_FOOD) return `food ${Math.round(s.food)}: home from the nether`;
   const left = daylightLeft(s.timeOfDay);
   if (s.activity !== 'work' || left < LEAVE_LEAD_TICKS) return s.activity === 'work' ? `${(ticksToMs(left) / MINUTE).toFixed(1)} min of daylight left: home by dusk` : `${s.activity === 'rest' ? 'night' : 'evening'}: home from the nether`;
@@ -985,7 +1111,8 @@ export function leaveNetherGoal(): Goal {
  * brain-status, `Nether:`: the switch; the stage and the clean trips to the next one (the probation while it lasts),
  * the deaths in 3 days; the portals it knows (the home portal, its own Nether side and whether the two are linked),
  * the setup's hold while it holds, the others' portals seen, the sites known, the bearings its scouting legs have
- * walked (of the eight); and the last trip, how it ended and its line. A look only.
+ * walked (of the eight), its tunnels for debris and how many still go on; and the last trip, how it ended and its
+ * line. A look only.
  */
 export function netherLine(world: WorldMemory, now: number): string {
   const n = peekNether(world);
@@ -996,10 +1123,13 @@ export function netherLine(world: WorldMemory, now: number): string {
   const hold = n.setupHold && now < n.setupHold.until ? `; setup held until ${clock(n.setupHold.until)}: ${n.setupHold.why}` : '';
   const bh = barterHold(world, now);
   const barterHeld = bh ? `; barter held for the day: ${bh.why}` : '';
+  const tl = n.tunnels?.list ?? [];
+  const tunnels = tl.length ? `; ${tl.length} tunnel(s) for debris, ${tl.filter(x => !x.shut).length} going on` : '';
+  const fortressOff = n.fortress?.off ? `; fortress trips off (${n.fortress.off.why}, ${clock(n.fortress.off.at)}) until the lead switches them back` : '';
   const t = n.lastTrip;
   const last = t ? `; last trip ${Math.max(0, Math.round((now - t.at) / MINUTE))} min ago (${t.end}): ${t.text.replace(/(?<!\.)\.$/, '')}` : '';
   return `Nether: trips ${tripsOn(world) ? 'on' : 'off'}; stage ${n.stage}, ${toNext(n)}${probation}, ${deaths} death(s) in 3 days; ` +
     `home portal ${home ? `overworld ${fmt(home)}` : 'none'}, nether side ${n.portal ? `nether ${fmt(n.portal)}` : 'none'}` +
-    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${barterHeld}${seen ? `; others' portals seen: ${seen}` : ''}` +
-    `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${n.legs?.length ? `; ${n.legs.length}/${BEARINGS.length} bearings scouted` : ''}${last}.`;
+    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${barterHeld}${fortressOff}${seen ? `; others' portals seen: ${seen}` : ''}` +
+    `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${n.legs?.length ? `; ${n.legs.length}/${BEARINGS.length} bearings scouted` : ''}${tunnels}${last}.`;
 }

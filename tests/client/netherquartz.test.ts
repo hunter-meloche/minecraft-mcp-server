@@ -540,7 +540,7 @@ test('what the bot takes up where it stands: the game\'s pickup box (1 across, h
 // ------------------------------------------------------------------------------------------------ the gate
 
 test('the quartz\'s gate: nothing before stage 1, before the link or without its own portal; at stage 1 the rung\'s work beside the barter, ready while the quartz is under 64 and the kit is whole; its gates write nothing', (t) => {
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
   t.is(NETHER_STOCK.quartz, 64);
   const w = setupWorld();
   const n = netherOf(w);

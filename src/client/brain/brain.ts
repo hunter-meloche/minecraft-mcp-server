@@ -268,6 +268,19 @@ export class Brain {
   }
 
   /**
+   * The fortress trips' own switch (the nether-trips tool's `fortress`): off after a death on one (nether.ts netherTick)
+   * until the lead turns it back on; off by hand too. Said in the log with who turned it, and saved at once.
+   */
+  setFortressTrips(on: boolean, by: string): void {
+    if (!this.worldId) throw new Error('not in a world yet');
+    const n = netherOf(this.memory.world(this.worldId));
+    if (on) { if (n.fortress) delete n.fortress.off; }
+    else (n.fortress ??= {}).off = { at: this.now(), why: `switched off by ${by}` };
+    this.note(`nether fortress trips ${on ? 'on' : 'off'} (by ${by})`);
+    this.memory.save();
+  }
+
+  /**
    * The villager-moves switch (the villager-moves tool): the villagers rung moves a villager home only while it is on.
    * Said in the log with who turned it (`villager moves on (by the lead)`), and saved at once.
    */

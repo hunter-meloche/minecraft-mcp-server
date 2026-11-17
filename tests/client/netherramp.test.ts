@@ -8,7 +8,7 @@ import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import { Brain, decide } from '../../src/client/brain/brain.js';
 import type { BrainMemory } from '../../src/client/brain/memory.js';
 import {
-  NETHER, NETHER_STAGES, OVERWORLD, netherEnd, netherLine, netherOf, netherTick, peekNether, portalCells, tripsForStage, type DeathSeen, type PortalShape
+  NETHER, NETHER_STAGES, OVERWORLD, netherEnd, stageNeeds, netherLine, netherOf, netherTick, peekNether, portalCells, tripsForStage, type DeathSeen, type PortalShape
 } from '../../src/client/brain/nether.js';
 import { SETUP_HOLD_MS, SETUP_WAITS, setupReady, type NetherZone } from '../../src/client/brain/nethersetup.js';
 import { HUT_OUT, LOOK_LEAST_MS, LOOK_MAX_MS, lavaLakes, lookOpen, lookReady, lookRound, lookRun } from '../../src/client/brain/netherlook.js';
@@ -51,8 +51,12 @@ const death = (min: number, dimension = NETHER): DeathSeen => ({ at: { x: -70, y
 
 // ------------------------------------------------------------------------------------------------ the stage ramp
 
-test('the stage ramp: 1 after 2 clean trips, 2 after 4, 3 after 6 with 2 potions of fire resistance in stock (carried or stored, told by their contents); a line each, once', (t) => {
-  t.deepEqual(NETHER_STAGES.map(s => `${s.stage}: ${s.trips}${s.potions ? ` and ${s.potions} potions` : ''}`), ['1: 2', '2: 4', '3: 6 and 2 potions']);
+test('the stage ramp: 1 after 2 clean trips, 2 after 4, 3 after 6 with no potion in stock (P3c, the user\'s strict rules: the fortress needs none, the bastion 2: its own gate\'s); a line each, once', (t) => {
+  t.deepEqual(NETHER_STAGES.map(s => `${s.stage}: ${s.trips}`), ['1: 2', '2: 4', '3: 6']);
+  t.deepEqual(['barter', 'quartz', 'scout', 'debris', 'fortress', 'bastion', 'setup'].map(stageNeeds),
+    [{ stage: 1, potions: 0 }, { stage: 1, potions: 0 }, { stage: 2, potions: 0 }, { stage: 2, potions: 0 }, { stage: 3, potions: 0 }, { stage: 3, potions: 2 }, undefined]);
+  // every work of the rung opens at its stage in the ramp
+  for (const v of NETHER_WORK) t.is(stageNeeds(v.id)?.stage ?? 0, v.stage, v.id);
   t.deepEqual([0, 1, 2, 3].map(tripsForStage), [0, 2, 4, 6]);
   const w = linkedWorld();
   // the setup that linked the two sides is the first clean trip, the look the second
@@ -64,17 +68,12 @@ test('the stage ramp: 1 after 2 clean trips, 2 after 4, 3 after 6 with 2 potions
   t.deepEqual(tick(w), [], 'said once');
   clean(w); clean(w);
   t.deepEqual(tick(w), ['nether: stage 2 after 4 clean trips']);
-  clean(w); clean(w);
-  t.deepEqual(tick(w), [], 'six clean trips, no potions');
-  t.like(peekNether(w), { stage: 2, stageTrips: 6 });
-  t.regex(netherLine(w, T0), /; stage 2, 6\/6 clean trips to stage 3 \(and 2 potions of fire resistance in stock\), 0 death/);
-  // a splash potion, a potion of something else: none of them
-  const odd: InventoryItem[] = [...KIT, { slot: 30, name: 'splash_potion', count: 3, potion: 'fire_resistance' }, { slot: 31, name: 'potion', count: 3, potion: 'swiftness' }];
-  t.deepEqual(tick(w, undefined, odd), []);
-  // one stored by its stack, one carried
-  w.chestStacks = { '-547,64,2182': [{ slot: 30, name: 'potion', count: 1, potion: 'long_fire_resistance' }] };
-  t.deepEqual(tick(w), [], 'one is not two');
-  t.deepEqual(tick(w, undefined, [...KIT, { slot: 30, name: 'potion', count: 1, potion: 'fire_resistance' }]), ['nether: stage 3 after 6 clean trips, 2 potions of fire resistance in stock']);
+  clean(w);
+  t.deepEqual(tick(w), [], 'five');
+  t.regex(netherLine(w, T0), /; stage 2, 5\/6 clean trips to stage 3, 0 death/);
+  clean(w);
+  // six clean trips and no potion in stock (live, Nov 15 to 17: stage 2 at 6/6, waiting on 2 potions)
+  t.deepEqual(tick(w), ['nether: stage 3 after 6 clean trips']);
   clean(w);
   t.deepEqual(tick(w), [], 'the top stage');
   t.regex(netherLine(w, T0), /; stage 3, the top stage, 0 death/);
@@ -118,7 +117,7 @@ test('a death in the Nether drops the stage by one, never below 1 once linked, a
   n.stageTrips = 7;
   t.deepEqual(tick(w, death(30)), [
     'nether: a death at nether (-70, 70, 270): no trips until 17:10',
-    'nether: stage 3 -> 2 after the death: 4/6 clean trips to stage 3 (and 2 potions of fire resistance in stock)'
+    'nether: stage 3 -> 2 after the death: 4/6 clean trips to stage 3'
   ]);
   t.like(peekNether(w), { stage: 2, stageTrips: 4, cleanTrips: 0 });
   t.deepEqual(tick(w, death(30)), [], 'told again on the next tick: booked once');
@@ -313,7 +312,7 @@ test('the look\'s gate: open once linked with its own portal known, at stage 0 o
   netherOf(past).stage = 1;
   t.false(lookOpen(past), 'past stage 0: the look is done with');
   // (P3a adds the barter and the quartz at stage 1, P3b the scouting and the debris at stage 2)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
   const s = lookAt(KIT, 1000);
   t.is(lookReady(s, w), null, 'its own portal stands: no frame\'s obsidian asked for');
   const rung = workGoals(() => undefined, LADDER, () => T0).find(g => g.name === 'work: nether')!;

@@ -126,17 +126,19 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
 
   factory.registerTool(
     'nether-trips',
-    "Turn the bot's trips to the Nether on or off. Off by default: nothing goes through a portal (the home portal is built but not lit, the nether rung of the work queue does nothing), and a bot that finds itself in the Nether goes home through a portal. On: the home portal may be lit, and the trips go as their stage, holds and the day allow (home by dusk; a death down there holds them an hour, two in 24 h a day, three in 3 days switch them off again). Nothing given: says which, with the Nether's state.",
+    "Turn the bot's trips to the Nether on or off. Off by default: nothing goes through a portal (the home portal is built but not lit, the nether rung of the work queue does nothing), and a bot that finds itself in the Nether goes home through a portal. On: the home portal may be lit, and the trips go as their stage, holds and the day allow (home by dusk; a death down there holds them an hour, two in 24 h a day, three in 3 days switch them off again). The fortress trips have a switch of their own besides: a death on one turns it off for good until it is turned back on here (`fortress`). Nothing given: says which, with the Nether's state.",
     {
       enabled: z.boolean().optional().describe('On or off'),
+      fortress: z.boolean().optional().describe('The fortress trips on again after a death on one (or off by hand)'),
       by: z.string().max(40).optional().describe('Who turns it, for the log (e.g. "the lead", "maintenance")')
     },
-    async ({ enabled, by }: { enabled?: boolean; by?: string }) => {
+    async ({ enabled, fortress, by }: { enabled?: boolean; fortress?: boolean; by?: string }) => {
       const world = brain.worldMemory();
       if (!world) return factory.createErrorResponse('Not in a world yet');
-      if (enabled !== undefined) {
-        try { brain.setNetherTrips(enabled, by?.trim() || 'a tool call'); } catch (e) { return factory.createErrorResponse((e as Error).message); }
-      }
+      try {
+        if (enabled !== undefined) brain.setNetherTrips(enabled, by?.trim() || 'a tool call');
+        if (fortress !== undefined) brain.setFortressTrips(fortress, by?.trim() || 'a tool call');
+      } catch (e) { return factory.createErrorResponse((e as Error).message); }
       return factory.createResponse(netherLine(world, Date.now()));
     }
   );

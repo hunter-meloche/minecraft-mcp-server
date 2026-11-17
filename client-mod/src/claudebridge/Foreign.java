@@ -110,6 +110,12 @@ public final class Foreign {
         boolean surface;
         /** a natural nether fortress or bastion (the world's, not anyone's): "fortress" or "bastion", else null */
         String natural;
+        /**
+         * for a natural one: the kinds of the markers off its palette within LOOT_CLEAR (16) of it (a torch, a sign, a
+         * rail, glass, a bed...): none, and the fortress trip may take from it (P3c: the user's "nothing taken from a
+         * fortress that has any player-only block" within 16); any, and it is still the world's but not the bot's to loot
+         */
+        final Set<String> strays = new java.util.TreeSet<>();
         /** the markers' kinds, and how many of each */
         final Map<String, Integer> kinds = new HashMap<>();
         /** the markers' blocks: what it's built of */
@@ -416,7 +422,10 @@ public final class Foreign {
             z.surface = mineshaft ? open * 2 > group.size() : open * 4 >= group.size();
             if (noSky) {
                 String pal = naturalPalette(z.kinds);
-                if (pal != null && natural(z.kinds, kindsNear(pal.equals("fortress") ? offFortress : offBastion, z, NATURAL_CLEAR))) z.natural = pal;
+                if (pal != null && natural(z.kinds, kindsNear(pal.equals("fortress") ? offFortress : offBastion, z, NATURAL_CLEAR))) {
+                    z.natural = pal;
+                    z.strays.addAll(strays(pal.equals("fortress") ? FORTRESS : BASTION, kindsNear(pal.equals("fortress") ? offFortress : offBastion, z, LOOT_CLEAR)));
+                }
                 z.surface = z.natural == null;
             }
             if (z.surface) {
@@ -441,6 +450,7 @@ public final class Foreign {
                 a.surface |= b.surface;
                 // natural only when both parts are the same structure's (a natural one by someone's build is theirs too)
                 a.natural = a.natural != null && a.natural.equals(b.natural) ? a.natural : null;
+                a.strays.addAll(b.strays);
                 if (noSky) a.surface = a.natural == null;
                 for (Map.Entry<String, Integer> e : b.kinds.entrySet()) a.kinds.merge(e.getKey(), e.getValue(), Integer::sum);
                 a.built.addAll(b.built);
@@ -515,6 +525,20 @@ public final class Foreign {
     }
 
     /**
+     * How far round a natural fortress or bastion nothing only a player puts there may stand for the bot to take from it
+     * (P3c, the user's decision of Nov 17: its chests, its wart, its soul sand): twice NATURAL_CLEAR, which only says
+     * whether it is the world's at all.
+     */
+    static final int LOOT_CLEAR = 16;
+
+    /** Of the kinds near a natural one, those off its palette (a player's), pure: none, and it may be looted. */
+    static Set<String> strays(Set<String> palette, java.util.Collection<String> near) {
+        Set<String> out = new java.util.TreeSet<>();
+        for (String n : near) if (!palette.contains(n)) out.add(n);
+        return out;
+    }
+
+    /**
      * The kinds of these markers within `r` of the zone's box (its markers' own box: the margin comes after). Only the
      * markers off its palette are passed in: the structure's own thousands of bricks need no looking at.
      */
@@ -565,16 +589,22 @@ public final class Foreign {
     }
 
     public static void register(BridgeServer s) {
-        // {dimension?} -> {dimension, zones: [{x1, y1, z1, x2, y2, z2, markers, surface, natural, sample, kinds}]}: the
-        // dimension the bot is in, or the one asked for (as last seen there). natural: "fortress" or "bastion" (the
-        // world's: only in the Nether), else absent
+        // {dimension?} -> {dimension, zones: [{x1, y1, z1, x2, y2, z2, markers, surface, natural, strays, sample, kinds}]}:
+        // the dimension the bot is in, or the one asked for (as last seen there). natural: "fortress" or "bastion" (the
+        // world's: only in the Nether), else absent; strays (a natural one's): the player-only kinds within 16 of it
         s.register("foreign.zones", true, (p, c) -> {
             fresh(Minecraft.getInstance()); // the first ask on a new server comes right after Node's first sync
             String which = Names.strip(strParam(p, "dimension", Nether.here()));
             JsonArray out = new JsonArray();
             for (Zone z : dim(which).zones) {
                 JsonObject o = obj("x1", z.x1, "y1", z.y1, "z1", z.z1, "x2", z.x2, "y2", z.y2, "z2", z.z2, "markers", z.markers, "surface", z.surface, "sample", z.sample());
-                if (z.natural != null) o.addProperty("natural", z.natural);
+                if (z.natural != null) {
+                    o.addProperty("natural", z.natural);
+                    // (what of a player's stands within LOOT_CLEAR of it: none, and the fortress trip may take from it)
+                    JsonArray strays = new JsonArray();
+                    for (String k : z.strays) strays.add(k);
+                    o.add("strays", strays);
+                }
                 o.add("kinds", kindsOf(z, 6));
                 out.add(o);
             }
