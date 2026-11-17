@@ -206,3 +206,30 @@ test('the tidy round leaves scaffold by the fence be while the fence is being mo
   t.is(await r.run(), 'the lawn is clear');
   t.deepEqual(r.digs, []);
 });
+
+test('strayCells: the cobblestone in the west gate\'s way comes down, though the lights round\'s torches stand by it; a torch hung on it still keeps it', t => {
+  // the west fence by its gate (-565, 63, 2183), the torch on the post at (-565, 64, 2185), and the lights round's
+  // torches: one standing at (-566, 63, 2182), two on the dirt at (-568, 63..64, 2183), on the gate's outer cell
+  const stand = new Map<string, string>();
+  for (let z = 2180; z <= 2186; z++) stand.set(`-565,63,${z}`, POST);
+  stand.set('-565,63,2183', 'oak_fence_gate[facing=west,in_wall=false,open=false,powered=false]');
+  stand.set('-565,64,2185', 'torch');
+  stand.set('-566,63,2182', 'torch');
+  stand.set('-567,63,2183', 'wall_torch[facing=east]');
+  stand.set('-567,64,2183', 'wall_torch[facing=east]');
+  const built = new Set(stand.keys());
+  const look = lookOf(stand, built);
+  // Nov 17: at the head over the cell outside the gate, and at the feet beside it
+  const shut = cobble([[-566, 64, 2183], [-566, 63, 2184]]);
+  const got = strayCells([cluster(shut)], 62, built, look);
+  t.deepEqual(keys(got), ['-566,64,2183', '-566,63,2184']);
+  t.true(got.every(p => p.fence));
+  // the same two a block north, out of the gate's way: the torches by them keep them, as before
+  t.deepEqual(strayCells([cluster(shut.map(c => ({ ...c, z: c.z - 2 })))], 62, built, look), []);
+  // a torch on the cobblestone's own side (facing west, away from it) holds it: left be
+  const hung = new Map(stand).set('-567,64,2183', 'wall_torch[facing=west]');
+  t.deepEqual(strayCells([cluster(shut)], 62, built, lookOf(hung, built)), []);
+  // a house's wall of the bot's by it still keeps it, in the gate's way or not
+  const walled = new Set([...built, '-567,65,2184']);
+  t.deepEqual(strayCells([cluster(shut)], 62, walled, lookOf(new Map(stand).set('-567,65,2184', 'oak_planks'), walled)), []);
+});

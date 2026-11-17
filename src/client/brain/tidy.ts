@@ -39,6 +39,10 @@ const TRIES = 2;
 const idOf = (b: string | null | undefined) => (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
 const FENCE = /_fence(_gate)?$/;
 const TORCH = /^(soul_|copper_)?torch$/;
+/** A torch, standing or on a wall: the lights round's, round a gate as anywhere. */
+const LIGHT = /^(soul_|copper_)?(wall_)?torch$/;
+/** The way a wall block faces: away from the block it hangs on. */
+const FACING: Record<string, [number, number]> = { east: [1, 0], west: [-1, 0], south: [0, 1], north: [0, -1] };
 const GONE = /^(air|cave_air|void_air)$/;
 /** What stands on a block and comes off with it when the block is dug. */
 const ON_TOP = /(torch|lantern|sign|banner|carpet|rail|pressure_plate|button|lever|candle|flower_pot|potted_|redstone|repeater|comparator|_door|_bed$|sapling|bell)/;
@@ -101,7 +105,11 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
     const fence = yard && againstFence(cells, yard, by) ? yard : undefined;
     if (fence) {
       const mine = new Set(c.cells.map(key));
-      const shelters = (q: Pos) => built.has(key(q)) && !fence.fence.has(key(q)) && q.y > groundY && !GONE.test(idOf(fence.at(q)));
+      // (a cluster in a gate's way: the bot's torches in that way or beside it, the gate's lamps, shelter none of it)
+      const way = gateWay(fence);
+      const shuts = cells.some(p => way.has(key(p)));
+      const lamp = (q: Pos) => shuts && LIGHT.test(idOf(fence.at(q))) && by(q, w => way.has(key(w)));
+      const shelters = (q: Pos) => built.has(key(q)) && !fence.fence.has(key(q)) && q.y > groundY && !GONE.test(idOf(fence.at(q))) && !lamp(q);
       if (c.blocks > FENCE_CLUSTER || cells.some(p => by(p, shelters) || holds(p, fence.at, mine))) continue;
       const r = fence.ring;
       dig = cells.filter(p => !(onEdge(r, p) && p.y <= r.y + 1));
@@ -122,12 +130,43 @@ function againstFence(cells: Pos[], yard: YardFence, by: (p: Pos, hit: (q: Pos) 
   return cells.some(p => by(p, q => yard.fence.has(key(q))));
 }
 
-/** Something stands on the block, hangs from it or is hung on its side (cells of its own cluster go first). */
+/**
+ * The cells a walk through one of the ring's gates goes by: the gate's own line, 2 out and 2 in (the cells inByGate
+ * and leaveYard walk to), at the feet and the head, and the cell on the gate. A block there shuts the gate to the
+ * careful walks. Live on Nov 17 a cobblestone at the head over the cell just outside the west gate (-566, 64, 2183),
+ * another beside it at the feet: twice "no way into the yard by the west gate or the east gate" after the junk walk
+ * west, and the round never listed them, for the two torches the lights round put on the dirt at the gate's outer
+ * cell and the one beside it kept the cluster as a build of the bot's would. Only those lamps: a torch of the bot's
+ * further off (the north gate's lawn torch, two from its way) keeps a cluster as before.
+ */
+function gateWay(yard: YardFence): Set<string> {
+  const r = yard.ring, out = new Set<string>();
+  for (const k of yard.fence) {
+    const [x, y, z] = k.split(',').map(Number);
+    if (!/_fence_gate$/.test(idOf(yard.at({ x, y, z })))) continue;
+    // across the west or east side the way goes along x, across the north or south along z
+    const [ax, az] = x === r.x1 || x === r.x2 ? [1, 0] : [0, 1];
+    for (let d = -2; d <= 2; d++) for (const dy of d ? [0, 1] : [1]) out.add(key({ x: x + ax * d, y: y + dy, z: z + az * d }));
+  }
+  return out;
+}
+
+/**
+ * Something stands on the block, hangs from it or is hung on its side (cells of its own cluster go first). A wall
+ * block with a facing hangs on the block behind it only: the torch on the dirt beside a stray holds the dirt, not it.
+ */
 function holds(p: Pos, at: (p: Pos) => string, mine: Set<string>): boolean {
   const up = { ...p, y: p.y + 1 }, down = { ...p, y: p.y - 1 };
   if (!mine.has(key(up)) && ON_TOP.test(idOf(at(up)))) return true;
   if (!mine.has(key(down)) && HANGS.test(idOf(at(down)))) return true;
-  return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => SIDE_ATTACHED.test(idOf(at({ x: p.x + dx, y: p.y, z: p.z + dz }))));
+  return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => {
+    const b = at({ x: p.x + dx, y: p.y, z: p.z + dz }) ?? '';
+    if (!SIDE_ATTACHED.test(idOf(b))) return false;
+    // (a button or a lever on a floor or a ceiling is on no side; one with no facing is taken as on this one)
+    if (/[[,]face=(floor|ceiling)\b/.test(b)) return false;
+    const f = FACING[/[[,]facing=(\w+)/.exec(b)?.[1] ?? ''];
+    return !f || (f[0] === dx && f[1] === dz);
+  });
 }
 
 // ------------------------------------------------------------------------------------------------ stray fluid
