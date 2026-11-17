@@ -2164,15 +2164,33 @@ test('D1 a player\'s build by a village stays another build: a hay barn beside i
   t.is(theirs(freeLook({ spawn: { x: -556, z: 2100 } })), 'spawn: within 256 of the world spawn (186 off)');
 });
 
-test('D1 recheck: an ominous banner in a village or within 16 of it is a player\'s mark like any banner (26.3 keeps every pillager outpost 10 chunks off a village, beyond the marks\' window: one there is a raid captain\'s, a trophy), for good', (t) => {
+test('the user\'s word of Nov 17 (again, told one by a village is likely a raid trophy: "Ignore it"): an ominous banner in a village or within 16 of it is no player\'s mark, the village judged on its other rules; a plain banner of any colour, or a player\'s beside an ominous one, is', (t) => {
   const banner = { ...freeLook().kinds, white_wall_banner: 1 };
-  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
-  t.false('sure' in judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 } })), 'for good');
+  // ominous: no mark, the village free as without it
+  const v = judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 } }));
+  t.is(v.kind, 'free', v.why);
+  t.is(v.why, judgeVillage(freeLook()).why);
+  t.is(judgeVillage(freeLook({ kinds: { ...freeLook().kinds, white_banner: 2 }, ominous: { white_banner: 2 } })).kind, 'free', 'standing ones too');
+  // ... and judged on its other rules all the same: a named villager, a sign by it, another build
+  const named = VILLAGERS().map((e, i) => (i ? e : { ...e, named: true }));
+  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, seen: named })), { kind: 'theirs', rule: 'villager' });
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'marker', why: 'what only a player puts down in it or within 16: oak_sign x1' });
+  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, players: [{ x: -560, z: 1900, at: T0 }] })), { kind: 'theirs', rule: 'player' });
+  // a plain white banner (the bridge said: none ominous), or one of another colour: someone's, for good
+  t.like(judgeVillage(freeLook({ kinds: banner, ominous: {} })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
+  t.false('sure' in judgeVillage(freeLook({ kinds: banner, ominous: {} })), 'for good');
+  t.like(judgeVillage(freeLook({ kinds: { ...freeLook().kinds, red_banner: 1 }, ominous: {} })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: red_banner x1' });
+  // a player's banner beside an ominous one: the player's is a mark (the ominous one not counted)
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, white_wall_banner: 2 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, brown_banner: 1 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: brown_banner x1' });
+  // an older jar's look (no word of ominous ones): every banner a mark, as before
   t.like(judgeVillage(freeLook({ kinds: banner })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, white_wall_banner: 2 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', why: 'what only a player puts down in it or within 16: white_wall_banner x2' });
   // a banner and a sign: a player's mark that is not banners alone
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 } })), { kind: 'theirs', rule: 'marker' });
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'marker', why: 'what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1' });
+  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 } })), { kind: 'theirs', rule: 'marker', why: 'what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1' });
+  // (the pillager outposts' rules as they were: one by the village is another build, one 60 off danger kept 48 off)
+  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, zones: [...VILLAGE_ZONES(), OUTPOST()] })), { kind: 'theirs', rule: 'build' });
+  const far = judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, zones: [...VILLAGE_ZONES(), OUTPOST({ x1: -457, x2: -447 })] }));
+  t.like(far, { kind: 'free', outposts: [{ x1: -457 }] });
 });
 
 /** A pillager outpost as the bridge's zone, read whole: its watchtower's dark oak, cobblestone walls, its loot chest, four ominous banners. */
@@ -2211,13 +2229,18 @@ test('D1 a pillager outpost by a village is danger, not someone\'s: its distance
   t.is(judgeVillage(freeLook({ seen: [...named, pillager] })).kind, 'theirs');
 });
 
-test('D1 judged again: a word of someone\'s given before Nov 17 for another build is looked at again, once; every other stays for good (banners alone too: no outpost is within the judge\'s reach of a village), and a player seen by one makes it for good', (t) => {
+test('D1 judged again: a word of someone\'s given before Nov 17 for another build, or for white banners alone (each maybe an ominous one), is looked at again, once; every other stays for good, and a player seen by one makes it for good', (t) => {
   const theirs = (why: string, more: Partial<NonNullable<VillageSite['judged']>> = {}): Pick<VillageSite, 'judged'> => ({ judged: { at: T0, kind: 'theirs', why, ...more } });
   t.true(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)')), 'the west village (Nov 15)');
-  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1')), 'the north-west one (Nov 15): a mark, ominous or not');
-  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, brown_banner x2')));
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1')), 'the north-west one (Nov 15): its banner may be an ominous one');
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x2, white_banner x1')));
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1', { rule: 'banner', v: 2 })), 'when every banner was a mark');
+  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1', { rule: 'banner', v: JUDGE_V })), 'today\'s judge: the ominous ones not counted');
+  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, brown_banner x2')), 'a brown one is never ominous');
+  t.false(rejudge(theirs('what only a player puts down in it or within 16: red_banner x1', { rule: 'banner' })));
   t.false(rejudge(theirs('whatever it said', { rule: 'banner' })));
   t.true(rejudge(theirs('whatever it said', { rule: 'build' })));
+  t.false(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: 2 })), 'the outbuildings\' judge: version 3 changed only the banners');
   t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1')));
   t.false(rejudge(theirs('a player was seen 20 from it, at (-560, 63, 1810) (13:00)')));
   t.false(rejudge(theirs('within 256 of the world spawn (100 off)')));
@@ -2225,6 +2248,7 @@ test('D1 judged again: a word of someone\'s given before Nov 17 for another buil
   t.false(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: JUDGE_V })), 'judged by today\'s judge: for good');
   t.false(rejudge({ judged: { at: T0, kind: 'wait', why: 'another build' } }));
   t.false(rejudge({}));
+  t.false(rejudge({ judged: { at: T0, kind: 'theirs', rule: 'banner' } as unknown as VillageSite['judged'] }), 'a banner word with no why (a damaged brain.json): someone\'s still, no throw');
   // the gate lets it through for a look, a word for good does not
   const site: VillageSite = { x: -693, y: 63, z: 2262, seenAt: T0, ...theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)') };
   t.true(siteOpen(site, HOME, T0));
@@ -2290,6 +2314,43 @@ test('D1 judged again live: the west village (someone\'s on Nov 15 by its hay st
   const t2 = await rung(l2).run(l2.ctx());
   t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: another build .*\): someone's, left alone: another build 0 from it \(x -703\.\.-670, z 2315\.\.2344, hay_block\); back home$/);
   t.like(peekVillages(w2).sites[0].judged, { kind: 'theirs', rule: 'build', v: JUDGE_V });
+  t.deepEqual(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2).map(v => v.id), SEARCHES);
+});
+
+test('the user\'s word of Nov 17, live: the north-west village (someone\'s on Nov 15 for its one white wall banner, every banner a mark then) is offered for a look only and judged again: its banner ominous, free, nothing touched, the move the next run\'s; a plain one, someone\'s for good', async (t) => {
+  const NW = { at: T0 - HOUR, kind: 'theirs' as const, why: 'what only a player puts down in it or within 16: white_wall_banner x1' };
+  const banner = { name: 'white_wall_banner', at: { x: -690, y: 66, z: 2300 } };
+  const world = hallWorld({ villages: { sites: [], players: [] } });
+  world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  world.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, bells: 1, beds: 3, jobs: 2, seenAt: T0 - HOUR, judged: { ...NW }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  const land = new Land(world, { houses: [] });
+  westStable(land);
+  land.marks.push({ ...banner, ominous: true });
+  // offered first, as a look (no boat, no move): the day it needs a walk's there and back and the look
+  const dist = Math.hypot(-693 - HOME.x, 2262 - HOME.z);
+  t.like(villagersTask.variants(snap(KIT(), { now: land.t }), world)[0], { id: 'village -693,2262', first: true, needMs: lookNeedMs(dist) });
+  const text = await rung(land).run(land.ctx());
+  t.is(text, '[village -693,2262] judged the village at (-693, 63, 2262) again (was someone\'s: what only a player puts down in it or within 16: white_wall_banner x1): '
+    + 'free (5 villagers, 3 unemployed adult(s) to take (2 employed)): the move next run; back home');
+  t.deepEqual(acted(land), [], 'no villager taken, nothing dug');
+  t.false(land.items.some(i => i.name === 'oak_boat' && i.count !== 1), 'the boat not used');
+  const site = peekVillages(world).sites.find(s => s.x === -693)!;
+  t.like(site.judged, { kind: 'free', v: JUDGE_V });
+  t.false(rejudge(site));
+  t.like(villagersTask.variants(snap(KIT(), { now: land.t + 2 * HOUR }), world)[0], { id: 'village -693,2262', first: true, needMs: moveNeedMs(dist) });
+
+  // a plain white banner there (the bridge read it: not ominous): someone's, for good, never offered again
+  const w2 = hallWorld({ villages: { sites: [], players: [] } });
+  w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
+  w2.villages!.sites.push({ x: -693, y: 63, z: 2262, seenAt: T0 - HOUR, judged: { ...NW } });
+  const l2 = new Land(w2, { houses: [] });
+  westStable(l2);
+  l2.marks.push({ ...banner });
+  const t2 = await rung(l2).run(l2.ctx());
+  t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: .*\): someone's, left alone: what only a player puts down in it or within 16: white_wall_banner x1; back home$/);
+  t.deepEqual(acted(l2), []);
+  t.like(peekVillages(w2).sites[0].judged, { kind: 'theirs', rule: 'banner', v: JUDGE_V });
+  t.false(rejudge(peekVillages(w2).sites[0]));
   t.deepEqual(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2).map(v => v.id), SEARCHES);
 });
 
@@ -2421,7 +2482,7 @@ test('D1 fix: a search going on from an earlier run looks for danger at the stop
 /** The rung's run for a site, its clock the stand-in world's (the snapshot at that time too, for the wrapper's marks). */
 const rungAt = (land: Land) => rung(land).run(land.ctx({ s: snap(land.items, { now: land.t }) }));
 
-test('D1 fix: an ominous banner by a village is the judge\'s, not an outpost to turn back from (the game keeps its outposts 10 chunks off a village): the re-look gets to the village, the search finds it; an outpost on the way still turns the walk back, its wait growing each time', async (t) => {
+test('D1 fix: an ominous banner by a village is the judge\'s, not an outpost to turn back from (the game keeps its outposts 10 chunks off a village): the re-look gets to the village, the search finds it (no player\'s mark: free); an outpost on the way still turns the walk back, its wait growing each time', async (t) => {
   // the west village to judge again, a player's trophy (ominous) banner in it, by the stable
   const world = hallWorld({ villages: { sites: [], players: [] } });
   world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
@@ -2432,8 +2493,8 @@ test('D1 fix: an ominous banner by a village is the judge\'s, not an outpost to 
   const trophy = { name: 'white_wall_banner', at: { x: -690, y: 66, z: 2300 }, ominous: true as const };
   land.marks.push(trophy);
   const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
-  // (the walk got there, not turned back by it; the judge then calls the trophy what it is: a player's mark)
-  t.regex(r.text, /^judged the village at \(-693, 63, 2262\) again .*: someone's, left alone: what only a player puts down in it or within 16: white_wall_banner x1$/);
+  // (the walk got there, not turned back by it; the judge then takes the ominous banner for no player's mark: the user's word)
+  t.regex(r.text, /^judged the village at \(-693, 63, 2262\) again .*: free \(5 villagers, 3 unemployed adult\(s\) to take \(2 employed\)\): the move next run$/);
   // the search west finds it with the banner in it (a village not known yet)
   const w2 = hallWorld({ villages: { sites: [], players: [] } });
   w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
@@ -2441,7 +2502,7 @@ test('D1 fix: an ominous banner by a village is the judge\'s, not an outpost to 
   westStable(l2);
   l2.marks.push({ ...trophy });
   const r2 = await villagersTask.run(l2.ctx(), 'west', MOVE_BUDGET, () => l2.t);
-  t.regex(r2.text, /^found a village at \(-693, 63, 2262\): someone's, left alone: what only a player puts down in it or within 16: white_wall_banner x1$/);
+  t.regex(r2.text, /^found a village at \(-693, 63, 2262\): free \(5 villagers, 3 unemployed adult\(s\) to take \(2 employed\)\): the move next run$/);
   // an outpost on the way out (79 off the village's area): turned back with no mark, so the wrapper's dry mark grows
   const w3 = hallWorld({ villages: { sites: [], players: [] } });
   w3.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });

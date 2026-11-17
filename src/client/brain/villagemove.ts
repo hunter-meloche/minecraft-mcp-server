@@ -443,7 +443,7 @@ function noteVerdict(world: WorldMemory, site: VillageSite, look: VillageLook, v
   // (someone's on it already stays someone's: a player seen as the look went round writes that for good (noteSeen), and
   // a fold may have made the village's someone's site the one found here; the judge's narrower word does not undo it,
   // and the ground it covered stays its as it moves to the bell and takes the judge's area. But for an older judge's
-  // word today's may undo (rejudge: another build), which this verdict replaces, area and all)
+  // word today's may undo (rejudge: another build, white banners alone), which this verdict replaces, area and all)
   const held = kept.judged?.kind === 'theirs' && !rejudge(kept) ? reachOf(kept) : undefined;
   const was = held && v.kind !== 'theirs' ? kept.judged : undefined;
   const bell = look.bells[0];
@@ -569,10 +569,10 @@ async function walkOut(ctx: GoalContext, from: { x: number; z: number }, site: V
 }
 
 /**
- * A village judged someone's by an older judge for a reason today's may undo (village.ts rejudge: another build by it)
- * is looked at and judged again, once: out to it a leg at a time (by the gate that way), the look round
- * it, today's judge, its word kept for good (JUDGE_V). Free, the move is the next run's. No villager is touched, nothing
- * is carried for a move.
+ * A village judged someone's by an older judge for a reason today's may undo (village.ts rejudge: another build by it,
+ * or white banners alone, each maybe an ominous one) is looked at and judged again, once: out to it a leg at a time
+ * (by the gate that way), the look round it, today's judge, its word kept for good (JUDGE_V). Free, the move is the
+ * next run's. No villager is touched, nothing is carried for a move.
  */
 async function relook(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<WorkResult> {
   const { now, enough } = clk;

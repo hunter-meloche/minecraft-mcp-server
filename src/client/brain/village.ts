@@ -71,11 +71,17 @@ export const OUTPOST_CLEAR = 48;
 export const ILLAGER = /^(pillager|vindicator|evoker|illusioner|ravager)$/;
 /**
  * The judge's version on a verdict (`judged.v`). Version 2 (the user's word of Nov 17): a village's own outbuildings
- * (village-made, in its area) are its own. A word of someone's given before it for another build may be wrong under it:
- * such a site is looked at and judged again, once. (Not one for banners: an ominous banner by a village is a player's
- * raid trophy, a mark like any banner, as before: rejudge.)
+ * (village-made, in its area) are its own. Version 3 (the user's word of Nov 17, said again once told that an ominous
+ * banner by a village is likely a player's raid trophy: "Ignore it"): an ominous banner is no player's mark. A word of
+ * someone's given before the version that changed its rule may be wrong under it: such a site is looked at and judged
+ * again, once (rejudge: REJUDGE_BEFORE).
  */
-export const JUDGE_V = 2;
+export const JUDGE_V = 3;
+/**
+ * The judge's version each rule of someone's last changed in: a word for it given before then is judged again
+ * (rejudge). Another build: version 2, the outbuildings; banners alone: version 3, the ominous ones.
+ */
+const REJUDGE_BEFORE: Partial<Record<TheirsRule, number>> = { build: 2, banner: 3 };
 /** Villages kept that are not someone's (the newest); those judged someone's are kept apart, up to THEIRS_KEPT. */
 const SITES = 8;
 /**
@@ -135,6 +141,8 @@ export const OUTPOST_MADE: ReadonlySet<string> = new Set([
   'dark_oak_stairs', 'hay_block', 'mossy_cobblestone_slab', 'mossy_cobblestone_stairs', 'mossy_cobblestone_wall', 'torch', 'white_wall_banner', 'white_wool'
 ]);
 const BANNER = /_banner$/;
+/** A banner that may be an ominous one: the game makes it white (Raid.getOminousBannerInstance), on a wall or standing. */
+const MAY_BE_OMINOUS = /^white_(wall_)?banner$/;
 /** What tells a village from the scans' markers: its bell, its beds, its job sites. */
 export const VILLAGE_MARK = /^(bell|.*_bed|lectern|composter|barrel|blast_furnace|smoker|cartography_table|brewing_stand|cauldron|water_cauldron|fletching_table|grindstone|loom|smithing_table|stonecutter)$/;
 /**
@@ -231,20 +239,27 @@ export interface VillagesMemory {
 export type TheirsRule = 'spawn' | 'player' | 'marker' | 'banner' | 'villager' | 'build';
 
 /**
- * A word of someone's the judge of today may undo (pure): given before JUDGE_V for another build by the village (the
- * user's word of Nov 17: a village's own outbuildings are its own). Read from the rule kept, or, for a word older than
- * the rules kept, from what it said. Every other word of someone's (a player seen, the spawn, a sign, a banner, a
- * villager named or traded with) stays for good. Banners alone too, ominous or not: the user's word of Nov 17 took an
- * ominous banner for a pillager outpost's, no player's mark, but 26.3's worldgen never puts an outpost within 10
- * chunks of a village (pillager_outposts' exclusion_zone, about 130 blocks from its bell), farther than the judge's
- * marks reach (its area and MARKERS_NEAR, about 120): one there was hung by a player, a raid captain's banner (it
- * drops every time, with the raid's pattern the bridge reads as ominous), and judged someone's as ever (live: the
- * north-west village's white_wall_banner, Nov 15).
+ * A word of someone's the judge of today may undo (pure), read from the rule kept, or, for a word older than the rules
+ * kept, from what it said: given before version 2 for another build by the village (the user's word of Nov 17: a
+ * village's own outbuildings are its own), or before version 3 for banners alone, every one of them white, so each may
+ * have been an ominous one (the user's word of Nov 17, and again once told one by a village is likely a player's raid
+ * trophy: an ominous banner is no player's mark). Live: the north-west village's one white_wall_banner (Nov 15), judged
+ * someone's when every banner was a mark, is looked at again: if the bridge reads it as ominous, the village is judged
+ * on its other rules. Every other word of someone's (a player seen, the spawn, a sign, a banner of another colour, a
+ * villager named or traded with, any word of today's judge) stays for good.
  */
 export function rejudge(s: Pick<VillageSite, 'judged'>): boolean {
   const j = s.judged;
-  if (!j || j.kind !== 'theirs' || (fin(j.v) && j.v >= JUDGE_V)) return false;
-  return (j.rule ?? (/^another build /.test(j.why) ? 'build' : undefined)) === 'build';
+  if (!j || j.kind !== 'theirs') return false;
+  const rule = j.rule ?? (/^another build /.test(j.why) ? 'build' : /^what only a player puts down /.test(j.why) ? 'banner' : undefined);
+  const before = rule && REJUDGE_BEFORE[rule];
+  if (!before || (fin(j.v) && j.v >= before)) return false;
+  if (rule !== 'banner') return true;
+  // (a mark's word older than the rules kept may be banners alone or not: what it said lists the marks, `name xN`,
+  // and only banners alone, each white, are judged again; a word cut short or with anything else in it stays, as does
+  // one with no word at all: only a damaged brain.json has that, and it must not throw in the gates or the status)
+  const listed = (typeof j.why === 'string' ? j.why : '').replace(/^what only a player puts down in it or within \d+: /, '').split(', ');
+  return listed.every(k => /^[a-z_]+ x\d+$/.test(k) && MAY_BE_OMINOUS.test(k.replace(/ x\d+$/, '')));
 }
 
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -562,8 +577,8 @@ export interface VillageLook {
   /** the markers' kinds in the village's area and MARKERS_NEAR round it, and how much of it the scans have seen */
   kinds: Record<string, number>;
   /**
-   * of those, the ominous banners, by kind (the bridge reads their patterns): a mark all the same (judgeVillage: in that
-   * window one is a player's raid trophy, never an outpost's)
+   * of those, the ominous banners, by kind (the bridge reads their patterns): no player's mark (judgeVillage, the user's
+   * word of Nov 17). None: an older jar, which tells no banner apart, and every banner is a mark
    */
   ominous?: Record<string, number>;
   looked: { chunks: number; of: number };
@@ -593,8 +608,9 @@ export type Verdict =
   /**
    * `sure: false`: a word of someone's that rests on what the look could not read whole (a build by it, near its own
    * marks, whose markers did not all read: it may be one of the village's own). It is kept as someone's (the
-   * courteous side), but not as today's judge's for good:
-   * judged again on a later look (rejudge)
+   * courteous side), but not as today's judge's for good: judged again on a later look (rejudge). Banners alone are
+   * always sure: the bridge reads each ominous one, and one left over is a player's (an older jar's look, which tells
+   * none apart, too: the courteous side)
    */
   | { kind: 'theirs'; why: string; area?: Area; rule: TheirsRule; sure?: false }
   | { kind: 'wait'; why: string; area?: Area }
@@ -666,13 +682,14 @@ export function outpostMade(z: LookZone): boolean {
 
 /**
  * The courtesy judge (pure): someone's (`theirs`, left alone for good) for any of the plan's rules, in this order: near
- * the world spawn; a player seen within 64 of its area, ever; a player-only marker in it or within 16 (a banner too, an
- * ominous one as well: no outpost is that near a village, rejudge); a villager named, riding something, on a lead,
- * penned in, or above the first level (only a player's trades, or a player's cure, give a villager the xp: a village
- * makes every one at level 1, so one traded with is a village someone uses); another build of others within
- * ZONES_NEAR of it. Its own houses are the surface zones within OWN_NEAR of its bell or a bed or job site chained to
- * the bell (coreMarks), and its outbuildings (the user's word of Nov 17): a build that meets its area, within CHAIN of
- * one of those marks, of nothing but what a natural village is built of (VILLAGE_MADE: a stable, a hay pile, a lamp, a
+ * the world spawn; a player seen within 64 of its area, ever; a player-only marker in it or within 16 (a banner too, but
+ * not an ominous one, the user's word of Nov 17, even knowing one by a village is likely a player's raid trophy: a
+ * player's banner beside it still is, and so is every banner from an older jar, which tells none apart); a villager
+ * named, riding something, on a lead, penned in, or above the first level (only a player's trades, or a player's
+ * cure, give a villager the xp: a village makes every one at level 1, so one traded with is a village someone uses);
+ * another build of others within ZONES_NEAR of it. Its own houses are the surface zones within OWN_NEAR of its bell
+ * or a bed or job site chained to the bell (coreMarks), and its outbuildings (the user's word of Nov 17): a build that
+ * meets its area, within CHAIN of one of those marks, of nothing but what a natural village is built of (VILLAGE_MADE: a stable, a hay pile, a lamp, a
  * pen, a field; live on Nov 15 the west village's hay stable was taken for someone's). A build anyone else put up by
  * it, a bed in it or not, is another build, and so is one with a chest, a sign, a banner or a player's block in it, one
  * not read whole, and one farther out (a player's hay barn beside it): the courteous side. A pillager outpost by it
@@ -699,8 +716,11 @@ export function judgeVillage(look: VillageLook): Verdict {
   }
   const player = look.players.map(p => ({ p, d: offArea(area, p) })).filter(x => x.d < PLAYER_CLEAR).sort((a, b) => a.d - b.d)[0];
   if (player) return theirs(`a player was seen ${Math.round(player.d)} from it, at ${at(player.p)} (${clock(player.p.at)})`, 'player');
-  // (an ominous banner too: within this window it is a player's raid trophy, never an outpost's (rejudge))
-  const marks = Object.fromEntries(Object.entries(look.kinds).filter(([n, c]) => c > 0 && PLAYER_ONLY.test(n)));
+  // (an ominous banner is no player's mark (the user's word of Nov 17): taken off its kind's count first, and a banner
+  // left over, a player's beside it, is one. No word of them at all: an older jar, which tells none apart, and every
+  // banner is a mark)
+  const ominous = (n: string) => (look.ominous && BANNER.test(n) && fin(look.ominous[n]) ? Math.max(0, look.ominous[n]) : 0);
+  const marks = Object.fromEntries(Object.entries(look.kinds).map(([n, c]) => [n, c - ominous(n)] as const).filter(([n, c]) => c > 0 && PLAYER_ONLY.test(n)));
   if (Object.keys(marks).length) {
     const banners = Object.keys(marks).every(n => BANNER.test(n));
     return theirs(`what only a player puts down in it or within ${MARKERS_NEAR}: ${list(marks)}`, banners ? 'banner' : 'marker');
