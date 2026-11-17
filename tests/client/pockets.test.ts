@@ -3,10 +3,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { kit as kitGoal, putAway, stash, stashKeep, stashList, stashWork, stock } from '../../src/client/brain/chores.js';
-import { GLUT, ROOM, makeRoom, noRoom, out as afield, pockets, room, type RoomKind } from '../../src/client/brain/pockets.js';
+import { GLUT, ROOM, look, makeRoom, noRoom, out as afield, pockets, room, type RoomKind } from '../../src/client/brain/pockets.js';
 import { workGoals, workOf, type WorkTask } from '../../src/client/brain/work.js';
 import { food, gatherFood } from '../../src/client/brain/food.js';
 import { deepTrip } from '../../src/client/brain/deep.js';
+import { netherCheck } from '../../src/client/brain/nether.js';
 import { no, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
 import { Brain, decide } from '../../src/client/brain/brain.js';
 import { brainRun, type ClientRuntime, type InventoryItem, type Status } from '../../src/client/tools.js';
@@ -1485,4 +1486,20 @@ test('F3: a stack kept by count split over two slots: a trip\'s room keeps it in
   // trip at the chests for more); the kit's tools all kept
   t.deepEqual(deposits([...tools(), { slot: 6, name: 'torch', count: 10 }, { slot: 20, name: 'torch', count: 10 }], 'nether'), { torch: 4 });
   t.deepEqual(deposits([...tools(), { slot: 6, name: 'torch', count: 40 }, { slot: 20, name: 'torch', count: 2 }], 'nether'), { torch: 26 });
+});
+
+test('look reads health and food as they are now: the Nether kit ate to full and its check read the run\'s start (Nov 17: "not setting out: food 17 < 18", three trips)', async t => {
+  const s = snap([{ name: 'bread', count: 16, slot: 0 }], { food: 17, health: 15 });
+  const { m, ctx } = live(s, world());
+  const fed = m.status;
+  m.status = () => ({ ...fed(), food: 20, health: 20 });
+  const now = await look(ctx);
+  t.is(now.food, 20);
+  t.is(now.health, 20);
+  t.is(netherCheck(now).food, 20);
+  // no status to be had: the snapshot's, as before
+  m.status = () => { throw new Error('no status'); };
+  const blind = await look(ctx);
+  t.is(blind.food, 17);
+  t.is(blind.health, 15);
 });

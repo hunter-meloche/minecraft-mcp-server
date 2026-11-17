@@ -267,7 +267,9 @@ test.serial('the strict rules at home: not at full health, or the Nether set not
   const a = await atStage3();
   a.f.state.health = 18;
   const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
-  t.deepEqual(r, { gain: 0, text: 'not setting out for the fortress: health 18 < 20', untried: true });
+  // (the kit's own check says it first: it reads the bot's health as it is now since Nov 17, pockets.ts look, and asks
+  // the same 20; before, it read the run's start and left the hurt to the fortress's rule)
+  t.deepEqual(r, { gain: 0, text: 'not setting out: health 18 < 20', untried: true });
   t.is(a.f.state.dim, OVERWORLD);
   const b = await atStage3();
   const plain = b.f.inv.find(i => i.slot === 38)!;

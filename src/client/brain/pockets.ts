@@ -243,8 +243,8 @@ export function noRoom(kind: RoomKind, who: string, s: Snapshot, world: WorldMem
 }
 
 /**
- * The bot as it is now (a run's snapshot is from when the run began): its pockets, where it stands, the hour. A home
- * round that walked home first goes on from this (work.ts toRound).
+ * The bot as it is now (a run's snapshot is from when the run began): its pockets, where it stands, the hour, its health
+ * and food. A home round that walked home first goes on from this (work.ts toRound).
  */
 export async function look(ctx: GoalContext): Promise<Snapshot> {
   const st = await ctx.status().catch(() => undefined);
@@ -260,6 +260,10 @@ export async function look(ctx: GoalContext): Promise<Snapshot> {
     ...ctx.s, items, counts, slotsUsed: items.filter(i => i.slot < SLOTS).length, position, dimension,
     timeOfDay, activity: activityAt(timeOfDay, st?.thundering ?? ctx.s.thundering),
     sleeping: st?.sleeping ?? ctx.s.sleeping,
+    // health and food as they are now, not as at the run's start: the Nether kit eats to full and then checks the bot
+    // on this look, and with the start's food it read the meal it had not had yet (Nov 17, three trips: "not setting
+    // out: food 17 < 18" two seconds after eating to 20, no "no meal" line said)
+    health: st?.health ?? ctx.s.health, food: st?.food ?? ctx.s.food,
     distHome: home && home.dimension === dimension ? Math.hypot(home.x - position.x, home.z - position.z) : Infinity
   };
 }
