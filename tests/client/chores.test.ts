@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { farm, furnaceLine, kit, lightArea, lights, smelt, sortStorage, stash, stashKeep, stashList, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
+import { farm, furnaceLine, kit, lightArea, lights, packOres, packPlan, PACK_KEEP, smelt, sortStorage, stash, stashKeep, stashList, stock, outsideBy, stockShort, toTheWoods, firstChest } from '../../src/client/brain/chores.js';
 import { stashPlan } from '../../src/client/brain/kit.js';
 import { food, makeRod, readyFoodPoints } from '../../src/client/brain/food.js';
 import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
@@ -1467,4 +1467,67 @@ test('the morning of 16:22:59-16:23:14Z replayed: the villager search walks out 
   t.deepEqual(wanted, ['21 raw_gold to smelt', null, null, null, '21 raw_gold to smelt']);
   t.deepEqual(smelts(r.h.acts), [['raw_gold', 21, false]]);
   r.done();
+});
+
+test('pack: a lot of 64 blocks a kind over the keep of 640 loose; under 128 loose, blocks crafted back; the pockets bound both', (t) => {
+  // live on Nov 18: 9400 redstone, 6606 lapis, 6249 iron ingots, 3078 diamonds loose, the storage full in two days
+  t.deepEqual(packPlan({ redstone: 9400, lapis_lazuli: 6606, iron_ingot: 6249, diamond: 3078, gold_ingot: 1000 }, 14), [
+    { item: 'redstone', block: 'redstone_block', blocks: 64 }, { item: 'lapis_lazuli', block: 'lapis_block', blocks: 64 },
+    { item: 'iron_ingot', block: 'iron_block', blocks: 64 }, { item: 'diamond', block: 'diamond_block', blocks: 64 }
+  ]);
+  // a full lot over the keep only: 640 + 575 stays loose
+  t.deepEqual(packPlan({ redstone: PACK_KEEP + 575 }, 14), []);
+  // not a pocketful free: nothing (9 stacks in, and a slot spare)
+  t.deepEqual(packPlan({ redstone: 9400 }, 9), []);
+  // the loose ones run low: back up to half the keep (320), 26 blocks for 90
+  t.deepEqual(packPlan({ diamond: 90, diamond_block: 300 }, 14), [{ item: 'diamond', block: 'diamond_block', blocks: 26, unpack: true }]);
+  t.deepEqual(packPlan({ diamond: 90, diamond_block: 5 }, 14), [{ item: 'diamond', block: 'diamond_block', blocks: 5, unpack: true }]);
+  t.deepEqual(packPlan({ diamond: 200, diamond_block: 300 }, 14), []);
+});
+
+test('pack: takes nine stacks, crafts 64 blocks at the table, and puts back only what the crafting made and left', async (t) => {
+  const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
+  const contents: Record<string, Record<string, number>> = { '1,64,0': { redstone: 1300 }, '2,64,0': {}, '3,64,0': {} };
+  const w = world({ landmarks: { chests, farmland: [], table: { x: 0, y: 64, z: 1 } }, chestItems: contents, chestAssign: { '1,64,0': 'ores', '2,64,0': 'wood', '3,64,0': 'stone' } });
+  // it carries 5 redstone of its own: those stay carried
+  const inv = new Map<string, number>([['redstone', 5]]);
+  const items = () => [...gear(), ...[...inv].filter(([, n]) => n > 0).map(([name, count], i) => ({ slot: 20 + i, name, count }))];
+  t.regex(packOres.wants(snap(gear()), w) ?? '', /^pack 576 redstone into redstone_block$/);
+  const acts: string[] = [];
+  const reply = (k: string) => `It holds: ${Object.entries(contents[k]).filter(([, v]) => v > 0).map(([n, v]) => `${n} x${v}`).join(', ') || 'nothing'}.`;
+  const ctx = {
+    s: snap(gear()), world: w, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    call: (async (m: string, p: Record<string, number>) => {
+      // (no look into every chest first: 54 of them took the first live run's whole time)
+      if (m === 'chest.open') { acts.push(`chest.open ${p.x},${p.y},${p.z}`); return { items: contents[`${p.x},${p.y},${p.z}`] }; }
+      if (m === 'inventory') return { items: items() };
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      const k = `${a.x},${a.y},${a.z}`, item = String(a.item), n = Number(a.count);
+      if (tool === 'craft-item') {
+        const times = Math.min(Number(a.amount), Math.floor((inv.get('redstone') ?? 0) / 9));
+        acts.push(`craft-item ${String(a.outputItem)} ${Number(a.amount)}`);
+        inv.set('redstone', (inv.get('redstone') ?? 0) - 9 * times);
+        inv.set('redstone_block', (inv.get('redstone_block') ?? 0) + times);
+        return { ok: true, text: `Successfully crafted redstone_block ${times} time(s)` };
+      }
+      acts.push(`${tool} ${k} ${item} ${n}`);
+      if (tool === 'take-from-chest') {
+        contents[k][item] -= n;
+        inv.set(item, (inv.get(item) ?? 0) + n);
+        return { ok: true, text: `Took ${n} ${item} from the chest. ${reply(k)}` };
+      }
+      contents[k][item] = (contents[k][item] ?? 0) + n;
+      inv.set(item, (inv.get(item) ?? 0) - n);
+      return { ok: true, text: `Stored ${n} ${item} in the chest. ${reply(k)}` };
+    }
+  } as unknown as GoalContext;
+  t.is(await packOres.run(ctx), 'packed 576 redstone into redstone_block');
+  t.deepEqual(acts, ['take-from-chest 1,64,0 redstone 576', 'craft-item redstone_block 64', 'store-in-chest 1,64,0 redstone_block 64']);
+  t.deepEqual(contents['1,64,0'], { redstone: 724, redstone_block: 64 });
+  t.is(inv.get('redstone'), 5);
+  // ran just now: not again for a while
+  t.is(packOres.wants(snap(gear()), w), null);
 });

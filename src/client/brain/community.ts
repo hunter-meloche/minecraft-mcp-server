@@ -9,6 +9,7 @@ import { tripDecline, diamondsWanted } from './deep.js';
 // (both come back to this file through their own imports: what they give is used inside functions only)
 import { tierOf } from './work.js';
 import { workKeeps } from './worktasks.js';
+import { withPacked } from './storage.js';
 import { goHome, walkHome } from './homeward.js';
 import { leaveYard } from './yardgates.js';
 
@@ -178,7 +179,7 @@ export function donationPlan(have: Record<string, number>, diamondsStillWanted: 
   for (const [item, k] of Object.entries(KEEP)) {
     if (item === 'diamond' && diamondsStillWanted > 0) continue;
     const work = workKeeps(item, tierNow);
-    const overWork = work ? work.items.reduce((n, i) => n + (have[i] ?? 0), 0) - work.target : Infinity;
+    const overWork = work ? withPacked(work.items, i => have[i] ?? 0) - work.target : Infinity;
     const spare = Math.min((have[item] ?? 0) - k.keep, overWork);
     if (spare >= k.lot) out[item] = spare;
   }

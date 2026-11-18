@@ -11,7 +11,7 @@ import { withSwapped } from './netherset.js';
 import { deepTrip } from './deep.js';
 import { NETHER_BLOCKS, NETHER_TRIP } from './mine.js';
 import { chestSlots, chestTotals, freeChestTotals, key, kindChests, peekChest, rememberReply, storeInChests, storeStack, takeFromChests, withoutSpare } from './chests.js';
-import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, stackSize, type ChestAssign, type Deposit } from './storage.js';
+import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, PACKS, PER_BLOCK, stackSize, type ChestAssign, type Deposit } from './storage.js';
 import { KIT, kitNeeds, stashPlan, storedBySlot, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
 import { DUG, FOOD_CARRY, GLUT, NEAR_HOME, ROOM, TRIP_STASH_RANGE, look, makeRoom, noRoom, out as afield, room, stashReach, type RoomKind } from './pockets.js';
@@ -591,6 +591,97 @@ export const sortStorage: Goal = {
       if (/^Stored/.test(r.text)) moved++;
     }
     return `moved ${moved} kind(s) of things to their own chest`;
+  }
+};
+
+// ------------------------------------------------------------------------------------------------ pack
+
+/**
+ * Loose ones of each packed ore (storage.ts PACKS) the chests keep, ten stacks: what the kit, the enchanting, the
+ * anvil, the barter, the rails and the donations take at once is a few dozen at most.
+ */
+export const PACK_KEEP = 640;
+/** Packed only a full lot over the keep at a time (a pocketful, 9 stacks into 64 blocks): no crafting by the block. */
+export const PACK_LOT = 64;
+/** Fewer loose ones than this, with blocks in the chests: blocks crafted back (up to half the keep). */
+export const UNPACK_BELOW = 128;
+
+export interface PackStep { item: string; block: string; blocks: number; unpack?: boolean }
+
+/**
+ * What to pack into storage blocks, or craft back out of them, by the chests' free totals (what no build job or
+ * mission holds) and the pocket slots free: a lot of 64 blocks a kind over the keep, or the blocks that bring the
+ * loose ones back up to half the keep. Only what the pockets can carry in and out of the crafting. Pure.
+ */
+export function packPlan(free: Record<string, number>, slotsFree: number): PackStep[] {
+  const out: PackStep[] = [];
+  // one slot of the free ones stays free (the crafting's output goes into the slots its input left, but the first one)
+  const room = Math.floor((slotsFree - 1) * 64 / PER_BLOCK);
+  for (const [item, block] of Object.entries(PACKS)) {
+    const loose = free[item] ?? 0;
+    if (loose - PACK_KEEP >= PACK_LOT * PER_BLOCK && room >= PACK_LOT) out.push({ item, block, blocks: PACK_LOT });
+    else if (loose < UNPACK_BELOW && (free[block] ?? 0) > 0) {
+      const blocks = Math.min(free[block], Math.ceil((PACK_KEEP / 2 - loose) / PER_BLOCK), room - 1);
+      if (blocks > 0) out.push({ item, block, blocks, unpack: true });
+    }
+  }
+  return out;
+}
+
+const packLine = (p: PackStep) => p.unpack ? `${p.blocks} ${p.block} back into ${p.item}` : `${p.blocks * PER_BLOCK} ${p.item} into ${p.block}`;
+const carriedOf = (items: Snapshot['items'], name: string) => items.filter(i => i.slot < 36 && i.name === name).reduce((n, i) => n + i.count, 0);
+
+/**
+ * By day at home, now and then: the ores over the keep packed nine to a block at the crafting table, back into their
+ * chests (the ores chests' room grows ninefold). The deep trips brought ore in faster than storage houses went up: the
+ * improvement run built a house a day for it (storehouse2 Nov 16, storehouse3 Nov 18, the yard nearly full), and with
+ * the storage maxed the pockets could not stash. The work queue counts a block as nine (storage.ts withPacked), so no
+ * trip goes for what was packed; and should the loose ones run low, blocks are crafted back.
+ */
+export const packOres: Goal = {
+  name: 'pack',
+  priority: 20,
+  timeoutMs: 6 * MINUTE,
+  retryMs: 30 * MINUTE,
+  wants: (s, world) => {
+    if (s.activity !== 'work' || !awakeForRound(s, world) || !world.landmarks.table || world.landmarks.chests.length < 3 || s.slotsUsed > 26) return null;
+    // (a chest not looked into may hold the loose ones: a half-read list would unpack what is there)
+    if (world.landmarks.chests.some(c => !world.chestItems?.[key(c)])) return null;
+    if (!roundDue(s, world, 'pack', 30 * MINUTE)) return null;
+    const plan = packPlan(freeChestTotals(world), 36 - s.slotsUsed);
+    return plan.length ? `pack ${plan.map(packLine).join(', ')}` : null;
+  },
+  cuts: s => nearHome(s, NEAR_HOME),
+  run: async run => {
+    const ctx: GoalContext = { ...run, s: await toRound(run, NEAR_HOME) };
+    done(ctx.world, 'pack', ctx.s.now);
+    // no look into every chest first (the sort's way): with 54 of them that took the first run's whole 54 s, till the
+    // repair round cut in before one step (Nov 18, 05:37Z). The want saw them all looked into, and each take's and
+    // store's reply writes its chest's contents: a count gone stale only makes a take smaller
+    const did: string[] = [];
+    for (const step of packPlan(freeChestTotals(ctx.world), 36 - ctx.s.slotsUsed)) {
+      if (ctx.signal.aborted) break;
+      const [from, to] = step.unpack ? [step.block, step.item] : [step.item, step.block];
+      // what it carried of either before is its own business: only what this step brought out goes back
+      const before = (await ctx.call<{ items: Snapshot['items'] }>('inventory')).items;
+      const got = await takeFromChests(ctx, from, step.unpack ? step.blocks : step.blocks * PER_BLOCK);
+      const times = step.unpack ? got : Math.floor(got / PER_BLOCK);
+      let line = `no ${from} came out of the chests`;
+      if (times > 0) {
+        const r = await ctx.act('craft-item', { outputItem: to, amount: times });
+        line = r.ok ? packLine({ ...step, blocks: times }) : `could not craft ${to}: ${r.text}`;
+      }
+      const after = (await ctx.call<{ items: Snapshot['items'] }>('inventory')).items;
+      for (const name of [to, from]) {
+        const n = carriedOf(after, name) - carriedOf(before, name);
+        if (n > 0) await storeInChests(ctx, name, n);
+      }
+      did.push(line);
+      ctx.progress(line);
+    }
+    // nothing packed at all: a failure, so the round waits its retry time
+    if (!did.length || did.every(l => /^(no |could not )/.test(l))) throw new Error(did.join('; ') || 'nothing to pack after all');
+    return `packed ${did.join('; ')}`;
   }
 };
 

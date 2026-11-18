@@ -2499,3 +2499,9 @@ test('the real rungs only look: asked over hours, pockets, places and stock, the
   }
   t.is(asked, 5 * 7 * 5 * 3 * LADDER.length);
 });
+
+test('deep: an ore packed into its storage block counts nine a block, so no trip goes for what the pack crafted', (t) => {
+  // 16 diamonds as 1 block and 7 loose; 96 iron as 10 blocks; 64 redstone as 7 blocks and 1 loose; lapis as 4 blocks less 4
+  const w = stored({ diamond: 7, diamond_block: 1, iron_block: 10, raw_iron: 6, raw_gold: 32, redstone: 1, redstone_block: 7, lapis_block: 3, lapis_lazuli: 1 });
+  t.deepEqual(deepShort(snap(carrying(KIT)), w), [{ family: 'lapis', want: 4 }]);
+});

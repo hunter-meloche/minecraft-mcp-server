@@ -13,6 +13,25 @@ export type Category = 'stone' | 'wood' | 'ores' | 'food' | 'farming' | 'mobdrop
 /** Most needed first: with too few chests, the last ones go without (and their things go in misc). */
 export const CATEGORIES: readonly Category[] = ['food', 'gear', 'ores', 'stone', 'wood', 'misc', 'farming', 'mobdrops'];
 
+/**
+ * The ores the chests keep packed nine to a storage block (chores.ts packOres), item -> block. The deep trips bring
+ * some 100 lots a day: the storage house was full again in under two days after each new one (storehouse2 on Nov 16,
+ * storehouse3 on Nov 18, with 9400 redstone, 6606 lapis, 6249 iron ingots and 3078 diamonds loose in 17 chests).
+ */
+export const PACKS: Readonly<Record<string, string>> = {
+  redstone: 'redstone_block', lapis_lazuli: 'lapis_block', iron_ingot: 'iron_block', gold_ingot: 'gold_block', diamond: 'diamond_block'
+};
+/** Items a storage block is crafted from, and comes back as. */
+export const PER_BLOCK = 9;
+
+/**
+ * A count of these items with their storage blocks counted in, nine an item a block (PACKS): what the work queue's
+ * targets and the donations' floor count, so a block packed is never mined again or given away as if gone.
+ */
+export function withPacked(items: readonly string[], count: (name: string) => number): number {
+  return items.reduce((n, item) => n + count(item) + (PACKS[item] ? PER_BLOCK * count(PACKS[item]) : 0), 0);
+}
+
 /** Chest key ("x,y,z") -> category. */
 export type ChestAssign = Record<string, string>;
 /** Chest key -> item -> count, as last seen. */

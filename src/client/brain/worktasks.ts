@@ -23,6 +23,7 @@ import { ownItems } from './community.js';
 import { withSwapped } from './netherset.js';
 import { NEAR_HOME } from './pockets.js';
 import { STRING_KEEP, allItems, recipeFor, stillShort } from './progress.js';
+import { withPacked } from './storage.js';
 import { WATER_FROM_HOME, cutStand, dropDeadCells, findWildCane, liveCells, plantCane, wildCane } from './cane.js';
 import type { Zone } from './courtesy.js';
 import { PEN_FOOD } from './animals.js';
@@ -69,7 +70,8 @@ const DEEP = Object.keys(WORK_STOCK) as DeepFamily[];
 
 /** How much of a family the home has: carried, and in the chests beyond what the build jobs and missions hold there. */
 export function have(s: Pick<Snapshot, 'counts'>, world: WorldMemory, family: Family, free = freeChestTotals(world)): number {
-  return FAMILY[family].items.reduce((n, item) => n + (s.counts.get(item) ?? 0) + (free[item] ?? 0), 0);
+  // (an ore packed into its storage block counts nine a block: chores.ts packOres)
+  return withPacked(FAMILY[family].items, item => (s.counts.get(item) ?? 0) + (free[item] ?? 0));
 }
 
 /** A deep family's target at this tier. */

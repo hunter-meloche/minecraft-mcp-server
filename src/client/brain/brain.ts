@@ -28,7 +28,7 @@ export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 
 import { breakOut, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { outFromUnder } from './underyard.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
-import { farm, furnaceLine, kit, lights, smelt, sortStorage, stash, stock } from './chores.js';
+import { farm, furnaceLine, kit, lights, packOres, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
 import { readBox } from './milestones.js';
 import { projectGoal } from './project.js';
@@ -208,7 +208,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, enchantGoal, anvilGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

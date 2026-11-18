@@ -171,3 +171,9 @@ test('missions are the user\'s asks, untouched by the floor: one owed is deliver
   syncReserve(w);
   t.regex(missionGoal.wants(atHome(), w) ?? '', /^#2: 24 diamond still to gather for community1$/);
 });
+
+test('donations: storage blocks count in the work queue\'s floor, nine a block (a pack is not stock gone)', (t) => {
+  // 118 ingots with 10 iron blocks: 208 iron against the queue's 96, so the 70 ingots over the 48 kept may go
+  t.deepEqual(donationPlan({ iron_ingot: 118, iron_block: 10 }, 0, 0), { iron_ingot: 70 });
+  t.deepEqual(donationPlan({ iron_ingot: 118 }, 0, 0), { iron_ingot: 22 });
+});
