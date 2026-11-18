@@ -136,6 +136,51 @@ export interface InventoryItem {
   /** what an anvil adds to the cost for the work done on it before (the game's REPAIR_COST); absent: 0 */
   repairCost?: number;
 }
+/**
+ * A brewing stand as the bridge reads it (client-mod Brewing.java: brew.open and brew.status answer it, brew.put and
+ * brew.take with it). Its slots: `bottles` 0-2, the `ingredient` (3) and the blaze powder `fuel` (4), each with its
+ * potion contents (a water bottle is 'potion' with potion 'water'); null an empty slot. `fuelUses`: the brews left in the
+ * powder burning (of BREWS_PER_POWDER); `brewTicks`: the ticks the brew under way has to go (0: none), counting down from
+ * `totalBrewTicks`; `freePockets`: empty pocket slots (a potion does not stack: a take needs one each).
+ */
+export interface BrewStatus {
+  open: boolean; at?: Pos;
+  bottles?: (BrewStack | null)[]; ingredient?: BrewStack | null; fuel?: BrewStack | null;
+  fuelUses?: number; brewing?: boolean; brewTicks?: number; totalBrewTicks?: number; freePockets?: number;
+}
+/** A stack in one of the stand's slots. */
+export type BrewStack = Pick<InventoryItem, 'name' | 'count' | 'potion' | 'enchantments' | 'damage' | 'maxDamage'>;
+/**
+ * What brew.put answers (asked { into: 'bottle' | 0-2 | 'ingredient' | 'fuel', name, potion?, slot?, count? }): the
+ * stand as the server has it a few ticks on, `into` the slot it went to ('bottle 1', 'ingredient', 'fuel'), `put` how
+ * many went in, `slot` what that slot holds now; `brewing` tells whether the brew started (it starts by itself).
+ */
+export interface BrewPut extends BrewStatus { into: string; put: number; slot: BrewStack | null }
+/** What brew.take answers (asked { from?: 'bottles' | 0-4 | 'ingredient' | 'fuel', force? }): `taken` the stacks that came into the pockets, by pocket slot. */
+export interface BrewTake extends BrewStatus { ok: boolean; reason?: string; taken: InventoryItem[] }
+/** What brew.close answers: the stand as it was left (it brews on with the menu shut, and keeps what is in it). */
+export interface BrewClosed { ok: boolean; wasOpen: boolean; stand: BrewStatus | null }
+/** A brew's ticks at the default speed (26.3 BrewingStandBlockEntity: 20 s). */
+export const BREW_TICKS = 400;
+/** Brews one blaze powder burns for (26.3 brewing uses_default). */
+export const BREWS_PER_POWDER = 20;
+
+/** A stand's slot in a line: "long_fire_resistance potion", "redstone x3", "empty". */
+const brewSlotText = (st: BrewStack | null | undefined): string =>
+  !st ? 'empty' : `${st.potion ? `${st.potion} ` : ''}${st.name}${st.count > 1 ? ` x${st.count}` : ''}`;
+
+/**
+ * A brewing stand in a line, for the brewing-stand tool and the brain's log: "bottles: water potion, awkward potion,
+ * empty; ingredient: magma_cream x2; fuel: blaze_powder x5 (19 brews left in the burning powder); brewing, 14 s to go".
+ */
+export function brewStandText(st: BrewStatus): string {
+  if (!st.open) return 'not open';
+  const bottles = (st.bottles ?? [null, null, null]).map(brewSlotText).join(', ');
+  const left = st.fuelUses ? ` (${st.fuelUses} brew${st.fuelUses === 1 ? '' : 's'} left in the burning powder)` : '';
+  const brew = st.brewing && st.brewTicks ? `brewing, ${Math.ceil(st.brewTicks / 20)} s to go` : 'not brewing';
+  return `bottles: ${bottles}; ingredient: ${brewSlotText(st.ingredient)}; fuel: ${brewSlotText(st.fuel)}${left}; ${brew}`;
+}
+
 /** A stack in a chest: `slot` is the chest's own (0 the top left), what chest.withdraw's `slot` takes. */
 export type ChestStack = InventoryItem;
 /** What chest.open, chest.withdraw and chest.deposit answer: the totals by name, and each stack by its slot. */
@@ -1327,7 +1372,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   register(
     'use-item-on-block',
-    "Right-click a block, holding `item` if given (else what's in hand): till grass or dirt with a hoe, open or close a door or trapdoor, flip a lever, press a button, use bone meal, fill or empty a bucket. Walks closer if needed. Reports the block before and after.",
+    "Right-click a block, holding `item` if given (else what's in hand): till grass or dirt with a hoe, open or close a door or trapdoor, flip a lever, press a button, use bone meal, fill or empty a bucket, fill a glass_bottle at a water source (aim at the water's cell). Walks closer if needed. Reports the block before and after, and for a bucket or a bottle what the server did with it.",
     {
       x: z.coerce.number().describe('X of the block'),
       y: z.coerce.number().describe('Y of the block'),
@@ -1342,8 +1387,9 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         try { await call('item.select', { name: item }); } catch { return factory.createErrorResponse(`No ${item} in inventory`); }
       }
       // bucket: the server's word on a bucket's use (filled, poured at, nothing happened), never the client's guess;
-      // answered: the server acked the use within 2 s (else `after` may be only what the client predicted)
-      type Used = { used: boolean; reason?: string; before?: string; after?: string; changed?: boolean; properties?: Record<string, string>; held?: string; result?: string; bucket?: string; answered?: boolean };
+      // bottle: the same for a glass bottle filled at water (filled, nothing happened); answered: the server acked the
+      // use within 2 s (else `after` may be only what the client predicted)
+      type Used = { used: boolean; reason?: string; before?: string; after?: string; changed?: boolean; properties?: Record<string, string>; held?: string; result?: string; bucket?: string; bottle?: string; answered?: boolean };
       // toggle: a water bucket in hand once poured outside the door it was shutting (the game client checks doors too)
       const how = toggle ? { face, toggle: true } : { face };
       let r = await call<Used>('useOn', { ...at, ...how });
@@ -1370,6 +1416,8 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       // a bucket: what the server did with it. Live the client showed buckets filled that the server never filled, and
       // the reply said only "nothing changed" about the block clicked
       if (r.bucket) return factory.createResponse(`Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: ${r.bucket}`);
+      // a bottle: the water stays where it was whatever the server did, so only its word on the inventory tells
+      if (r.bottle) return factory.createResponse(`Used ${r.held ?? item ?? 'the held item'} on ${r.before} at ${fmt(at)}: ${r.bottle}`);
       const props = Object.entries(r.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
       const after = `${r.after}${props ? `[${props}]` : ''}`;
       const unchanged = r.changed === undefined ? r.before === r.after : !r.changed;
@@ -2221,6 +2269,35 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
       const r = await placeCart(at, { inVillage: args.inVillage, newMovement: args.newMovement });
       if (!r.ok) return factory.createErrorResponse(`No minecart put on the rail at ${fmt(at)}: ${r.reason ?? 'no answer'}`);
       return factory.createResponse(`Put a minecart (${r.id}, uuid ${r.uuid}) on the rail at ${fmt(at)}${r.passengers?.length ? `; it took ${r.passengers.map(q => q.name ?? q.id).join(', ')}` : ''}`);
+    }
+  );
+
+  register(
+    'brewing-stand',
+    "Look into a brewing stand: what its three bottles hold (by their potion contents: water, awkward, long_fire_resistance...), the ingredient and the blaze powder fuel, how many brews the burning powder has left, and how long the brew has to go. `take`: once nothing brews, take the potions out into the pockets. The bot walks carefully into reach; the stand keeps brewing with its menu shut.",
+    {
+      ...xyz,
+      take: z.boolean().optional().describe('Take the bottles out into the pockets (refused while a brew is under way)')
+    },
+    async (args: Pos & { take?: boolean }) => {
+      const at = floorPos(args);
+      const open = () => call<BrewStatus>('brew.open', { ...at }).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+      let st = await open();
+      if (st instanceof Error && /too far/.test(st.message)) {
+        await carefulNear(at);
+        st = await open();
+      }
+      if (st instanceof Error) return factory.createErrorResponse(`Could not open the brewing stand at ${fmt(at)}: ${st.message}`);
+      try {
+        if (!args.take) return factory.createResponse(`Brewing stand at ${fmt(at)}: ${brewStandText(st)}`);
+        const r = await call<BrewTake>('brew.take', {}, 15_000).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+        if (r instanceof Error) return factory.createErrorResponse(`Took nothing from the brewing stand at ${fmt(at)}: ${r.message}. It holds ${brewStandText(st)}`);
+        const took = r.taken.map(i => `${i.potion ? `${i.potion} ` : ''}${i.name}${i.count > 1 ? ` x${i.count}` : ''}`).join(', ');
+        if (!r.ok) return factory.createErrorResponse(`Took ${took || 'nothing'} from the brewing stand at ${fmt(at)}: ${r.reason ?? 'no answer'}. It holds ${brewStandText(r)}`);
+        return factory.createResponse(`Took ${took || 'nothing'} from the brewing stand at ${fmt(at)}${r.reason ? ` (${r.reason})` : ''}; it holds ${brewStandText(r)}`);
+      } finally {
+        await call('brew.close').catch(() => undefined);
+      }
     }
   );
 

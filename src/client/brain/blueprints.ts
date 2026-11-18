@@ -628,6 +628,36 @@ export function caneStrip(length: number): Blueprint {
   return blueprint('cane-strip', spec, { landmarks, bill: { sugar_cane: length } });
 }
 
+/** The wart farm's footprint (P4): two rows of soul sand with a walk between them, 3 x 6. */
+export const WART_STRIP = { width: 3, length: 6 } as const;
+
+/**
+ * The wart farm's strip (P4, wart.ts): two rows of wart cells along z (x 0 and x 2) whose ground (layer 0, groundOffset
+ * 0) takes soul sand, with the ground between them left as it is (x 1) for the bot to walk along: every wart cell is
+ * then the next cell over from where it stands, and what a harvest drops lands within its reach to pick up. The build
+ * places nothing in the ground layer (' '): a build lifts the no-break rule on every kind it replaces for as long as it
+ * runs, everywhere in reach and not only in its box (the hall's has why: the portal's plinth left five holes in the
+ * lawn beside it, Nov 14), and 12 soul sand set in by the build would have let Baritone dig the yard's grass anywhere
+ * near. The soul sand is set in cell by cell from the walk instead (wart.ts sandStep: the bridge's own dig of that one
+ * grass block, then the soul sand placed in its hole). Layer 1 clears what grows over all three rows (grass in a wart's
+ * cell, or on the walk). Nether wart grows on soul sand in any light, in any dimension. Planting is an act step too (the
+ * wart comes from the fortress a few at a time). Landmarks 'cell' (y 1: a wart's cell, its soul sand under it) and
+ * 'walk' (y 1: where the bot stands). `along: 'x'` turns it a quarter, the rows along x (a site found the other way round).
+ */
+export function wartStrip(opts: { along?: 'x' | 'z' } = {}): Blueprint {
+  const along = opts.along ?? 'z';
+  if (along !== 'x' && along !== 'z') throw new Error(`a wart strip runs along x or z, not "${String(along)}"`);
+  const { width, length } = WART_STRIP;
+  const g = new Grid(width, 2, length, '.');
+  const landmarks: Landmark[] = [];
+  for (let z = 0; z < length; z++) {
+    for (let x = 0; x < width; x++) g.set(x, 0, z, ' ');
+    landmarks.push({ kind: 'cell', at: { x: 0, y: 1, z } }, { kind: 'cell', at: { x: 2, y: 1, z } }, { kind: 'walk', at: { x: 1, y: 1, z } });
+  }
+  const bp = blueprint('wart-strip', { palette: {}, layers: g.layers() }, { landmarks, groundOffset: 0 });
+  return along === 'z' ? bp : rotate(bp, 1);
+}
+
 /** Steps between torches on a mine staircase. */
 export const STAIR_TORCH_EVERY = 8;
 

@@ -242,11 +242,12 @@ function afterEnchanting(): WorldMemory {
   return w;
 }
 
-test('the workshop comes after the enchanting room (the nether portal after it, P2a, and the villager hall, P5b): its site, its build, its water; with the room done it is next', (t) => {
+test('the workshop comes after the enchanting room (the nether portal after it, P2a, the villager hall, P5b, and the brewing and the wart farm, P4): its site, its build, its water; with the room done it is next', (t) => {
   const m = TREE.find(x => x.id === 'workshop')!;
   t.is(TREE.indexOf(m), TREE.findIndex(x => x.id === 'enchanting') + 1);
-  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['nether-portal', 'hall']);
-  for (const after of TREE.slice(TREE.indexOf(m) + 1)) t.deepEqual(after.prereqs, ['workshop'], after.id);
+  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['nether-portal', 'hall', 'brewing', 'wart-farm']);
+  const prereqs: Record<string, string[]> = { 'nether-portal': ['workshop'], hall: ['workshop'], brewing: ['workshop', 'nether-portal'], 'wart-farm': ['brewing'] };
+  for (const after of TREE.slice(TREE.indexOf(m) + 1)) t.deepEqual(after.prereqs, prereqs[after.id], after.id);
   t.is(m.id, 'workshop');
   t.is(m.title, 'a workshop');
   t.deepEqual(m.prereqs, ['enchanting']);

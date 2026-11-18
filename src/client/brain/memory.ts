@@ -31,6 +31,11 @@ export interface Landmarks {
    */
   beds?: Pos[];
   fletching?: Pos;
+  /**
+   * a brewing stand (the nearest home): the brewing milestone's own at the workshop's stand cell, or one the
+   * improvement run or a player put up in the yard, which the milestone counts as its own (brewing.ts)
+   */
+  brewing?: Pos;
   /** farmland cells near home */
   farmland: Pos[];
   /** when these were looked for (ms) */
@@ -206,6 +211,10 @@ export interface WorldMemory {
   work?: import('./work.js').WorkMemory;
   /** the anvil's: the pairs that gave nothing worth taking, an anvil that wore out to put back (anvil.ts) */
   anvil?: import('./anvil.js').AnvilMemory;
+  /** the brewing's (P4, brewing.ts): the stand as the last look saw it, a stand found gone (the milestone puts one back) */
+  brewing?: import('./brewing.js').BrewMemory;
+  /** the wart farm's round (P4, wart.ts): when it last looked, and the cells it found bare */
+  wart?: import('./wart.js').WartMemory;
   /**
    * The Nether (progression P2a). `trips` is the nether-trips switch: anything that goes through a portal waits for it
    * to be true, and it is off (undefined) until the lead turns it on (the nether-trips tool); the portal milestone
@@ -290,7 +299,7 @@ const id = (b: string | null) => (b ?? '').replace(/^minecraft:/, '').replace(/\
  */
 export function findLandmarks(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
   const found: Landmarks = { chests: [], farmland: [] };
-  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [], portals: Pos[] = [], fletchings: Pos[] = [];
+  const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [], portals: Pos[] = [], fletchings: Pos[] = [], stands: Pos[] = [];
   blocks.forEach((b, i) => {
     const name = id(b);
     if (!name) return;
@@ -304,6 +313,7 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
     else if (name === 'anvil' || name === 'chipped_anvil' || name === 'damaged_anvil') anvils.push(at);
     else if (name === 'smithing_table') smithings.push(at);
     else if (name === 'fletching_table') fletchings.push(at);
+    else if (name === 'brewing_stand') stands.push(at);
     else if (name === 'nether_portal') portals.push(at);
     else if (name === 'farmland') found.farmland.push(at);
   });
@@ -320,5 +330,7 @@ export function findLandmarks(box: Pos & { width: number; height: number; length
   if (portal) found.portal = portal;
   if (beds.length) found.beds = beds;
   if (fletching) found.fletching = fletching;
+  const stand = stands.sort(near)[0];
+  if (stand) found.brewing = stand;
   return found;
 }

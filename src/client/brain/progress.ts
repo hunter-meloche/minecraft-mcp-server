@@ -272,6 +272,19 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   flint_and_steel: { makes: 1, from: { iron_ingot: 1, flint: 1 } },
   golden_helmet: { makes: 1, from: { gold_ingot: 5 } },
   ladder: { makes: 3, from: { stick: 7 } },
+  // the brewing's (P4), as 26.3's data/minecraft/recipe/brewing_stand.json (a blaze rod over three of
+  // #minecraft:stone_crafting_materials, at a table: cobbled deepslate does, as GROUPS has it), glass_bottle.json (three
+  // glass in a V, at a table: three bottles), blaze_powder.json (shapeless: a rod makes two), magma_cream.json
+  // (shapeless: a blaze powder and a slime ball), sugar_from_sugar_cane.json (shapeless: one for one) and
+  // fermented_spider_eye.json (shapeless: a spider eye, a brown mushroom and sugar; weakness, for curing: off, see
+  // brewing.ts) have them. The glass is smelted from sand (project.ts SMELTED). No blaze rod is made of anything: the
+  // fortress brings them, and the brewing keeps the last one for the stand (brewing.ts ROD_KEEP)
+  brewing_stand: { makes: 1, from: { blaze_rod: 1, cobblestone: 3 } },
+  glass_bottle: { makes: 3, from: { glass: 3 } },
+  blaze_powder: { makes: 2, from: { blaze_rod: 1 } },
+  magma_cream: { makes: 1, from: { blaze_powder: 1, slime_ball: 1 } },
+  sugar: { makes: 1, from: { sugar_cane: 1 } },
+  fermented_spider_eye: { makes: 1, from: { spider_eye: 1, brown_mushroom: 1, sugar: 1 } },
   // the villager move's boat (P5c), as 26.3's data/minecraft/recipe/oak_boat.json has it: five oak planks in a boat's
   // shape, at a table. Oak, not any planks: birch planks make a birch_boat, and the craft of an oak_boat would fail
   oak_boat: { makes: 1, from: { oak_planks: 5 } },

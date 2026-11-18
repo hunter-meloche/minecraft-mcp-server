@@ -10,6 +10,7 @@ import {
   fortressWay, fortressWart, naturalChest, refuseFortress
 } from '../../src/client/brain/netherfortress.js';
 import { BARTER_WAITS, LAVA_GAP } from '../../src/client/brain/netherbarter.js';
+import { POTION_S } from '../../src/client/brain/netherdebris.js';
 import { FROM_BUILDS, SETUP_WAITS, boxGap, zoneBox, type Box, type NetherZone } from '../../src/client/brain/nethersetup.js';
 import { BEARINGS, FORTRESS_TRIP_CAP_MS, NETHER, OVERWORLD, leaveWhy, netherLine, netherOf, netherTick, noteSites, peekNether, stageNeeds, type Bearing, type NetherMemory } from '../../src/client/brain/nether.js';
 import { LADDER, NETHER_WORK } from '../../src/client/brain/worktasks.js';
@@ -370,6 +371,125 @@ test.serial('a way on only by lava within 2: fire resistance would be needed and
   t.false(f.did.some(d => d.startsWith('dig ') || d.startsWith('drink ')), 'no wart dug, no potion drunk');
   t.like(r, { gain: 12, worked: true });
   walkedKindly(t, f);
+});
+
+test.serial('a way on only by lava within 2 with a potion of fire resistance carried (P4\'s brewing): drunk instead of turning back, the wart by the lava taken under it; a plain one that would not last the way back is not', async (t) => {
+  const lava: Blocks = [...[-48, -47, -43, -42].flatMap(x => [228, 229, 230, 231, 232].map((z): [Pos, string] => [at(x, 69, z), 'lava'])),
+    ...[-44, -43, -42, -41, -40].map((x): [Pos, string] => [at(x, 69, 233), 'lava'])];
+  const a = await atStage3({ mobs: [] }, lava);
+  a.f.inv.push({ slot: 30, name: 'potion', count: 1, potion: 'long_fire_resistance' });
+  const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
+  t.true(a.f.did.includes('drink potion of long_fire_resistance'), a.f.did.join(' | '));
+  t.true(a.f.said.some(x => /^fortress: drank a potion of long_fire_resistance for the way to the wart at nether \(-46, 70, 230\) by lava: 480 s of fire resistance$/.test(x)), a.f.said.join(' | '));
+  t.true(a.f.did.some(d => d.startsWith('dig ')), 'the wart by the lava dug');
+  t.notRegex(r.text, /fire resistance would be needed/);
+  t.regex(r.text, /back at overworld/);
+  t.true(carried(a.f, 'nether_wart') > 4, 'the wart patch\'s, on top of the chest\'s four');
+  // a plain potion (3:00) after the way's long walk out lasts it too; one with too little left for the way back would not be drunk
+  const b = await atStage3({ mobs: [] }, lava);
+  b.f.inv.push({ slot: 30, name: 'potion', count: 1, potion: 'fire_resistance' });
+  const r2 = await fortressRun(b.f.ctx, HOUR, () => b.later);
+  t.true(b.f.did.includes('drink potion of fire_resistance'));
+  t.notRegex(r2.text, /fire resistance would be needed/);
+});
+
+test.serial('a potion is drunk only where it outlasts the bound the trip turns back by (the walk back to the way too) and some work: one that would run short at the first look after it is kept', async (t) => {
+  const lava: Blocks = [...[-48, -47, -43, -42].flatMap(x => [228, 229, 230, 231, 232].map((z): [Pos, string] => [at(x, 69, z), 'lava'])),
+    ...[-44, -43, -42, -41, -40].map((x): [Pos, string] => [at(x, 69, 233), 'lava'])];
+  // a plain potion of 2:00 here stands for the plain 3:00 after a longer way out (130 cells): it outlasts the way back
+  // and its spare (78 + 30 s at the drink, 23 cells off the way inside the fortress), not the walk back to the way on top
+  const S = POTION_S as Record<string, number>;
+  const was = S.fire_resistance;
+  S.fire_resistance = 120;
+  try {
+    const a = await atStage3({ mobs: [] }, lava);
+    a.f.inv.push({ slot: 30, name: 'potion', count: 1, potion: 'fire_resistance' });
+    const call = a.f.ctx.call.bind(a.f.ctx);
+    (a.f.ctx as { call: typeof call }).call = (async (m: string, p?: Record<string, unknown>) => {
+      const r = await call(m, p);
+      if (m === 'use' && a.f.state.fire === 180) a.f.state.fire = 120;
+      return r;
+    }) as typeof call;
+    const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
+    t.false(a.f.did.some(d => d.startsWith('drink ')), a.f.did.join(' | '));
+    t.true(a.f.inv.some(i => i.name === 'potion' && i.potion === 'fire_resistance'), 'kept for the Guardian\'s hook');
+    t.regex(r.text, /fire resistance would be needed \(lava within 2 of the way to the wart at nether \(-46, 70, 230\)\) and the potion of fire_resistance carried would not last the way there and back/);
+    t.notRegex(r.text, /lasts only the way back/);
+  } finally {
+    S.fire_resistance = was;
+  }
+});
+
+test.serial('the way out by lava within 2 (a lava field the north way crosses on a causeway three wide): with a potion carried it is drunk there and the trip goes on; with none it turns back as before', async (t) => {
+  const field: Blocks = [];
+  for (let x = -100; x <= -52; x++) for (let z = 245; z <= 247; z++) if (Math.abs(x + 76) > 1) field.push([at(x, 69, z), 'lava']);
+  const a = await atStage3({ mobs: [] }, field);
+  a.f.inv.push({ slot: 30, name: 'potion', count: 1, potion: 'long_fire_resistance' });
+  const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
+  t.true(a.f.said.some(x => /^fortress: drank a potion of long_fire_resistance for the way to the fortress along the north way at nether \(/.test(x)), a.f.said.join(' | '));
+  t.regex(r.text, /^fortress at nether \(-44, 71, 233\): /);
+  t.notRegex(r.text, /fire resistance would be needed/);
+  const b = await atStage3({ mobs: [] }, field);
+  const r2 = await fortressRun(b.f.ctx, HOUR, () => b.later);
+  t.false(b.f.did.some(d => d.startsWith('drink ')));
+  // (closed as before P4: no potion asked, so the dry mark grows rather than being kept, and it does not set out again for nothing)
+  t.regex(r2.text, /^nothing from the fortress at nether \(-44, 71, 233\); the north way closed by nether \(-76, 70, 24\d\); back at overworld/);
+  t.not((r2 as { mark?: string }).mark, 'same');
+});
+
+test.serial('a plain potion drunk at the causeway, the fortress\'s work longer than it lasts: back while the effect still covers the way back past the lava, not once it is gone', async (t) => {
+  const field: Blocks = [];
+  for (let x = -100; x <= -52; x++) for (let z = 245; z <= 247; z++) if (Math.abs(x + 76) > 1) field.push([at(x, 69, z), 'lava']);
+  let g: Game | undefined;
+  // the effect runs down as the trip goes: 3 s a look (the fake's status says what is left)
+  const a = await atStage3({ onLook: () => { if (g && g.state.fire > 0) g.state.fire = Math.max(0, g.state.fire - 3); } }, field);
+  g = a.f;
+  a.f.inv.push({ slot: 30, name: 'potion', count: 1, potion: 'fire_resistance' });
+  // every walk down there to a cell by lava, with the fire resistance on the bot as it set out on it
+  const byLava: number[] = [];
+  const call = a.f.ctx.call.bind(a.f.ctx);
+  (a.f.ctx as { call: typeof call }).call = (async (m: string, p?: Record<string, unknown>) => {
+    if (m === 'goto' && a.f.state.dim === NETHER && p) {
+      const to = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+      let hot = false;
+      for (let dx = -LAVA_GAP; dx <= LAVA_GAP; dx++) for (let dz = -LAVA_GAP; dz <= LAVA_GAP; dz++) for (let dy = -3; dy <= 1; dy++) {
+        if (/^lava/.test(a.f.get(NETHER, { x: to.x + dx, y: to.y + dy, z: to.z + dz }))) hot = true;
+      }
+      if (hot) byLava.push(a.f.state.fire);
+    }
+    return call(m, p);
+  }) as typeof call;
+  const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
+  t.true(a.f.did.includes('drink potion of fire_resistance'), a.f.did.join(' | '));
+  t.regex(r.text, /the fire resistance drunk now lasts only the way back; back at overworld/);
+  t.true(byLava.length > 0, 'the causeway walked');
+  t.true(byLava.every(f => f > 30), `every walk by lava with the effect on it: ${byLava.join(', ')}`);
+  t.is(a.f.state.dim, OVERWORLD);
+});
+
+test.serial('the effect runs short while it stands by the lava it reached under the potion: back from there to its way over the same ground (the walk from off the way would be a blind one)', async (t) => {
+  const lava: Blocks = [...[-48, -47, -43, -42].flatMap(x => [228, 229, 230, 231, 232].map((z): [Pos, string] => [at(x, 69, z), 'lava'])),
+    ...[-44, -43, -42, -41, -40].map((x): [Pos, string] => [at(x, 69, 233), 'lava'])];
+  let g: Game | undefined;
+  // the first wart dug by the lava: what is left of the effect falls to 40 s at once (under the way back and its spare)
+  const a = await atStage3({ mobs: [], onDig: () => { if (g && g.state.fire > 40) g.state.fire = 40; } }, lava);
+  g = a.f;
+  a.f.inv.push({ slot: 30, name: 'potion', count: 1, potion: 'long_fire_resistance' });
+  // a careful walk goes a leg of a few blocks at a time: one asked for from further off does not arrive
+  const call = a.f.ctx.call.bind(a.f.ctx);
+  const far: string[] = [];
+  (a.f.ctx as { call: typeof call }).call = (async (m: string, p?: Record<string, unknown>) => {
+    if (m === 'goto' && a.f.state.dim === NETHER && p) {
+      const d = Math.hypot(Number(p.x) + 0.5 - a.f.state.pos.x, Number(p.y) - a.f.state.pos.y, Number(p.z) + 0.5 - a.f.state.pos.z);
+      if (d > 6.5) { far.push(`${p.x},${p.y},${p.z} from ${d.toFixed(1)}`); return { arrived: false }; }
+    }
+    return call(m, p);
+  }) as typeof call;
+  const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
+  t.true(a.f.did.includes('drink potion of long_fire_resistance'));
+  t.regex(r.text, /the fire resistance drunk now lasts only the way back; back at overworld/);
+  t.deepEqual(far, [], 'no walk from off the way');
+  t.is(a.f.state.dim, OVERWORLD);
 });
 
 test.serial('courtesy: a fortress with a player\'s block within 16 (the bridge\'s strays) or a player seen within 64: refused for good, nothing taken', async (t) => {

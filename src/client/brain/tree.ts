@@ -12,6 +12,8 @@ import { homeMilestone } from './home.js';
 import { workshopMilestone } from './workshop.js';
 import { netherPortalMilestone } from './portal.js';
 import { hallMilestone } from './villagers.js';
+import { brewingMilestone } from './brewing.js';
+import { wartFarmMilestone } from './wart.js';
 
 /**
  * The bot's long game, in order. Each milestone is done once the world shows it (a zone the build registered), so
@@ -322,4 +324,7 @@ export const TREE: Milestone[] = [homeMilestone, storage, moreChests, perimeter,
   penMilestone('cow', ['plot1']), penMilestone('sheep', ['pen-cow']),
   caneMilestone(['plot1']), enchantingMilestone(['cane', 'pen-cow']), workshopMilestone(['enchanting']), netherPortalMilestone(['workshop']),
   // the villagers' own hall at home (P5b): after the workshop, not the portal (nothing of the villagers waits on it)
-  hallMilestone(['workshop'])];
+  hallMilestone(['workshop']),
+  // brewing (P4): the stand in the workshop once a blaze rod is home (the fortress trips bring them through the portal),
+  // then the wart farm, planted from the fortress's wart
+  brewingMilestone(['workshop', 'nether-portal']), wartFarmMilestone(['brewing'])];

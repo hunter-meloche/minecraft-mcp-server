@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'lay-rail', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'place-minecart', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'take-up-rail', 'use-item-on-block', 'use-portal']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['brewing-stand', 'build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'lay-rail', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'place-minecart', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'take-up-rail', 'use-item-on-block', 'use-portal']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -766,6 +766,73 @@ test('use-item-on-block reports what the server did with a bucket, never the cli
   t.is((await run('use-item-on-block', { x: -541, y: 62, z: 2161, item: 'water_bucket', face: 'west' })).text, 'Used water_bucket on stone at (-541, 62, 2161): poured at (-542, 62, 2161)');
   reply = { used: true, before: 'water', after: 'air', changed: true, properties: {}, held: 'bucket', answered: true, bucket: 'filled (the water at (-600, 62, 2100))', heldAfter: 'water_bucket' };
   t.is((await run('use-item-on-block', { x: -600, y: 62, z: 2100, item: 'bucket' })).text, 'Used bucket on water at (-600, 62, 2100): filled (the water at (-600, 62, 2100))');
+});
+
+test('use-item-on-block reports what the server did with a glass bottle at water, never the client\'s guess', async (t) => {
+  // the source stays whatever happens: only the server's word on the inventory says whether the bottle filled
+  let reply: Record<string, unknown> = {
+    used: true, before: 'water', after: 'water', changed: false, properties: { level: '0' }, held: 'glass_bottle', answered: true,
+    bottle: 'filled', heldAfter: 'glass_bottle'
+  };
+  const { run, request } = setup({ 'item.select': { held: 'glass_bottle' }, useOn: () => reply });
+  t.is((await run('use-item-on-block', { x: -545, y: 62, z: 2156, item: 'glass_bottle' })).text, 'Used glass_bottle on water at (-545, 62, 2156): filled');
+  t.like(request.getCalls().find(c => c.args[0] === 'useOn')!.args[1], { x: -545, y: 62, z: 2156, face: 'up' });
+  reply = { ...reply, bottle: 'nothing happened (the server did not fill the bottle; the client had guessed potion)' };
+  t.is((await run('use-item-on-block', { x: -545, y: 62, z: 2156, item: 'glass_bottle' })).text,
+    'Used glass_bottle on water at (-545, 62, 2156): nothing happened (the server did not fill the bottle; the client had guessed potion)');
+});
+
+test('brewing-stand reads a stand by its contents and closes it again', async (t) => {
+  const stand = {
+    open: true, at: { x: -545, y: 63, z: 2155 },
+    bottles: [{ name: 'potion', count: 1, potion: 'fire_resistance' }, { name: 'potion', count: 1, potion: 'fire_resistance' }, null],
+    ingredient: { name: 'redstone', count: 1 }, fuel: { name: 'blaze_powder', count: 3 }, fuelUses: 18, brewing: true, brewTicks: 200, totalBrewTicks: 400, freePockets: 4
+  };
+  const { run, request } = setup({ 'brew.open': stand, 'brew.close': { ok: true, wasOpen: true, stand } });
+  const r = await run('brewing-stand', { x: -545, y: 63, z: 2155 });
+  t.false(r.isError);
+  t.is(r.text, 'Brewing stand at (-545, 63, 2155): bottles: fire_resistance potion, fire_resistance potion, empty; ingredient: redstone; fuel: blaze_powder x3 (18 brews left in the burning powder); brewing, 10 s to go');
+  t.deepEqual(request.getCalls().map(c => c.args[0]).filter(m => m.startsWith('brew.')), ['brew.open', 'brew.close']);
+});
+
+test('brewing-stand walks carefully into reach when the stand is too far, and says why it could not open one', async (t) => {
+  let opens = 0;
+  const { run, request } = setup({
+    'brew.open': () => {
+      if (opens++ === 0) throw new Error('brewing stand too far to open (6.2 blocks, max 4.5)');
+      return { open: true, bottles: [null, null, null], ingredient: null, fuel: null, fuelUses: 0, brewing: false, brewTicks: 0 };
+    },
+    goto: { arrived: true },
+    'brew.close': { ok: true, wasOpen: true, stand: null }
+  });
+  t.is((await run('brewing-stand', { x: 3, y: 64, z: 4 })).text, 'Brewing stand at (3, 64, 4): bottles: empty, empty, empty; ingredient: empty; fuel: empty; not brewing');
+  // the careful walk: no digging or placing on the way to the workshop (A11)
+  t.like(request.getCalls().find(c => c.args[0] === 'goto')!.args[1], { x: 3, y: 64, z: 4, careful: true });
+  const none = setup({ 'brew.open': () => { throw new Error('no brewing_stand at 3, 64, 4 (air)'); } });
+  const r = await none.run('brewing-stand', { x: 3, y: 64, z: 4 });
+  t.true(r.isError);
+  t.is(r.text, 'Failed: Could not open the brewing stand at (3, 64, 4): no brewing_stand at 3, 64, 4 (air)');
+  t.false(none.request.getCalls().some(c => c.args[0] === 'brew.close'));
+});
+
+test('brewing-stand take reports the potions by contents, and the refusal under a brew with the stand', async (t) => {
+  const done = { open: true, bottles: [{ name: 'potion', count: 1, potion: 'long_fire_resistance' }, { name: 'potion', count: 1, potion: 'long_fire_resistance' }, { name: 'potion', count: 1, potion: 'long_fire_resistance' }], ingredient: null, fuel: { name: 'blaze_powder', count: 2 }, fuelUses: 17, brewing: false, brewTicks: 0 };
+  const after = { ...done, bottles: [null, null, null], ok: true, taken: [0, 1, 2].map(k => ({ slot: 20 + k, name: 'potion', count: 1, potion: 'long_fire_resistance' })) };
+  const { run, request } = setup({ 'brew.open': done, 'brew.take': after, 'brew.close': { ok: true, wasOpen: true, stand: after } });
+  const r = await run('brewing-stand', { x: -545, y: 63, z: 2155, take: true });
+  t.false(r.isError);
+  t.is(r.text, 'Took long_fire_resistance potion, long_fire_resistance potion, long_fire_resistance potion from the brewing stand at (-545, 63, 2155); it holds bottles: empty, empty, empty; ingredient: empty; fuel: blaze_powder x2 (17 brews left in the burning powder); not brewing');
+  t.deepEqual(request.getCalls().map(c => c.args[0]).filter(m => m.startsWith('brew.')), ['brew.open', 'brew.take', 'brew.close']);
+  // never forced from the tool: a brew under way is left to finish
+  t.deepEqual(request.getCalls().find(c => c.args[0] === 'brew.take')!.args[1], {});
+
+  const busy = { ...done, brewing: true, brewTicks: 120 };
+  const b = setup({ 'brew.open': busy, 'brew.take': () => { throw new Error('brewing (6 s left): take the potions once it is done, or force'); }, 'brew.close': { ok: true, wasOpen: true, stand: busy } });
+  const rb = await b.run('brewing-stand', { x: -545, y: 63, z: 2155, take: true });
+  t.true(rb.isError);
+  t.regex(rb.text, /^Failed: Took nothing from the brewing stand at \(-545, 63, 2155\): brewing \(6 s left\): take the potions once it is done, or force\. It holds bottles: long_fire_resistance potion/);
+  // closed even after the refusal
+  t.true(b.request.getCalls().some(c => c.args[0] === 'brew.close'));
 });
 
 test('use-item-on-block says so when the server never answered the use', async (t) => {

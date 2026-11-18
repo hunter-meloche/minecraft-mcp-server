@@ -277,7 +277,8 @@ export function firePotions(items: { name: string; count: number; potion?: strin
  *
  * Fire resistance 12, up from 4 (D1, the user's "prioritize getting fire resistance gear for nether in general"): a
  * day's use is 6 (one carried on each of the day's two trips for the Guardian's hook, NETHER_TRIP.firePotions; the
- * debris trip's DEBRIS_POTIONS 2, drunk; the bastion's FIRE_POTIONS 2; the fortress drinks none), and twice that keeps a day of use from
+ * debris trip's DEBRIS_POTIONS 2, drunk; the bastion's FIRE_POTIONS 2; the fortress drinks the one it carries only where lava is by its
+ * way, P4), and twice that keeps a day of use from
  * emptying the stock. The barter goes on while any target is short (netherShort), so the potions keep it bartering
  * after the rest are met: about 3.4 in 100 barters bring one (the 26.3 jar's piglin_bartering: its two fire resistance
  * entries, 8 + 8 of 469), some two a day at the gold chore's 64 ingots.

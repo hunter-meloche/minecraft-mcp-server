@@ -521,12 +521,13 @@ test('no room in the yard: it grows the yard as a site step does, at most twice,
 
 // ------------------------------------------------------------------------------------------------ the milestone
 
-test('the hall milestone comes after the nether portal, the last of the tree, after the workshop; its steps in order; with the portal done it is next', (t) => {
-  const m = TREE.at(-1)!;
+test('the hall milestone comes after the nether portal, the last of the tree but the brewing and the wart farm (P4), after the workshop; its steps in order; with the portal done it is next', (t) => {
+  const m = TREE.find(x => x.id === 'hall')!;
   t.is(m.id, 'hall');
   t.is(m.title, 'a villager hall');
   t.deepEqual(m.prereqs, ['workshop']);
-  t.is(TREE.findIndex(x => x.id === 'nether-portal'), TREE.length - 2);
+  t.is(TREE.findIndex(x => x.id === 'nether-portal'), TREE.indexOf(m) - 1);
+  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['brewing', 'wart-farm']);
   t.deepEqual(m.steps.map(s => s.name), ['find room for the hall', 'the beds and the windows\' glass', 'build the villager hall']);
   t.deepEqual(hallMilestone(['workshop']).steps.map(s => s.name), m.steps.map(s => s.name));
   t.is(TREE.filter(x => x.id === 'hall').length, 1);
@@ -588,8 +589,8 @@ test('the live homestead: a site, the beds made of string-made wool (the sheep p
   // a gate the shelter shuts and the pens' walks keep clear of, as every `:gate` zone is
   t.true(Object.keys(z).filter(k => /:(gate|door)$/.test(k)).includes('hall:gate'));
   t.is(world.progress!.carry, undefined);
-  // the tree done with it
-  t.like(goal.declines!(h.look(), world), { cause: 'unneeded', text: `all ${TREE.length} milestone(s) done` });
+  // the hall's part of the tree done with it: the brewing (P4) is next, and it waits on a blaze rod from the fortress
+  t.is(goal.wants(h.look(), world), 'a brewing stand: a blaze rod from the fortress');
 });
 
 test('the beds wait for the sheep pen\'s wool while it has sheep (no string spent), three times, then the string; the glass is made meanwhile', async (t) => {

@@ -23,8 +23,12 @@ const name = (s: string | null | undefined) => (s ?? '').replace(/^minecraft:/, 
 const AIR = /^(air|cave_air|void_air)$/;
 /** Not ground: plants, snow layers, trees, torches (a torch goes with the block it stands on). */
 const NOT_GROUND = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|leaf_litter|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|lily_of_the_valley|pink_petals|wildflowers|bush|firefly_bush|dead_bush|sweet_berry_bush|snow|torch|wall_torch|red_mushroom|brown_mushroom|vine|.*_log|.*_leaves|.*_sapling)$/;
-/** Columns to leave whole: water, crops and farmland, furniture and doors. */
-const KEEP = /^(water|farmland|wheat|carrots|potatoes|beetroots|crafting_table|furnace|chest|barrel|.*_bed|.*_door|.*_pressure_plate|.*_trapdoor|ladder)$/;
+/**
+ * Columns to leave whole: water, crops and farmland, furniture and doors. The nether wart on the wart farm's soul sand
+ * too (P4: it grows from the fortress's few, and a levelling of the yard would cut the whole crop), and the brewing
+ * stand.
+ */
+const KEEP = /^(water|farmland|wheat|carrots|potatoes|beetroots|nether_wart|crafting_table|furnace|brewing_stand|chest|barrel|.*_bed|.*_door|.*_pressure_plate|.*_trapdoor|ladder)$/;
 
 export function planLevel(box: Box, blocks: (string | null)[], level: number, isProtected: (p: Pos) => boolean = () => false, cutLeaves = false,
   fillWater = false): LevelPlan {

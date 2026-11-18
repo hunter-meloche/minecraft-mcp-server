@@ -38,8 +38,8 @@ const AIRY = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|lea
 const FURNITURE = /^(crafting_table|furnace|blast_furnace|smoker|chest|trapped_chest|barrel|.*_bed|.*_door|.*_trapdoor|.*_fence|.*_fence_gate|.*_wall|torch|wall_torch|lantern|ladder|.*_pressure_plate|composter|.*_sign|.*_wall_sign)$/;
 const FARM = /^(farmland|wheat|carrots|potatoes|beetroots|melon_stem|pumpkin_stem|attached_.*_stem|sugar_cane)$/;
 const PATH = /^(dirt_path|gravel)$/;
-/** Ground the world made, good to build on as it is. */
-const NATURAL = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mycelium|mud|sand|red_sand|clay|stone|deepslate|andesite|diorite|granite|tuff)$/;
+/** Ground the world made, good to build on as it is (and the ground a site found free has: wart.ts sandStep lifts it). */
+export const NATURAL = /^(grass_block|dirt|coarse_dirt|rooted_dirt|podzol|mycelium|mud|sand|red_sand|clay|stone|deepslate|andesite|diorite|granite|tuff)$/;
 
 /**
  * Classify every column of a region for building. `box` must include y = level (and preferably a few blocks above,

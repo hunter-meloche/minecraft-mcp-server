@@ -507,7 +507,8 @@ public final class Interact {
             return BridgeServer.LATER;
         });
 
-        // right-click a block with whatever is held: till with a hoe, open/close a door, flip a lever, bone meal, buckets
+        // right-click a block with whatever is held: till with a hoe, open/close a door, flip a lever, bone meal, buckets,
+        // a glass bottle filled at water (aimed and judged by the server's word as an empty bucket is)
         s.register("useOn", true, (p, c) -> {
             Minecraft mc = Minecraft.getInstance();
             LocalPlayer pl = player();
@@ -543,10 +544,12 @@ public final class Interact {
                 && (inHand.endsWith("_hoe") || inHand.endsWith("_axe") || inHand.endsWith("_shovel"));
             if (sneak) mc.options.keyShift.setDown(true);
             Ticker.add(new Ticker.Task() {
-                int age = 0, steady = 0, usedAt = -1, sequence, answeredAt = -1, askedAt = -1, slot, fullBefore;
+                int age = 0, steady = 0, usedAt = -1, sequence, answeredAt = -1, askedAt = -1, slot, fullBefore, waterBefore;
                 String result = "", held = "", aimed = "", guessed;
                 ItemStack heldStack = ItemStack.EMPTY;
-                boolean bucket;
+                // bucket: a use aimed along the look at a fluid and judged by the server's word (a bucket, or a glass
+                // bottle: ServerWord.aimsAtFluid); bottle: the glass bottle of those
+                boolean bucket, bottle;
                 long syncs;
                 net.minecraft.client.multiplayer.ClientLevel level;
                 BlockPos lo, hi;
@@ -557,10 +560,11 @@ public final class Interact {
                     age++;
                     if (m.player == null || m.level == null) { if (sneak) m.options.keyShift.setDown(false); c.fail("not in a world"); return true; }
                     if (usedAt < 0) {
-                        // after the rotation is sent; and a bucket only once the bot has stood unchanged for 3 ticks (a
-                        // crouch someone else held, let go, reaches the server's pose a tick or two after the client's),
-                        // so the eye the server traces from is the eye aimed from
-                        boolean isBucket = !toggle && Hazards.isBucket(Names.item(m.player.getMainHandItem()));
+                        // after the rotation is sent; and a bucket (or a glass bottle: it traces from the server's eye
+                        // the same way) only once the bot has stood unchanged for 3 ticks (a crouch someone else held,
+                        // let go, reaches the server's pose a tick or two after the client's), so the eye the server
+                        // traces from is the eye aimed from
+                        boolean isBucket = !toggle && ServerWord.aimsAtFluid(Names.item(m.player.getMainHandItem()));
                         boolean crouched = m.options.keyShift.isDown() || m.player.isShiftKeyDown() || m.player.isCrouching();
                         steady = isBucket && crouched ? 0 : steady + 1;
                         if (age < 2 || (isBucket && steady < 3 && age < 20)) return false;
@@ -584,6 +588,7 @@ public final class Interact {
                     heldStack = me.getMainHandItem().copy();
                     held = heldStack.isEmpty() ? "nothing" : Names.item(heldStack);
                     bucket = isBucket;
+                    bottle = isBucket && ServerWord.isBottle(held);
                     // buckets (and other aimed items) act through "use", along the look direction at the same point,
                     // when the block click does nothing
                     if (bucket) {
@@ -594,8 +599,9 @@ public final class Interact {
                         // aimed at the middle, the line from the shore clipped the shore block's corner ("aim: BLOCK
                         // ... grass_block"); the point the brain's sight-line check (fluidpick.ts) looks at too. A full
                         // one pours next to the face clicked: aimed at that face (aimed into the block, the line hit
-                        // the pit's upper wall and the lava went in a cell too high)
-                        aimAt = held.equals("bucket") ? new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5) : hit;
+                        // the pit's upper wall and the lava went in a cell too high). A glass bottle fills from the
+                        // source its trace meets, as the empty bucket does: aimed the same
+                        aimAt = held.equals("bucket") || bottle ? new Vec3(at.getX() + 0.5, at.getY() + 0.85, at.getZ() + 0.5) : hit;
                         me.lookAt(EntityAnchorArgument.Anchor.EYES, aimAt);
                         // what the bucket's aim hits, the way BucketItem traces it (sources only), for the reply
                         Vec3 eye = me.getEyePosition(), end = eye.add(me.getViewVector(1f).scale(me.blockInteractionRange()));
@@ -611,6 +617,8 @@ public final class Interact {
                     }
                     // (a fill from a stack of empties puts the full bucket in another slot: counted over the whole inventory)
                     if (bucket) fullBefore = ServerWord.fullBuckets(me.getInventory());
+                    // and a bottle's water bottle, which lands in another slot when it came from a stack
+                    if (bottle) waterBefore = ServerWord.waterBottles(me.getInventory());
                     level = m.level;
                     syncs = ServerWord.handSyncs();
                     int sent = ServerWord.sequence(level);
@@ -648,7 +656,16 @@ public final class Interact {
                     for (var prop : now.getProperties()) props.addProperty(prop.getName(), Handlers.valueName(now, prop));
                     JsonObject r = obj("used", true, "before", before, "after", Names.block(now), "changed", !now.equals(beforeState), "properties", props, "held", held, "result", result + (aimed.isEmpty() ? "" : " [aim: " + aimed + "]"),
                         "sneaking", m.player.isShiftKeyDown(), "answered", answeredAt >= 0);
-                    if (bucket) {
+                    if (bottle) {
+                        // what the server did with the bottle: filled, or nothing (never the client's guess). The source
+                        // stays either way: only the inventory tells
+                        ItemStack hand = m.player.getInventory().getItem(slot);
+                        String after = hand.isEmpty() ? "nothing" : Names.item(hand);
+                        boolean known = ServerWord.handSyncs() > syncs || ItemStack.matches(hand, heldStack);
+                        r.addProperty("bottle", ServerWord.bottleVerdict(after, guessed, answeredAt >= 0, known, heldStack.getCount(), hand.getCount(),
+                            ServerWord.waterBottles(m.player.getInventory()) - waterBefore));
+                        r.addProperty("heldAfter", after);
+                    } else if (bucket) {
                         // what the server did with the bucket: filled, poured at, or nothing (never the client's guess)
                         ItemStack hand = m.player.getInventory().getItem(slot);
                         String after = hand.isEmpty() ? "nothing" : Names.item(hand);

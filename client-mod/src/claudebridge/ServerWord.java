@@ -191,6 +191,55 @@ public final class ServerWord {
         return item.endsWith("_bucket") && !item.equals("milk_bucket");
     }
 
+    // ---------------------------------------------------------------- a glass bottle filled at water
+
+    /**
+     * An empty glass bottle: useOn aims and checks it as it does an empty bucket. Its use is a use along the look as the
+     * bucket's is (26.3 BottleItem.use: getPlayerPOVHitResult with Fluid.SOURCE_ONLY from the server's own eye, and water
+     * there makes a water bottle; it has no useOn), so the same aim at the source just under its surface and the same
+     * steady pose apply. It is no hazard (Hazards.isHazard): it takes nothing from the world, and a stray use of one at
+     * most fills it. The source stays: a bottle never takes it up.
+     */
+    static boolean isBottle(String item) {
+        return "glass_bottle".equals(item);
+    }
+
+    /** A use useOn aims along the look at a fluid and judges by the server's word: a bucket (any but milk) or a glass bottle. */
+    static boolean aimsAtFluid(String item) {
+        return Hazards.isBucket(item) || isBottle(item);
+    }
+
+    /**
+     * The reply's word on a glass bottle's use, pure: `filled`, or `nothing happened (...)`, or `nothing confirmed (...)`
+     * when the server gave no word, from the hand after the use as the server has it ({@code after}: its name; the
+     * count before and after), the client's own guess, and the water bottles the whole inventory gained. A bottle from
+     * a stack leaves the rest of the stack in the hand, one fewer, and puts the water bottle in another slot, or drops
+     * it at the feet with no room (ItemUtils.createFilledResult, as a bucket's fill); the last bottle of a stack becomes
+     * the water bottle in the hand.
+     */
+    static String bottleVerdict(String after, String guessed, boolean answered, boolean handKnown, int countBefore, int countAfter, int waterGained) {
+        if (!answered) return "nothing confirmed (no word from the server within 2 s" + (guessed != null && !guessed.equals("glass_bottle") ? "; the client guessed " + guessed : "") + ")";
+        if (!handKnown) return "nothing confirmed (the server sent no word on the hand; the client guessed " + after + ")";
+        boolean fromStack = after.equals("glass_bottle") && countAfter < countBefore;
+        if (waterGained > 0) return "filled";
+        if (fromStack) return "filled; no room for the water bottle: the server dropped it at the bot's feet";
+        String guess = guessed != null && !guessed.equals(after) ? "; the client had guessed " + guessed : "";
+        if (after.equals("glass_bottle")) return "nothing happened (the server did not fill the bottle" + guess + ")";
+        return "nothing happened (the hand holds " + after + " now, not the glass_bottle)";
+    }
+
+    /** The water bottles (a potion of water: not a splash or lingering one) anywhere in the inventory. */
+    static int waterBottles(Inventory inv) {
+        int n = 0;
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack st = inv.getItem(i);
+            if (st.isEmpty() || !Names.item(st).equals("potion")) continue;
+            var pc = st.get(net.minecraft.core.component.DataComponents.POTION_CONTENTS);
+            if (pc != null && pc.is(net.minecraft.world.item.alchemy.Potions.WATER)) n += st.getCount();
+        }
+        return n;
+    }
+
     /** The full buckets anywhere in the inventory: a fill from a stack of empties puts its bucket in another slot. */
     static int fullBuckets(Inventory inv) {
         int n = 0;

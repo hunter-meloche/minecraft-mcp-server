@@ -21,8 +21,11 @@
  * skeleton's hit), on any hold (the switch off, a death hold, the fortress trips off), at its time (the rung's day is
  * home by dusk: the leave nether goal's), on the ghast rule (the user's rule b: a ghast within 16 that sees it, one that
  * fired at it, or a hit, as barterDanger has it; a hit while a fortress mob is about is the fight's, and the health rule
- * is what bounds it), and where fire resistance would be needed and none is drunk: the way on only by lava within 2 (it
- * drinks none for the fortress: "without potions"). Blazes are fought from the shield (the bridge's fight: never walked
+ * is what bounds it), and where fire resistance would be needed and none can be drunk: the way on only by lava within 2.
+ * The fortress needs no potion to set out ("without potions": its stage gate asks for none), but with brewing (P4) the
+ * kit carries one where the chests hold it (mine.ts NETHER_TRIP.firePotions), and the trip drinks it where lava by the
+ * way would turn it back (drinkFor: one that lasts the way back, no ghast watching); while the effect lasts past the way
+ * back, the ground by lava is walked. Blazes are fought from the shield (the bridge's fight: never walked
  * after by it, the shield up toward their fire and the swing in its gaps, Nether.noChase and blazeSwing); one that holds
  * off out of reach (a blaze that sees the bot only fires) the trip walks in to itself, carefully, over the fortress's
  * ground by its rules (no lava within 2, no drop's edge), and one in the air is let be (blazeStance), wither skeletons with the sword (the fight's own choice of weapon, an axe only where a neutral mob is by: no sweep
@@ -53,6 +56,7 @@ import {
   BACK_MS, FAR_STEP_MS, FAR_TURN_MS, KNOCK_GAP, backThroughOwn, barterDanger, ghastAbout, ghastWatched, lavaBy, lootWords, overDrop, takesAt, toOwnPortal, type Seen
 } from './netherbarter.js';
 import { DROP_RANGE, digStance } from './netherquartz.js';
+import { fireOf, potionSeconds, potionToDrink } from './netherdebris.js';
 import { dressedFireGear, fireGear } from './netherset.js';
 import {
   EYE, FROM_BUILDS, GONE, SETUP_HEALTH, SETUP_WAITS, blockAt, boxGap, boxOf, cellOf, clearTo, fetchSetupKit, footing, inNether, pathOf, placedIn, readGround,
@@ -136,6 +140,17 @@ const WAY_AHEAD = 4;
 const STRETCH = { across: 8, down: 12, up: 12 } as const;
 /** A blaze's eyes over its feet (26.3's EntityType.BLAZE: 0.6 x 1.8, eyes at 1.53); a wither skeleton's (2.4 tall, 2.1). */
 const FOE_EYE: Readonly<Record<string, number>> = { blaze: 1.53, wither_skeleton: 2.1 };
+
+/**
+ * The fire resistance a walk by lava must have left beyond the way back (ms): the ground by lava is walked only while
+ * the effect outlasts the walk back to its hut by this, and a potion is drunk for it only where it would.
+ */
+export const FIRE_SPARE_MS = 30_000;
+/**
+ * The least work a potion drunk must buy beyond the walk it is drunk for (ms): one that ran short at the first look after
+ * it (fireShort) was drunk for nothing, the kit's one potion gone and none left for the Guardian's hook.
+ */
+export const FIRE_WORK_MS = 30_000;
 
 /** A fortress's own blocks round its chests (26.3 NetherFortressPieces: nether bricks, their fence and stairs). */
 const FORTRESS_BLOCKS = /^(nether_bricks|nether_brick_fence|nether_brick_stairs)$/;
@@ -460,11 +475,14 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
   let unlearnt = false;
   let gone = false;
   let watched = false;
+  /** the fire resistance on the bot as the last look saw it, s */
+  let fire = 0;
   const watch = async (): Promise<boolean> => {
     if (ctx.signal.aborted) throw new Error('aborted');
     const st = await ctx.status().catch(() => undefined);
     if ((st?.dimension ?? NETHER) !== NETHER) { gone = true; return false; }
     me = st?.position ?? me;
+    if (st) fire = fireOf(st);
     await askZones();
     ents = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 64 }).catch(() => ({ entities: [] as Seen[] }))).entities ?? [];
     const was = health;
@@ -494,21 +512,63 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
    * bridge has it now may have grown past the last waypoints since the scouting walked them; one no longer natural is
    * among `others`)
    */
-  const wayMay = (p: Pos) => !others.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && !lavaBy(g, p) && !overDrop(g, p);
+  const wayMay = (p: Pos) => !others.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && (hotOk() || !lavaBy(g, p)) && !overDrop(g, p);
+  /** the same with lava let by: what would need fire resistance */
+  const wayHot = (p: Pos) => !others.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && !overDrop(g, p);
   const knockSafe = (p: Pos) => !watched || !overDrop(g, p, KNOCK_GAP);
 
   // ---- out along the known way, the ground read a few waypoints ahead at a time; the cells walked are the way back
   const walked: Pos[] = [];
+  /** the way back to its hut, ms: the cells walked out, and through its portal */
+  const backMs = () => walked.length * FAR_STEP_MS + BACK_MS;
+  /** the fire resistance on it outlasts the way back (and FIRE_SPARE_MS): the ground by lava may be walked */
+  function hotOk(): boolean { return fire * 1000 > backMs() + FIRE_SPARE_MS; }
+  /** cells by lava walked under the potion drunk: from then on the way back over them needs the effect too */
+  let hotWalked = false;
+  /** the walk from where it stands to the nearest cell of the way out, ms (the fortress's ground it walked in over) */
+  const toWayMs = () => walked.reduce((n, c) => Math.min(n, dist3(c, me)), Infinity) * FAR_STEP_MS;
+  /**
+   * Back now, while the fire resistance still covers the way: cells by lava were walked under it, and what is left of
+   * it no longer outlasts the walk to the way, the way back and FIRE_SPARE_MS. Only the day's time turned the trip back
+   * before, so a plain potion drunk 40 cells out let it work on at the fortress until the effect was gone, and the way
+   * back went past the lava it came by with none on it (and, the kit's one potion drunk, none for the Guardian's hook).
+   */
+  const fireNeed = () => backMs() + toWayMs() + FIRE_SPARE_MS;
+  const fireShort = () => hotWalked && fire * 1000 <= fireNeed();
+  const FIRE_SHORT = 'the fire resistance drunk now lasts only the way back';
+  /**
+   * A potion of fire resistance drunk for the way to `what` by lava (P4): the longest carried (by its contents), only
+   * one that outlasts the bound fireShort turns the trip back by (fireNeed), the walk `walkMs` to `what` and back to
+   * here, and FIRE_WORK_MS of work there, and not with a ghast watching (the trip it may cut short would lose it).
+   * Undefined once it took; else why not ("none is drunk": none carried). (Against the way back alone, a plain potion
+   * drunk 20 off the way inside the fortress ran short at the first look after it, its walk to the lava not begun.)
+   */
+  const drinkFor = async (what: string, walkMs: number): Promise<string | undefined> => {
+    const potion = potionToDrink(await inventory(ctx));
+    if (!potion) return 'none is drunk';
+    if (potionSeconds(potion) * 1000 <= fireNeed() + walkMs + FIRE_WORK_MS) return `the potion of ${potion.potion} carried would not last the way there and back`;
+    if (watched) return `${ghastAbout(ents)}: no potion drunk for a trip it may cut short`;
+    const held = await ctx.call('item.select', { name: potion.name, slot: potion.slot }).then(() => true, () => false);
+    if (ctx.signal.aborted) throw new Error('aborted');
+    const r = held ? await ctx.call<{ finished?: boolean }>('use', {}, 15_000).catch(() => ({ finished: false })) : undefined;
+    if (ctx.signal.aborted) throw new Error('aborted');
+    const st = await ctx.status().catch(() => undefined);
+    fire = fireOf(st);
+    if (fire <= 0) return `the potion of fire resistance did not take${!held ? ' (not taken in hand)' : r?.finished === false ? ' (not drunk)' : ''}`;
+    ctx.progress(`fortress: drank a potion of ${potion.potion} for the way to ${what} by lava: ${Math.round(fire)} s of fire resistance`);
+    return undefined;
+  };
   const start = footing(g, me) ?? floorOf(me);
   walked.push(start);
   const walkOut = async (path: Pos[]): Promise<'ok' | 'stuck' | 'gone' | 'back'> => {
     for (let i = 0; i < path.length - 1;) {
       const j = Math.min(i + STEP, path.length - 1);
       if (i > 0 && !(await watch())) return 'back';
+      if (i > 0 && fireShort()) { stop = FIRE_SHORT; unlearnt = true; return 'back'; }
       if (i > 0 && left() < (walked.length + 2) * FAR_STEP_MS + BACK_MS) { stop = `the fortress trip's time is up on the ${fw.bearing} way`; unlearnt = true; return 'back'; }
       const r = await walkAlong(ctx, path.slice(i, j + 1), STEP);
       if (r !== 'ok') return r;
-      for (const c of path.slice(i + 1, j + 1)) walked.push(c);
+      for (const c of path.slice(i + 1, j + 1)) { walked.push(c); if (lavaBy(g, c)) hotWalked = true; }
       i = j;
     }
     return 'ok';
@@ -523,6 +583,7 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
   };
   for (let j = 1, tries = 0; j <= fw.to && !end && !stop && !gone;) {
     if (!(await watch())) break;
+    if (fireShort()) { stop = FIRE_SHORT; unlearnt = true; break; }
     // the rest of the way there and back again, and the least of the fortress's work (FAR_TURN_MS: a barter's out there)
     if (left() < (walked.length + 2 * rest(j)) * FAR_STEP_MS + FAR_TURN_MS + BACK_MS) { stop = `the fortress trip's time is up on the ${fw.bearing} way`; unlearnt = true; break; }
     const ahead = fw.way.slice(j, Math.min(fw.to, j + WAY_AHEAD - 1) + 1);
@@ -535,6 +596,15 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
     for (let i = ahead.length - 1; i >= 0 && k < 0; i--) if (reach.has(cellKey(ahead[i]))) k = i;
     if (k < 0) {
       if (watched && walkFrom(g, [here], wayMay).has(cellKey(ahead[0]))) { stop = `${ghastAbout(ents)}: the ${fw.bearing} way on only by a drop's edge`; unlearnt = true; break; }
+      // the way on only by lava within 2: a potion carried drunk for it (P4), instead of turning back. None carried:
+      // closed, as before (the dry mark grows: the fortress asks for no potion, and it would set out again for nothing)
+      if (!hotOk() && potionToDrink(await inventory(ctx)) && walkFrom(g, [here], p => wayHot(p) && knockSafe(p)).has(cellKey(ahead[0]))) {
+        const why = await drinkFor(`the fortress along the ${fw.bearing} way at nether ${fmt(ahead[0])}`, 2 * rest(j) * FAR_STEP_MS);
+        if (!why) continue;
+        stop = `fire resistance would be needed (lava within 2 of the ${fw.bearing} way at nether ${fmt(ahead[0])}) and ${why}`;
+        unlearnt = true;
+        break;
+      }
       end = `the ${fw.bearing} way closed by nether ${fmt(ahead[0])}`;
       break;
     }
@@ -565,7 +635,8 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
     const fortressMay = (p: Pos) => inRead(p) && !others.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && !lavaBy(g, p) && !overDrop(g, p);
     /** the same with lava let by: what would need fire resistance */
     const lavaMay = (p: Pos) => inRead(p) && !others.some(z => boxGap(z, cellBox(p)) < FROM_BUILDS) && !overDrop(g, p);
-    const walkable = (p: Pos) => fortressMay(p) && knockSafe(p);
+    // (by lava too while the fire resistance drunk outlasts the way back)
+    const walkable = (p: Pos) => (hotOk() ? lavaMay(p) : fortressMay(p)) && knockSafe(p);
     const looted = new Set((peekNether(world).fortress?.looted ?? []).map(cellKey));
     const tried = new Set<string>();
     /** the wart cells harvested this trip: their soul sand may be dug */
@@ -589,7 +660,16 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
       const here = footing(g, me);
       return here ? walkFrom(g, [here], ok) : new Map<string, { from: string | null; n: number }>();
     };
-    const between = () => watch();
+    const between = async () => {
+      if (!(await watch())) return false;
+      if (fireShort()) { stop = FIRE_SHORT; unlearnt = true; return false; }
+      return true;
+    };
+    /** A walk over the fortress's ground, a look between its legs; one over cells by lava is noted (the way back needs the effect too). */
+    const walkIn = (path: Pos[]) => {
+      if (path.some(c => lavaBy(g, c))) hotWalked = true;
+      return walkAlong(ctx, path, STEP, between);
+    };
     /** Items lying within DROP_RANGE of a point (or of the bot), picked up on foot over ground it may walk. */
     const pickUp = async (around: Pos | undefined): Promise<boolean> => {
       const passed = new Set<number>();
@@ -608,7 +688,7 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
           if (r && across(middleOf(q), next.position) <= 1.2 && takesAt(middleOf(q), next.position) && (!best || r.n < best.n)) best = { p: q, n: r.n };
         }
         if (!best || best.n === 0) { passed.add(next.id); continue; }
-        const w = await walkAlong(ctx, pathOf(reach, best.p), STEP, between);
+        const w = await walkIn(pathOf(reach, best.p));
         if (w === 'gone') { gone = true; return false; }
         if (w === 'back') return false;
         if (w === 'stuck') passed.add(next.id);
@@ -734,6 +814,7 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
     while (!stop && !gone) {
       if (left() < walked.length * FAR_STEP_MS + BACK_MS + 10_000) { stop = 'the fortress trip\'s time is up'; break; }
       if (!(await watch())) break;
+      if (fireShort()) { stop = FIRE_SHORT; unlearnt = true; break; }
       const e = foe();
       if (e) {
         // a blaze out of the swing's reach: walked in to (it holds off while it sees the bot), or let be
@@ -741,7 +822,7 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
           const reach = reachFrom();
           const st = blazeStance(e, reach);
           if (!st) { const on = blazeFloor(e); letBe(e, typeof on === 'string' ? on : `has no ground it may walk within ${BLAZE_REACH} of it`); continue; }
-          const w = await walkAlong(ctx, pathOf(reach, st), STEP, between);
+          const w = await walkIn(pathOf(reach, st));
           if (w === 'gone') { gone = true; break; }
           if (w === 'back') { if (stop || gone) break; continue; }
           if (w === 'stuck') { missed.set(e.id, (missed.get(e.id) ?? 0) + 1); continue; }
@@ -755,14 +836,20 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
       const reach = reachFrom();
       const t = targets(reach)[0];
       if (!t) {
-        // the ground with the lava rule let go reaches some: fire resistance would be needed there, and none is drunk
-        const hot = targets(reachFrom(p => lavaMay(p) && knockSafe(p)))[0];
-        if (hot) { stop = `fire resistance would be needed (lava within 2 of the way to the ${hot.kind} at nether ${fmt(hot.at)}) and none is drunk`; break; }
+        // the ground with the lava rule let go reaches some: fire resistance would be needed there. A potion carried is
+        // drunk for it (P4), where it lasts the way back; else back
+        const hot = !hotOk() && targets(reachFrom(p => lavaMay(p) && knockSafe(p)))[0];
+        if (hot) {
+          const why = await drinkFor(`the ${hot.kind} at nether ${fmt(hot.at)}`, 2 * hot.n * FAR_STEP_MS);
+          if (!why) continue;
+          stop = `fire resistance would be needed (lava within 2 of the way to the ${hot.kind} at nether ${fmt(hot.at)}) and ${why}`;
+          break;
+        }
         if (rodsWanted() && waits < BLAZE_WAIT_LOOKS) { waits++; await pause(FORTRESS_WAITS.pollMs); continue; }
         return chests || warts || sand || foes ? 'nothing more it may take by the way in' : `nothing it may take within ${FORTRESS_REACH} of where the ${fw.bearing} way meets it`;
       }
       tried.add(cellKey(t.at));
-      const w = await walkAlong(ctx, pathOf(reach, t.stand), STEP, between);
+      const w = await walkIn(pathOf(reach, t.stand));
       if (w === 'gone') { gone = true; break; }
       if (w === 'back') { if (stop || gone) break; continue; }
       if (w === 'stuck') continue;
@@ -822,12 +909,15 @@ async function tripThere(ctx: GoalContext, fw: FortressWay, home: Pos, own: Pos,
   let w: 'ok' | 'stuck' | 'gone' | 'back' = 'stuck';
   for (let i = 0; i < 2 && w === 'stuck'; i++) {
     const st = await ctx.status().catch(() => undefined);
+    if (st) fire = fireOf(st);
     const p = floorOf(st?.position ?? me);
     const from = back.reduce((best, c, n) => (dist3(c, p) < dist3(back[best], p) ? n : best), 0);
-    // (from where it stands to the nearest cell of the way first: the fortress's ground it walked in over)
+    // (from where it stands to the nearest cell of the way first: the fortress's ground it walked in over. By lava too
+    // where it came in over lava under the potion (back is the only way now), or while the effect lasts that short walk)
     const here = footing(g, p);
+    const hotBack = hotWalked || fire * 1000 > FIRE_SPARE_MS;
     if (here && !same(here, back[from])) {
-      const reach = walkFrom(g, [here], c => same(c, back[from]) || (!others.some(z => boxGap(z, cellBox(c)) < FROM_BUILDS) && !lavaBy(g, c) && !overDrop(g, c)));
+      const reach = walkFrom(g, [here], c => same(c, back[from]) || (!others.some(z => boxGap(z, cellBox(c)) < FROM_BUILDS) && (hotBack || !lavaBy(g, c)) && !overDrop(g, c)));
       if (reach.has(cellKey(back[from]))) await walkAlong(ctx, pathOf(reach, back[from]), STEP);
     }
     w = await walkAlong(ctx, back.slice(from), STEP);
