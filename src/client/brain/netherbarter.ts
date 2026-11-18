@@ -329,6 +329,8 @@ export interface Seen {
   id: number; name: string; position: Pos; distance: number;
   baby?: boolean; aggressive?: boolean; admiring?: boolean; offhand?: string; mainhand?: string;
   item?: string; count?: number; foreign?: boolean; buildDistance?: number;
+  /** a living one's health (the bridge's; 0 for one dying, its body still listed until the server removes it) */
+  health?: number;
   /** a projectile's motion, blocks a tick (the bridge's from P3b on; none for one just fired, or from an older jar) */
   motion?: Pos;
 }

@@ -735,7 +735,12 @@ export const packOres: Goal = {
 
 // ------------------------------------------------------------------------------------------------ smelt
 
-const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot' };
+/**
+ * What the smelt loads, and what it cooks into: the raw ores, and the ancient debris the Nether's tunnels bring home
+ * (P6: the netherite's scrap, 200 ticks a piece as an ore; project.ts SMELTED). Loaded as it comes home, the debris
+ * waits in the chests as scrap, four of it an ingot when the netherite milestone smiths a piece.
+ */
+const ORES: Record<string, string> = { raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot', ancient_debris: 'netherite_scrap' };
 const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_oak_log', 'acacia_log', 'jungle_log', 'cherry_log', 'mangrove_log', 'oak_planks', 'birch_planks', 'spruce_planks'];
 
 /** A furnace's time over one item (200 game ticks), with some of the server's lag: what a load's time is reckoned in. */

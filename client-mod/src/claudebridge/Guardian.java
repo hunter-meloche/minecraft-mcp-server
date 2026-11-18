@@ -52,8 +52,9 @@ public final class Guardian {
 
     /**
      * Armour slots the gear check leaves alone for now: inventory index (36 feet .. 39 head) -> until when (ms). Set by
-     * armor.unequip, so a piece taken off for the enchanting table or the anvil stays off (and no spare goes on in its
-     * place) until the block has it; ended by enchant.close, anvil.close or the time running out. Game thread only.
+     * armor.unequip, so a piece taken off for the enchanting table, the anvil or the smithing table stays off (and no
+     * spare goes on in its place) until the block has it; ended by enchant.close, anvil.close, smith.close or the time
+     * running out. Game thread only.
      */
     static final Map<Integer, Long> gearHoldUntil = new HashMap<>();
 
@@ -73,10 +74,10 @@ public final class Guardian {
     }
 
     /**
-     * After the enchanting table or the anvil has had a piece armor.unequip took off (or the run gave up): end every
-     * hold and put the best of the held kinds on again now, the enchanted or mended piece if it took, not when the gear
-     * check next looks. With auto-defend off that check never runs, and the chore would take all four pieces off, one
-     * a run, with nothing to wear them again. A piece still in the block's menu (no offer, no result) comes back from
+     * After the enchanting table, the anvil or the smithing table has had a piece armor.unequip took off (or the run
+     * gave up): end every hold and put the best of the held kinds on again now, the enchanted, mended or netherite
+     * piece if it took, not when the gear check next looks. With auto-defend off that check never runs, and the chore
+     * would take all four pieces off, one a run, with nothing to wear them again. A piece still in the block's menu (no offer, no result) comes back from
      * the server a tick or two after the close: a few more looks over 2 s put it on then (`from` names the block in
      * that note). Returns what went on at once. Call it after the menu is closed.
      */

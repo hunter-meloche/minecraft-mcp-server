@@ -312,7 +312,7 @@ test('the look\'s gate: open once linked with its own portal known, at stage 0 o
   netherOf(past).stage = 1;
   t.false(lookOpen(past), 'past stage 0: the look is done with');
   // (P3a adds the barter and the quartz at stage 1, P3b the scouting and the debris at stage 2)
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3', 'bastion 3']);
   const s = lookAt(KIT, 1000);
   t.is(lookReady(s, w), null, 'its own portal stands: no frame\'s obsidian asked for');
   const rung = workGoals(() => undefined, LADDER, () => T0).find(g => g.name === 'work: nether')!;

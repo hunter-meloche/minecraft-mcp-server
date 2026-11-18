@@ -388,8 +388,12 @@ public final class Combat {
      * attack-entity: chase and hit until the target dies; 'hostile' keeps going with the next monster while health
      * allows. Stops at low health (4 HP earlier when outnumbered) and takes cover. Replies with kills, swings, landed
      * hits, what vanished without dying (creeper blasts), what was out of reach, and the threats still around.
+     * crowdStop false: minHealth whoever is about (a bastion: every piglin there is an Enemy, the calm ones and the
+     * victim too, and the brain counts the turned ones itself). careful: the chase changes nothing on its way
+     * (Careful: no break, no place; a bastion's gold blocks and gilded blackstone turn every piglin within 16 when broken).
      */
-    static void fight(BridgeServer.Call c, String query, double maxDistance, int timeoutTicks, float minHealth, boolean retreat) {
+    static void fight(BridgeServer.Call c, String query, double maxDistance, int timeoutTicks, float minHealth, boolean retreat,
+                      boolean crowdStop, boolean careful) {
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer self = mc.player;
         Entity first = pick(query, maxDistance, Set.of());
@@ -400,6 +404,7 @@ public final class Combat {
         boolean multiple = query.equals("hostile");
         victimId = first.getId();
         landed = 0;
+        if (careful) Careful.begin();
         Ticker.add(new Ticker.Task() {
             Entity victim = first;
             final java.util.HashSet<Integer> skip = new java.util.HashSet<>();
@@ -412,9 +417,24 @@ public final class Combat {
 
             /** why the victim is let go rather than chased (it flies, stands by lava, across a drop), as last seen */
             String letGo;
+            /** the careful walk this fight began, not yet ended (once only: a tick that throws is dropped without end) */
+            boolean carefulOn = careful;
+
+            void uncareful() {
+                if (carefulOn) { carefulOn = false; Careful.end(); }
+            }
 
             @Override
             public boolean tick(Minecraft m) {
+                try {
+                    return step(m);
+                } catch (RuntimeException e) {
+                    uncareful(); // Baritone's breaking must not stay off for good
+                    throw e;
+                }
+            }
+
+            boolean step(Minecraft m) {
                 age++;
                 LocalPlayer p = m.player;
                 if (p == null) return end("none");
@@ -428,7 +448,7 @@ public final class Combat {
                     newTarget(next);
                     return false;
                 }
-                float stopAt = hostilesNear(12).size() >= 2 ? minHealth + 4 : minHealth;
+                float stopAt = crowdStop && hostilesNear(12).size() >= 2 ? minHealth + 4 : minHealth;
                 if (p.getHealth() <= stopAt) return end("low_health");
                 if (age > timeoutTicks) return end("timeout");
                 double d = p.distanceTo(victim);
@@ -496,6 +516,7 @@ public final class Combat {
             boolean end(String outcome) {
                 shieldDown();
                 Processes.baritone().getPathingBehavior().cancelEverything();
+                uncareful();
                 fighting = false;
                 victimId = -1;
                 JsonObject r = obj("outcome", outcome, "kills", kills, "vanished", vanished, "unreachable", unreachable, "hits", hits,
@@ -533,7 +554,8 @@ public final class Combat {
         s.register("fight", true, (p, c) -> {
             if (fighting) throw new IllegalStateException("already fighting");
             fight(c, required(p, "target").toLowerCase().replace("minecraft:", ""), numParam(p, "maxDistance", 16),
-                intParam(p, "timeoutMs", 30_000) / 50, (float) numParam(p, "minHealth", 6), !p.has("retreat") || p.get("retreat").getAsBoolean());
+                intParam(p, "timeoutMs", 30_000) / 50, (float) numParam(p, "minHealth", 6), !p.has("retreat") || p.get("retreat").getAsBoolean(),
+                !p.has("crowdStop") || p.get("crowdStop").getAsBoolean(), p.has("careful") && p.get("careful").getAsBoolean());
             return BridgeServer.LATER;
         });
     }

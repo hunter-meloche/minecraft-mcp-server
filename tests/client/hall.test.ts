@@ -521,13 +521,13 @@ test('no room in the yard: it grows the yard as a site step does, at most twice,
 
 // ------------------------------------------------------------------------------------------------ the milestone
 
-test('the hall milestone comes after the nether portal, the last of the tree but the brewing and the wart farm (P4), after the workshop; its steps in order; with the portal done it is next', (t) => {
+test('the hall milestone comes after the nether portal, the last of the tree but the brewing and the wart farm (P4) and the netherite (P6), after the workshop; its steps in order; with the portal done it is next', (t) => {
   const m = TREE.find(x => x.id === 'hall')!;
   t.is(m.id, 'hall');
   t.is(m.title, 'a villager hall');
   t.deepEqual(m.prereqs, ['workshop']);
   t.is(TREE.findIndex(x => x.id === 'nether-portal'), TREE.indexOf(m) - 1);
-  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['brewing', 'wart-farm']);
+  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['brewing', 'wart-farm', 'netherite']);
   t.deepEqual(m.steps.map(s => s.name), ['find room for the hall', 'the beds and the windows\' glass', 'build the villager hall']);
   t.deepEqual(hallMilestone(['workshop']).steps.map(s => s.name), m.steps.map(s => s.name));
   t.is(TREE.filter(x => x.id === 'hall').length, 1);

@@ -258,6 +258,11 @@ export interface WorldMemory {
    * it out again and lets this go
    */
   gearSwap?: import('./netherset.js').GearSwap;
+  /**
+   * A job at the smithing table with the piece in it, from the opening to the close that shut it (netherite.ts
+   * useSmithing): one left means the table may have dropped them by a disconnect (smithDropsGoal looks round it)
+   */
+  smithingOpen?: import('./netherite.js').SmithingOpen;
 }
 
 export const DEFAULT_LEASH = 96;

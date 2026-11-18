@@ -93,13 +93,13 @@ test('the portal frame along z: turned a quarter, the landmark still the inside\
 
 // ------------------------------------------------------------------------------------------------ the tree
 
-test('the portal milestone comes after the workshop, the last of the tree but the villager hall (P5b) and the brewing and the wart farm (P4), its steps in order', (t) => {
+test('the portal milestone comes after the workshop, the last of the tree but the villager hall (P5b), the brewing and the wart farm (P4) and the netherite (P6), its steps in order', (t) => {
   const m = PORTAL();
   t.is(m.id, 'nether-portal');
   t.is(m.title, 'a nether portal');
   t.deepEqual(m.prereqs, ['workshop']);
   t.is(TREE.findIndex(x => x.id === 'workshop'), TREE.indexOf(m) - 1);
-  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['hall', 'brewing', 'wart-farm']);
+  t.deepEqual(TREE.slice(TREE.indexOf(m) + 1).map(x => x.id), ['hall', 'brewing', 'wart-farm', 'netherite']);
   t.deepEqual(m.steps.map(s => s.name), [
     'gather 20 obsidian', 'craft 2 flint and steel', 'the spare diamond set', 'a golden helmet', 'find room for the portal', 'build the portal frame', 'light the portal'
   ]);

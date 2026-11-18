@@ -97,9 +97,10 @@ function farmWorld(stacks: ChestStack[], over: Partial<WorldMemory> = {}): World
   return world;
 }
 
-test('the wart farm milestone: after the brewing stand, the last of the tree; it waits on the Nether for its soul sand and a wart, and says so; then a site, the strip, the planting', (t) => {
-  const m = TREE.at(-1)!;
+test('the wart farm milestone: after the brewing stand, the last of the tree but the netherite (P6); it waits on the Nether for its soul sand and a wart, and says so; then a site, the strip, the planting', (t) => {
+  const m = TREE.at(-2)!;
   t.is(m.id, 'wart-farm');
+  t.is(TREE.at(-1)!.id, 'netherite');
   t.is(m.title, 'a nether wart farm');
   t.deepEqual(m.prereqs, ['brewing']);
   t.deepEqual(m.steps.map(s => s.name), ['soul sand and nether wart from the Nether', 'find room for the wart farm', 'build the wart farm\'s soul sand', 'set the wart farm\'s soul sand into the ground', 'plant the nether wart']);

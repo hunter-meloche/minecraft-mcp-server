@@ -14,6 +14,7 @@ import { netherPortalMilestone } from './portal.js';
 import { hallMilestone } from './villagers.js';
 import { brewingMilestone } from './brewing.js';
 import { wartFarmMilestone } from './wart.js';
+import { netheriteMilestone } from './netherite.js';
 
 /**
  * The bot's long game, in order. Each milestone is done once the world shows it (a zone the build registered), so
@@ -327,4 +328,8 @@ export const TREE: Milestone[] = [homeMilestone, storage, moreChests, perimeter,
   hallMilestone(['workshop']),
   // brewing (P4): the stand in the workshop once a blaze rod is home (the fortress trips bring them through the portal),
   // then the wart farm, planted from the fortress's wart
-  brewingMilestone(['workshop', 'nether-portal']), wartFarmMilestone(['brewing'])];
+  brewingMilestone(['workshop', 'nether-portal']), wartFarmMilestone(['brewing']),
+  // netherite (P6): the main set's chestplate, leggings, boots and helmet smithed one by one, each as a template (a
+  // bastion's, then its copies) and an ingot (the tunnels' debris) are home; after the brewing, whose potions the
+  // bastion and the tunnels go under
+  netheriteMilestone(['brewing'])];

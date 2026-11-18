@@ -355,7 +355,7 @@ test('the bearing: the eight in turn, the least known first: none walked before 
 });
 
 test('the scouting\'s gate: nothing before stage 2 or with the switch off; at stage 2 the rung\'s work beside the barter and the quartz, ready while a bearing is due and the kit is whole, held with the barter for the day; its gates write nothing', (t) => {
-  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3']);
+  t.deepEqual(NETHER_WORK.map(v => `${v.id} ${v.stage}`), ['setup 0', 'look 0', 'barter 1', 'quartz 1', 'scout 2', 'debris 2', 'fortress 3', 'tunnel 3', 'bastion 3']);
   const w = setupWorld();
   const n = netherOf(w);
   Object.assign(n, { portal: { x: OWN.x, y: OWN.y, z: OWN.z }, linked: true, stage: 1, stageTrips: 2, cleanTrips: 3 });

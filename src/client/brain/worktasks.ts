@@ -39,6 +39,7 @@ import { QUARTZ_LEAST_MS, quartzOpen, quartzReady, quartzRun } from './netherqua
 import { SCOUT_LEAST_MS, scoutOpen, scoutReady, scoutRun } from './netherscout.js';
 import { DEBRIS_LEAST_MS, debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
 import { FORTRESS_LEAST_MS, fortressOpen, fortressReady, fortressRun } from './netherfortress.js';
+import { BASTION_LEAST_MS, bastionOpen, bastionReady, bastionRun } from './netherbastion.js';
 import { TUNNEL_LEAST_MS, tunnelOpenAt, tunnelReady, tunnelRun } from './nethertunnel.js';
 import { villagersTask } from './villagemove.js';
 import { railsTask } from './railshome.js';
@@ -585,8 +586,27 @@ const tunnelWork: NetherWork = {
   run: (ctx, budgetMs, now) => tunnelRun(ctx, budgetMs, now)
 };
 
-/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz, stage 2's scouting and debris, stage 3's fortress and tunnelling; P6 adds the bastion. */
-export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork, scoutWork, debrisWork, fortressWork, tunnelWork];
+/**
+ * `bastion` (P6, netherbastion.ts, the user's decision of Nov 13: it raids a bastion itself for the netherite upgrade
+ * template): from stage 3 with FIRE_POTIONS potions of fire resistance and one of strength in stock (nether.ts
+ * NETHER_STAGES), to a natural bastion a scouting leg found, by that leg's way, while the home has no template: at full
+ * health and food in the fire gear with a shield, both potions drunk at the bastion's edge; its chests opened only with
+ * few piglins by (they turn), those that turn and one piglin brute a trip (the user's choice of Nov 18) fought from the
+ * shield; home at once under 14 health, at a second brute or a hoglin near, more than three foes on it, the wither, a
+ * hold, its time, the potions running short. A death on one turns the bastion trips off until the lead switches them
+ * back.
+ */
+const bastionWork: NetherWork = {
+  id: 'bastion',
+  leastMs: () => BASTION_LEAST_MS,
+  stage: 3,
+  open: world => bastionOpen(world),
+  ready: (s, world) => bastionReady(s, world),
+  run: (ctx, budgetMs, now) => bastionRun(ctx, budgetMs, now)
+};
+
+/** The Nether rung's work: stage 0's setup and look, stage 1's barter and quartz, stage 2's scouting and debris, stage 3's fortress, tunnelling and bastion. */
+export const NETHER_WORK: readonly NetherWork[] = [setupWork, lookWork, barterWork, quartzWork, scoutWork, debrisWork, fortressWork, tunnelWork, bastionWork];
 
 /** The home portal is lit and the bot's own: the portal milestone is done and the portal known. */
 const portalReady = (world: WorldMemory) => (world.progress?.done ?? []).includes('nether-portal') && !!homePortal(world);

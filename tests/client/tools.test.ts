@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['brewing-stand', 'build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'lay-rail', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'place-minecart', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'take-up-rail', 'use-item-on-block', 'use-portal']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['brewing-stand', 'build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'lay-rail', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'place-minecart', 'rejoin-server', 'set-home', 'smithing-table', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'take-up-rail', 'use-item-on-block', 'use-portal']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {
@@ -866,6 +866,115 @@ test('brewing-stand take reports the potions by contents, and the refusal under 
   t.regex(rb.text, /^Failed: Took nothing from the brewing stand at \(-545, 63, 2155\): brewing \(6 s left\): take the potions once it is done, or force\. It holds bottles: long_fire_resistance potion/);
   // closed even after the refusal
   t.true(b.request.getCalls().some(c => c.args[0] === 'brew.close'));
+});
+
+test('smithing-table upgrades a carried diamond piece: the template, the piece and the ingot in, the netherite piece out with its enchantments, closed', async (t) => {
+  const en = [{ name: 'protection', level: 4 }, { name: 'unbreaking', level: 3 }, { name: 'mending', level: 1 }];
+  const table = { open: true, template: null, base: null, addition: null, result: null, noRecipe: false, canTake: false, freePockets: 20 };
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 12, name: 'diamond_chestplate', count: 1, enchantments: en }, { slot: 13, name: 'netherite_upgrade_smithing_template', count: 2 }, { slot: 14, name: 'netherite_ingot', count: 1 }], selectedSlot: 0, held: null },
+    'smith.open': table,
+    'smith.put': (p: Record<string, unknown>) => p.which === 'addition'
+      ? { ...table, which: 'addition', put: { name: 'netherite_ingot', count: 1 }, result: { name: 'netherite_chestplate', count: 1, enchantments: en }, canTake: true }
+      : { ...table, which: p.which, put: p.which === 'base' ? { name: 'diamond_chestplate', count: 1, enchantments: en } : { name: p.name, count: 1 } },
+    'smith.take': { ok: true, item: 'netherite_chestplate', count: 1, slot: 12, from: 'diamond_chestplate', enchantments: en, open: true },
+    'smith.close': { ok: true, wasOpen: true, wore: [] }
+  });
+  const r = await run('smithing-table', { x: -545, y: 63, z: 2153, base: 'diamond_chestplate' });
+  t.false(r.isError);
+  t.is(r.text, 'Smithed diamond_chestplate -> netherite_chestplate (protection 4, unbreaking 3, mending kept) at (-545, 63, 2153); in slot 12');
+  const smith = request.getCalls().filter(c => String(c.args[0]).startsWith('smith.')).map(c => `${c.args[0]} ${JSON.stringify(c.args[1] ?? {})}`);
+  t.deepEqual(smith, [
+    'smith.open {"x":-545,"y":63,"z":2153}',
+    'smith.put {"which":"template","name":"netherite_upgrade_smithing_template","count":1}',
+    'smith.put {"which":"base","name":"diamond_chestplate","count":1}',
+    'smith.put {"which":"addition","name":"netherite_ingot","count":1}',
+    // only the netherite piece is taken: never a trim a stray template would make
+    'smith.take {"expect":"netherite_chestplate"}',
+    'smith.close {}'
+  ]);
+  t.false(request.getCalls().some(c => c.args[0] === 'armor.unequip'));
+});
+
+test('smithing-table takes a worn piece off for the table, puts it in by its slot, and says the netherite piece went on again', async (t) => {
+  const en = [{ name: 'protection', level: 4 }];
+  const table = { open: true, template: null, base: null, addition: null, result: null, noRecipe: false };
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 37, name: 'diamond_leggings', count: 1, enchantments: en }, { slot: 13, name: 'netherite_upgrade_smithing_template', count: 1 }, { slot: 14, name: 'netherite_ingot', count: 1 }], selectedSlot: 0, held: null },
+    'armor.unequip': { ok: true, slot: 9, name: 'diamond_leggings', count: 1, holdMs: 60_000 },
+    'smith.open': table,
+    'smith.put': (p: Record<string, unknown>) => ({ ...table, which: p.which, put: { name: p.name, count: 1 }, ...(p.which === 'addition' ? { result: { name: 'netherite_leggings', count: 1, enchantments: en } } : {}) }),
+    'smith.take': { ok: true, item: 'netherite_leggings', count: 1, slot: 9, from: 'diamond_leggings', enchantments: en, open: true },
+    'smith.close': { ok: true, wasOpen: true, wore: ['netherite_leggings'] }
+  });
+  const r = await run('smithing-table', { x: -545, y: 63, z: 2153, base: 'diamond_leggings' });
+  t.false(r.isError);
+  t.is(r.text, 'Smithed diamond_leggings -> netherite_leggings (protection 4 kept) at (-545, 63, 2153); worn');
+  t.deepEqual(request.getCalls().find(c => c.args[0] === 'armor.unequip')!.args[1], { slot: 'legs', holdMs: 60_000 });
+  // the piece armor.unequip took off, by its slot (a spare of its name would be the wrong one)
+  t.deepEqual(request.getCalls().find(c => c.args[0] === 'smith.put' && (c.args[1] as { which: string }).which === 'base')!.args[1], { which: 'base', name: 'diamond_leggings', slot: 9, count: 1 });
+  t.is(request.getCalls().filter(c => c.args[0] === 'smith.close').length, 1);
+});
+
+test('smithing-table refuses what has no upgrade, says why there is no result, and closes the table after any failure', async (t) => {
+  const golden = setup({});
+  const g = await golden.run('smithing-table', { x: 1, y: 64, z: 2, base: 'golden_helmet' });
+  t.true(g.isError);
+  t.is(g.text, 'Failed: golden_helmet has no netherite upgrade: give a diamond piece (diamond_chestplate, diamond_pickaxe...)');
+  t.false(golden.request.getCalls().some(c => String(c.args[0]).startsWith('smith.')));
+
+  const table = { open: true, template: null, base: null, addition: null, result: null, noRecipe: false };
+  const inventory = { items: [{ slot: 12, name: 'diamond_boots', count: 1 }], selectedSlot: 0, held: null };
+  const none = setup({
+    inventory,
+    'smith.open': table,
+    'smith.put': (p: Record<string, unknown>) => {
+      if (p.which === 'addition') throw new Error('no netherite_ingot in inventory');
+      return { ...table, which: p.which, put: { name: p.name, count: 1 } };
+    },
+    'smith.close': { ok: true, wasOpen: true, wore: [] }
+  });
+  const n = await none.run('smithing-table', { x: 1, y: 64, z: 2, base: 'diamond_boots' });
+  t.true(n.isError);
+  t.is(n.text, 'Failed: Could not put the netherite_ingot in the smithing table at (1, 64, 2): no netherite_ingot in inventory');
+  t.true(none.request.getCalls().some(c => c.args[0] === 'smith.close'));
+  t.false(none.request.getCalls().some(c => c.args[0] === 'smith.take'));
+
+  const full = { open: true, template: { name: 'netherite_upgrade_smithing_template', count: 1 }, base: { name: 'diamond_boots', count: 1 }, addition: { name: 'netherite_ingot', count: 1 }, result: null, noRecipe: true };
+  const wrong = setup({ inventory, 'smith.open': table, 'smith.put': (p: Record<string, unknown>) => ({ ...full, which: p.which, put: { name: p.name, count: 1 } }), 'smith.close': { ok: true, wasOpen: true, wore: [] } });
+  const w = await wrong.run('smithing-table', { x: 1, y: 64, z: 2, base: 'diamond_boots' });
+  t.true(w.isError);
+  t.is(w.text, 'Failed: The smithing table at (1, 64, 2) shows no result: template: netherite_upgrade_smithing_template; base: diamond_boots; addition: netherite_ingot; result: none (no recipe takes these)');
+  t.true(wrong.request.getCalls().some(c => c.args[0] === 'smith.close'));
+});
+
+test('smithing-table walks carefully into reach when the table is too far, and leaves a table it could not open alone', async (t) => {
+  let opens = 0;
+  const en = [{ name: 'efficiency', level: 5 }];
+  const table = { open: true, template: null, base: null, addition: null, result: null, noRecipe: false };
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 3, name: 'diamond_pickaxe', count: 1, enchantments: en }], selectedSlot: 0, held: null },
+    'smith.open': () => {
+      if (opens++ === 0) throw new Error('smithing table too far to open (6.0 blocks, max 4.5)');
+      return table;
+    },
+    goto: { arrived: true },
+    'smith.put': (p: Record<string, unknown>) => ({ ...table, which: p.which, put: { name: p.name, count: 1 }, ...(p.which === 'addition' ? { result: { name: 'netherite_pickaxe', count: 1, enchantments: en } } : {}) }),
+    'smith.take': { ok: false, reason: 'the server did not hand the result over', item: 'netherite_pickaxe', from: 'diamond_pickaxe', open: true },
+    'smith.close': { ok: true, wasOpen: true, wore: [] }
+  });
+  const r = await run('smithing-table', { x: 3, y: 64, z: 4, base: 'diamond_pickaxe' });
+  t.true(r.isError);
+  t.is(r.text, 'Failed: Took nothing from the smithing table at (3, 64, 4): the server did not hand the result over');
+  // the careful walk: no digging or placing on the way to the workshop (A11)
+  t.like(request.getCalls().find(c => c.args[0] === 'goto')!.args[1], { x: 3, y: 64, z: 4, careful: true });
+  t.true(request.getCalls().some(c => c.args[0] === 'smith.close'));
+
+  const gone = setup({ inventory: { items: [], selectedSlot: 0, held: null }, 'smith.open': () => { throw new Error('no smithing_table at 3, 64, 4 (air)'); } });
+  const g = await gone.run('smithing-table', { x: 3, y: 64, z: 4, base: 'diamond_pickaxe' });
+  t.true(g.isError);
+  t.is(g.text, 'Failed: Could not open the smithing table at (3, 64, 4): no smithing_table at 3, 64, 4 (air)');
+  t.false(gone.request.getCalls().some(c => c.args[0] === 'smith.close'));
 });
 
 test('use-item-on-block says so when the server never answered the use', async (t) => {

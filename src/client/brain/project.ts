@@ -1,7 +1,7 @@
 import { fromGate, nearHome, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import {
-  allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, stepId, stepOf,
+  allItems, backoffMs, backoffOf, countOf, haveFn, heldUntil, journal, milestoneOf, nextMilestone, progressOf, recipeFor, selfMade, stepId, stepOf,
   stillShort, STRING_KEEP, type Milestone
 } from './progress.js';
 import { chestTotals, reservedCount, takeFromChests } from './chests.js';
@@ -399,6 +399,9 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   }
   const r = recipeFor(item);
   if (!r || depth > 6) return { [item]: n - have };
+  // one made of itself (the netherite template's copy) with none of it carried: nothing makes the first. Gone down as
+  // any other, each level fetched the copy's diamonds for a template it then asked of itself again, seven deep
+  if (selfMade(item) && have < 1) return { [item]: n - have };
   const crafts = Math.ceil((n - have) / r.makes);
   // the leads' string stays (STRING_KEEP): wool for the hall's beds, or anything else made of string, uses only what
   // is beyond it. Taken, the pens' next lead would want string no trip fetches (it comes only as the mobs drop it)
@@ -423,12 +426,16 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
 export const SMELTED: Record<string, string> = {
   iron_ingot: 'raw_iron', gold_ingot: 'raw_gold', copper_ingot: 'raw_copper',
   glass: 'sand', stone: 'cobblestone', smooth_stone: 'stone', brick: 'clay_ball', terracotta: 'clay',
-  cracked_stone_bricks: 'stone_bricks', smooth_sandstone: 'sandstone', deepslate: 'cobbled_deepslate'
+  cracked_stone_bricks: 'stone_bricks', smooth_sandstone: 'sandstone', deepslate: 'cobbled_deepslate',
+  // the netherite's (P6), as 26.3's data/minecraft/recipe/netherite_scrap.json: ancient debris in a furnace, 200 ticks
+  // as an ore (a blast furnace does it in 100, but the home knows its furnace only, and the 16 debris of the four pieces
+  // are under 3 minutes in it). The smelt goal loads the debris carried home as it does raw ore (chores.ts ORES)
+  netherite_scrap: 'ancient_debris'
 };
 /** Most to smelt in one go (about 4 minutes at the furnace): a bigger bill is smelted over several runs. */
 export const SMELT_BATCH = 24;
-/** smelt-item's reply when the furnace holds raw ore (the smelt goal's, chores.ts) where something else is to go in. */
-export const RAW_ORE_IN = /^Furnace input slot is occupied by raw_(iron|gold|copper)$/;
+/** smelt-item's reply when the furnace holds raw ore or ancient debris (the smelt goal's, chores.ts) where something else is to go in. */
+export const RAW_ORE_IN = /^Furnace input slot is occupied by (raw_(iron|gold|copper)|ancient_debris)$/;
 
 type Slot = { name: string; count: number } | null;
 type Pockets = { name: string; count: number; slot: number }[];
@@ -458,7 +465,7 @@ async function inputOut(ctx: GoalContext, input: { name: string; count: number }
 export async function oreOut(ctx: GoalContext): Promise<boolean> {
   try {
     const f = await ctx.call<{ input: Slot }>('furnace.open', { ...ctx.world.landmarks.furnace! });
-    if (!f.input || !/^raw_(iron|gold|copper)$/.test(f.input.name)) return false;
+    if (!f.input || !/^(raw_(iron|gold|copper)|ancient_debris)$/.test(f.input.name)) return false;
     return await inputOut(ctx, f.input);
   } catch {
     return false;

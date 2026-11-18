@@ -176,6 +176,11 @@ export interface NetherMemory {
   barter?: BarterMemory;
   /** the fortress trips' switch after a death, the trip under way, the chests emptied, the fortresses refused (P3c: netherfortress.ts) */
   fortress?: FortressMemory;
+  /**
+   * the bastion trips' own, kept as the fortress's are (P6: netherbastion.ts): their switch after a death on one (off
+   * for good until the lead switches them back), the trip under way, the natural chests looted, the bastions refused
+   */
+  bastion?: FortressMemory;
   /** its tunnels for ancient debris at y 8-22, from its own portal: later trips go on from them (P3c: nethertunnel.ts) */
   tunnels?: TunnelMemory;
   /**
@@ -325,6 +330,28 @@ const shapeOf = (v: unknown): PortalShape | undefined => {
   return { x: v.x, y: v.y, z: v.z, axis: v.axis, ...(fin(v.width) && v.width > 0 ? { width: v.width } : {}), ...(fin(v.height) && v.height > 0 ? { height: v.height } : {}) };
 };
 
+/**
+ * The fortress's or the bastion's memory as it must be (the two are kept alike: their switch after a death, the trip
+ * under way, the chests emptied, the places refused), from whatever brain.json held; undefined when nothing of it holds.
+ */
+function natureTrips(f: unknown): FortressMemory | undefined {
+  if (!isObj(f)) return undefined;
+  const out: FortressMemory = {};
+  if (isObj(f.off) && fin(f.off.at)) out.off = { at: f.off.at, why: typeof f.off.why === 'string' ? f.off.why.slice(0, TRIP_TEXT) : '' };
+  if (isObj(f.trip) && fin(f.trip.from)) out.trip = { from: f.trip.from, ...(fin(f.trip.to) ? { to: f.trip.to } : {}) };
+  const looted = (Array.isArray(f.looted) ? f.looted : []).map(posOf).filter((p): p is Pos => !!p).slice(-FORTRESS_KEPT);
+  if (looted.length) out.looted = looted;
+  const refused = (Array.isArray(f.refused) ? f.refused : []).flatMap(x => {
+    const p = posOf(x);
+    if (!p || !isObj(x) || !fin(x.at)) return [];
+    const b = x.box;
+    const box = isObj(b) && fin(b.x1) && fin(b.y1) && fin(b.z1) && fin(b.x2) && fin(b.y2) && fin(b.z2) ? { x1: b.x1, y1: b.y1, z1: b.z1, x2: b.x2, y2: b.y2, z2: b.z2 } : undefined;
+    return [{ ...p, why: typeof x.why === 'string' ? x.why.slice(0, TRIP_TEXT) : '', at: x.at, ...(box ? { box } : {}) }];
+  }).slice(-FORTRESS_KEPT);
+  if (refused.length) out.refused = refused;
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** A Nether memory as it must be, from whatever brain.json held (nothing, P2a's first `{ trips }`, or something half written). */
 function clean(raw: unknown): NetherMemory {
   const r = isObj(raw) ? raw : {};
@@ -388,23 +415,10 @@ function clean(raw: unknown): NetherMemory {
     if (fin(b.untaken) && b.untaken > 0) barter.untaken = Math.floor(b.untaken);
     if (Object.keys(barter).length) m.barter = barter;
   }
-  const f = r.fortress;
-  if (isObj(f)) {
-    const fortress: FortressMemory = {};
-    if (isObj(f.off) && fin(f.off.at)) fortress.off = { at: f.off.at, why: typeof f.off.why === 'string' ? f.off.why.slice(0, TRIP_TEXT) : '' };
-    if (isObj(f.trip) && fin(f.trip.from)) fortress.trip = { from: f.trip.from, ...(fin(f.trip.to) ? { to: f.trip.to } : {}) };
-    const looted = (Array.isArray(f.looted) ? f.looted : []).map(posOf).filter((p): p is Pos => !!p).slice(-FORTRESS_KEPT);
-    if (looted.length) fortress.looted = looted;
-    const refused = (Array.isArray(f.refused) ? f.refused : []).flatMap(x => {
-      const p = posOf(x);
-      if (!p || !isObj(x) || !fin(x.at)) return [];
-      const b = x.box;
-      const box = isObj(b) && fin(b.x1) && fin(b.y1) && fin(b.z1) && fin(b.x2) && fin(b.y2) && fin(b.z2) ? { x1: b.x1, y1: b.y1, z1: b.z1, x2: b.x2, y2: b.y2, z2: b.z2 } : undefined;
-      return [{ ...p, why: typeof x.why === 'string' ? x.why.slice(0, TRIP_TEXT) : '', at: x.at, ...(box ? { box } : {}) }];
-    }).slice(-FORTRESS_KEPT);
-    if (refused.length) fortress.refused = refused;
-    if (Object.keys(fortress).length) m.fortress = fortress;
-  }
+  const fortress = natureTrips(r.fortress);
+  if (fortress) m.fortress = fortress;
+  const bastion = natureTrips(r.bastion);
+  if (bastion) m.bastion = bastion;
   const tn = r.tunnels;
   const tportal = isObj(tn) ? posOf(tn.portal) : undefined;
   if (isObj(tn) && tportal) {
@@ -850,20 +864,26 @@ export function netherTick(s: Snapshot, world: WorldMemory, d: DeathSeen | undef
     if (dropped) lines.push(dropped);
     // on a fortress trip (between its start and its end): the fortress trips stop for good, whatever the ladder says
     // after it (the user's strict rules: "trips stop after a death"); the lead switches them back
-    const ft = n.fortress?.trip;
-    if (ft && d.time >= ft.from && d.time <= (ft.to ?? ft.from + FORTRESS_TRIP_CAP_MS) && !n.fortress?.off) {
-      n.fortress!.off = { at: d.time, why: `a death on a fortress trip at nether ${fmt(where)}` };
-      lines.push(`nether: a death on a fortress trip: fortress trips off until the lead switches them back`);
+    // (the bastion's the same, P6: "a death turns bastion trips off for good")
+    for (const kind of ['fortress', 'bastion'] as const) {
+      const m = n[kind];
+      const ft = m?.trip;
+      if (m && ft && d.time >= ft.from && d.time <= (ft.to ?? ft.from + FORTRESS_TRIP_CAP_MS) && !m.off) {
+        m.off = { at: d.time, why: `a death on a ${kind} trip at nether ${fmt(where)}` };
+        lines.push(`nether: a death on a ${kind} trip: ${kind} trips off until the lead switches them back`);
+      }
     }
   }
-  // a fortress trip's end where its run could not write it: cut short down there (leave nether's abort: the dusk,
-  // under 6 health), the walk home after it is the trip's still, and it ends at the first look home after the bot went in
-  // (a death told a tick late is still inside it); a trip left open by a restart ends at FORTRESS_TRIP_CAP_MS
-  const open = n.fortress?.trip;
-  if (open && open.to === undefined) {
-    const cap = open.from + FORTRESS_TRIP_CAP_MS;
-    if (s.now >= cap) open.to = cap;
-    else if (s.dimension !== NETHER && (n.enteredAt ?? -Infinity) >= open.from) open.to = s.now;
+  // a fortress (or bastion) trip's end where its run could not write it: cut short down there (leave nether's abort:
+  // the dusk, under 6 health), the walk home after it is the trip's still, and it ends at the first look home after the
+  // bot went in (a death told a tick late is still inside it); a trip left open by a restart ends at FORTRESS_TRIP_CAP_MS
+  for (const kind of ['fortress', 'bastion'] as const) {
+    const open = n[kind]?.trip;
+    if (open && open.to === undefined) {
+      const cap = open.from + FORTRESS_TRIP_CAP_MS;
+      if (s.now >= cap) open.to = cap;
+      else if (s.dimension !== NETHER && (n.enteredAt ?? -Infinity) >= open.from) open.to = s.now;
+    }
   }
   lines.push(...raiseStage(n));
   const deaths = n.deaths.filter(x => s.now - x.at < NETHER_HOLDS.offWithinMs);
@@ -1127,10 +1147,11 @@ export function netherLine(world: WorldMemory, now: number): string {
   const tl = n.tunnels?.list ?? [];
   const tunnels = tl.length ? `; ${tl.length} tunnel(s) for debris, ${tl.filter(x => !x.shut).length} going on` : '';
   const fortressOff = n.fortress?.off ? `; fortress trips off (${n.fortress.off.why}, ${clock(n.fortress.off.at)}) until the lead switches them back` : '';
+  const bastionOff = n.bastion?.off ? `; bastion trips off (${n.bastion.off.why}, ${clock(n.bastion.off.at)}) until the lead switches them back` : '';
   const t = n.lastTrip;
   const last = t ? `; last trip ${Math.max(0, Math.round((now - t.at) / MINUTE))} min ago (${t.end}): ${t.text.replace(/(?<!\.)\.$/, '')}` : '';
   return `Nether: trips ${tripsOn(world) ? 'on' : 'off'}; stage ${n.stage}, ${toNext(n)}${probation}, ${deaths} death(s) in 3 days; ` +
     `home portal ${home ? `overworld ${fmt(home)}` : 'none'}, nether side ${n.portal ? `nether ${fmt(n.portal)}` : 'none'}` +
-    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${barterHeld}${fortressOff}${seen ? `; others' portals seen: ${seen}` : ''}` +
+    `${n.portal ? (n.linked ? ' (linked)' : ' (not linked)') : ''}${hold}${barterHeld}${fortressOff}${bastionOff}${seen ? `; others' portals seen: ${seen}` : ''}` +
     `${n.sites.length ? `; ${n.sites.length} site(s) known` : ''}${n.legs?.length ? `; ${n.legs.length}/${BEARINGS.length} bearings scouted` : ''}${tunnels}${last}.`;
 }

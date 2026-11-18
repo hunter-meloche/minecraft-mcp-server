@@ -10,7 +10,10 @@
  * ancient debris drops and what the bot held to dig it; and for the fortress (netherfortress.test.ts) the bridge's
  * fight (the nearest of the kind killed, a blaze's rod dropped where it died), what a nether wart and a soul sand dug
  * drop, the wither on the bot; and for the tunnelling (nethertunnel.ts) a block put down there as a dig opens the
- * rock (lava come in), and a block placed into lava (the game's: lava is replaceable).
+ * rock (lava come in), and a block placed into lava (the game's: lava is replaceable); and for the bastion
+ * (netherbastion.test.ts) a potion of strength drunk and its effect, (by `bottles`) the glass bottle it leaves, (by
+ * `brutesCome`) a piglin brute that walks at the bot once it sees it, and (by `corpseLooks`) a mob killed still listed
+ * with health 0, as the game keeps its body.
  */
 import type { InventoryItem } from '../../src/client/tools.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
@@ -141,8 +144,14 @@ export function game(world: WorldMemory, opts: {
   biome?: (p: Pos) => string | undefined;
   /** a potion drunk does not take (the use ends before it is drunk: nothing goes, no effect) */
   drinkFails?: boolean;
+  /** a potion drunk leaves its glass bottle in the pockets, as the game's does in survival (26.3 Items.POTION: usingConvertsTo GLASS_BOTTLE) */
+  bottles?: boolean;
   /** the bridge's fight never kills (a blaze that stays out of reach) */
   fightMisses?: boolean;
+  /** a mob the fight killed stays listed by world.entities with health 0 for this many looks (the game keeps a dead mob's body about 1 s, till the server removes it) */
+  corpseLooks?: number;
+  /** a piglin brute within 16 of the bot comes at it, this many blocks a look along the ground, to 1.5 off (26.3's brute: hostile at sight, golden helmet or not) */
+  brutesCome?: number;
   /** called after each block dug down there, with a way to put a block in the Nether (a test lets lava in as the rock opens) */
   onDig?: (at: Pos, put: (p: Pos, b: string) => void) => void;
 } = {}) {
@@ -157,8 +166,8 @@ export function game(world: WorldMemory, opts: {
   // the Nether as an earlier trip left it: what it dug and built there, the portal it lit
   for (const c of opts.after?.changed ?? []) over[c.dim].set(k(c.at), c.to);
   for (const l of opts.after?.lit ?? []) if (l.dim === NETHER && !lit.some(x => x.dim === l.dim && x.x === l.x && x.y === l.y && x.z === l.z)) lit.push({ ...l });
-  /** `fire`: the fire resistance on the bot, s (a test lowers it); `heldSlot`: the pocket item.select named by slot; `wither`: the wither on it (a test sets it); `food`: as the status says it */
-  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20, food: 20, fire: 0, heldSlot: -1, wither: false };
+  /** `fire`: the fire resistance on the bot, s (a test lowers it); `strength`: the strength on it, s; `heldSlot`: the pocket item.select named by slot; `wither`: the wither on it (a test sets it); `food`: as the status says it */
+  const state = { dim: OVERWORLD as Dim, pos: { x: HOME.x + 0.5, y: HOME.y, z: HOME.z + 0.5 }, held: 'diamond_sword', health: 20, food: 20, fire: 0, strength: 0, heldSlot: -1, wither: false };
   /** each block dug down there, with what the bot held to dig it */
   const dugWith: string[] = [];
   const own: { dimension: string; x: number; y: number; z: number }[] = [];
@@ -194,6 +203,8 @@ export function game(world: WorldMemory, opts: {
   // ---- the barter down there: the mobs, the items lying, a piglin's admiring and what it throws, the bot's pickup
   const mobs: Mob[] = (opts.mobs ?? []).map(m => ({ ...m, position: { ...m.position } }));
   const drops: Drop[] = [];
+  /** the mobs the fight killed, still listed (opts.corpseLooks), and the looks left */
+  let dying: { mob: Mob; looks: number }[] = [];
   const admire = new Map<number, number>();
   const lootPlan = opts.loot ?? [{ name: 'soul_sand', count: 4 }];
   let nextId = 5000, looks = 0, barters = 0;
@@ -234,6 +245,15 @@ export function game(world: WorldMemory, opts: {
         m.offhand = 'gold_ingot';
         if (!m.baby) admire.set(m.id, opts.admireLooks ?? 3);
         did.push(`piglin #${m.id} took the gold`);
+      }
+    }
+    // the brutes that see the bot come at it (the floor down there is flat: in sight)
+    if (opts.brutesCome && state.dim === NETHER) {
+      for (const m of mobs.filter(x => x.name === 'piglin_brute')) {
+        const dx = state.pos.x - m.position.x, dz = state.pos.z - m.position.z, d = Math.hypot(dx, dz);
+        if (d > 16 || d <= 1.5) continue;
+        const step = Math.min(opts.brutesCome, d - 1.5);
+        m.position = { x: m.position.x + dx / d * step, y: m.position.y, z: m.position.z + dz / d * step };
       }
     }
     pickup();
@@ -298,7 +318,8 @@ export function game(world: WorldMemory, opts: {
     progress: (x: string) => { said.push(x); },
     status: async () => {
       const biome = state.dim === NETHER ? opts.biome?.(feet()) : undefined;
-      const list = [...(state.fire > 0 ? [{ name: 'fire_resistance', amplifier: 0, seconds: state.fire }] : []), ...(state.wither ? [{ name: 'wither', amplifier: 0, seconds: 8 }] : [])];
+      const list = [...(state.fire > 0 ? [{ name: 'fire_resistance', amplifier: 0, seconds: state.fire }] : []), ...(state.strength > 0 ? [{ name: 'strength', amplifier: 0, seconds: state.strength }] : []),
+        ...(state.wither ? [{ name: 'wither', amplifier: 0, seconds: 8 }] : [])];
       const effects = list.length ? { effects: list } : {};
       return { inWorld: true, username: 'claudebot', screen: null, dimension: state.dim, position: { ...state.pos }, health: state.health, food: state.food, timeOfDay: 1000, ...(biome ? { biome } : {}), ...effects };
     },
@@ -313,6 +334,8 @@ export function game(world: WorldMemory, opts: {
         potion.count -= 1;
         if (potion.count <= 0) inv.splice(inv.indexOf(potion), 1);
         if (/(^|_)fire_resistance$/.test(potion.potion ?? '')) state.fire = /^long_/.test(potion.potion ?? '') ? 480 : 180;
+        if (/(^|_)strength$/.test(potion.potion ?? '')) state.strength = /^long_/.test(potion.potion ?? '') ? 480 : /^strong_/.test(potion.potion ?? '') ? 90 : 180;
+        if (opts.bottles) give('glass_bottle', 1);
         did.push(`drink potion of ${potion.potion}`);
         return { finished: true, food: 20, foodBefore: 20, health: state.health, healthBefore: state.health };
       }
@@ -363,7 +386,8 @@ export function game(world: WorldMemory, opts: {
         tick();
         const range = Number(p.maxDistance ?? 32);
         if (state.dim !== NETHER) return { entities: [] };
-        const all = [...mobs.map(seenMob), ...drops.map(seenDrop)].filter(e => e.distance <= range && (p.type === undefined || e.name === p.type));
+        const all = [...mobs.map(seenMob), ...dying.map(d => ({ ...seenMob(d.mob), health: 0 })), ...drops.map(seenDrop)].filter(e => e.distance <= range && (p.type === undefined || e.name === p.type));
+        dying = dying.map(d => ({ ...d, looks: d.looks - 1 })).filter(d => d.looks > 0);
         return { entities: all.sort((a, b) => a.distance - b.distance) };
       }
       if (m === 'item.toss') {
@@ -409,6 +433,7 @@ export function game(world: WorldMemory, opts: {
         did.push(`fight ${kind}${mob ? ` #${mob.id}` : ''} (min health ${p.minHealth}, retreat ${p.retreat})`);
         if (!mob || opts.fightMisses || (mob.name === 'blaze' && off(mob) > 3.2)) return { outcome: mob ? 'unreachable' : 'none', kills: [], unreachable: mob ? [kind] : [] };
         mobs.splice(mobs.indexOf(mob), 1);
+        if (opts.corpseLooks) dying.push({ mob, looks: opts.corpseLooks });
         const at = { x: Math.floor(mob.position.x), y: Math.floor(mob.position.y), z: Math.floor(mob.position.z) };
         let y = at.y;
         while (y > 1 && !solid(get(state.dim, { x: at.x, y: y - 1, z: at.z }))) y--;

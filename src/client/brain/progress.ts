@@ -285,6 +285,13 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   magma_cream: { makes: 1, from: { blaze_powder: 1, slime_ball: 1 } },
   sugar: { makes: 1, from: { sugar_cane: 1 } },
   fermented_spider_eye: { makes: 1, from: { spider_eye: 1, brown_mushroom: 1, sugar: 1 } },
+  // the netherite's (P6; netherite.ts), as 26.3's data/minecraft/recipe/netherite_ingot.json (shapeless, at a table:
+  // four scrap and four gold ingots; the scrap is smelted from ancient debris, project.ts SMELTED) and
+  // netherite_upgrade_smithing_template.json (shaped, at a table: seven diamonds round a template over a netherrack,
+  // two templates out) have them. The template is made of one of itself: nothing makes the first (a bastion's treasure
+  // chest has it), and the walkers below take none for one they would have to make from itself (selfMade)
+  netherite_ingot: { makes: 1, from: { netherite_scrap: 4, gold_ingot: 4 } },
+  netherite_upgrade_smithing_template: { makes: 2, from: { diamond: 7, netherrack: 1, netherite_upgrade_smithing_template: 1 } },
   // the villager move's boat (P5c), as 26.3's data/minecraft/recipe/oak_boat.json has it: five oak planks in a boat's
   // shape, at a table. Oak, not any planks: birch planks make a birch_boat, and the craft of an oak_boat would fail
   oak_boat: { makes: 1, from: { oak_planks: 5 } },
@@ -351,6 +358,13 @@ export function recipeFor(item: string): { makes: number; from: Record<string, n
   return RECIPES[item];
 }
 
+/**
+ * A recipe that takes one of what it makes (the netherite template's copy: one in, two out): with none of it at all
+ * it can never be made, only found. Gone down as any other, it asked for one of itself at every level of the walk,
+ * seven deep, and a stock list of 49 diamonds and 7 netherrack for a template that only a bastion gives.
+ */
+export const selfMade = (item: string): boolean => (recipeFor(item)?.from[item] ?? 0) > 0;
+
 /** The wood the bot has most of, carried and in the chests (logs, and planks at a quarter). */
 export function mostWood(items: Record<string, number>): string {
   const woods = new Map<string, number>();
@@ -381,6 +395,13 @@ export function rawShort(bill: Record<string, number>, haveItems: Record<string,
     let left = n - use;
     if (left <= 0) return;
     const r = RECIPES[g];
+    // one made of itself: with none of it there it is short, as it is; with some, those go into the craft (one template
+    // and the copy's makings make two), not toward the count
+    if (r && selfMade(g) && depth <= 6) {
+      if (!((pool[g] ?? 0) + use > 0)) { short[g] = (short[g] ?? 0) + left; return; }
+      pool[g] = (pool[g] ?? 0) + use;
+      left = n;
+    }
     if (!r || depth > 6) { short[g] = (short[g] ?? 0) + left; return; }
     const crafts = Math.ceil(left / r.makes);
     for (const [inp, k] of Object.entries(r.from)) need(inp, k * crafts, depth + 1);

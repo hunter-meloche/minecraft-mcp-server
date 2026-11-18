@@ -181,6 +181,68 @@ export function brewStandText(st: BrewStatus): string {
   return `bottles: ${bottles}; ingredient: ${brewSlotText(st.ingredient)}; fuel: ${brewSlotText(st.fuel)}${left}; ${brew}`;
 }
 
+/**
+ * A smithing table as the bridge reads it (client-mod Smithing.java: smith.open and smith.status answer it, smith.put
+ * with it). Its slots: the `template` (0), the `base` piece (1), the `addition` (2: the ingot) and the `result` (3), the
+ * server's; null an empty slot. `noRecipe`: all three in and no recipe takes them (the server's word); `canTake`: a
+ * result and a free pocket slot for it.
+ */
+export interface SmithStatus {
+  open: boolean; at?: Pos;
+  template?: SmithStack | null; base?: SmithStack | null; addition?: SmithStack | null; result?: SmithStack | null;
+  noRecipe?: boolean; canTake?: boolean; freePockets?: number;
+}
+/** A stack in one of the table's slots, with what tells it from others of its name. */
+export type SmithStack = Pick<InventoryItem, 'name' | 'count' | 'enchantments' | 'damage' | 'maxDamage' | 'repairCost'>;
+/** What smith.put answers (asked { which: 'template' | 'base' | 'addition', name?, slot?, count? }): the table a round trip on, `put` what that slot holds now. */
+export interface SmithPut extends SmithStatus { which: SmithSlot; put: SmithStack | null }
+export type SmithSlot = 'template' | 'base' | 'addition';
+/**
+ * What smith.take answers (asked { expect? }): the piece in the pockets at `slot`, with the enchantments it kept
+ * (always there: [] for a plain piece) and `from` the base it was; `ok` false when the server did not hand it over.
+ */
+export interface SmithTake {
+  ok: boolean; reason?: string; item: string; count?: number; slot?: number; from: string;
+  enchantments?: ItemEnchantment[]; damage?: number; maxDamage?: number; repairCost?: number; open?: boolean;
+}
+/** What smith.close answers: `wore` what went back on (a piece armor.unequip took off for the table). */
+export interface SmithClosed { ok: boolean; wasOpen: boolean; wore: string[] }
+/** The template of the netherite upgrade: one used per piece (26.3 netherite_*_smithing.json). */
+export const NETHERITE_TEMPLATE = 'netherite_upgrade_smithing_template';
+/** The upgrade's addition (26.3 #netherite_tool_materials holds it alone). */
+export const NETHERITE_INGOT = 'netherite_ingot';
+
+/** What the netherite upgrade makes of a diamond piece (26.3 smithing_transform recipes), or undefined for anything else. */
+export function netheriteOf(base: string): string | undefined {
+  const m = /^diamond_(helmet|chestplate|leggings|boots|sword|pickaxe|axe|shovel|hoe|spear)$/.exec(base);
+  return m ? `netherite_${m[1]}` : undefined;
+}
+
+/** Enchantments with a single level (26.3): named without it, as the plan's log line has "mending kept". */
+const ONE_LEVEL = new Set(['mending', 'silk_touch', 'infinity', 'aqua_affinity', 'channeling', 'flame', 'multishot', 'binding_curse', 'vanishing_curse']);
+const enchantName = (e: ItemEnchantment) => (ONE_LEVEL.has(e.name) && e.level === 1 ? e.name : `${e.name} ${e.level}`);
+
+/**
+ * A smithing take in a line, for the brain's log and the smithing-table tool: "diamond_chestplate ->
+ * netherite_chestplate (protection 4, unbreaking 3, mending kept)". `before`: the base's enchantments as it went in
+ * (the put's `put`); one the result lacks is named ("; lost thorns 3": the transform keeps them all, so that would be a
+ * bug to see).
+ */
+export function smithingText(take: Pick<SmithTake, 'from' | 'item' | 'enchantments'>, before?: ItemEnchantment[]): string {
+  const kept = take.enchantments ?? [];
+  const lost = (before ?? []).filter(b => !kept.some(k => k.name === b.name && k.level >= b.level));
+  const what = kept.length ? `${kept.map(enchantName).join(', ')} kept` : 'no enchantments to keep';
+  return `${take.from} -> ${take.item} (${what}${lost.length ? `; lost ${lost.map(enchantName).join(', ')}` : ''})`;
+}
+
+/** A smithing table in a line: "template: netherite_upgrade_smithing_template; base: diamond_chestplate (protection 4); addition: empty; result: none". */
+export function smithTableText(st: SmithStatus): string {
+  if (!st.open) return 'not open';
+  const slot = (s: SmithStack | null | undefined) => (!s ? 'empty' : `${s.name}${s.count > 1 ? ` x${s.count}` : ''}${s.enchantments?.length ? ` (${s.enchantments.map(enchantName).join(', ')})` : ''}`);
+  const result = st.result ? slot(st.result) : st.noRecipe ? 'none (no recipe takes these)' : 'none';
+  return `template: ${slot(st.template)}; base: ${slot(st.base)}; addition: ${slot(st.addition)}; result: ${result}`;
+}
+
 /** A stack in a chest: `slot` is the chest's own (0 the top left), what chest.withdraw's `slot` takes. */
 export type ChestStack = InventoryItem;
 /** What chest.open, chest.withdraw and chest.deposit answer: the totals by name, and each stack by its slot. */
@@ -2309,6 +2371,68 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
         return factory.createResponse(`Took ${took || 'nothing'} from the brewing stand at ${fmt(at)}${r.reason ? ` (${r.reason})` : ''}; it holds ${brewStandText(r)}`);
       } finally {
         await call('brew.close').catch(() => undefined);
+      }
+    }
+  );
+
+  register(
+    'smithing-table',
+    "Upgrade a diamond piece to netherite at a smithing table: the netherite_upgrade_smithing_template, the piece and a netherite_ingot go in, the netherite piece comes out with every enchantment the diamond one had. A worn piece is taken off for it and put on again after. The bot walks carefully into reach.",
+    {
+      ...xyz,
+      base: z.string().describe('The diamond piece to upgrade, e.g. diamond_chestplate'),
+      slot: z.coerce.number().optional().describe('Inventory slot (0-35) of the piece, when several of its name are carried')
+    },
+    async (args: Pos & { base: string; slot?: number }) => {
+      const at = floorPos(args);
+      const base = args.base.replace(/^minecraft:/, '');
+      const into = netheriteOf(base);
+      if (!into) return factory.createErrorResponse(`${base} has no netherite upgrade: give a diamond piece (diamond_chestplate, diamond_pickaxe...)`);
+      // a worn piece: the table takes only carried ones. armor.unequip holds its slot off the Guardian's gear check
+      // until smith.close, which puts the best of the kind on again (the netherite piece, once it is made)
+      const inv = await call<Inventory>('inventory');
+      let slot = args.slot;
+      let tookOff = false;
+      const carried = inv.items.some(i => i.slot < 36 && i.name === base);
+      const worn = inv.items.find(i => i.slot >= 36 && i.slot <= 39 && i.name === base);
+      if (!carried && worn) {
+        const off = await call<{ ok: boolean; slot: number }>('armor.unequip', { slot: ['feet', 'legs', 'chest', 'head'][worn.slot - 36], holdMs: 60_000 })
+          .catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+        if (off instanceof Error) return factory.createErrorResponse(`Could not take the worn ${base} off for the smithing table: ${off.message}`);
+        slot = off.slot;
+        tookOff = true;
+      }
+      const open = () => call<SmithStatus>('smith.open', { ...at }).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+      let closed: SmithClosed | undefined, opened = false;
+      const close = async () => { closed ??= await call<SmithClosed>('smith.close').catch(() => ({ ok: false, wasOpen: false, wore: [] })); return closed; };
+      try {
+        let st = await open();
+        if (st instanceof Error && /too far/.test(st.message)) {
+          await carefulNear(at);
+          st = await open();
+        }
+        if (st instanceof Error) return factory.createErrorResponse(`Could not open the smithing table at ${fmt(at)}: ${st.message}`);
+        opened = true;
+        let put: SmithPut | undefined;
+        let before: SmithStack | null = null;
+        for (const [which, name, from] of [['template', NETHERITE_TEMPLATE, undefined], ['base', base, slot], ['addition', NETHERITE_INGOT, undefined]] as const) {
+          const r = await call<SmithPut>('smith.put', { which, name, ...(from === undefined ? {} : { slot: from }), count: 1 })
+            .catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          if (r instanceof Error) return factory.createErrorResponse(`Could not put the ${name} in the smithing table at ${fmt(at)}: ${r.message}`);
+          put = r;
+          if (which === 'base') before = r.put;
+        }
+        if (!put?.result) return factory.createErrorResponse(`The smithing table at ${fmt(at)} shows no result${put?.noRecipe ? '' : ' yet'}: ${smithTableText(put ?? { open: true })}`);
+        const take = await call<SmithTake>('smith.take', { expect: into }, 15_000).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+        if (take instanceof Error) return factory.createErrorResponse(`Took nothing from the smithing table at ${fmt(at)}: ${take.message}`);
+        if (!take.ok) return factory.createErrorResponse(`Took nothing from the smithing table at ${fmt(at)}: ${take.reason ?? 'no answer'}`);
+        const { wore } = await close();
+        const where = wore.includes(take.item) ? '; worn' : take.slot !== undefined ? `; in slot ${mineflayerSlot(take.slot)}` : '';
+        return factory.createResponse(`Smithed ${smithingText(take, before?.enchantments)} at ${fmt(at)}${where}`);
+      } finally {
+        // closed when it opened, and when a worn piece came off for it even if it did not: smith.close also ends that
+        // piece's hold and wears it again
+        if (opened || tookOff) await close();
       }
     }
   );

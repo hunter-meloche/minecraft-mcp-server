@@ -55,6 +55,7 @@ import { homeBed } from './villagers.js';
 import { closeUpGoal, tooFarFrom } from './villagemove.js';
 import { railsHomeLine } from './railshome.js';
 import { VILLAGE_RANGE, movesOn, noteBells, noteSeen, villagersLine, villagesOf, type Seen } from './village.js';
+import { smithDropsGoal } from './netherite.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -211,7 +212,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), smithDropsGoal, leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -281,6 +282,19 @@ export class Brain {
     if (on) { if (n.fortress) delete n.fortress.off; }
     else (n.fortress ??= {}).off = { at: this.now(), why: `switched off by ${by}` };
     this.note(`nether fortress trips ${on ? 'on' : 'off'} (by ${by})`);
+    this.memory.save();
+  }
+
+  /**
+   * The bastion trips' own switch (the nether-trips tool's `bastion`, P6): off after a death on one (nether.ts
+   * netherTick) until the lead turns it back on; off by hand too. Said in the log with who turned it, and saved at once.
+   */
+  setBastionTrips(on: boolean, by: string): void {
+    if (!this.worldId) throw new Error('not in a world yet');
+    const n = netherOf(this.memory.world(this.worldId));
+    if (on) { if (n.bastion) delete n.bastion.off; }
+    else (n.bastion ??= {}).off = { at: this.now(), why: `switched off by ${by}` };
+    this.note(`nether bastion trips ${on ? 'on' : 'off'} (by ${by})`);
     this.memory.save();
   }
 
