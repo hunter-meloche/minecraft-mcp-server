@@ -153,18 +153,19 @@ export type BedPlan = { bed: string; string: number } | { wait: string } | { sho
  * The beds, from what there is (carried and in the chests, by name): three of a colour already; else a colour whose
  * beds and wool make three (the sheep pen's shears bring in whatever its flock wears); else, while the sheep pen has
  * sheep (`sheep`), its wool is waited for; else white, the wool made of string, four a wool, leaving the leads' share
- * (STRING_KEEP). The string short of that is the shortfall.
+ * (STRING_KEEP). The string short of that is the shortfall. `beds`: how many (the hall's three; the chores' more for
+ * the breeding, hallchores.ts).
  */
-export function bedPlan(have: Record<string, number>, sheep: boolean): BedPlan {
+export function bedPlan(have: Record<string, number>, sheep: boolean, beds = HALL_BEDS): BedPlan {
   const n = (item: string) => Math.max(0, have[item] ?? 0);
   const colours = COLOURS.map(c => ({ bed: `${c}_bed`, beds: n(`${c}_bed`), wool: n(`${c}_wool`) }));
-  const ready = colours.filter(c => c.beds >= HALL_BEDS).sort((a, b) => b.beds - a.beds)[0];
+  const ready = colours.filter(c => c.beds >= beds).sort((a, b) => b.beds - a.beds)[0];
   if (ready) return { bed: ready.bed, string: 0 };
-  const fromWool = colours.filter(c => c.beds + Math.floor(c.wool / WOOL_PER_BED) >= HALL_BEDS).sort((a, b) => b.beds - a.beds || b.wool - a.wool)[0];
+  const fromWool = colours.filter(c => c.beds + Math.floor(c.wool / WOOL_PER_BED) >= beds).sort((a, b) => b.beds - a.beds || b.wool - a.wool)[0];
   if (fromWool) return { bed: fromWool.bed, string: 0 };
   const white = colours.find(c => c.bed === 'white_bed')!;
-  const wool = WOOL_PER_BED * (HALL_BEDS - white.beds) - white.wool;
-  if (sheep) return { wait: `the sheep pen's wool (${white.wool} white wool carried and stored, ${wool} more for ${HALL_BEDS} beds)` };
+  const wool = WOOL_PER_BED * (beds - white.beds) - white.wool;
+  if (sheep) return { wait: `the sheep pen's wool (${white.wool} white wool carried and stored, ${wool} more for ${beds} beds)` };
   const string = STRING_PER_WOOL * wool;
   const spare = n('string') - STRING_KEEP;
   if (spare >= string) return { bed: 'white_bed', string };

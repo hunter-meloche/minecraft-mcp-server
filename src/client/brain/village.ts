@@ -832,9 +832,10 @@ export function pennedIn(block: (x: number, y: number, z: number) => string | nu
 
 /**
  * brain-status, `Villagers:`: the switch; the hall and the villagers in it (as last counted); the villages known, and
- * how each was judged (`far`: a free one too far from home for a day's move, villagemove.ts tooFarFrom); the last move.
+ * how each was judged (`far`: a free one too far from home for a day's move, villagemove.ts tooFarFrom); the last move;
+ * `chores`: the hall chores' part, given by the caller (hallchores.ts hallChoresText: this file stays out of its imports).
  */
-export function villagersLine(world: WorldMemory, now: number, far?: (site: VillageSite) => boolean): string {
+export function villagersLine(world: WorldMemory, now: number, far?: (site: VillageSite) => boolean, chores = ''): string {
   const v = peekVillages(world);
   const hall = world.zones?.hall?.[0];
   const ago = (t: number) => { const m = Math.round((now - t) / MINUTE); return m < 1 ? 'just now' : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
@@ -854,5 +855,6 @@ export function villagersLine(world: WorldMemory, now: number, far?: (site: Vill
   // (a search the day cut short, to go on from there)
   const searched = Object.entries(v.searched ?? {}).map(([b, q]) => `${b} to ${q.out}`);
   const half = searched.length ? `; searched part way (out of ${VILLAGE_RANGE}): ${searched.join(', ')}` : '';
-  return `Villagers: moves ${movesOn(world) ? 'on' : 'off'}; ${hallText}; ${villages}${rails}${open}${boat}${half}${last}`;
+  // (the chores in the hall, once it has been looked into: its adults and babies, the librarian, the emeralds)
+  return `Villagers: moves ${movesOn(world) ? 'on' : 'off'}; ${hallText}${chores}; ${villages}${rails}${open}${boat}${half}${last}`;
 }

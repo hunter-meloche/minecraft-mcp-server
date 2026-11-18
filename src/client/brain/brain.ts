@@ -13,6 +13,7 @@ import { enchantGoal } from './enchant.js';
 import { anvilGoal } from './anvil.js';
 import { brewGoal } from './brewing.js';
 import { wartRound } from './wart.js';
+import { hallChoresGoal, hallChoresText, hallInSight, noteHall } from './hallchores.js';
 import { HeatMap } from './paths.js';
 import { signsGoal } from './signs.js';
 import { driftGoal, structureGoal } from '../structures/job.js';
@@ -210,7 +211,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -530,7 +531,7 @@ export class Brain {
     // the Nether gear: the EPF against fire dressed for it, and what the fortress's and the tunnel's 20 are short of
     if (world && s) this.measure('status', () => lines.push(netherGearLine(s.items, world)));
     // the villagers: the switch, the hall and its villagers, the villages known and judged, the last move
-    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined)));
+    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined, hallChoresText(world, this.now(), s?.counts.get('emerald') ?? 0))));
     // the rails home (the villager move's fallback): the switch, the line's state
     if (world) this.measure('status', () => lines.push(railsHomeLine(world, this.now())));
     if (world) this.measure('status', () => {
@@ -850,6 +851,16 @@ export class Brain {
     await this.dropForeign(world, s.home);
     // the villager hall's beds are the villagers' (villagers.ts): the bot sleeps in its own, the nearest of the rest
     world.landmarks.bed = homeBed(world.landmarks, world);
+    // who is in the villager hall (hallchores.ts noteHall): the chores want only for villagers seen there, and one
+    // brought in, or born, is seen from here without them running. Only from within 64 of the hall on home's level
+    // (hallInSight): further, or down the mine under the yard, the look misses some, and an empty look counts it empty
+    if (hallInSight(world, s.position, s.home)) {
+      const r = await this.rt.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 128, type: 'villager' }).catch(() => undefined);
+      if (Array.isArray(r?.entities)) {
+        const count = noteHall(world, r.entities, this.now());
+        if (count !== undefined) villagesOf(world).hall = { count, at: this.now() };
+      }
+    }
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
       const l = world.landmarks;
       this.note(`landmarks: bed ${l.bed ? 'found' : 'none'}, ${l.chests.length} chest(s), furnace ${l.furnace ? 'found' : 'none'}, table ${l.table ? 'found' : 'none'}, ${l.farmland.length} farmland` +

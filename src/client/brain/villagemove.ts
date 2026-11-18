@@ -11,6 +11,7 @@ import type { Bearing } from './nether.js';
 import { planRails, railsLine, type RailPlan } from './railroute.js';
 import { chestTotals } from './chests.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
+import { noteHall } from './hallchores.js';
 import {
   AREA_GROW, HALL_FRESH, HALL_WANTS, ILLAGER, JOB_SITE, JUDGE_V, MARKERS_NEAR, OUTPOST_CLEAR, VILLAGE_MARK, VILLAGE_RANGE, VILLAGE_REACH, ZONES_NEAR, byJobSite, joinAreas, judgeVillage,
   knownVillage, movesOn, noteSeen, noteVillage, peekVillages, pennedIn, reachOf, rejudge, siteNow, siteOf, siteOpen, variantOf, villageArea, villagesOf,
@@ -226,6 +227,8 @@ export async function countHall(ctx: GoalContext, now: number): Promise<number |
   const inside = r.entities.filter(e => e.position && e.position.x >= x && e.position.x < x + width
     && e.position.z >= z && e.position.z < z + length && Math.abs(e.position.y - (y + 1)) <= 3);
   villagesOf(ctx.world).hall = { count: inside.length, at: now };
+  // (the chores' census too: a villager brought in is the hall's from this look on)
+  noteHall(ctx.world, r.entities, now);
   return inside.length;
 }
 

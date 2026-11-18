@@ -9,6 +9,7 @@ import { castObsidian } from './cast.js';
 import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 import { netherLine } from './nether.js';
 import { villagersLine } from './village.js';
+import { hallChoresText } from './hallchores.js';
 import { lastRailPlan } from './villagemove.js';
 import { railsHomeLine } from './railshome.js';
 import { railsText } from './railroute.js';
@@ -160,7 +161,7 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
         if (railsSwitch !== undefined) brain.setRailsHome(railsSwitch, by?.trim() || 'a tool call');
       } catch (e) { return factory.createErrorResponse((e as Error).message); }
       const rails = lastRailPlan(world);
-      return factory.createResponse(`${villagersLine(world, Date.now())}\n${railsHomeLine(world, Date.now())}` + (rails ? `\n${railsText(rails)}` : ''));
+      return factory.createResponse(`${villagersLine(world, Date.now(), undefined, hallChoresText(world, Date.now()))}\n${railsHomeLine(world, Date.now())}` + (rails ? `\n${railsText(rails)}` : ''));
     }
   );
 

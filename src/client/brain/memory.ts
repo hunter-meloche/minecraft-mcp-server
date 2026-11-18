@@ -216,6 +216,11 @@ export interface WorldMemory {
   /** the wart farm's round (P4, wart.ts): when it last looked, and the cells it found bare */
   wart?: import('./wart.js').WartMemory;
   /**
+   * the villager chores in the hall (P5d, hallchores.ts): who is in it as last seen, the breeding's bread, the
+   * librarian's rolls and its Mending, the fletcher's stick trade
+   */
+  hallChores?: import('./hallchores.js').HallChoresMemory;
+  /**
    * The Nether (progression P2a). `trips` is the nether-trips switch: anything that goes through a portal waits for it
    * to be true, and it is off (undefined) until the lead turns it on (the nether-trips tool); the portal milestone
    * lights the home portal only then (portal.ts). The rest is nether.ts's: the stage, the clean trips and the deaths

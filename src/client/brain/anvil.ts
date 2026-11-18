@@ -572,6 +572,16 @@ export function bookOfUse(items: InventoryItem[], book: Pick<InventoryItem, 'enc
 }
 
 /**
+ * How many of the pieces the anvil sees to still lack mending (every one of them wants it: WANTED and
+ * NETHER_HELMET_WANTED): the main set's in use and the Nether helmet, carried, worn or in its chest (`stored`:
+ * storedNetherHelmets). What the villager hall's librarian sells mending books for (hallchores.ts), one a restock, until
+ * none lacks it; a plain piece is the table's first and no subject yet, and is counted once it is enchanted.
+ */
+export function mendingLacking(items: InventoryItem[], stored: { chest: Pos; stack: ChestStack }[] = []): number {
+  return subjects(items, stored).filter(({ piece }) => !levelOf(piece.enchantments, 'mending')).length;
+}
+
+/**
  * The job in words, for the want: `protection 4 onto the diamond_chestplate (worn)`, `fire_protection 4 onto the nether
  * golden_helmet (in its chest)`.
  */
