@@ -405,6 +405,20 @@ export const breakOut: Goal = {
 };
 
 /**
+ * Home enough for the evening: within IN_YARD of home, or anywhere inside the yard's fence on home's level (home
+ * standing in it). The yard has grown to 96 blocks long and most of its 54 chests stand in the storehouses 20 to 45
+ * from home: by IN_YARD alone the evening's stash walked to them, the shelter called it back to home ("walked home",
+ * 10 s), the stash set out again, three times an evening, a LOOP each (Nov 17 16:46, Nov 18 10:20), the pockets still
+ * full at bedtime. The fence and the lights keep the mobs out of all of it; at night the shelter still walks to bed.
+ */
+export function inYardAtDusk(s: Pick<Snapshot, 'home' | 'position' | 'distHome'>, world: Pick<WorldMemory, 'yard'>): boolean {
+  if (nearHome(s, IN_YARD)) return true;
+  const yard = world.yard;
+  if (!yard || !s.home || !s.position || !onHomeLevel(s.position, s.home)) return false;
+  return outsideBy(yard, s.home) === 0 && outsideBy(yard, s.position) === 0;
+}
+
+/**
  * Home before dark, and into bed once it lets the bot sleep (skips phantoms and sets the respawn point). Stuck away
  * from home at night, or home with no bed yet (a new bot's first nights: it stood in the open all night): wall in
  * where it stands and wait for morning (the break-out goal digs it out by day).
@@ -436,7 +450,7 @@ export function shelterGoal(): Goal {
       // yard is neither. Under the yard the walk home stops in a second, and three of those held the shelter until
       // the morning, past the moment out from under brought the bot up: that is out from under's (the night's wall-in
       // down there still is the shelter's)
-      if (s.activity === 'return') return !nearHome(s, IN_YARD) && !underNow(s, world) ? 'evening: head home before dark' : null;
+      if (s.activity === 'return') return !inYardAtDusk(s, world) && !underNow(s, world) ? 'evening: head home before dark' : null;
       if (!nearHome(s, AT_HOME)) return 'night: get home';
       if (s.activity === 'rest' && world.landmarks.bed) return 'night: go to bed';
       if (s.activity === 'rest' && !s.boxedIn) return 'night: no bed yet: wall in';

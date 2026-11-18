@@ -40,3 +40,16 @@ test('shelter: a home cell that cannot be reached does not cost the night: the d
   t.is(await shelterGoal().run(ctx), 'home cell not reached, shut 1 door(s), asleep in the bed at (12, 64, 10)');
   t.deepEqual(calls, ['world.region', 'bed.sleep']);
 });
+
+test('shelter: in the evening anywhere inside the fence on home\'s level is home enough; outside it, or under it, not', t => {
+  const g = shelterGoal();
+  // the yard as it grew: 33 by 97, home 34 from its south end; the storehouses' chests 20 to 45 from home
+  const w = { landmarks: { chests: [], farmland: [] }, yard: { x1: -565, z1: 2119, x2: -533, z2: 2215, y: 62 } } as unknown as WorldMemory;
+  const home = { x: -549, y: 63, z: 2183 };
+  const at = (x: number, y: number, z: number) => night({ activity: 'return', home, position: { x, y, z }, distHome: Math.hypot(x - home.x, z - home.z) } as unknown as Partial<Snapshot>);
+  t.is(g.wants(at(-545, 63, 2140), w), null, 'at a storehouse 43 from home, inside the fence: the stash may finish');
+  t.is(g.wants(at(-549, 63, 2190), w), null, 'by home');
+  t.is(g.wants(at(-520, 63, 2140), w), 'evening: head home before dark', 'past the fence');
+  t.is(g.wants(at(-545, 40, 2140), { ...w, zones: {} } as unknown as WorldMemory), 'evening: head home before dark', 'deep under the yard is not on its level');
+  t.is(g.wants(at(-545, 63, 2140), { landmarks: w.landmarks } as unknown as WorldMemory), 'evening: head home before dark', 'no yard known: 16 from home as before');
+});
