@@ -767,23 +767,26 @@ export const anvilGoal: Goal = {
     }
     const slot = await fetchAdd(ctx, plan.add);
     const at = where.at;
-    // on foot only (A11): Baritone neither breaks nor places in the yard, and the workshop's way in is its door
-    const walk = await ctx.call<{ arrived?: boolean }>('goto', { ...at, range: 2, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
-    if (walk?.arrived === false) throw new Error(`no way on foot to the anvil at ${fmt(at)}`);
-    const block = await blockAt(ctx, at);
-    if (!ANVIL_BLOCK.test(block)) {
-      if (!AIR.test(block)) throw new Error(`no anvil at ${fmt(at)} (${block || 'nothing'})`);
-      mem.gone = { ...at };
-      return `the anvil at ${fmt(at)} is gone: one goes down there next`;
-    }
     const worn = wornHere(plan);
     // the Nether set's piece out of its chest by its slot (the one with fire protection 3, not the first of its name),
-    // and back in after, whatever the anvil made of it: it lies there between trips
+    // and back in after, whatever the anvil made of it: it lies there between trips. Before the walk, as the book is:
+    // fetched after it, the take walked the bot to that chest and the anvil opened from there (Nov 17-18, seven runs:
+    // "anvil too far to open (41.77 blocks, max 4.5)")
     const pocketSlot = plan.at ? await fetchPiece(ctx, plan.at, plan.piece) : plan.piece.slot;
     // (in the run only: a run the brain gave up leaves it carried, and the stash puts it away with the rest)
     const returnPiece = async () => { if (plan.at && !ctx.signal.aborted) await putBackPiece(ctx, plan.piece.name).catch(() => undefined); };
     let out: AnvilOutcome;
     try {
+      // on foot only (A11): Baritone neither breaks nor places in the yard, and the workshop's way in is its door
+      const walk = await ctx.call<{ arrived?: boolean }>('goto', { ...at, range: 2, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
+      if (walk?.arrived === false) throw new Error(`no way on foot to the anvil at ${fmt(at)}`);
+      const block = await blockAt(ctx, at);
+      if (!ANVIL_BLOCK.test(block)) {
+        if (!AIR.test(block)) throw new Error(`no anvil at ${fmt(at)} (${block || 'nothing'})`);
+        mem.gone = { ...at };
+        await returnPiece();
+        return `the anvil at ${fmt(at)} is gone: one goes down there next`;
+      }
       out = await useAnvil(ctx, {
         at, input: { name: plan.piece.name, ...(worn ? { worn } : { slot: pocketSlot }) },
         additional: { name: plan.add.name, slot, count: plan.add.count }, maxCost: plan.cap, wants: wantsFor(plan)
