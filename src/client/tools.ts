@@ -203,6 +203,8 @@ export const HOME_ZONE = 24;
 const MINE_BEYOND = 12;
 /** lay-rail's wait when the hand held something else at the use (a calm-time eat, about 32 ticks), before one more try */
 const HAND_WAIT_MS = 2000;
+/** How long after a first read that found nothing a lay whose call timed out is read again (its use done by then). */
+const LOST_READ_MS = 1500;
 
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
@@ -2093,7 +2095,13 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
    * to come after it (one with a next is checked by the next's own lay), a torch's rail lit. Else the answer as it was.
    */
   const downAfterAll = async (p: Pos, a: RailLay, r: RailPlaced): Promise<RailPlaced> => {
-    const st = await stateAt(p);
+    let st = await stateAt(p);
+    // (a call that timed out is not called off: its use may wait on the client's ticks behind this first read, which
+    // then sees room; read once more after a moment, the block down by then if it is to come)
+    if (st !== undefined && st.replace(/\[.*$/, '') !== a.item && /timed out|connection closed/.test(r.reason ?? '')) {
+      await new Promise(res => setTimeout(res, LOST_READ_MS));
+      st = await stateAt(p);
+    }
     const id = st?.replace(/\[.*$/, '');
     if (!st || id !== a.item) return r;
     const shapeIn = (state: string | undefined) => /shape=([a-z_]+)/.exec(state ?? '')?.[1];

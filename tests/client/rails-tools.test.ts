@@ -219,6 +219,17 @@ test('a lay whose reply was lost (the call timed out) is read: the rail there af
   t.deepEqual(none.rt.builtNear({ x: 0, y: 64, z: 0 }, 1), []);
 });
 
+test('a lay whose call timed out and whose use waited on the client\'s ticks behind the first read (room read there) is read once more after a moment: the rail down then is the bot\'s own, never left unprotected', async (t) => {
+  let reads = 0;
+  const { rt } = setup({
+    'rail.place': () => { throw new Error('bridge call rail.place timed out after 15000 ms'); },
+    'world.block': () => (reads++ === 0 ? { loaded: true, name: 'air', properties: {} } : railBlock('north_south'))
+  });
+  const r = await rt.rails!.lay({ at: { x: 0, y: 64, z: 0 }, item: 'rail', shape: 'north_south' });
+  t.like(r, { ok: true, placed: true, block: 'rail' });
+  t.deepEqual(rt.builtNear({ x: 0, y: 64, z: 0 }, 0), [{ at: { x: 0, y: 64, z: 0 }, state: 'rail[shape=north_south,waterlogged=false]' }]);
+});
+
 test('the hand swapped at the use (a calm-time eat under way): one more try after it, not a refusal of the rail', async (t) => {
   let tries = 0;
   const { rt, calls } = setup({

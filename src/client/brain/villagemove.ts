@@ -6,7 +6,7 @@ import { MIN_WORK, alongSide, byYard, inFence, outByGate, roundFrom, type HomeSi
 import { prepare } from './project.js';
 import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
 import { FROM_ZONES, Ground, MAX_DROP, checkLeg, entryOf, footprint, keepOff, planRoute, readBand, yardEntry, yardInside, type BoatAt, type Entry } from './boatroute.js';
-import { closeRailsYard, heldByRails, peekLine, railsOn, railsYardOpen, startLine } from './railshome.js';
+import { closeRailsYard, heldByRails, peekLine, railsOn, railsPostWaits, railsYardOpen, startLine } from './railshome.js';
 import type { Bearing } from './nether.js';
 import { planRails, railsLine, type RailPlan } from './railroute.js';
 import { chestTotals } from './chests.js';
@@ -1400,17 +1400,21 @@ export const closeUpGoal: Goal = {
   cuts: () => false,
   wants: (s, world) => {
     const open = (peekVillages(world).open ?? []).filter(o => !heldByRails(world, o.at)).length;
-    const rails = railsYardOpen(world);
+    // (the post left open for a cart out that is not looked at now: a given-up line's take-up shuts it, or a look a while
+    // ago found the cart not at rest on the brake)
+    const rails = railsYardOpen(world) && !railsPostWaits(world, s.now);
     if ((!open && !rails) || s.sleeping || s.dimension !== 'overworld' || !roundFrom(s, world, 24)) return null;
     if (open) return `${open} block(s) of the hall or the fence left open by a villager move`;
     const line = peekLine(world);
-    return line?.stage === 'moving' && line.cart ? 'the rails home\'s post left open by a move cut short with its cart out' : 'the rails home\'s yard stretch left down by a move that did not go';
+    return line?.stage === 'moving' && line.cart ? 'the rails home\'s post left open by a move cut short with its cart out'
+      : line?.stage === 'taking up' ? 'the rails home\'s yard stretch left down by a line given up' : 'the rails home\'s yard stretch left down by a move that did not go';
   },
   run: async ctx => {
     // (the rails' yard stretch first: its rail stands in the fence's opening, which goes back once it is up)
-    const rails = railsYardOpen(ctx.world) ? await closeRailsYard(ctx) : undefined;
+    const rails = railsYardOpen(ctx.world) && !railsPostWaits(ctx.world, ctx.s.now) ? await closeRailsYard(ctx) : undefined;
     const r = await closeUp(ctx);
-    if (rails?.stop && !rails.taken && !r.put) throw new Error(rails.text);
+    // (the post left open for a cart still out is no failure: looked at again in a while)
+    if (rails?.stop && !rails.waits && !rails.taken && !r.put) throw new Error(rails.text);
     if (r.left.length && !r.put && !rails?.taken) throw new Error(`could not put back ${r.left.join(', ')}`);
     return `${rails ? `${rails.text}; ` : ''}put back ${r.put} block(s) a villager move left open${r.left.length ? `; not ${r.left.join(', ')}` : ''}`;
   }

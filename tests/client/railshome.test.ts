@@ -11,7 +11,7 @@ import { pick, workTick } from '../../src/client/brain/work.js';
 import { closeUpGoal } from '../../src/client/brain/villagemove.js';
 import { JUDGE_V, peekVillages } from '../../src/client/brain/village.js';
 import {
-  MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, shapeWith, startLine, stepAt, yardSteps, type RailLine
+  MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, railsTick, railsYardOpen, shapeWith, startLine, stepAt, yardSteps, type RailLine
 } from '../../src/client/brain/railshome.js';
 
 /**
@@ -383,7 +383,8 @@ class Field {
         const all = [
           ...this.villagers.map(v => ({ ...v, position: { ...v.position }, ...(this.boat?.rider === v.id ? { vehicle: 'oak_boat' } : this.cart?.rider === v.id ? { vehicle: 'minecart' } : {}) })),
           ...this.players.map(q => ({ ...q, position: { ...q.position } })),
-          ...(this.cart ? [{ id: this.cart.id, name: 'minecart', position: { ...this.cart.pos } }] : [])
+          ...(this.cart ? [{ id: this.cart.id, name: 'minecart', position: { ...this.cart.pos } }] : []),
+          ...(this.boat ? [{ id: this.boat.id, name: 'oak_boat', position: { ...this.boat.pos } }] : [])
         ];
         return { entities: all.filter(e => (!p.type || e.name === p.type) && Math.hypot(e.position.x - this.me.x, e.position.y - this.me.y, e.position.z - this.me.z) <= max) };
       }
@@ -880,7 +881,7 @@ test('a move not made today (the village not judged free: a player came by) leav
   // the yard's stretch was down and the post open: close up (any hour, in the yard) has it, before the take-up's run
   land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
   const s = snap(land.items, { now: land.t, timeOfDay: 14000, activity: activityAt(14000) });
-  t.is(closeUpGoal.wants(s, world), 'the rails home\'s yard stretch left down by a move that did not go');
+  t.is(closeUpGoal.wants(s, world), 'the rails home\'s yard stretch left down by a line given up');
   const text = await closeUpGoal.run(land.ctx());
   t.regex(text, /^the rails' yard stretch: 6 rail\(s\) taken up, the fence back; put back 0 block/);
   t.is(land.block(-556, 63, 2119), FENCE);
@@ -957,8 +958,16 @@ test('a move cut short with the cart still rolling home (not at rest on the brak
   line.villagerOut = 101;
   const night = snap(land.items, { now: land.t, timeOfDay: 14000, activity: activityAt(14000) });
   t.truthy(closeUpGoal.wants(night, world));
-  await t.throwsAsync(closeUpGoal.run(land.ctx()), { message: /not at rest on the brake .*: the post left open for it/ });
+  // (no failure, and not looked at again for a while: close up does not churn on it all evening)
+  t.regex(await closeUpGoal.run(land.ctx()), /not at rest on the brake .*: the post left open for it/);
   t.is(land.block(-556, 63, 2119).split('[')[0], 'rail', 'the post\'s rail left for the cart coming in');
+  t.is(closeUpGoal.wants(night, world), null);
+  t.truthy(closeUpGoal.wants({ ...night, now: night.now + 11 * MINUTE }, world));
+  // given up with the cart and its villager out and not found (followOn's lostOut): the take-up's to shut, not close up's
+  line.stage = 'taking up';
+  delete line.postLook;
+  land.cart = undefined;
+  t.is(closeUpGoal.wants(night, world), null);
 });
 
 // ------------------------------------------------------------------------------------------------ the give-ups and the switch
@@ -1574,4 +1583,147 @@ test('a move cut short as the cart rolled (its took never heard): the next run t
   cartOutAsLeft(two, b.line, b.world, b.line.cells[b.line.cells.length - 1], 101, { aimed: 101 });
   two.me = { x: -555.5, y: 63, z: 2121.5 };
   t.regex((await run(two, 'move', 20 * MINUTE)).text, /^moved an unemployed villager/);
+});
+
+// ------------------------------------------------------------------------------------------------ the fourth review's
+
+/** ctx.call with cart.watch's `either` reply lost (the client stalled past the call's timeout), the watch run all the same. */
+const watchLost = (land: Field, also?: (m: string) => void): GoalContext['call'] => (async (m: string, p?: Record<string, unknown>) => {
+  also?.(m);
+  const r = land.call(m, p);
+  if (m === 'cart.watch' && p?.until === 'either') throw new Error('bridge call cart.watch timed out after 35000 ms');
+  return r;
+}) as GoalContext['call'];
+
+test('the cart\'s watch lost after the trigger: the cart read by its uuid first; the villager in it home on the brake goes on into the hall, never the line given up as if the cart were empty', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  const r = await run(land, 'move', 20 * MINUTE, { call: watchLost(land) });
+  t.regex(r.text, /^moved an unemployed villager/);
+  t.true(world.villagerMoves);
+  t.deepEqual(land.standing(line), []);
+  t.is(land.cart, undefined);
+});
+
+test('the cart\'s watch lost after the trigger with the cart at rest out on the line, the villager in it: the move given up with the moves off, the yard held for the cart', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { stuckAt: 60 });
+  await laidWhole(land, line);
+  const r = await run(land, 'move', 20 * MINUTE, { call: watchLost(land) });
+  t.regex(r.text, /^the move given up: .*came to rest short of the brake/);
+  t.is(line.stage, 'taking up');
+  t.false(world.villagerMoves);
+  t.is(line.villagerOut, 101);
+});
+
+test('the cart not read after a lost watch: the move stays under way, the next run finds the cart by the villager it went for and goes on into the hall', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  let watched = false, blind = 0;
+  const call = (async (m: string, p?: Record<string, unknown>) => {
+    if (m === 'cart.watch' && p?.until === 'either') { land.call(m, p); watched = true; blind = 1; throw new Error('bridge call cart.watch timed out after 35000 ms'); }
+    if (watched && blind > 0 && m === 'cart.status') { blind--; throw new Error('not in a world'); }
+    return land.call(m, p);
+  }) as GoalContext['call'];
+  const r = await run(land, 'move', 20 * MINUTE, { call });
+  t.regex(r.text, /^the move left under way: the cart's watch ended: bridge call cart.watch timed out after 35000 ms; the cart not in sight; the next run looks for the cart$/);
+  t.is(line.stage, 'moving');
+  t.true(world.villagerMoves);
+  const again = await run(land, 'move', 20 * MINUTE);
+  t.regex(again.text, /^moved an unemployed villager/);
+});
+
+test('a death after the trigger, before the watch said who got in: the moves off (the villager may be in the cart) and the yard held for the cart until it is found', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  cartOutAsLeft(land, line, world, line.cells[20], 101, { aimed: 101 });
+  line.run = { at: T0, end: T0 + 60_000 };
+  line.at = T0 - MINUTE;
+  const lines = railsTick(world, { time: T0 + 30_000 });
+  t.true(lines.some(l => /villager moves off/.test(l)), lines.join(' | '));
+  t.false(world.villagerMoves);
+  t.is(line.stage, 'taking up');
+  // the take-up keeps the brake and the post down for it (the cart, frozen out on the line, may still roll home)
+  t.true(railsYardOpen(world));
+  const night = snap(land.items, { now: land.t, timeOfDay: 14000, activity: activityAt(14000) });
+  t.is(closeUpGoal.wants(night, world), null);
+});
+
+test('a boat a hop to the pickup left there (a restart between the dismount and its take): the next move day breaks it back first, the villager out in its own village; the take-up does too', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  const mid = { x: line.pickup.x + 0.5, y: 63, z: line.pickup.z + 0.5 };
+  land.boat = { id: 950, uuid: 'b0a7-0009', pos: { ...mid }, rider: 101 };
+  land.villagers.find(v => v.id === 101)!.position = { ...mid };
+  world.villages!.boat = { uuid: 'b0a7-0009', at: { x: line.pickup.x, y: 62, z: line.pickup.z }, since: T0 - HOUR };
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.true(land.said.some(l => /^rails: the boat a hop cut short left at .* taken back up/.test(l)), land.said.join(' | '));
+  t.is(peekVillages(world).boat, undefined);
+  t.regex(r.text, /^moved an unemployed villager/);
+  // given up with the boat out: the take-up's walk breaks it as it comes by the pickup
+  const b = lineWorld('laying');
+  const two = new Field(b.world);
+  await laidWhole(two, b.line);
+  two.boat = { id: 950, uuid: 'b0a7-0009', pos: { ...mid }, rider: 101 };
+  two.villagers.find(v => v.id === 101)!.position = { ...mid };
+  b.world.villages!.boat = { uuid: 'b0a7-0009', at: { x: b.line.pickup.x, y: 62, z: b.line.pickup.z }, since: T0 - HOUR };
+  b.line.stage = 'taking up';
+  b.line.why = 'a death on a rails run';
+  await run(two, 'take up', 30 * MINUTE);
+  t.is(two.boat as Vehicle | undefined, undefined);
+  t.is(peekVillages(b.world).boat, undefined);
+  t.is(peekLine(b.world), undefined);
+});
+
+test('the fence\'s post read again on the move\'s day before it is dug: restyled since the plan, something put on it or hung by it, the move stops for the day and nothing is dug', async (t) => {
+  const cases: [string, (land: Field, post: Pos) => void, RegExp][] = [
+    ['restyled', (land, post) => land.blocks.set(k(post), 'spruce_fence[east=true,north=false,south=false,waterlogged=false,west=true]'), /spruce_fence at \(-556, 63, 2119\) now, not the birch_fence the line was planned with/],
+    ['on top', (land, post) => land.blocks.set(k({ ...post, y: post.y + 2 }), 'lantern[hanging=false,waterlogged=false]'), /lantern on top of the fence's post at \(-556, 65, 2119\) now/],
+    ['hung by', (land, post) => land.blocks.set(k({ ...post, x: post.x + 1 }), 'oak_wall_sign[facing=east,waterlogged=false]'), /oak_wall_sign hung by the fence's post at \(-555, 63, 2119\)/]
+  ];
+  for (const [what, change, why] of cases) {
+    const { world, line } = lineWorld('laying');
+    const land = new Field(world);
+    await laidWhole(land, line);
+    const post = line.cells[goalOf(line) + 1];
+    change(land, post);
+    const was = land.block(post.x, post.y, post.z);
+    const r = await run(land, 'move', 20 * MINUTE);
+    t.regex(r.text, why, what);
+    t.is(line.stage, 'whole', what);
+    t.false(land.log.some(l => l.startsWith('dig ')), what);
+    t.is(land.block(post.x, post.y, post.z), was, what);
+    t.is(line.yardOpen, undefined, what);
+    t.is(peekVillages(world).open, undefined, what);
+  }
+});
+
+test('a cart put down whose reply timed out and that shows only after the first look (the use waited on the client\'s ticks): looked at again, named, and the take-up breaks it', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  let shows = Infinity;
+  const placeCart = async (at: Pos): Promise<CartPlaced> => {
+    await land.placeCart(at);
+    shows = Date.now() + 1000;
+    throw new Error('bridge call cart.place timed out after 15000 ms');
+  };
+  const call = (async (m: string, p?: Record<string, unknown>) => {
+    if ((m === 'cart.status' || m === 'world.entities') && Date.now() < shows && land.cart) {
+      const c = land.cart;
+      land.cart = undefined;
+      try { return land.call(m, p); } finally { land.cart = c; }
+    }
+    return land.call(m, p);
+  }) as GoalContext['call'];
+  const r = await run(land, 'move', 20 * MINUTE, { call, rails: { lay: land.lay, takeUp: land.takeUp, placeCart } });
+  t.regex(r.text, /^the line given up: no minecart on the launch at \(-556, 63, 1995\): bridge call cart.place timed out after 15000 ms$/);
+  t.like(line.cart, { uuid: 'ca27-0001' });
+  await run(land, 'take up', 30 * MINUTE);
+  t.is(land.cart, undefined);
+  t.is(peekLine(world), undefined);
 });

@@ -140,6 +140,8 @@ export interface RailLine {
   villagerOut?: number;
   /** the villager the cart is launched for, written before the trigger goes down (a move cut short names its rider by it) */
   aimed?: number;
+  /** close up's last look at a cart out that was not at rest on the brake (the post left open for it): not again for a while */
+  postLook?: number;
   /** given up (or done): why, while it is taken up */
   why?: string;
   /** the villager made it into the hall */
@@ -420,8 +422,10 @@ export function railsTick(world: WorldMemory, d: { time: number } | undefined): 
   }
   line.stage = 'taking up';
   line.why = `a death on a rails run (${clock(d.time)})`;
-  if (line.villagerOut !== undefined && movesOn(world)) world.villagerMoves = false;
-  return [`rails: giving up the line: ${line.why}; everything it put down taken back up from here on${line.villagerOut !== undefined ? '; villager moves off (the villager was out of its village)' : ''}`];
+  // (the cart launched for the villager and not accounted for counts as out: it may be rolling home with it)
+  const out = line.villagerOut !== undefined || launched(line);
+  if (out && movesOn(world)) world.villagerMoves = false;
+  return [`rails: giving up the line: ${line.why}; everything it put down taken back up from here on${out ? '; villager moves off (the villager was, or may be, out of its village)' : ''}`];
 }
 
 /**
@@ -462,7 +466,25 @@ export const heldByRails = (world: WorldMemory, at: Pos): boolean => held(peekLi
  * (it may still roll home, frozen out on the line past the simulation distance till someone comes near). Its way in, the
  * brake and the post's rail, is left down until it rests on the brake (the post then shut behind it) or is found.
  */
-const cartOut = (line: RailLine) => !!line.cart && (line.stage === 'moving' || line.villagerOut !== undefined);
+const cartOut = (line: RailLine) => !!line.cart && (line.stage === 'moving' || line.villagerOut !== undefined || line.aimed !== undefined);
+/**
+ * The cart launched (its trigger tried, `aimed` written before it) and not taken back up: whatever the launch's answer,
+ * it may hold the villager it went for (a lost reply, a death in the watch). The yard is held for it, a give-up turns
+ * the moves off.
+ */
+const launched = (line: RailLine) => !!line.cart && line.aimed !== undefined;
+
+/** How long close up leaves the rails' post alone after a look found the cart out not at rest on the brake. */
+const POST_LOOK_MS = 10 * MINUTE;
+/**
+ * The post left open for a cart out (cartOut) that close up is not to look at now: the line given up (the take-up's to
+ * shut once the cart is found or let go), or the last look, a while ago, found it not at rest on the brake.
+ */
+export function railsPostWaits(world: WorldMemory, now: number): boolean {
+  const line = peekLine(world);
+  if (!line || !cartOut(line)) return false;
+  return line.stage === 'taking up' || (line.postLook !== undefined && now - line.postLook >= 0 && now - line.postLook < POST_LOOK_MS);
+}
 
 export function railsYardOpen(world: WorldMemory): boolean {
   const line = peekLine(world);
@@ -995,6 +1017,9 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   const walked = await alongLine(ctx, line, g, 0, clk);
   if (walked.stop) return notToday(ctx, line, walked.stop, walked.late || walked.off);
   await walkTo(ctx, line.pickup, 3);
+  // (a boat a hop cut short left at the pickup, the villager perhaps seated in it: broken back first)
+  const boatLeft = await boatAtPickup(ctx, line);
+  if (boatLeft) return notToday(ctx, line, boatLeft);
 
   // the village looked over and judged again (a fresh look is what counts)
   const vs = villagesOf(world);
@@ -1032,6 +1057,14 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
     const go = await launch(ctx, line, pick.e);
     if ('took' in go) { took = pick.e; break; }
     if ('fail' in go) return go.out ? lostOut(ctx, line, go.fail) : lostIfOut(ctx, line, go.fail);
+    // (the cart perhaps gone with the villager, not read: the move stays under way, the next run's resumeMove finds the
+    // cart by the villager it went for)
+    if ('unsure' in go) {
+      ctx.save?.();
+      const text = `the move left under way: ${go.unsure}; the next run looks for the cart`;
+      say(ctx, text);
+      return { gain: 0, text, mark: 'same' };
+    }
     // (not the villager lost: the cart never went down for it; the dry mark's wait lets the mob wander off)
     if ('blocked' in go) return notToday(ctx, line, go.blocked, 'miss');
     missed = go.missed;
@@ -1064,6 +1097,11 @@ function lostIfOut(ctx: GoalContext, line: RailLine, why: string): WorkResult {
 async function openYard(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
   const inner = line.cells[Math.min(line.cells.length - 1, goalOf(line) + 2)];
   await ctx.call('goto', { ...inner, range: 1, careful: true, timeoutMs: 45_000 }, 60_000).catch(() => undefined);
+  const changed = await fenceAsPlanned(ctx, line);
+  if (changed) {
+    if (!yardSteps(line).some(st => isLaid(line, stepAt(line, st)))) delete line.yardOpen;
+    return changed;
+  }
   // (what stands on the post first: a torch on it would pop off as the post goes, and never come back)
   for (const o of [...line.opens].sort((a, b) => b.at.y - a.at.y)) {
     const why = await digOut(ctx, o.at, o.block);
@@ -1079,6 +1117,45 @@ async function openYard(ctx: GoalContext, line: RailLine): Promise<string | unde
     const r = await lay(ctx, line, st, args);
     if (!r.placed) return `${stepWord(line, st)} not laid: ${r.reason ?? 'no answer'}`;
     if (!r.ok) { giveUp(ctx, line, `${stepWord(line, st)} came out not as planned: ${r.reason ?? 'no answer'}`); return line.why; }
+  }
+  return undefined;
+}
+
+/** Blocks that hang on a block's side (they pop off when it goes). */
+const HUNG = /(wall_torch|wall_sign|wall_hanging_sign|wall_banner|wall_head|wall_skull|ladder|lever|_button|tripwire_hook)$/;
+const AIR = /^(minecraft:)?(air|cave_air|void_air)(\[|$)/;
+
+/**
+ * The fence's post and what stands on it read again on the move's day, right before they are dug: the plan read them
+ * once, at its dry run, up to MAX_AGE ago (the yard restyled since, a lantern put on the post, a sign hung on it). Each
+ * opening still the block the plan has (it goes back as that), nothing on top of the topmost (it would pop off as the
+ * post goes, and never come back), nothing hung on the post's sides. Openings dug already (villages.open: a day cut
+ * short) and the post with its rail down are not read again. Why not (the move stopped for the day), or undefined.
+ */
+async function fenceAsPlanned(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
+  const post = line.cells[goalOf(line) + 1];
+  const open = villagesOf(ctx.world).open ?? [];
+  const todo = line.opens.filter(o => !open.some(q => same(q.at, o.at)) && !(same(o.at, post) && isLaid(line, post)));
+  if (!todo.length) return undefined;
+  const top = Math.max(...line.opens.map(o => o.at.y));
+  const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => ({ x: post.x + dx, y: post.y, z: post.z + dz }));
+  const at = await readAround(ctx, [post, ...sides, { x: post.x, y: top, z: post.z }]);
+  const unread = `the fence's post at ${fmt(post)} not read before it is opened`;
+  for (const o of todo) {
+    const st = at(o.at.x, o.at.y, o.at.z);
+    if (st === undefined) return unread;
+    if (!st || idOf(st) !== idOf(o.block)) return `${st ? idOf(st) : 'nothing'} at ${fmt(o.at)} now, not the ${idOf(o.block)} the line was planned with: the fence not opened`;
+  }
+  const over = at(post.x, top + 1, post.z);
+  if (over === undefined) return unread;
+  if (over && !AIR.test(over)) return `${idOf(over)} on top of the fence's post at ${fmt({ x: post.x, y: top + 1, z: post.z })} now (it would pop off as the post goes): the fence not opened`;
+  for (let y = post.y; y <= top; y++) {
+    for (const sd of sides) {
+      const st = at(sd.x, y, sd.z);
+      // (the line's own torches aside)
+      if (line.torches.some(q => same(q.at, { x: sd.x, y, z: sd.z }))) continue;
+      if (st && HUNG.test(idOf(st))) return `${idOf(st)} hung by the fence's post at ${fmt({ x: sd.x, y, z: sd.z })} (it would pop off as the post goes): the fence not opened`;
+    }
   }
   return undefined;
 }
@@ -1146,11 +1223,54 @@ async function toPickup(ctx: GoalContext, line: RailLine, candidates: readonly S
 }
 
 /**
+ * The bot's boat a hop to the pickup left there (villages.boat near the pickup: a restart, a death or a take that failed
+ * between the boat going down and its take), the villager perhaps seated in it: looked for by its place (world.entities;
+ * after a restart the client's own set is gone, so any boat by the pickup, the kept uuid first) and broken back
+ * (vehicle.take with the kept uuid: the bridge refuses any boat but that one). The villager steps out where it sits, in its
+ * own village. None kept there, or taken: undefined; none there with the bot by the pickup: forgotten. Why not, else.
+ */
+async function boatAtPickup(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
+  const v = villagesOf(ctx.world);
+  const kept = v.boat;
+  const mid = { x: line.pickup.x + 0.5, z: line.pickup.z + 0.5 };
+  if (!kept || horiz(kept.at, mid) > HOP + 8) return undefined;
+  const round = (await ctx.call<{ entities?: (Seen & { uuid?: string })[] }>('world.entities', { maxDistance: 64 }).catch(() => undefined))?.entities;
+  if (!round) return `the boat left at ${fmt(kept.at)} not looked for (nothing read)`;
+  const boats = round.filter(x => /boat$/.test(x.name) && x.position && (x.uuid === kept.uuid || horiz(x.position, mid) <= HOP + 6))
+    .sort((a, b) => (a.uuid === kept.uuid ? -1 : 0) - (b.uuid === kept.uuid ? -1 : 0) || horiz(a.position!, mid) - horiz(b.position!, mid));
+  if (!boats.length) {
+    if (horiz(await here(ctx), mid) > 24) return `the boat left at ${fmt(kept.at)} not in sight`;
+    delete v.boat;
+    ctx.save?.();
+    say(ctx, `the boat once left at ${fmt(kept.at)} is not there any more: forgotten`);
+    return undefined;
+  }
+  const whys: string[] = [];
+  for (const b of boats) {
+    aborted(ctx);
+    const p = b.position!;
+    await ctx.call('goto', { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    const r = await takeBoat(ctx, { id: b.id, uuid: kept.uuid });
+    if (!r) { say(ctx, `the boat a hop cut short left at ${fmt(p)} taken back up (whoever sat in it out where it was)`); return undefined; }
+    whys.push(r);
+  }
+  // (every boat there someone else's, the bridge's word by the kept uuid: the bot's own is gone)
+  if (whys.every(w => /^not the bot's own/.test(w))) {
+    delete v.boat;
+    ctx.save?.();
+    say(ctx, `the boat once left at ${fmt(kept.at)} is not there any more (the boats by the pickup are not the bot's): forgotten`);
+    return undefined;
+  }
+  return `the boat left at ${fmt(kept.at)} not taken back up: ${whys.find(w => !/^not the bot's own/.test(w))}`;
+}
+
+/**
  * The cart on the launch and the trigger torch put down from behind the stop (the bot off the line's way): the cart
  * goes, and is watched until it takes someone in or comes to rest. `took`, `missed` (at rest, or out of sight with the
  * villager still on the pickup), or `fail`.
  */
-async function launch(ctx: GoalContext, line: RailLine, e: Seen): Promise<{ took: true } | { missed: string } | { blocked: string } | { fail: string; out?: true }> {
+type Launched = { took: true } | { missed: string } | { blocked: string } | { fail: string; out?: true } | { unsure: string };
+async function launch(ctx: GoalContext, line: RailLine, e: Seen): Promise<Launched> {
   const trig = triggerOf(line);
   if (!trig) return { fail: 'no trigger torch in the plan' };
   const launchAt = line.cells[0];
@@ -1182,7 +1302,13 @@ async function launch(ctx: GoalContext, line: RailLine, e: Seen): Promise<{ took
   if (!line.cart) {
     // (a cart down all the same, the reply lost: the bot's own, named for the take-up; one there before this call is
     // not, unless a run cut short left one there unseen: never adopted)
-    if (/^a minecart on that rail already/.test(c.reason ?? '') && stale !== 'unseen') { delete line.cartAt; ctx.save?.(); } else await findCartAt(ctx, line);
+    if (/^a minecart on that rail already/.test(c.reason ?? '') && stale !== 'unseen') { delete line.cartAt; ctx.save?.(); } else if (!/timed out|connection closed/.test(c.reason ?? '')) await findCartAt(ctx, line);
+    else if (await findCartAt(ctx, line, false) === 'none') {
+      // (a call that timed out is not called off: its use may wait on the client's ticks behind this first look, which
+      // then sees no cart; looked at once more after a moment, the cart down by then if it is to come)
+      await pause(LOST_LOOK_MS);
+      await findCartAt(ctx, line);
+    }
     return { fail: `no minecart on the launch at ${fmt(launchAt)}: ${c.reason ?? 'no reply'}` };
   }
   // (looked at again with the cart down, right before the trigger: a mob come onto the head meanwhile, the cart back up)
@@ -1196,8 +1322,8 @@ async function launch(ctx: GoalContext, line: RailLine, e: Seen): Promise<{ took
   // the hall only that one, never whatever else the cart took)
   line.aimed = e.id;
   const r = await lay(ctx, line, { kind: 'torch', t: trig }, { at: trig.at, item: 'redstone_torch', lights: trig.lights, ...(inVillage(line, trig.at) ? { inVillage: true } : {}) });
-  if (!r.placed) return { fail: `the trigger torch not put down at ${fmt(trig.at)}: ${r.reason ?? 'no answer'}` };
-  if (!r.ok) return { fail: `the trigger torch is down but the launch not lit: ${r.reason ?? 'no answer'}` };
+  if (!r.placed) return afterTrigger(ctx, line, e.id, `the trigger torch not put down at ${fmt(trig.at)}: ${r.reason ?? 'no answer'}`);
+  if (!r.ok) return afterTrigger(ctx, line, e.id, `the trigger torch is down but the launch not lit: ${r.reason ?? 'no answer'}`);
   const w = await ctx.call<CartWatched>('cart.watch', { id: c.id, uuid: c.uuid, until: 'either', timeoutMs: 20_000 }, 35_000)
     .catch((x: Error): CartWatched => ({ ok: false, reason: x.message }));
   aborted(ctx);
@@ -1215,7 +1341,28 @@ async function launch(ctx: GoalContext, line: RailLine, e: Seen): Promise<{ took
     return still ? { fail: 'the cart ran out of sight without the villager' } : { took: true };
   }
   if (w.reason === 'died' || w.reason === 'cancelled') throw new Error('aborted');
-  return { fail: `the cart's watch ended: ${w.reason}` };
+  return afterTrigger(ctx, line, e.id, `the cart's watch ended: ${w.reason ?? 'no reply'}`);
+}
+
+/**
+ * A launch that did not answer `took` or `missed` once its trigger was tried (the torch's reply lost, the launch read
+ * unlit, the watch's reply lost or the client dropped): the cart may have gone all the same, the villager in it, so it
+ * is read by its uuid before the move is called a failure. The villager it went for in it: `took`. Another mob: the
+ * move lost (`out`: the moves off, its way home held). Empty and at rest, or out of sight with the villager seen on foot:
+ * a plain failure (the take-up breaks the cart). Not read, or still rolling empty: `unsure`, the move kept under way for
+ * the next run's resumeMove, which reads the cart by `aimed`.
+ */
+async function afterTrigger(ctx: GoalContext, line: RailLine, villager: number, why: string): Promise<Launched> {
+  const { cart, read } = await cartNow(ctx, line);
+  if (cart?.passengers?.some(q => q.id === villager)) return { took: true };
+  const other = cart?.passengers?.find(q => q.id !== villager);
+  if (other) return { fail: `${why}; the cart holds another (${other.name ?? 'a mob'}${other.baby ? ' (a baby)' : ''} ${other.id}), not the villager (${villager})`, out: true };
+  if (cart && !cart.moving) return { fail: why };
+  if (read && !cart) {
+    const seen = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 24, type: 'villager' }).catch(() => undefined))?.entities;
+    if (seen?.some(x => x.id === villager && x.position && !x.vehicle)) return { fail: `${why}; the cart out of sight, the villager still on foot` };
+  }
+  return { unsure: `${why}; the cart ${cart ? 'still rolling, empty' : 'not in sight'}` };
 }
 
 /**
@@ -1237,7 +1384,7 @@ async function mobOnHead(ctx: GoalContext, line: RailLine, but: number): Promise
  * bot's own again. `found` (line.cart named), `none` (the launch in sight with no cart on it: cartAt cleared), or
  * `unseen` (too far to tell, or not read: kept for a later look).
  */
-async function findCartAt(ctx: GoalContext, line: RailLine): Promise<'found' | 'none' | 'unseen'> {
+async function findCartAt(ctx: GoalContext, line: RailLine, clear = true): Promise<'found' | 'none' | 'unseen'> {
   const at = line.cartAt;
   if (line.cart) { if (at) { delete line.cartAt; ctx.save?.(); } return 'found'; }
   if (!at || !isPos(at)) { delete line.cartAt; return 'none'; }
@@ -1254,10 +1401,13 @@ async function findCartAt(ctx: GoalContext, line: RailLine): Promise<'found' | '
     return c?.uuid ? name({ uuid: c.uuid, id: e.id }) : 'unseen';
   }
   if (horiz(await here(ctx), mid) > 48) return 'unseen';
+  if (!clear) return 'none';
   delete line.cartAt;
   ctx.save?.();
   return 'none';
 }
+/** How long after a first look that found nothing a call that timed out is looked at again (its use done by then). */
+const LOST_LOOK_MS = 2000;
 
 /** A cart that missed taken back up (vehicle.take, walked to), and the trigger torch taken up (the launch unlit again). Why not, or undefined. */
 async function recoverCart(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
@@ -1279,6 +1429,7 @@ async function takeCart(ctx: GoalContext, line: RailLine): Promise<string | unde
   const r = await ctx.call<{ ok: boolean; reason?: string }>('vehicle.take', { id: cart.id, uuid: line.cart.uuid }, 30_000).catch((x: Error) => ({ ok: false, reason: x.message }));
   if (!r.ok) return r.reason ?? 'no reply';
   delete line.cart;
+  delete line.aimed;
   ctx.save?.();
   return undefined;
 }
@@ -1455,6 +1606,9 @@ async function resumeMove(ctx: GoalContext, line: RailLine, clk: Clk): Promise<W
     if (read && horiz(await here(ctx), brake) <= BRAKE_SIGHT) return resumeOut(ctx, line, line.villagerOut, clk);
     return followOn(ctx, line, line.villagerOut, clk);
   }
+  // (launched for the villager, its took never heard, and the cart not in sight: it may be rolling home with it, or
+  // frozen out on the line; looked for along it, by the villager it went for)
+  if (!cart && launched(line)) return followOn(ctx, line, line.aimed!, clk);
   const why = `the last move was cut short: the cart ${cart ? `at ${cart.position ? fmt(cart.position) : '?'}${villager !== undefined ? ' with the villager in it' : ', empty'}` : 'not in sight'}`;
   return line.villagerOut !== undefined ? lostOut(ctx, line, why) : lostIfOut(ctx, line, why);
 }
@@ -1552,6 +1706,7 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
     if (gate.shut) said.push(`not out of the yard: ${gate.shut}`);
     else {
       let to = -1;
+      let boatTried = false;
       for (const st of order) {
         aborted(ctx);
         const p = stepAt(line, st);
@@ -1559,6 +1714,12 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
         if (to < 0 || horiz(await here(ctx), p) > 6) {
           await walkTo(ctx, p, 3);
           to = 0;
+          // (a boat a hop cut short left at the pickup: broken back as the walk comes by it, the villager out in its village)
+          if (!boatTried && villagesOf(ctx.world).boat && horiz(await here(ctx), line.pickup) <= 24) {
+            boatTried = true;
+            const b = await boatAtPickup(ctx, line);
+            if (b) said.push(b);
+          }
           // (a cart stopped out on the line, not in sight from home: found as the walk passes it, before its rail goes;
           // one a run cut short left on the launch, unnamed, found by its place as the walk comes to the launch)
           if (!line.cart && line.cartAt) await findCartAt(ctx, line);
@@ -1598,6 +1759,9 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
   }
   const openLeft = (villagesOf(ctx.world).open ?? []).some(o => line.opens.some(q => same(q.at, o.at)));
   if (!line.laid.length && !line.cart && !line.cartAt && !openLeft) {
+    // (a boat the hop left at the pickup, not taken back: said with what was left, kept in villages.boat for the status)
+    const boat = villagesOf(ctx.world).boat;
+    if (boat && horiz(boat.at, line.pickup) <= HOP + 8) (line.left ??= []).push(`the boat at ${fmt(boat.at)} by the pickup, perhaps with a villager in it`);
     const left = line.left?.length ? `; left: ${line.left.slice(0, 3).join(', ')}` : '';
     const text = `everything of the line taken back up (${line.why ?? 'given up'})${left}`;
     const w = ctx.world.rails ??= {};
@@ -1721,12 +1885,15 @@ async function yardTakeUp(ctx: GoalContext, line: RailLine): Promise<{ taken: nu
  * the post's rail taken up (the brake's rails and the cart with the villager in it left as they are, for the next run's
  * resumeMove: on into the hall). A cart still rolling home, or not in sight, is left its way in: the post stays open.
  */
-async function closeRailsPost(ctx: GoalContext, line: RailLine): Promise<{ taken: number; text: string; stop?: string }> {
+async function closeRailsPost(ctx: GoalContext, line: RailLine): Promise<{ taken: number; text: string; stop?: string; waits?: true }> {
   const { cart } = await cartNow(ctx, line);
   if (!cart || cart.moving || !onBrake(line, cellIndexAt(line, cart))) {
     const stop = `the cart ${cart ? `not at rest on the brake (at ${cart.position ? fmt(cart.position) : '?'})` : 'not in sight'}: the post left open for it`;
+    // (no failure: close up waits a while before it looks again, railsPostWaits)
+    line.postLook = ctx.s.now;
+    ctx.save?.();
     say(ctx, `the rails' post: ${stop}`);
-    return { taken: 0, text: `the rails' post: ${stop}`, stop };
+    return { taken: 0, text: `the rails' post: ${stop}`, stop, waits: true };
   }
   const why = await shutYard(ctx, line);
   const text = `the rails' post: the fence shut behind the cart on the brake${why ? `, but ${why}` : ''} (the move goes on into the hall next run)`;
@@ -1738,7 +1905,7 @@ async function closeRailsPost(ctx: GoalContext, line: RailLine): Promise<{ taken
  * Close up's part (any hour, the bot in the yard): the yard's stretch of a move that did not go (or of a give-up) taken
  * back up and the fence's post put back. Said; why not, as close up throws.
  */
-export async function closeRailsYard(ctx: GoalContext): Promise<{ taken: number; text: string; stop?: string }> {
+export async function closeRailsYard(ctx: GoalContext): Promise<{ taken: number; text: string; stop?: string; waits?: true }> {
   const line = peekLine(ctx.world);
   if (!line || !ctx.rails) return { taken: 0, text: 'the rails\' yard stretch: no rails tools', stop: 'no rails tools' };
   if (cartOut(line)) return closeRailsPost(ctx, line);
