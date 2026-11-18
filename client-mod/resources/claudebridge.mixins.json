@@ -16,6 +16,7 @@
     "MineTargetMixin",
     "FenceScaffoldMixin",
     "ZoneBreakMixin",
+    "AvoidanceMixin",
     "HazardUseMixin",
     "ShieldUseMixin",
     "ClientLevelAccessor",
