@@ -1,4 +1,4 @@
-import type { InventoryItem, Status, StatusEffect } from '../tools.js';
+import type { ClientRuntime, InventoryItem, Status, StatusEffect } from '../tools.js';
 import { tier } from './kit.js';
 import { daylightLeft, type Activity } from './schedule.js';
 import type { Pos, WorldMemory } from './memory.js';
@@ -73,6 +73,16 @@ export interface GoalContext {
    * which keep no zone), for a site that keeps its distance from every build (portal.ts); none where nothing gives them
    */
   builds?: () => { x: number; z: number; width: number; length: number }[];
+  /**
+   * the rails home's calls (tools.ts: lay-rail, take-up-rail, place-minecart with the bridge's whole replies), for the
+   * rails rung (railshome.ts); none where the runtime has none
+   */
+  rails?: ClientRuntime['rails'];
+  /**
+   * brain.json written now (the brain saves at a run's end only): for a run that writes a record the world must keep
+   * through a restart mid-run, as the rails home's of every block it puts down (railshome.ts); none in a test
+   */
+  save?: () => void;
 }
 
 /**

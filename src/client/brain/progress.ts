@@ -242,6 +242,12 @@ export const RECIPES: Record<string, { makes: number; from: Record<string, numbe
   // and smithing_table.json have them: an anvil is 31 iron (three blocks of nine and four ingots), the smithing table
   // takes planks of any wood (#minecraft:planks). No iron_ingot from a block here: the two would make a loop
   iron_block: { makes: 1, from: { iron_ingot: 9 } },
+  // the rails home's (P5e; railroute.ts RAIL_RECIPES), as 26.3's data/minecraft/recipe/rail.json, powered_rail.json,
+  // redstone_torch.json and minecart.json have them: its bill made at the table from the chests' iron, gold, redstone
+  rail: { makes: 16, from: { iron_ingot: 6, stick: 1 } },
+  powered_rail: { makes: 6, from: { gold_ingot: 6, stick: 1, redstone: 1 } },
+  redstone_torch: { makes: 1, from: { redstone: 1, stick: 1 } },
+  minecart: { makes: 1, from: { iron_ingot: 5 } },
   anvil: { makes: 1, from: { iron_block: 3, iron_ingot: 4 } },
   smithing_table: { makes: 1, from: { iron_ingot: 2, planks: 4 } },
   // the cows are walked home to the pen on a lead (pens.ts): two from five string, on the table's 3x3 grid. The game

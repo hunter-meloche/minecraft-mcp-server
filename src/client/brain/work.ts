@@ -21,6 +21,7 @@ import { ZONE_MARGIN, underYard } from './underyard.js';
 import { walkHome } from './homeward.js';
 import { outByGate, type HomeSide } from './yardgates.js';
 import { brainRun } from '../tools.js';
+import { railsTick } from './railshome.js';
 import { BEARINGS, NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, netherUnstart, tripHold, type Bearing } from './nether.js';
 
 // (the yard's gates and the walks through them live in yardgates.ts: the walk home comes in by a gate too)
@@ -1066,6 +1067,11 @@ export function workTick(
     lines.push(...netherTick(s, world, d));
     wrote = true;
   }
+  // the rails home's: a death on one of its runs gives the line up (railshome.ts)
+  if (world.rails?.line) {
+    const said = railsTick(world, d);
+    if (said.length) { lines.push(...said); wrote = true; }
+  }
   if (wrote) writes++;
   const next = step(s, world, w.tier);
   if (next) {
@@ -1103,7 +1109,7 @@ export function releaseOldestDry(world: WorldMemory, now: number, s: Snapshot, t
 }
 
 /** The longest `skipped:` line written: past it, cut short. */
-const SKIPPED_MAX = 400;
+const SKIPPED_MAX = 480;
 
 /** a decline's words without the task's own name in front (the line names the task already) */
 function short(task: WorkTask, d: Decline): string {
@@ -1128,7 +1134,8 @@ export function skippedLine(goal: Goal, s: Snapshot, world: WorldMemory, goals: 
     return h ? `${t.name} (hold: ${h})` : `${t.name} (${c.demoted ? 'demoted' : 'passed over'}: ${c.variant}: ${c.why})`;
   });
   const line = `work: ${task.name}: skipped: ${parts.join(' | ')}`;
-  // (a bound on the line, not on what it says: with the nether rung the surface's line names six rungs, some 330)
+  // (a bound on the line, not on what it says: with the nether rung the surface's line names six rungs, some 330; with
+  // the rails rung, P5e, seven, some 430: cut at 400 it lost the deep rung's reason, the one that says most)
   return line.length > SKIPPED_MAX ? `${line.slice(0, SKIPPED_MAX - 3)}...` : line;
 }
 

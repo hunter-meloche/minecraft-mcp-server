@@ -20,6 +20,7 @@ import type { Item } from 'prismarine-item';
 import { ALWAYS_EDIBLE, chooseFood, type FoodInfo } from '../food.js';
 import { smeltsPerFuel } from '../tools/furnace-tools.js';
 import { WILD_DISTANCE, homeProblems, zoneDistance, type Creature, type Zone } from './brain/courtesy.js';
+import type { RailShape } from './brain/railroute.js';
 
 export const foodsFor26 = () => (minecraftData('26.3') as unknown as { foodsByName: Record<string, FoodInfo> }).foodsByName;
 
@@ -73,6 +74,57 @@ export interface Status {
 }
 /** An effect on the bot: amplifier 0 is level I; seconds left, -1 for one that never runs out. */
 export interface StatusEffect { name: string; amplifier: number; seconds: number }
+
+/** A block of the rails home as the bridge reads it (Rails.blockJson): a rail's shape, a powered rail's power, a torch's light. */
+export interface RailBlock extends Pos { block: string; shape?: RailShape; powered?: boolean; lit?: boolean }
+/**
+ * What lay-rail answers (the bridge's rail.place, rail.torch; the stop by place): `ok` when it stands as asked: the rail
+ * with the shape looked at (`predicted` now, `once` when the next rail is down) and the rail before as the plan has it,
+ * or the torch lit with the rail it lights powered. `turned`: the rails whose shape changed. `newMovement`: the server
+ * runs the minecart_improvements experiment (the line was planned on the old rules).
+ */
+export interface RailPlaced {
+  ok: boolean; placed: boolean; reason?: string; dryRun?: boolean;
+  block?: string; shape?: RailShape; powered?: boolean; lit?: boolean;
+  predicted?: RailShape; once?: RailShape;
+  turned?: (Pos & { from: RailShape | null; to: RailShape })[];
+  prev?: RailBlock; lights?: RailBlock;
+  newMovement?: boolean;
+}
+/** What lay-rail is asked: a cell of the plan (railroute.ts RailCell), the rail before it, the cell after it, or a torch and the rail it lights. */
+export interface RailLay {
+  at: Pos;
+  item: 'rail' | 'powered_rail' | 'redstone_torch' | 'cobblestone';
+  /** a rail's shape once the rail at `next` is down (none: now) */
+  shape?: RailShape;
+  /** the rail laid before this one, and the shape it must end with */
+  prev?: Pos & { shape: RailShape };
+  /** the plan's cell after this one (laid next), and what goes there */
+  next?: Pos & { item?: 'rail' | 'powered_rail' };
+  /** a torch: the powered rail it lights */
+  lights?: Pos;
+  /** the brain's courtesy judge found this village free (a cell in its zone) */
+  inVillage?: boolean;
+  /** look only: what the rail would do, nothing put down */
+  dryRun?: boolean;
+}
+/** What take-up-rail answers: dug (and picked up) or why not. */
+export interface RailTaken { ok: boolean; dug: boolean; block?: string; pickedUp?: boolean; reason?: string }
+/** A minecart as cart.status reads it: speed in blocks a tick (on the client), the rail under it, who rides it. */
+export interface CartState {
+  id: number; uuid?: string; name?: string; position?: Pos; block?: Pos; yaw?: number; own?: boolean; distance?: number;
+  speed?: number; moving?: boolean; rail?: RailBlock;
+  passengers?: { id: number; name?: string; baby?: boolean; profession?: string }[];
+}
+/** What place-minecart answers (cart.place): the bot's own cart, by id and the uuid that names it after a restart. */
+export interface CartPlaced extends Partial<CartState> { ok: boolean; reason?: string; newMovement?: boolean }
+/** cart.status: the carts asked for (or the bot's own within 128), the rules the server runs, its simulation distance (chunks). */
+export interface CartStatus { carts: CartState[]; riding?: Status['riding']; newMovement?: boolean; simulationDistance?: number; takeSpeed?: number }
+/** cart.watch: why it stopped watching ("took", "at rest", "out of sight", "timed out", "cancelled", "died"), and where the cart is. */
+export interface CartWatched {
+  ok: boolean; reason: string; at?: Pos; block?: Pos; speed?: number; maxSpeed?: number; travelled?: number; seconds?: number;
+  passengers?: CartState['passengers']; took?: number[]; rail?: RailBlock;
+}
 /** An enchantment and its level ('sharpness', 5). */
 export interface ItemEnchantment { name: string; level: number }
 export interface InventoryItem {
@@ -149,6 +201,8 @@ export const HOME_ZONE = 24;
 /** Where mining from home starts: ore at least this far from home (the zone, its margin and Baritone's reach). */
 /** How far past the home zone's edge ore trips start (Baritone reaches some blocks past where it stands). */
 const MINE_BEYOND = 12;
+/** lay-rail's wait when the hand held something else at the use (a calm-time eat, about 32 ticks), before one more try */
+const HAND_WAIT_MS = 2000;
 
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
@@ -301,6 +355,27 @@ export interface ClientRuntime {
   adoptStates: (blocks: { at: Pos; state: string }[]) => void;
   /** Protect built positions with the state they stand in now (a build job's cells, as they come right). */
   protectBuilt: (blocks: { at: Pos; state: string }[]) => void;
+  /**
+   * The rails home (P5e): the same code as the lay-rail, take-up-rail and place-minecart tools, with the bridge's whole
+   * replies (absent from a fake that has none)
+   */
+  rails?: {
+    /**
+     * A rail, a powered rail, a redstone torch or the stop's cobblestone put down as the plan has it (rail.place,
+     * rail.torch), stepping carefully into reach when too far; the bot's own once down (protected with the state it
+     * stands in, synced to the client mod before the next rail: its rail.place turns only the bot's own rails), and the
+     * rail before it with its new shape.
+     */
+    lay: (args: RailLay) => Promise<RailPlaced>;
+    /**
+     * One block of the line taken back up: only a rail, powered rail, redstone torch or cobblestone the bot put down
+     * (protected), dug from where it stands (dig.here: no Baritone), stepping carefully into reach when too far, and the
+     * drop walked onto; protected no more.
+     */
+    takeUp: (at: Pos) => Promise<RailTaken>;
+    /** The minecart put on the rail at `at` (cart.place), stepping carefully into reach when too far. */
+    placeCart: (at: Pos, opts?: { inVillage?: boolean; newMovement?: boolean }) => Promise<CartPlaced>;
+  };
 }
 
 export interface ClientToolOptions {
@@ -1927,7 +2002,212 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
+  // ---------------------------------------------------------------- the rails home (P5e)
+
+  /** What stands at `p` as world.region writes it ("rail[shape=north_south,waterlogged=false]"), or undefined unread. */
+  const stateAt = async (p: Pos): Promise<string | undefined> => {
+    const b = await call<{ loaded: boolean; name?: string; properties?: Record<string, string> }>('world.block', { ...p }).catch(() => undefined);
+    if (!b?.loaded || !b.name) return undefined;
+    const props = Object.entries(b.properties ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
+    return props ? `${b.name}[${props}]` : b.name;
+  };
+  /** Into reach of `p` by a careful walk (nothing placed or broken: the yard's fence, the line's own rails). */
+  const carefulNear = (p: Pos) => call('goto', { ...p, range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+  const same = (a: Pos, b: Pos) => a.x === b.x && a.y === b.y && a.z === b.z;
+
+  const layRail = async (a: RailLay): Promise<RailPlaced> => {
+    const p = floorPos(a.at);
+    // the bot's own before it goes down (the dimension as last read, no call): a run cut short, the bot kicked or the
+    // process killed between the bridge's answer and here must not leave a block down that the take-up refuses; taken
+    // off again only when a read shows nothing of it there
+    const dim = lastDimension;
+    const had = protection.has(dim, p);
+    if (!a.dryRun) protection.add(dim, [p]);
+    // (a call that threw or timed out has no answer: the block may be down all the same, read after)
+    let lost = false;
+    const fail = (e: Error): RailPlaced => { lost = true; return { ok: false, placed: false, reason: e.message }; };
+    const ask = async (): Promise<RailPlaced> => {
+      if (a.item === 'cobblestone') {
+        // the launch's stop: a plain block on the ground, as place-block puts one
+        if (a.dryRun) return { ok: true, placed: false, dryRun: true };
+        try { await call('item.select', { name: 'cobblestone' }); } catch { return { ok: false, placed: false, reason: 'no cobblestone carried' }; }
+        const r = await call<{ placed: boolean; block?: string; reason?: string }>('place', { ...p, face: 'down' });
+        return { ok: r.placed, placed: r.placed, ...(r.block ? { block: r.block } : {}), ...(r.reason ? { reason: r.reason } : {}) };
+      }
+      const where = { ...p, ...(a.inVillage ? { inVillage: true } : {}) };
+      if (a.item === 'redstone_torch') {
+        if (a.dryRun) return { ok: true, placed: false, dryRun: true };
+        return call<RailPlaced>('rail.torch', { ...where, ...(a.lights ? { lights: floorPos(a.lights) } : {}) }, 15_000);
+      }
+      return call<RailPlaced>('rail.place', {
+        ...where, item: a.item,
+        ...(a.shape ? { shape: a.shape } : {}),
+        ...(a.prev ? { prev: { ...floorPos(a.prev), shape: a.prev.shape } } : {}),
+        ...(a.next ? { next: { ...floorPos(a.next), item: a.next.item ?? 'rail' } } : {}),
+        ...(a.dryRun ? { dryRun: true } : {})
+      }, 15_000);
+    };
+    const again = () => { lost = false; return ask().catch(fail); };
+    let r = await again();
+    if (!r.placed && /^too far/.test(r.reason ?? '')) {
+      await carefulNear(p);
+      r = await again();
+    }
+    if (!r.placed && r.reason === 'the bot is standing there') {
+      await call('goto', { ...p, away: 2, careful: true, timeoutMs: 10_000 }, 20_000).catch(() => undefined);
+      r = await again();
+    }
+    // (the Guardian's calm-time eat swapped the hand at the use, one begun before the call: over in under two seconds)
+    if (!r.placed && /^the hand holds/.test(r.reason ?? '')) {
+      await new Promise(res => setTimeout(res, HAND_WAIT_MS));
+      r = await again();
+    }
+    if (!r.placed && lost && !a.dryRun) r = await downAfterAll(p, a, r);
+    if (a.dryRun) return r;
+    if (r.placed) {
+      // the bot's own (since before the call), with the state it stands in (the rail before too, turned to its curve or
+      // slope), and the client mod told before the next rail: rail.place turns only the bot's own rails, and the
+      // courtesy scans skip them. A read that fails (the run cut short now) keeps the answer's block
+      protection.add(dim, [p], [await stateAt(p) ?? r.block]);
+      for (const t of r.turned ?? []) {
+        if (same(t, p) || !protection.has(dim, t)) continue;
+        const st = await stateAt(t);
+        if (st) protection.add(dim, [t], [st]);
+      }
+      await status().catch(() => undefined);
+    } else if (!had) {
+      // not down: off again on a plain answer (or a call never sent: the run cut short before it), and on a lost reply
+      // read so (something else there, or room); kept when unread or it stands there all the same (the brain's own
+      // read-back keeps it in the record, and the take-up's read sees air as gone)
+      const st = !lost || /^aborted:/.test(r.reason ?? '') ? 'air' : await stateAt(p);
+      if (st !== undefined && st.replace(/\[.*$/, '') !== a.item) protection.remove(dim, p);
+      else if (st !== undefined) protection.add(dim, [p], [st]);
+    }
+    return r;
+  };
+
+  /**
+   * A lay whose call had no answer (a timeout, the bridge dropped), read: the block there all the same is the bot's (the
+   * brain read the cell as room just before), `ok` when the rail before ends as asked and this one as asked with no rail
+   * to come after it (one with a next is checked by the next's own lay), a torch's rail lit. Else the answer as it was.
+   */
+  const downAfterAll = async (p: Pos, a: RailLay, r: RailPlaced): Promise<RailPlaced> => {
+    const st = await stateAt(p);
+    const id = st?.replace(/\[.*$/, '');
+    if (!st || id !== a.item) return r;
+    const shapeIn = (state: string | undefined) => /shape=([a-z_]+)/.exec(state ?? '')?.[1];
+    let ok = true;
+    if (a.item === 'rail' || a.item === 'powered_rail') {
+      if (a.prev && shapeIn(await stateAt(floorPos(a.prev))) !== a.prev.shape) ok = false;
+      if (!a.next && a.shape && shapeIn(st) !== a.shape) ok = false;
+    } else if (a.item === 'redstone_torch' && a.lights) ok = /powered=true/.test(await stateAt(floorPos(a.lights)) ?? '');
+    const shape = shapeIn(st) as RailShape | undefined;
+    return { ok, placed: true, block: id, ...(shape ? { shape } : {}), reason: `the reply was lost (${r.reason ?? 'no answer'}); read down after${ok ? '' : ', not as asked'}` };
+  };
+
+  /** The blocks the line is made of: nothing else is taken up. */
+  const LINE_BLOCK = /^(rail|powered_rail|redstone_torch|cobblestone)$/;
+  const takeUpRail = async (at: Pos): Promise<RailTaken> => {
+    const p = floorPos(at);
+    const dim = await dimension();
+    const name = (await stateAt(p))?.replace(/\[.*$/, '');
+    if (!name) return { ok: false, dug: false, reason: 'not loaded' };
+    // gone already (someone took it, a cart knocked a torch?): nothing to dig, nothing of the bot's there any more
+    if (/^(air|cave_air)$/.test(name)) { protection.remove(dim, p); return { ok: true, dug: false, block: name, reason: 'nothing there' }; }
+    if (!LINE_BLOCK.test(name)) return { ok: false, dug: false, block: name, reason: `not a block of the line: ${name}` };
+    if (!protection.has(dim, p)) return { ok: false, dug: false, block: name, reason: `the bot did not put that ${name} there` };
+    const count = async () => (await inventoryCounts()).counts.get(name) ?? 0;
+    const had = await count();
+    const dig = () => call<{ dug?: boolean; reason?: string }>('dig.here', { ...p, timeoutMs: 15_000 }, 25_000).catch((e: Error) => ({ dug: false, reason: e.message }));
+    let r = await dig();
+    if (!r.dug && /out of reach|out of sight/.test(r.reason ?? '')) {
+      await carefulNear(p);
+      r = await dig();
+    }
+    if (!r.dug && r.reason !== 'air') return { ok: false, dug: false, block: name, reason: r.reason ?? 'not dug' };
+    protection.remove(dim, p);
+    await status().catch(() => undefined);
+    // the drop: onto the cell, carefully (a rail's cell is walked over), for it to come in
+    await call('goto', { ...p, range: 0, careful: true, timeoutMs: 8000 }, 15_000).catch(() => undefined);
+    let got = (await count()) > had;
+    if (!got) { await new Promise(res => setTimeout(res, 600)); got = (await count()) > had; }
+    return { ok: true, dug: true, block: name, pickedUp: got };
+  };
+
+  const placeCart = async (at: Pos, opts: { inVillage?: boolean; newMovement?: boolean } = {}): Promise<CartPlaced> => {
+    const p = floorPos(at);
+    const ask = () => call<CartPlaced>('cart.place', { ...p, ...(opts.inVillage ? { inVillage: true } : {}), ...(opts.newMovement ? { newMovement: true } : {}) }, 15_000)
+      .catch((e: Error): CartPlaced => ({ ok: false, reason: e.message }));
+    let r = await ask();
+    if (!r.ok && /^too far/.test(r.reason ?? '')) {
+      await carefulNear(p);
+      r = await ask();
+    }
+    return r;
+  };
+
+  const RAIL_SHAPES = ['north_south', 'east_west', 'ascending_north', 'ascending_south', 'ascending_east', 'ascending_west', 'north_east', 'north_west', 'south_east', 'south_west'] as const;
+  const xyz = { x: z.coerce.number(), y: z.coerce.number(), z: z.coerce.number() };
+  register(
+    'lay-rail',
+    "Lay one block of a minecart line (the rails home): a rail or powered rail with the shape it should end with, a redstone torch beside a powered rail (it lights it), or the cobblestone stop. A rail takes its shape from the rails beside it, not from the hand: lay the line in its order, each rail beside the last, and give the rail before (`prev`, with the shape it must end with) and the cell after (`next`): the rail is refused unless both come out as asked. The bot walks carefully into reach. Nothing goes down in someone's build unless `inVillage`.",
+    {
+      ...xyz,
+      item: z.enum(['rail', 'powered_rail', 'redstone_torch', 'cobblestone']).describe('What to put down'),
+      shape: z.enum(RAIL_SHAPES).optional().describe("The rail's shape once the rail at `next` is down (none: now)"),
+      prev: z.object({ ...xyz, shape: z.enum(RAIL_SHAPES) }).optional().describe('The rail laid before this one, and the shape it must end with'),
+      next: z.object({ ...xyz, item: z.enum(['rail', 'powered_rail']).optional() }).optional().describe("The line's next cell (laid after this one)"),
+      lights: z.object(xyz).optional().describe('A torch: the powered rail it lights (checked lit after)'),
+      inVillage: z.boolean().optional().describe("The village was judged free to take from: a cell inside its zone may be laid"),
+      dryRun: z.boolean().optional().describe('Only look: what the rail would do')
+    },
+    async (args: RailLay & Pos) => {
+      const at = floorPos({ x: args.x, y: args.y, z: args.z });
+      const r = await layRail({ ...args, at });
+      const turned = (r.turned ?? []).filter(t => !same(t, at)).map(t => ` the rail at ${fmt(t)} now ${t.to}`).join(';');
+      if (r.dryRun && r.ok) {
+        return factory.createResponse(`Would lay ${args.item} at ${fmt(at)}${r.predicted ? `: ${r.predicted} now${r.once && r.once !== r.predicted ? `, ${r.once} once the next rail is down` : ''}` : ''}${turned ? `;${turned}` : ''}`);
+      }
+      if (!r.ok) return factory.createErrorResponse(`${r.placed ? 'Laid, but not as asked' : 'Not laid'}: ${args.item} at ${fmt(at)}: ${r.reason ?? 'no answer'}`);
+      if (args.item === 'redstone_torch') {
+        return factory.createResponse(`Put a redstone torch at ${fmt(at)}${r.lights ? `: the rail at ${fmt(r.lights)} is ${r.lights.powered ? 'lit' : 'not lit'}` : ''}`);
+      }
+      if (args.item === 'cobblestone') return factory.createResponse(`Put the stop (cobblestone) at ${fmt(at)}`);
+      return factory.createResponse(`Laid ${args.item} [${r.shape}] at ${fmt(at)}${r.powered ? ', powered' : ''}${turned ? `;${turned}` : ''}${r.newMovement ? ' (the server runs the minecart_improvements experiment)' : ''}`);
+    }
+  );
+
+  register(
+    'take-up-rail',
+    'Take one block of a minecart line back up: a rail, powered rail, redstone torch or cobblestone the bot put down itself (never anyone else\'s), dug from where it stands after a careful walk into reach, and the drop picked up.',
+    { ...xyz },
+    async (args: Pos) => {
+      const at = floorPos(args);
+      const r = await takeUpRail(at);
+      if (!r.ok) return factory.createErrorResponse(`Not taken up at ${fmt(at)}: ${r.reason ?? 'no answer'}`);
+      if (!r.dug) return factory.createResponse(`Nothing to take up at ${fmt(at)} (${r.reason ?? 'gone'})`);
+      return factory.createResponse(`Took up the ${r.block} at ${fmt(at)}${r.pickedUp ? '' : ' (the drop not picked up yet)'}`);
+    }
+  );
+
+  register(
+    'place-minecart',
+    "Put a minecart on the rail at (x, y, z): it comes down still and takes no one there (a moving cart takes the first mob it runs into). It is the bot's own afterwards. Refused on a server running the minecart_improvements experiment unless `newMovement`.",
+    {
+      ...xyz,
+      inVillage: z.boolean().optional().describe('The village was judged free to take from: a rail inside its zone may take a cart'),
+      newMovement: z.boolean().optional().describe('Go on under the minecart_improvements experiment\'s rules')
+    },
+    async (args: Pos & { inVillage?: boolean; newMovement?: boolean }) => {
+      const at = floorPos(args);
+      const r = await placeCart(at, { inVillage: args.inVillage, newMovement: args.newMovement });
+      if (!r.ok) return factory.createErrorResponse(`No minecart put on the rail at ${fmt(at)}: ${r.reason ?? 'no answer'}`);
+      return factory.createResponse(`Put a minecart (${r.id}, uuid ${r.uuid}) on the rail at ${fmt(at)}${r.passengers?.length ? `; it took ${r.passengers.map(q => q.name ?? q.id).join(', ')}` : ''}`);
+    }
+  );
+
   return {
+    rails: { lay: layRail, takeUp: takeUpRail, placeCart },
     actions: handlers,
     call,
     status,

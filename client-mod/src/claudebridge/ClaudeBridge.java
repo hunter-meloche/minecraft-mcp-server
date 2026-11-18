@@ -41,6 +41,7 @@ public class ClaudeBridge implements ClientModInitializer {
         Merchant.register(server);
         Portal.register(server);
         Vehicle.register(server);
+        Rails.register(server);
         Signs.register(server);
         Terraslicer.register(server);
         Foreign.register(server);

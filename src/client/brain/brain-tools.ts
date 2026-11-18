@@ -10,6 +10,7 @@ import { activeMissions, community, communityStatus, left, owed, sourceOf, syncR
 import { netherLine } from './nether.js';
 import { villagersLine } from './village.js';
 import { lastRailPlan } from './villagemove.js';
+import { railsHomeLine } from './railshome.js';
 import { railsText } from './railroute.js';
 
 /** Tools to switch the brain on and off and see what it is doing. They never take control from it. */
@@ -145,19 +146,21 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
 
   factory.registerTool(
     'villager-moves',
-    "Turn the bot's villager moves on or off. Off by default: the villagers rung of the work queue does nothing (villages and the players seen are only remembered). On: by day and dry, with the villager hall standing and fewer than 3 villagers in it, the bot looks for villages within 384 of home, judges each (someone's, and left alone, if a villager is named, rides something or is penned in, a sign, rail, redstone or portal stands in it or within 16, a player was ever seen within 64, it is within 256 of the world spawn or near another build), and from a free village of 5 or more takes one unemployed adult home a run by boat, on a way judged flat, downhill or water and 16 off every build, through its own fence and the hall's panel, put back after. Where no boat way is found, the rails home (the fallback) are only planned, a dry run, never laid, switch on or off: the last plan this session is shown in full (the route, every block it would put down and take back up, the bill, the time). Nothing given: says which, with the villages' state.",
+    "Turn the bot's villager moves on or off. Off by default: the villagers rung of the work queue does nothing (villages and the players seen are only remembered). On: by day and dry, with the villager hall standing and fewer than 3 villagers in it, the bot looks for villages within 384 of home, judges each (someone's, and left alone, if a villager is named, rides something or is penned in, a sign, rail, redstone or portal stands in it or within 16, a player was ever seen within 64, it is within 256 of the world spawn or near another build), and from a free village of 5 or more takes one unemployed adult home a run by boat, on a way judged flat, downhill or water and 16 off every build, through its own fence and the hall's panel, put back after. Where no boat way is found, the rails home (the fallback) are planned: with `rails` off (as it ships) a dry run, never laid; with it on (and the moves on) the line is kept and laid: the bill made at home, laid from the yard's fence out over as many days as it takes, the villager brought home in a minecart, everything taken back up after (or at a give-up; `rails` off with a line under way gives it up). The last plan this session is shown in full (the route, every block it would put down and take back up, the bill, the time). Nothing given: says which, with the villages' and the line's state.",
     {
       enabled: z.boolean().optional().describe('On or off'),
+      rails: z.boolean().optional().describe('The rails home laid where the boat finds no way (off: planned only)'),
       by: z.string().max(40).optional().describe('Who turns it, for the log (e.g. "the lead", "maintenance")')
     },
-    async ({ enabled, by }: { enabled?: boolean; by?: string }) => {
+    async ({ enabled, rails: railsSwitch, by }: { enabled?: boolean; rails?: boolean; by?: string }) => {
       const world = brain.worldMemory();
       if (!world) return factory.createErrorResponse('Not in a world yet');
-      if (enabled !== undefined) {
-        try { brain.setVillagerMoves(enabled, by?.trim() || 'a tool call'); } catch (e) { return factory.createErrorResponse((e as Error).message); }
-      }
+      try {
+        if (enabled !== undefined) brain.setVillagerMoves(enabled, by?.trim() || 'a tool call');
+        if (railsSwitch !== undefined) brain.setRailsHome(railsSwitch, by?.trim() || 'a tool call');
+      } catch (e) { return factory.createErrorResponse((e as Error).message); }
       const rails = lastRailPlan(world);
-      return factory.createResponse(villagersLine(world, Date.now()) + (rails ? `\n${railsText(rails)}` : ''));
+      return factory.createResponse(`${villagersLine(world, Date.now())}\n${railsHomeLine(world, Date.now())}` + (rails ? `\n${railsText(rails)}` : ''));
     }
   );
 

@@ -50,6 +50,7 @@ import { oneSpareSet } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 import { homeBed } from './villagers.js';
 import { closeUpGoal, tooFarFrom } from './villagemove.js';
+import { railsHomeLine } from './railshome.js';
 import { VILLAGE_RANGE, movesOn, noteBells, noteSeen, villagersLine, villagesOf, type Seen } from './village.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
@@ -291,6 +292,17 @@ export class Brain {
     this.memory.save();
   }
 
+  /**
+   * The rails switch (the villager-moves tool's `rails`): a rails home the boat move needs is laid only while it is on
+   * (and the moves on). Off with a line under way gives the line up: it is taken back up. Said and saved at once.
+   */
+  setRailsHome(on: boolean, by: string): void {
+    if (!this.worldId) throw new Error('not in a world yet');
+    this.memory.world(this.worldId).railsHome = on;
+    this.note(`rails home ${on ? 'on' : 'off'} (by ${by})`);
+    this.memory.save();
+  }
+
   /** The LLM ran a tool: step back now and stay out until it has been quiet for a while. */
   async manual(tool: string): Promise<void> {
     this.leaseUntil = this.now() + this.leaseMs;
@@ -515,6 +527,8 @@ export class Brain {
     if (world) this.measure('status', () => lines.push(netherLine(world, this.now())));
     // the villagers: the switch, the hall and its villagers, the villages known and judged, the last move
     if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined)));
+    // the rails home (the villager move's fallback): the switch, the line's state
+    if (world) this.measure('status', () => lines.push(railsHomeLine(world, this.now())));
     if (world) this.measure('status', () => {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
@@ -876,7 +890,10 @@ export class Brain {
         used.gain += n;
         run.gain = used.gain; // the loop watch's record of this run
       },
-      builds: () => this.structureBoxes(world)
+      builds: () => this.structureBoxes(world),
+      rails: this.rt.rails,
+      // (a restart mid-run never reaches the run's save: what a run must keep through one it saves at once)
+      save: () => this.measure('save', () => this.memory.save())
     };
     this.note(`start ${goal.name}: ${reason}`);
     // a rung of the work queue: why each rung above it did not run instead, from the answers this choice was made by

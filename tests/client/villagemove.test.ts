@@ -14,6 +14,7 @@ import {
 } from '../../src/client/brain/village.js';
 import { BOAT_PACE, DAY_MS, MOVE_BUDGET, closeUpGoal, homeMs, lastRailPlan, lookNeedMs, moveNeedMs, searchNeedMs, tooFarFrom, tooFarWord, villagersTask } from '../../src/client/brain/villagemove.js';
 import { railsText } from '../../src/client/brain/railroute.js';
+import { peekLine, railsHomeLine, railsTask, type RailLine } from '../../src/client/brain/railshome.js';
 import { pick, workGoals } from '../../src/client/brain/work.js';
 import { LADDER } from '../../src/client/brain/worktasks.js';
 import { RECIPES, recipeFor } from '../../src/client/brain/progress.js';
@@ -1113,6 +1114,48 @@ test('no boat way home (a ridge across the way): the rails are planned on the gr
   t.regex(railsText(plan), /\nTaken back up walking home after the cart: the trigger torch/);
   // the village is not offered again today (the boat's way failed), nor anything laid on the next look
   t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
+});
+
+test('no boat way home with the rails switch on (P5e): the line is kept to be laid, the bill first; still nothing touched on this run, and the next move from there waits as before', async (t) => {
+  const world = hallWorld({ railsHome: true });
+  const land = new Land(world);
+  ridge(land);
+  const before = JSON.stringify(land.items);
+  const text = await rung(land).run(land.ctx());
+  t.regex(text, /; rails home planned and kept to be laid: \d+ rails, \d+ iron, \d+ gold; the bill next; back home$/);
+  t.deepEqual(acted(land), []);
+  t.is(JSON.stringify(land.items), before);
+  const line = peekLine(world)!;
+  t.truthy(line);
+  t.like(line, { stage: 'bill', laid: [], runs: 0, yard: 6 });
+  t.is(line.cells.length, lastRailPlan(world)!.cells.length);
+  t.deepEqual(line.opens, [{ at: { x: -556, y: 63, z: 2119 }, block: FENCE }, { at: { x: -556, y: 64, z: 2119 }, block: 'torch' }]);
+  t.like(line.site, { x: -556, z: 1880 });
+  t.truthy(line.area, 'the village\'s area kept: its own builds, and where rails go down as `inVillage`');
+  t.true(land.said.some(l => /^villagers: rails home planned and kept to be laid \(the rails switch is on\): /.test(l)), land.said.join(' | '));
+  t.regex(railsHomeLine(world, land.t), /^Rails home: on; the line to the village at \(-556, 63, 1880\), planned \d+ min ago: planned: \d+ rails, the bill to make\.$/);
+  // the rails rung's from here (the bill at home), and the villagers rung passes the village by as with no boat way
+  t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['bill']);
+  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
+  // the moves off: nothing is kept, the dry run only
+  const off = hallWorld({ railsHome: true, villagerMoves: undefined });
+  t.is(peekLine(off), undefined);
+});
+
+test('no boat way home with the rails switch on and a line under way already (one at a time): said so, not as a dry run (the switch is on)', async (t) => {
+  const first = hallWorld({ railsHome: true });
+  const one = new Land(first);
+  ridge(one);
+  await rung(one).run(one.ctx());
+  const kept = peekLine(first)!;
+  const world = hallWorld({ railsHome: true, rails: { line: JSON.parse(JSON.stringify(kept)) as RailLine } });
+  const land = new Land(world);
+  ridge(land);
+  const text = await rung(land).run(land.ctx());
+  t.regex(text, /; rails home planned only: the line to the village at \(-556, 63, 1880\) is under way \(one at a time\); back home$/);
+  t.notRegex(text, /a dry run/);
+  t.false(land.said.some(l => /dry run/.test(l)), land.said.join(' | '));
+  t.is(peekLine(world)!.at, kept.at, 'the line under way kept as it was');
 });
 
 test('no boat way and no rails way either (a wall of two across the way): said and kept, still nothing touched', async (t) => {

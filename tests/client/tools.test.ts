@@ -48,7 +48,7 @@ test('the client backend offers every mineflayer tool with the same schema, plus
     t.is(args![1], def.description);
     t.deepEqual(Object.keys(args![2] as object), Object.keys(def.schema), def.name);
   }
-  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'use-item-on-block', 'use-portal']);
+  t.deepEqual([...client.keys()].filter(n => !mineflayerToolDefinitions().some(d => d.name === n)).sort(), ['build-structure', 'collect-items', 'drop-item', 'explore', 'farm', 'fish', 'go-home', 'lay-rail', 'leave-server', 'level-area', 'mine-blocks', 'nearby-builds', 'place-minecart', 'rejoin-server', 'set-home', 'stop', 'store-in-chest', 'survey-area', 'take-from-chest', 'take-up-rail', 'use-item-on-block', 'use-portal']);
 });
 
 test('read tools answer in the mineflayer wording', async (t) => {

@@ -222,6 +222,13 @@ export interface WorldMemory {
   /** The villages known, the players seen, the hall's count, the last move and what a move left open (village.ts) */
   villages?: import('./village.js').VillagesMemory;
   /**
+   * The rails switch (progression P5e, the villager-moves tool's `rails`): with it on (and the moves on) a rails home
+   * the boat move found needed is laid; off (undefined) as it ships, when it is only planned, a dry run
+   */
+  railsHome?: boolean;
+  /** The rails home under way (the line, every block of it down, its stage) and the last one's end (railshome.ts) */
+  rails?: import('./railshome.js').RailsMemory;
+  /**
    * The spare diamond set the portal milestone stored for a regear after a death in the Nether (chests.ts SpareSet):
    * which chest slots hold it. Nothing else takes or uses those pieces
    */

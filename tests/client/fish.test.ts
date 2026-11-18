@@ -950,7 +950,7 @@ test.serial('a live evening, tod 8500 to 11500: the `late` idle the far rungs le
   t.true(said[1].tod <= 11_000, `home by dusk: ${log}`);
   // the line under its start says why no rung above it ran instead
   t.is(after.lines.find(l => l.text.startsWith('work: fish: skipped: '))!.text, 'work: fish: skipped: cane patch (unneeded: 24 cells) | cows (unneeded: the pen has 6 cows (they breed the rest)) | ' +
-    'cane (unneeded: the patch grows it (24 cells)) | trip kit (unneeded: kit ready) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off) | ' +
+    'cane (unneeded: the patch grows it (24 cells)) | trip kit (unneeded: kit ready) | rails (unneeded: no line to lay) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off) | ' +
     'deep (late: needs 3 min, 0.0 left) | surface (stocked: coal 146 (keep 128))');
   // and what idles is the evening's last seconds, home: too little of the day left for another walk to the lake
   t.regex(after.lines.at(-3)!.text, /^idle \d+s: late: deep needs 3 min, 0\.0 left/);

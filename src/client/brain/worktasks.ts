@@ -2,7 +2,8 @@
  * The rungs of the work ladder (work.ts runs them): what the bot does with a day that has no job in it, the top rung
  * first. The cane patch grown on the lake shore, cows for the pen while it holds fewer than a pair (out past the
  * leash: the herd is farmed for good) and wild cane while the project waits on cane, the kit for a trip down from out
- * in the yard, a villager brought home by boat to its hall (villagemove.ts, behind the villager-moves switch), a trip
+ * in the yard, the rails home laid, used and taken up where the boat found no way (railshome.ts, behind its rails
+ * switch), a villager brought home by boat to its hall (villagemove.ts, behind the villager-moves switch), a trip
  * down for every ore the home keeps, coal from the surface, and in the evening fishing by the lake. Each says why it
  * does not run when it does not; the wrapper books what each brought in and walks home.
  *
@@ -39,6 +40,7 @@ import { debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
 import { fortressOpen, fortressReady, fortressRun } from './netherfortress.js';
 import { tunnelOpenAt, tunnelReady, tunnelRun } from './nethertunnel.js';
 import { villagersTask } from './villagemove.js';
+import { railsTask } from './railshome.js';
 import { eveningFrom, fishDist, fishLate, fishRun, isEvening } from './fish.js';
 
 const MINUTE = 60_000;
@@ -745,4 +747,4 @@ const fish: WorkTask = {
   run: (ctx, _variant, budgetMs, now) => fishRun(ctx, budgetMs, now)
 };
 
-export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, villagersTask, nether, deep, surface, fish];
+export const LADDER: WorkTask[] = [canePatch, cows, cane, tripKit, railsTask, villagersTask, nether, deep, surface, fish];

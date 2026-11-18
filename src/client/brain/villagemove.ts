@@ -6,6 +6,7 @@ import { MIN_WORK, alongSide, byYard, inFence, outByGate, roundFrom, type HomeSi
 import { prepare } from './project.js';
 import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
 import { FROM_ZONES, Ground, MAX_DROP, checkLeg, entryOf, footprint, keepOff, planRoute, readBand, yardEntry, yardInside, type BoatAt, type Entry } from './boatroute.js';
+import { closeRailsYard, heldByRails, peekLine, railsOn, railsYardOpen, startLine } from './railshome.js';
 import type { Bearing } from './nether.js';
 import { planRails, railsLine, type RailPlan } from './railroute.js';
 import { chestTotals } from './chests.js';
@@ -33,8 +34,9 @@ import {
  * `close up` goal (and the brain gets a bot seated in a boat with no run to steer it out first, a restart's among them:
  * brain.ts outOfVehicle). Every step is said
  * (`villagers: ...`). With the switch off nothing of it runs: the rung offers nothing, the sightings are only remembered.
- * When no boat way home is found, the rails fallback (the user's) is planned on the same ground and said, a dry run:
- * nothing of it is laid, switch on or off (railroute.ts; the lead builds the laying if the boat move fails live).
+ * When no boat way home is found, the rails fallback (the user's) is planned on the same ground and said: a dry run with
+ * the rails switch off; with it on, the line is kept to be laid (railshome.ts, its own rung: the bill, the laying over
+ * days, the move by minecart, the take-up).
  */
 
 const MINUTE = 60_000;
@@ -215,7 +217,7 @@ const here = async (ctx: GoalContext): Promise<Pos> => (await ctx.status().catch
 const say = (ctx: GoalContext, text: string) => ctx.progress(`villagers: ${text}`);
 
 /** The villagers inside the hall's box (world.entities from home or the hall), noted with the time; undefined when not seen. */
-async function countHall(ctx: GoalContext, now: number): Promise<number | undefined> {
+export async function countHall(ctx: GoalContext, now: number): Promise<number | undefined> {
   const hall = ctx.world.zones?.hall?.[0];
   if (!hall?.width || !hall.length) return undefined;
   const { x, y, z, width, length } = { ...hall, width: hall.width, length: hall.length };
@@ -313,7 +315,7 @@ const homeBy = (enough: () => boolean, left: () => number, home: { x: number; z:
  * of that the scans have seen (walking to up to VIEWPOINTS more places when not all), the builds of others, the players
  * remembered, the world spawn. `middle`: where the village is thought to be.
  */
-async function lookVillage(ctx: GoalContext, middle: Pos, now: number, enough: (to?: { x: number; z: number }) => boolean): Promise<VillageLook> {
+export async function lookVillage(ctx: GoalContext, middle: Pos, now: number, enough: (to?: { x: number; z: number }) => boolean): Promise<VillageLook> {
   const seen = new Map<number, Seen>();
   const visited: { x: number; z: number }[] = [await here(ctx)];
   let marks: { at: { x: number; y: number; z: number; name: string }[] } = { at: [] };
@@ -426,7 +428,7 @@ function split(at: { x: number; y: number; z: number; name: string }[]): Pick<Vi
  * foldSites: a site of it judged someone's before keeps that word, and all the ground it covered). Returns the site
  * kept (none: no village there, forgotten; but a site someone's is never forgotten, and is returned).
  */
-function noteVerdict(world: WorldMemory, site: VillageSite, look: VillageLook, v: Verdict, now: number): VillageSite | undefined {
+export function noteVerdict(world: WorldMemory, site: VillageSite, look: VillageLook, v: Verdict, now: number): VillageSite | undefined {
   const counts = { bells: look.bells.length, beds: look.beds.length, jobs: look.jobs.length, villagers: look.seen.filter(e => e.name === 'villager').length };
   const w = villagesOf(world);
   // (the run's own site, or the one a fold took it into as the look went round (a player seen by another site of the
@@ -459,7 +461,7 @@ function noteVerdict(world: WorldMemory, site: VillageSite, look: VillageLook, v
 }
 
 /** The word on a village after the judge's (pure): the verdict, or someone's where a site of the village was judged so before. */
-const wordOn = (v: Verdict, kept: VillageSite | undefined): { kind: Verdict['kind']; why: string } =>
+export const wordOn = (v: Verdict, kept: VillageSite | undefined): { kind: Verdict['kind']; why: string } =>
   (kept?.judged?.kind === 'theirs' && v.kind !== 'theirs' ? { kind: 'theirs', why: kept.judged.why } : v);
 
 // ------------------------------------------------------------------------------------------------ the search
@@ -605,13 +607,13 @@ async function relook(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<
 interface Clock { now: () => number; began: number; budgetMs: number; enough: () => boolean }
 
 /** The bot's own boat (vehicle.place's): its id now and the uuid that names it after a restart. */
-interface Boat { id: number; uuid: string }
+export interface Boat { id: number; uuid: string }
 /** What the vehicle calls answer: ok, or why not. */
 type Reply = { ok: boolean; reason?: string };
 type Placed = Reply & { id?: number; uuid?: string; position?: Pos; tookIt?: boolean };
 
 /** What the bot rides (status.riding), or undefined on foot. */
-const ridingOf = async (ctx: GoalContext): Promise<Status['riding']> => (await ctx.status().catch(() => undefined))?.riding ?? undefined;
+export const ridingOf = async (ctx: GoalContext): Promise<Status['riding']> => (await ctx.status().catch(() => undefined))?.riding ?? undefined;
 
 /** The block under a creature's feet (a boat put down on its top face comes down where the creature stands). */
 const under = (p: Pos): Pos => ({ x: Math.floor(p.x), y: Math.floor(p.y - 0.01), z: Math.floor(p.z) });
@@ -623,11 +625,13 @@ type Opened = { at: Pos; block: string };
  * Dig a block from where the bot sits or stands (dig.here: no walking, no Baritone), written into `villages.open`
  * first, so a run cut short leaves it for `close up`. Air: nothing to do. Returns why not, or undefined.
  */
-async function digOut(ctx: GoalContext, at: Pos, block: string | null | undefined): Promise<string | undefined> {
+export async function digOut(ctx: GoalContext, at: Pos, block: string | null | undefined): Promise<string | undefined> {
   if (ctx.signal.aborted) throw new Error('aborted');
   if (!block || /^(minecraft:)?(air|cave_air)(\[|$)/.test(block)) return undefined;
   const v = villagesOf(ctx.world);
   (v.open ??= []).push({ at: { ...at }, block });
+  // (kept on disk before the dig: a restart mid-run would forget the opening, a gap in the fence or the hall for good)
+  ctx.save?.();
   const r = await ctx.call<{ dug?: boolean; reason?: string }>('dig.here', { ...at, timeoutMs: 15_000 }, 25_000).catch(e => ({ dug: false, reason: (e as Error).message }));
   // (gone already: what stood on a dug block falls with it, and goes back all the same)
   if (r.dug || r.reason === 'air') return undefined;
@@ -668,9 +672,13 @@ async function putBack(ctx: GoalContext, o: Opened): Promise<string | undefined>
   return `${item} at ${fmt(o.at)}: ${said.slice(0, 80)}`;
 }
 
-/** Put back everything a move left open (or those of `which`), the lowest first, walking carefully into reach of each. */
-async function closeUp(ctx: GoalContext, which?: (o: Opened) => boolean): Promise<{ put: number; left: string[] }> {
-  const todo = [...(villagesOf(ctx.world).open ?? [])].filter(o => !which || which(o)).sort((a, b) => a.at.y - b.at.y);
+/**
+ * Put back everything a move left open (or those of `which`), the lowest first, walking carefully into reach of each.
+ * Not the rails home's opening in the fence while its rail stands in it (railshome.ts held: the take-up's to put back
+ * once the rail is up; put back now it would only meet the rail, "already a block")
+ */
+export async function closeUp(ctx: GoalContext, which?: (o: Opened) => boolean): Promise<{ put: number; left: string[] }> {
+  const todo = [...(villagesOf(ctx.world).open ?? [])].filter(o => (which ? which(o) : !heldByRails(ctx.world, o.at))).sort((a, b) => a.at.y - b.at.y);
   let put = 0;
   const left: string[] = [];
   for (const o of todo) {
@@ -862,9 +870,10 @@ const railPlans = new WeakMap<WorldMemory, RailPlan>();
 export const lastRailPlan = (world: WorldMemory): RailPlan | undefined => railPlans.get(world);
 
 /**
- * The rails fallback when the boat finds no way home, as P5c has it: planned on the ground the walk out read and said,
- * NEVER laid (whatever the switch: the laying is not built; the lead builds it and turns it on if the boat move fails
- * live). From by the villagers the judge allows (the nearest to the bot first) to the yard's fence the boat's way in
+ * The rails fallback when the boat finds no way home: planned on the ground the walk out read and said; with the rails
+ * switch off (as it ships) a dry run, nothing laid, as P5c had it; with it on (and the moves on) the line is kept to be
+ * laid (railshome.ts startLine: the `rails` rung makes the bill, lays it over days, moves the villager and takes it all
+ * back up), unless a line is under way already. From by the villagers the judge allows (the nearest to the bot first) to the yard's fence the boat's way in
  * comes by (straight out from the hall's panel, or the panel of a way in across the yard: the same entry), 16 off every
  * build but the village's own: the route, the bill against the stores (the chests as last seen and the pockets), every
  * block it would put down and take back up (kept for the villager-moves tool), what it would open. Its line is kept on
@@ -889,6 +898,20 @@ function railsDryRun(ctx: GoalContext, t: {
   }
   railPlans.set(ctx.world, r);
   t.site.rails = { at: t.at, ok: true, text: `${r.length} rails (up ${r.climb}, down ${r.drop}), ${r.bill.iron_ingot} iron, ${r.bill.gold_ingot} gold, about ${Math.round(r.seconds.total / 60)} min` };
+  // the rails switch on: the line kept to be laid (the rails rung's from here: the bill first)
+  if (railsOn(ctx.world) && movesOn(ctx.world)) {
+    const line = startLine(ctx.world, r, t.site, t.entry, t.at);
+    if (line) {
+      say(ctx, `rails home planned and kept to be laid (the rails switch is on): ${railsLine(r)}`);
+      say(ctx, `rails: the route ${r.route}; the bill first, then laid from the yard's fence out over as many days as it takes; the fence at ${r.opens.map(o => `${idOf(o.block)} ${fmt(o.at)}`).join(', ')} opened on the move's day only`);
+      return `rails home planned and kept to be laid: ${r.length} rails, ${r.bill.iron_ingot} iron, ${r.bill.gold_ingot} gold; the bill next`;
+    }
+    // (the switch is on: not the dry run's words, which would read as the switch not working)
+    const under = peekLine(ctx.world);
+    const text = `rails home planned only: ${under ? `the line to the village at ${fmt(under.site)}` : 'a line'} is under way (one at a time)`;
+    say(ctx, `${text}: ${railsLine(r)}`);
+    return text;
+  }
   say(ctx, `rails home planned (a dry run, nothing laid): ${railsLine(r)}`);
   say(ctx, `rails: the route ${r.route}; it would open the fence at ${r.opens.map(o => `${idOf(o.block)} ${fmt(o.at)}`).join(', ')} and take every rail, torch${r.stop.placed ? ' and the stop' : ''} back up after`);
   return `rails home planned (a dry run, nothing laid): ${r.length} rails, ${r.bill.iron_ingot} iron, ${r.bill.gold_ingot} gold, about ${Math.round(r.seconds.total / 60)} min`;
@@ -948,7 +971,7 @@ interface Trip {
 }
 
 /** Why a villager the judge allowed is no longer one to take, looked at again just before the boat goes down; '' if it still is. */
-function notFree(e: Seen, jobs: readonly { at: Pos }[]): string {
+export function notFree(e: Seen, jobs: readonly { at: Pos }[]): string {
   if (e.profession !== 'none') return `has a job now (${e.profession ?? 'none said'})`;
   if (e.baby) return 'is a baby';
   if (e.named) return 'is named';
@@ -1205,8 +1228,131 @@ async function boatHome(ctx: GoalContext, t: Trip): Promise<WorkResult> {
   }
 }
 
+/** What boatIntoHall needs read before the villager is out of its cart (the yard known, its ground, the hall's wall). */
+export interface HallWay { yard: NonNullable<WorldMemory['yard']>; ground: Ground; wall: Opened[]; own: Pick<Ground, 'cell'> }
+
+/**
+ * The yard's ground and the hall's wall read for boatIntoHall, before anything is done with the villager: the rails
+ * home reads them with the villager still seated in its cart on the brake, so a failure here leaves it seated, never
+ * loose in the yard. Why not, or the way.
+ */
+export async function hallWay(ctx: GoalContext, entry: Entry): Promise<HallWay | { why: string }> {
+  const yard = ctx.world.yard;
+  if (!yard) return { why: 'no yard known' };
+  const ground = new Ground(entry.level - MAX_DROP - 3, 16);
+  await ground.read(ctx, yard.x1 - 1, yard.z1 - 1, yard.x2 + 1, yard.z2 + 1);
+  const wall: Opened[] = entry.wall.map(p => ({ at: p, block: ground.state(p.x, p.y, p.z) ?? '' }));
+  const notRead = wall.find(o => !o.block);
+  if (notRead) return { why: `the hall's wall not read at ${fmt(notRead.at)}` };
+  for (const o of wall) ground.set(o.at.x, o.at.y, o.at.z, 'air');
+  return { yard, ground, wall, own: keepOff(ground, ctx.world) };
+}
+
+/**
+ * A villager standing in the yard taken into the hall by boat (the rails home's last part, railshome.ts: the cart broken
+ * on its brake, the fence already shut behind it), as a move's own yard part does: the boat against it (it wanders, so
+ * looked at again before each try, a boat that missed taken back up), the bot in front, across the yard to the hall's
+ * front stop on the yard's own ground (its builds kept off: keepOff), the hall's wall dug from the boat, into the room,
+ * out, the boat broken, the wall put back from inside, out by the hall's gate. A boat that never took the villager
+ * leaves it in the shut yard (`loose`); one that took it and stopped on the way leaves it seated in the boat (`boat`:
+ * a boat with no one in front goes nowhere), the bot out, never let out loose: the lead's then. Its own steps, not
+ * boatHome's: that one's give-ups let a villager out where the boat is, here the yard.
+ */
+export async function boatIntoHall(ctx: GoalContext, t: { entry: Entry; villager: Seen; now: () => number; way?: HallWay }): Promise<{ ok: true; text: string; count?: number } | { ok: false; why: string; held: 'boat' | 'loose' }> {
+  const world = ctx.world;
+  const { entry } = t;
+  const way = t.way ?? await hallWay(ctx, entry);
+  if ('why' in way) return { ok: false, why: way.why, held: 'loose' };
+  const { yard, ground, wall, own } = way;
+  let e = t.villager;
+  let boat: Boat | undefined;
+  for (let i = 0; i < PLACE_TRIES && !boat; i++) {
+    if (ctx.signal.aborted) throw new Error('aborted');
+    if (e.position) await ctx.call('goto', { ...under(e.position), y: Math.floor(e.position.y), range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 24, type: 'villager' }).catch(() => undefined))?.entities ?? [];
+    const fresh = round.find(x => x.id === e.id && x.position);
+    if (!fresh) return { ok: false, why: `the villager (${e.id}) went out of sight in the yard`, held: 'loose' };
+    e = fresh;
+    const r = await ctx.call<Placed>('vehicle.place', { item: BOAT_ITEM, for: e.id }, 20_000).catch((x): Placed => ({ ok: false, reason: (x as Error).message }));
+    if (!r.ok || r.id === undefined || !r.uuid) { say(ctx, `the boat did not go down in the yard: ${r.reason ?? 'no reply'}`); continue; }
+    const placed: Boat = { id: r.id, uuid: r.uuid };
+    villagesOf(world).boat = { uuid: r.uuid, at: under(r.position ?? e.position!), since: t.now() };
+    if (!r.tookIt) {
+      say(ctx, 'the villager was not taken into the boat: the boat back up, again');
+      const why = await takeBoat(ctx, placed);
+      if (why) return { ok: false, why: `the boat missed the villager and did not come back up: ${why}`, held: 'loose' };
+      continue;
+    }
+    boat = placed;
+  }
+  if (!boat) return { ok: false, why: `the boat could not be put down against the villager (${e.id}) in the yard`, held: 'loose' };
+  const b = boat;
+  // stopped on the way: the bot out, the villager left seated in the boat (what was dug of the wall put back, if it goes)
+  const seated = async (why: string): Promise<{ ok: false; why: string; held: 'boat' }> => {
+    await ctx.call('vehicle.dismount', { toward: { x: entry.inside.x, z: entry.inside.z } }, 15_000).catch(() => undefined);
+    await closeUp(ctx, o => t.entry.wall.some(w => w.x === o.at.x && w.y === o.at.y && w.z === o.at.z)).catch(() => undefined);
+    return { ok: false, why, held: 'boat' };
+  };
+  const m = await ctx.call<Reply & { controlling?: boolean }>('vehicle.mount', { id: b.id, uuid: b.uuid }, 15_000).catch((x): Reply & { controlling?: boolean } => ({ ok: false, reason: (x as Error).message }));
+  if (!m.ok || !m.controlling) return seated(`could not get into the boat in front: ${m.reason ?? 'not steering'}`);
+  const drive = async (to: { x: number; z: number }, within: number, what: string): Promise<string | undefined> => {
+    if (ctx.signal.aborted) throw new Error('aborted');
+    const p = (await ridingOf(ctx))?.position;
+    const ms = Math.max(20_000, Math.round((p ? horiz(p, to) : 0) / BOAT_PACE * 1500) + 10_000);
+    const r = await ctx.call<{ ok: boolean; reason?: string; at?: Pos }>('vehicle.drive', { to, within, timeoutMs: ms, maxDrop: MAX_DROP, maxOff: 3 }, ms + 15_000)
+      .catch(x => ({ ok: false, reason: (x as Error).message, at: undefined }));
+    const kept = villagesOf(world).boat;
+    if (kept && r.at && Number.isFinite(r.at.x) && Number.isFinite(r.at.y) && Number.isFinite(r.at.z)) kept.at = under(r.at);
+    return r.ok ? undefined : `the drive ${what} stopped: ${r.reason ?? 'no reply'}${r.at ? ` at ${fmt(r.at)}` : ''}`;
+  };
+  // across the yard to the hall's front stop, leg by leg, the rest planned again where a leg no longer holds
+  let again = 0;
+  for (let n = 0; ; n++) {
+    if (ctx.signal.aborted) throw new Error('aborted');
+    if (n > 20) return seated('the way across the yard kept failing');
+    const at = (await ridingOf(ctx))?.position;
+    if (!at) return seated('no longer in the boat');
+    if (horiz(at, entry.front) <= 0.6) break;
+    const r = planRoute(own, { x: at.x, z: at.z, level: at.y }, entry.front, { bounds: yardInside(yard), within: 0.5, corners: false });
+    if (!r.ok) return seated(`no way across the yard to the hall from ${fmt(at)}: ${r.why}`);
+    const stopped = await drive(r.legs[0], 0.5, `across the yard to ${fmt(r.legs[0])}`);
+    if (stopped && ++again > 5) return seated(stopped);
+    if (r.legs.length === 1 && !stopped) break;
+  }
+  const at = (await ridingOf(ctx))?.position;
+  if (!at) return seated('no longer in the boat');
+  const into = checkLeg(ground, { x: at.x, z: at.z, level: at.y }, entry.inside);
+  if (!into.ok) return seated(`the boat stopped where its way into the hall does not hold, at ${fmt(at)}: ${into.why} at ${fmt(into.at)}`);
+  for (const o of wall) {
+    const why = await digOut(ctx, o.at, o.block);
+    if (why) return seated(`the hall's wall did not come out: ${why}`);
+  }
+  say(ctx, `the hall's panel open at ${fmt(wall[0].at)} (${wall.length} blocks)`);
+  const inside = await drive(entry.inside, 0.8, 'into the hall');
+  if (inside) return seated(inside);
+  const deeper = { x: entry.inside.x - entry.dir[0] * 4, z: entry.inside.z - entry.dir[1] * 4 };
+  const off = await ctx.call<{ ok: boolean; reason?: string }>('vehicle.dismount', { toward: deeper }, 15_000).catch(x => ({ ok: false, reason: (x as Error).message }));
+  if (!off.ok) return seated(`could not get out in the hall: ${off.reason ?? 'no reply'}`);
+  await pause(500);
+  const took = await takeBoat(ctx, b);
+  say(ctx, `the villager (${e.id}) let out in the hall; the panel back`);
+  const c = wall[Math.floor(wall.length / 4)].at;
+  await ctx.call('goto', { x: c.x - entry.dir[0] * 2, y: c.y, z: c.z - entry.dir[1] * 2, range: 1, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+  const back = await closeUp(ctx, o => wall.some(w => w.at.x === o.at.x && w.at.y === o.at.y && w.at.z === o.at.z));
+  if (entry.gate) {
+    const g = entry.gate;
+    const gside = g.z === entry.hall.z ? [0, -1] : g.z === entry.hall.z + entry.hall.length - 1 ? [0, 1] : g.x === entry.hall.x ? [-1, 0] : [1, 0];
+    await ctx.call('goto', { x: g.x + gside[0] * 2, y: g.y, z: g.z + gside[1] * 2, range: 1, careful: true, timeoutMs: 45_000 }, 60_000).catch(() => undefined);
+  }
+  const count = await countHall(ctx, t.now());
+  return {
+    ok: true, ...(count !== undefined ? { count } : {}),
+    text: `the villager (${e.id}) into the hall${took ? `; the boat left in the hall (${took})` : ''}${back.left.length ? `; could not put back ${back.left.join(', ')}` : ''}`
+  };
+}
+
 /** Break the bot's own boat back into its item (vehicle.take: an axe, never a sword); why not, or undefined. */
-async function takeBoat(ctx: GoalContext, boat: Boat): Promise<string | undefined> {
+export async function takeBoat(ctx: GoalContext, boat: Boat): Promise<string | undefined> {
   const r = await ctx.call<{ ok: boolean; reason?: string }>('vehicle.take', { id: boat.id, uuid: boat.uuid }, 30_000).catch(x => ({ ok: false, reason: (x as Error).message }));
   if (r.ok) { delete villagesOf(ctx.world).boat; return undefined; }
   return r.reason ?? 'no reply';
@@ -1217,7 +1363,7 @@ async function takeBoat(ctx: GoalContext, boat: Boat): Promise<string | undefine
  * back into its item (the villager steps out where it was: left there, unharmed). Says what it left behind, and
  * whether the boat is its item again.
  */
-async function letGo(ctx: GoalContext, boat: Boat | undefined): Promise<{ text: string; taken: boolean }> {
+export async function letGo(ctx: GoalContext, boat: Boat | undefined): Promise<{ text: string; taken: boolean }> {
   let said = '';
   const seat = await ridingOf(ctx);
   // (where the boat is: the villager steps out there)
@@ -1253,13 +1399,19 @@ export const closeUpGoal: Goal = {
   // (never worth stopping a run for: the move's own run puts back what it opened as it goes)
   cuts: () => false,
   wants: (s, world) => {
-    const open = peekVillages(world).open?.length;
-    if (!open || s.sleeping || s.dimension !== 'overworld' || !roundFrom(s, world, 24)) return null;
-    return `${open} block(s) of the hall or the fence left open by a villager move`;
+    const open = (peekVillages(world).open ?? []).filter(o => !heldByRails(world, o.at)).length;
+    const rails = railsYardOpen(world);
+    if ((!open && !rails) || s.sleeping || s.dimension !== 'overworld' || !roundFrom(s, world, 24)) return null;
+    if (open) return `${open} block(s) of the hall or the fence left open by a villager move`;
+    const line = peekLine(world);
+    return line?.stage === 'moving' && line.cart ? 'the rails home\'s post left open by a move cut short with its cart out' : 'the rails home\'s yard stretch left down by a move that did not go';
   },
   run: async ctx => {
+    // (the rails' yard stretch first: its rail stands in the fence's opening, which goes back once it is up)
+    const rails = railsYardOpen(ctx.world) ? await closeRailsYard(ctx) : undefined;
     const r = await closeUp(ctx);
-    if (r.left.length && !r.put) throw new Error(`could not put back ${r.left.join(', ')}`);
-    return `put back ${r.put} block(s) a villager move left open${r.left.length ? `; not ${r.left.join(', ')}` : ''}`;
+    if (rails?.stop && !rails.taken && !r.put) throw new Error(rails.text);
+    if (r.left.length && !r.put && !rails?.taken) throw new Error(`could not put back ${r.left.join(', ')}`);
+    return `${rails ? `${rails.text}; ` : ''}put back ${r.put} block(s) a villager move left open${r.left.length ? `; not ${r.left.join(', ')}` : ''}`;
   }
 };

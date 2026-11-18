@@ -82,11 +82,12 @@ import static claudebridge.Json.*;
  *   it gets out where it was. A sword's sweep (a sword's only: Player.isSweepAttack, ItemTags.SWORDS) hurts every living
  *   thing within a block of the boat, the villager beside it among them: never a sword, nor a mace, a trident or a spear
  *   (the server drops a spear's attack packet: PIERCING_WEAPON).
- * - Minecarts (the rails fallback: planned, not built). A moving empty minecart takes the first non-player, non-golem
- *   mob it runs into (OldMinecartBehavior.pushAndPickupEntities: horizontal speed over 0.1 a tick), one passenger only;
- *   a powered rail adds 0.06 a tick along the way a cart moves at all, with any passenger or none, and pushes a still one
- *   off a solid block beside it (0.02); an unpowered one brakes. NewMinecartBehavior is the minecart_improvements
- *   experiment's, off on a vanilla server whose world was not made with it.
+ * - Minecarts (the rails fallback, P5e: Rails.java lays the line and puts the cart on it, as the bot's own here). A
+ *   moving empty minecart takes the first non-player, non-golem mob it runs into (OldMinecartBehavior.pushAndPickupEntities:
+ *   horizontal speed of 0.1 a tick or more), one passenger only; a powered rail adds 0.06 a tick along the way a cart
+ *   moves at all, with any passenger or none, and pushes a still one off a solid block beside it (0.02); an unpowered one
+ *   brakes. NewMinecartBehavior is the minecart_improvements experiment's, off on a vanilla server whose world was not
+ *   made with it. vehicle.mount (one seat), vehicle.dismount and vehicle.take (an axe's one hit) take a cart as a boat.
  */
 public final class Vehicle {
     private Vehicle() { }
@@ -341,6 +342,9 @@ public final class Vehicle {
     static final double FLOOR_EPS = 1e-3;
 
     // ---------------------------------------------------------------- live helpers
+
+    /** A vehicle the bot put down by other means (Rails' cart.place): its own from now, as vehicle.place's boats. */
+    static void adopt(UUID uuid) { OWN.add(uuid); }
 
     static boolean own(Entity e) {
         return e instanceof VehicleEntity && OWN.contains(e.getUUID());

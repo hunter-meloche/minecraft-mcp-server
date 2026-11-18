@@ -375,12 +375,13 @@ test('the skipped line: why each rung above the one that starts did not run inst
   t.is(skippedLine(b.goal(kit), snap(), world, goals, none), undefined);
   t.is(skippedLine(other, snap(), world, goals, none), undefined);
 
-  // a long ladder's line is cut at 400 characters (300 before P2a: with the nether rung the live ladder's own line ran past it)
+  // a long ladder's line is cut at 480 characters (300 before P2a: with the nether rung the live ladder's own line ran past
+  // it; 400 before P5e: with the rails rung the surface's lost the deep rung's reason)
   const many = Array.from({ length: 12 }, (_, i) => stub(`rung number ${i + 1}`, i + 1, 'yard', [], { none: () => ({ cause: 'unneeded', text: 'nothing to do here for now' }) }));
   const last = stub('last', 13, 'yard');
   const long = bench([...many, last]);
   const line = skippedLine(long.goal(last), snap(), emptyWorld(), long.goals, none)!;
-  t.is(line.length, 400);
+  t.is(line.length, 480);
   t.true(line.startsWith('work: last: skipped: rung number 1 (unneeded: nothing to do here for now) | rung number 2 ('));
   t.true(line.endsWith('...'));
 });
@@ -2403,7 +2404,7 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
     // (no cane to plant a patch with, no cow pen, and no project waiting on cane: the rungs above have nothing to do)
     // (the nether rung, 4.5, above the deep one since P2a: its switch is off; the villagers rung, 4.4, since P5c: its
     // switch is off too)
-    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off)',
+    'work: deep: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: kit ready) | rails (unneeded: no line to lay) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off)',
     'work: deep: out to the mine at (0, -56)',
     'work: deep: mining iron for 23 more (180 s)',
     'work: deep: Mined for 100s: raw_iron x23.',
@@ -2438,7 +2439,7 @@ test.serial('done work: deep and done work: surface say what came in, and the wa
     // the stored ingots make the armour: at home that is the kit goal's to do
     // (the nether rung, 4.5, above the deep one since P2a: its switch is off; the villagers rung, 4.4, since P5c: its
     // switch is off too)
-    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off) | deep (kit: armour below iron (deep needs the deep kit))',
+    'work: surface: skipped: cane patch (unneeded: no cane to plant) | cows (unneeded: no cow pen with a gate) | cane (unneeded: the project is not waiting on sugar_cane) | trip kit (unneeded: armour: the kit goal sees to them at home) | rails (unneeded: no line to lay) | villagers (unneeded: villager moves are off) | nether (unneeded: trips are off) | deep (kit: armour below iron (deep needs the deep kit))',
     'work: surface: mining coal_ore for up to 24 (90 s)',
     'work: surface: mining coal_ore for up to 1 (90 s)',
     'done work: surface in 0s: [coal] +23 coal; back home'
