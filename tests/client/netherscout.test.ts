@@ -10,7 +10,7 @@ import { FROM_BUILDS, SETUP_WAITS, boxGap, boxOf, footing, walkFrom, zoneBox, ty
 import {
   BEARINGS, NETHER, OVERWORLD, SITES, WAYPOINTS, netherLine, netherOf, noteSites, peekNether, portalCells, type Bearing, type PortalShape, type ScoutLeg
 } from '../../src/client/brain/nether.js';
-import { LADDER, NETHER_WORK } from '../../src/client/brain/worktasks.js';
+import { LADDER, NETHER_KIT_MS, NETHER_WORK } from '../../src/client/brain/worktasks.js';
 import { workGoals } from '../../src/client/brain/work.js';
 import { T0, liveWorld, lookAt } from '../helpers/homestead.js';
 import { KIT, ROOM_ZONE, game, gridOf, k, netherGround, setupWorld, type Mob } from '../helpers/netherworld.js';
@@ -394,6 +394,24 @@ test('the scouting\'s gate: nothing before stage 2 or with the switch off; at st
     for (const tod of [0, 1000, 3900, 6000, 12_000]) { const look = lookAt(KIT, tod); scoutOpen(x); scoutReady(look, x); scoutBearing(x, look.now); rung().wants(look, x); rung().declines!(look, x); }
     t.is(JSON.stringify(x), before);
   }
+});
+
+test('the scouting does not fetch the kit with too little of the day for its own least after it: late before the kit, and the rung\'s turn goes to a shorter work', (t) => {
+  // live Nov 18 14:07: let go with the day's 3 min, it fetched the kit and the Nether set (34 s), found 3 min no
+  // longer left and came straight back ("not setting out: the kit took 34 s, too little of the scouting's 8 min is left")
+  const w = setupWorld();
+  Object.assign(netherOf(w), { portal: { x: OWN.x, y: OWN.y, z: OWN.z }, linked: true, stage: 2, stageTrips: 2, cleanTrips: 3 });
+  w.chestItems![ORES].quartz = 64;
+  const scout = NETHER_WORK.find(v => v.id === 'scout')!;
+  const barter = NETHER_WORK.find(v => v.id === 'barter')!;
+  t.is(scout.leastMs() + NETHER_KIT_MS, 4 * MINUTE);
+  t.is(barter.leastMs() + NETHER_KIT_MS, 3 * MINUTE);
+  t.is(rung().wants(lookAt(KIT, 1000), w), 'scout: in the nether');
+  // past the scouting's hour (but inside the day's 3 min) the scouting is not chosen
+  // (netherBudgetMs: 3 min at tod 3800, a minute more each 1200 ticks earlier: the scouting's 4 min till tod 2600)
+  t.is(rung().wants(lookAt(KIT, 2600), w), 'scout: in the nether');
+  for (const tod of [2601, 3000, 3700]) t.false(String(rung().wants(lookAt(KIT, tod), w)).startsWith('scout'), `tod ${tod}`);
+  t.like(rung().declines!(lookAt(KIT, 3000), w), { cause: 'late', text: 'nether needs 4 min down there and home by dusk, 3.6 left' });
 });
 
 test('with the switch off (the live world) the scouting never wants, at any hour', (t) => {

@@ -32,14 +32,14 @@ import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult
 import { leaveYard } from './yardgates.js';
 import { homePortal, tripsOn } from './portal.js';
 import { netherKitDecline, peekNether } from './nether.js';
-import { setupOpen, setupReady, setupRun } from './nethersetup.js';
-import { lookOpen, lookReady, lookRun } from './netherlook.js';
-import { barterOpen, barterReady, barterRun } from './netherbarter.js';
-import { quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
-import { scoutOpen, scoutReady, scoutRun } from './netherscout.js';
-import { debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
-import { fortressOpen, fortressReady, fortressRun } from './netherfortress.js';
-import { tunnelOpenAt, tunnelReady, tunnelRun } from './nethertunnel.js';
+import { SETUP_LEAST_MS, setupOpen, setupReady, setupRun } from './nethersetup.js';
+import { LOOK_LEAST_MS, lookOpen, lookReady, lookRun } from './netherlook.js';
+import { BARTER_LEAST_MS, barterOpen, barterReady, barterRun } from './netherbarter.js';
+import { QUARTZ_LEAST_MS, quartzOpen, quartzReady, quartzRun } from './netherquartz.js';
+import { SCOUT_LEAST_MS, scoutOpen, scoutReady, scoutRun } from './netherscout.js';
+import { DEBRIS_LEAST_MS, debrisOpen, debrisReady, debrisRun } from './netherdebris.js';
+import { FORTRESS_LEAST_MS, fortressOpen, fortressReady, fortressRun } from './netherfortress.js';
+import { TUNNEL_LEAST_MS, tunnelOpenAt, tunnelReady, tunnelRun } from './nethertunnel.js';
 import { villagersTask } from './villagemove.js';
 import { railsTask } from './railshome.js';
 import { eveningFrom, fishDist, fishLate, fishRun, isEvening } from './fish.js';
@@ -449,7 +449,22 @@ export interface NetherWork {
   open?(world: WorldMemory): boolean;
   ready(s: Snapshot, world: WorldMemory): Decline | null;
   run(ctx: GoalContext, budgetMs: number, now: () => number): Promise<WorkResult>;
+  /** the least of its time it must have left once kitted, or it does not set out (each trip's own *_LEAST_MS; a
+   *  function: the modules import each other, and nothing of theirs is read as they load) */
+  leastMs(): number;
 }
+
+/**
+ * What fetching the Nether kit and putting the Nether set on may take before a trip sets out, ms. The rung let a trip
+ * go with the day's least (nether.ts NETHER_WORTH_MS, 3 min) and the trip checked its own least only after the kit:
+ * the scouting, 3 min of its own, fetched the kit, put the Nether set on, found too little left and came straight back
+ * to take it off again (Nov 17 07:01, Nov 18 07:55 and 14:09: "not setting out: the kit took 7 / 116 / 34 s, too
+ * little of the scouting's 8 min is left", two minutes and a home set round each). Now the day must hold the trip's
+ * least and this before the kit is fetched (the variant's needMs, asked by work.ts lateFor), or it is `late` and the
+ * rung's turn goes to a shorter work. A minute, not the slowest kit seen: the trip's day is short (netherBudgetMs: 6
+ * min at dawn), and two would keep the fortress and the tunnel (4 min of their own) home but for the first minutes.
+ */
+export const NETHER_KIT_MS = MINUTE;
 
 /**
  * `setup` (P2b, nethersetup.ts): the bot's own Nether-side portal, built and checked both ways, from stage 0 until the
@@ -458,6 +473,7 @@ export interface NetherWork {
  */
 const setupWork: NetherWork = {
   id: 'setup',
+  leastMs: () => SETUP_LEAST_MS,
   stage: 0,
   open: world => setupOpen(world),
   ready: (s, world) => setupReady(s, world),
@@ -471,6 +487,7 @@ const setupWork: NetherWork = {
  */
 const lookWork: NetherWork = {
   id: 'look',
+  leastMs: () => LOOK_LEAST_MS,
   stage: 0,
   open: world => lookOpen(world),
   ready: (s, world) => lookReady(s, world),
@@ -484,6 +501,7 @@ const lookWork: NetherWork = {
  */
 const barterWork: NetherWork = {
   id: 'barter',
+  leastMs: () => BARTER_LEAST_MS,
   stage: 1,
   open: world => barterOpen(world),
   ready: (s, world) => barterReady(s, world),
@@ -497,6 +515,7 @@ const barterWork: NetherWork = {
  */
 const quartzWork: NetherWork = {
   id: 'quartz',
+  leastMs: () => QUARTZ_LEAST_MS,
   stage: 1,
   open: world => quartzOpen(world),
   ready: (s, world) => quartzReady(s, world),
@@ -511,6 +530,7 @@ const quartzWork: NetherWork = {
  */
 const scoutWork: NetherWork = {
   id: 'scout',
+  leastMs: () => SCOUT_LEAST_MS,
   stage: 2,
   open: world => scoutOpen(world),
   ready: (s, world) => scoutReady(s, world),
@@ -525,6 +545,7 @@ const scoutWork: NetherWork = {
  */
 const debrisWork: NetherWork = {
   id: 'debris',
+  leastMs: () => DEBRIS_LEAST_MS,
   stage: 2,
   open: world => debrisOpen(world),
   ready: (s, world) => debrisReady(s, world),
@@ -541,6 +562,7 @@ const debrisWork: NetherWork = {
  */
 const fortressWork: NetherWork = {
   id: 'fortress',
+  leastMs: () => FORTRESS_LEAST_MS,
   stage: 3,
   open: world => fortressOpen(world),
   ready: (s, world) => fortressReady(s, world),
@@ -556,6 +578,7 @@ const fortressWork: NetherWork = {
  */
 const tunnelWork: NetherWork = {
   id: 'tunnel',
+  leastMs: () => TUNNEL_LEAST_MS,
   stage: 3,
   open: world => tunnelOpenAt(world),
   ready: (s, world) => tunnelReady(s, world),
@@ -589,7 +612,7 @@ const nether: WorkTask = {
   variants: (_s, world) => {
     if (!tripsOn(world) || !portalReady(world)) return [];
     const stage = peekNether(world).stage;
-    return NETHER_WORK.filter(v => v.stage <= stage && (v.open?.(world) ?? true)).map(v => ({ id: v.id, dist: 0 }));
+    return NETHER_WORK.filter(v => v.stage <= stage && (v.open?.(world) ?? true)).map(v => ({ id: v.id, dist: 0, needMs: v.leastMs() + NETHER_KIT_MS }));
   },
   none: (_s, world) => ({
     cause: 'unneeded',

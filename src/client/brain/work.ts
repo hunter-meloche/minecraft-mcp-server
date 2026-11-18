@@ -553,8 +553,10 @@ function common(task: WorkTask, s: Snapshot, world: WorldMemory): Decline | null
  */
 function lateFor(task: WorkTask, dist: number, s: Snapshot, need?: number): Decline | null {
   if (task.reach === 'nether') {
+    // (a work's own least with the kit before it, worktasks.ts NETHER_KIT_MS, where it needs more than the day's least)
+    const least = Math.max(NETHER_WORTH_MS, need ?? 0);
     const left = netherBudgetMs(s.timeOfDay);
-    return left < NETHER_WORTH_MS ? { cause: 'late', text: `${task.name} needs ${NETHER_WORTH_MS / MINUTE} min down there and home by dusk, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
+    return left < least ? { cause: 'late', text: `${task.name} needs ${least / MINUTE} min down there and home by dusk, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
   }
   if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(need ?? needMs(dist, task.reach, task.backPace)));
   const left = tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
