@@ -173,7 +173,30 @@ class Field {
     mobAtCart?: Villager;
     /** the launched cart takes this villager (one come onto the head after the looks), not the one on the pickup */
     takesOther?: number;
+    /** the server's simulation distance in chunks, as cart.status says it (10 unless said) */
+    simulation?: number;
+    /** a cart frozen past the simulation distance rolls on home once the bot comes within it (to the end of the rails down) */
+    wakes?: boolean;
+    /** the boat broken at the pickup leaves its drop on the ground (vehicle.take answers pickedUp: false) */
+    boatDropLeft?: boolean;
+    /** world.region reads that fail right after the lost lay (lostAt): the client dropped */
+    unreadAfterLost?: number;
   } = {}) {}
+  regionFails = 0;
+  /** a frozen cart woken (the bot within the simulation distance): on along the rails down to their end, at rest there */
+  private wake() {
+    const c = this.cart;
+    const sim = (this.opts.simulation ?? 10) * 16 - 16;
+    if (!this.opts.wakes || !c || this.cartMoving || horiz(c.pos, this.me) >= sim || !this.line) return;
+    const cells = this.line.cells;
+    let i = cells.findIndex(q => q.x === Math.floor(c.pos.x) && q.z === Math.floor(c.pos.z));
+    if (i < 0) return;
+    while (i + 1 < cells.length && this.rails.has(k(cells[i + 1]))) i++;
+    c.pos = { x: cells[i].x + 0.5, y: cells[i].y + 0.0625, z: cells[i].z + 0.5 };
+    const v = this.villagers.find(q => q.id === c.rider);
+    if (v) v.position = { ...c.pos };
+    this.log.push(`cart woke, at rest ${k(cells[i])}`);
+  }
 
   base(x: number, y: number, z: number): string {
     if (y <= 61) return 'dirt';
@@ -245,7 +268,7 @@ class Field {
     if (this.opts.abortAtLay?.n === this.lays) { this.opts.abortAtLay.abort.abort(); throw new Error('aborted: the brain gave this job up'); }
     if (this.opts.offAtLay === this.lays) this.world.railsHome = false;
     const r = await this.layNow(a);
-    if (this.opts.lostAt === this.lays && r.placed) throw new Error('bridge call rail.place timed out');
+    if (this.opts.lostAt === this.lays && r.placed) { this.regionFails = this.opts.unreadAfterLost ?? 0; throw new Error('bridge call rail.place timed out'); }
     return r;
   };
   private layNow = async (a: RailLay): Promise<RailPlaced> => {
@@ -289,7 +312,7 @@ class Field {
     this.own.add(k(p));
     return { ok: true, placed: true, block: a.item, shape: this.rails.get(k(p))!.shape, ...(this.opts.newMovement ? { newMovement: true } : {}) };
   };
-  takeUp = async (at: Pos): Promise<RailTaken> => {
+  takeUp = async (at: Pos, item?: string): Promise<RailTaken> => {
     this.near(at);
     this.t += 1000;
     if (this.opts.unreach?.includes(k(at))) return { ok: false, dug: false, reason: 'out of reach or out of sight' };
@@ -299,6 +322,7 @@ class Field {
     if (name === 'air') return { ok: true, dug: false, block: name, reason: 'nothing there' };
     if (!/^(rail|powered_rail|redstone_torch|cobblestone)$/.test(name)) return { ok: false, dug: false, block: name, reason: `not a block of the line: ${name}` };
     if (!this.own.has(k(at))) return { ok: false, dug: false, block: name, reason: `the bot did not put that ${name} there` };
+    if (item && item !== name) { this.own.delete(k(at)); return { ok: false, dug: false, block: name, reason: `the bot did not put that ${name} there (its ${item} is gone)` }; }
     this.rails.delete(k(at));
     this.blocks.set(k(at), 'air');
     this.own.delete(k(at));
@@ -349,6 +373,7 @@ class Field {
       case 'world.region': {
         const box = (q: Pos) => q.x >= n('x') && q.x < n('x') + n('width') && q.y >= n('y') && q.y < n('y') + n('height') && q.z >= n('z') && q.z < n('z') + n('length');
         if (this.opts.wallUnreadAtBrake && this.cartHome && box(PANEL[0])) throw new Error('bridge call world.region timed out');
+        if (this.regionFails > 0) { this.regionFails--; throw new Error('not in a world'); }
         const out: (string | null)[] = [];
         for (let y = 0; y < n('height'); y++) for (let z = 0; z < n('length'); z++) for (let x = 0; x < n('width'); x++) out.push(this.block(n('x') + x, n('y') + y, n('z') + z));
         return { blocks: out };
@@ -441,16 +466,32 @@ class Field {
         const rider = this.villagers.find(q => q.id === v.rider);
         if (rider) rider.position = { x: v.pos.x, y: 63, z: v.pos.z };
         const isCart = v === this.cart;
-        if (v === this.boat) { this.boat = undefined; this.give('oak_boat'); this.log.push('boat taken up'); } else { this.cart = undefined; this.give('minecart'); this.log.push('cart taken up'); }
+        if (v === this.boat) {
+          this.boat = undefined;
+          if (this.opts.boatDropLeft) { this.log.push('boat broken, its drop left'); return { ok: true, pickedUp: false }; }
+          this.give('oak_boat');
+          this.log.push('boat taken up');
+        } else { this.cart = undefined; this.give('minecart'); this.log.push('cart taken up'); }
         if (isCart && this.opts.cartTakeLost) { this.opts.cartTakeLost = false; throw new Error('bridge call vehicle.take timed out'); }
         return { ok: true };
       }
-      case 'cart.status': return { carts: this.cart && !(this.opts.forgotOwn && p.id === undefined && p.uuid === undefined) && horiz(this.cart.pos, this.me) <= (this.opts.sight ?? Infinity) ? [this.cartJson()] : [], newMovement: false, simulationDistance: 10, takeSpeed: 0.1 };
+      case 'cart.status': this.wake(); return { carts: this.cart && !(this.opts.forgotOwn && p.id === undefined && p.uuid === undefined) && horiz(this.cart.pos, this.me) <= (this.opts.sight ?? Infinity) ? [this.cartJson()] : [], newMovement: false, simulationDistance: this.opts.simulation ?? 10, takeSpeed: 0.1 };
       case 'cart.watch': {
         const c = this.cart;
         const line = this.line!;
         if (!c || n('id') !== c.id) return { ok: false, reason: `no minecart with id ${n('id')} in sight` };
-        if (p.until === 'rest') return { ok: true, reason: 'at rest', at: { ...c.pos }, passengers: this.cartJson().passengers };
+        if (p.until === 'rest') {
+          // (one rolling home: on to the brake's end, at rest there)
+          if (this.cartMoving) {
+            const end = line.cells[line.cells.length - 1];
+            c.pos = { x: end.x + 0.5, y: end.y + 0.0625, z: end.z + 0.5 };
+            const v = this.villagers.find(q => q.id === c.rider);
+            if (v) v.position = { ...c.pos };
+            this.cartMoving = false;
+            this.t += 5000;
+          }
+          return { ok: true, reason: 'at rest', at: { ...c.pos }, passengers: this.cartJson().passengers };
+        }
         const launch = this.rails.get(k(line.cells[0]));
         if (!launch?.powered) { this.t += 20_000; return { ok: false, reason: 'timed out', at: { ...c.pos } }; }
         this.launches++;
@@ -1349,4 +1390,188 @@ test('a mob onto the line\'s head as the cart goes down: looked at again before 
   const zup = await run(three, 'take up', 30 * MINUTE);
   t.regex(zup.text, /left with a zombie \(301\) in it \(never let out loose in the yard\)/);
   t.is(three.cart?.rider, 301);
+});
+
+// ------------------------------------------------------------------------------------------------ the third review's
+
+/** As a move left it: the yard's stretch down, the post open, the cart `uuid` (id 701) at `at` with `rider` in it, stage moving. */
+function cartOutAsLeft(land: Field, line: RailLine, world: WorldMemory, at: Pos, rider: number, over: Partial<RailLine> = {}) {
+  yardAsLeft(land, line, world, { postOpen: true });
+  land.cart = { id: 701, uuid: 'ca27-0002', pos: { x: at.x + 0.5, y: at.y + 0.0625, z: at.z + 0.5 }, rider };
+  land.villagers.find(v => v.id === rider)!.position = { ...land.cart.pos };
+  land.line = line;
+  line.stage = 'moving';
+  line.yardOpen = true;
+  line.cart = { uuid: 'ca27-0002' };
+  Object.assign(line, over);
+}
+
+test('the post\'s rail off the record is saved before the fence goes back on it; and a restart that finds the fence back over a post still in the record goes on into the hall, never gives the move up', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  const post = line.cells[goalOf(line) + 1];
+  cartOutAsLeft(land, line, world, line.cells[line.cells.length - 1], 101, { villagerOut: 101 });
+  land.me = { x: -555.5, y: 63, z: 2121.5 };
+  const n0 = land.saves.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.regex(r.text, /^moved an unemployed villager/);
+  // the first save with the post's rail off the record: the fence's opening still listed (the fence not back yet)
+  const saves = land.saves.slice(0, land.saves.length - n0).reverse().map(x => JSON.parse(x) as WorldMemory);
+  const first = saves.find(w => w.rails?.line && !w.rails.line.laid.some(b => k(b.at) === k(post)));
+  t.truthy(first);
+  t.true((first!.villages?.open ?? []).some(o => k(o.at) === k(post)), 'saved before the fence went back');
+  // a restart in that gap before the fix's save: the fence back on the post, the record still has its rail
+  const b = lineWorld('laying');
+  const two = new Field(b.world);
+  await laidWhole(two, b.line);
+  cartOutAsLeft(two, b.line, b.world, b.line.cells[b.line.cells.length - 1], 101, { villagerOut: 101 });
+  two.rails.delete(k(post));
+  two.own.delete(k(post));
+  for (const o of b.line.opens) two.blocks.set(k(o.at), o.block);
+  two.me = { x: -555.5, y: 63, z: 2121.5 };
+  const go = await run(two, 'move', 20 * MINUTE);
+  t.regex(go.text, /^moved an unemployed villager/);
+  t.true(b.world.villagerMoves);
+  t.is(two.block(-556, 63, 2119), FENCE);
+  t.deepEqual(two.standing(b.line), []);
+});
+
+test('the take-up never digs a block of someone\'s standing where the bot\'s rail was (their cobblestone over the line): left, said, the rest up', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  const c = line.cells[50];
+  land.rails.delete(k(c));
+  land.blocks.set(k(c), 'cobblestone');
+  line.stage = 'taking up';
+  line.why = 'stopped 2 runs in a row: cobblestone where the line\'s rail was';
+  const up = await run(land, 'take up', 30 * MINUTE);
+  t.regex(up.text, /everything of the line taken back up/);
+  t.is(land.block(c.x, c.y, c.z), 'cobblestone', 'theirs, left standing');
+  t.false(land.log.includes(`take up cobblestone ${k(c)}`));
+  t.true(up.text.includes(`left: rail (${c.x}, ${c.y}, ${c.z}): the bot did not put that cobblestone there (its rail is gone)`), up.text);
+  t.deepEqual(land.standing(line), [k(c)]);
+});
+
+test('a lay whose reply was lost and whose read after failed too (the client dropped) is kept in the record, unsure: the next day reads it and lays on, and the take-up gets it', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { lostAt: 5, unreadAfterLost: 1 });
+  land.line = line;
+  const r = await run(land, 'lay', 30 * MINUTE);
+  const fifth = line.cells[goalOf(line) - 4];
+  t.regex(r.text, /stopped: rail .* not laid: bridge call rail.place timed out; not read after \(kept in the record\)/);
+  t.like(line.laid.find(b => k(b.at) === k(fifth)), { item: 'rail', unsure: true });
+  t.true(land.standing(line).includes(k(fifth)), 'down all the same');
+  const again = await run(land, 'lay', 30 * MINUTE);
+  t.regex(again.text, /^the line is whole/);
+  t.false(line.laid.some(b => b.unsure));
+  t.deepEqual(land.standing(line).sort(), line.laid.map(b => k(b.at)).sort());
+  // (unsure and not down: the take-up's read finds air and forgets it)
+  world.railsHome = false;
+  await run(land, 'take up', 30 * MINUTE);
+  t.deepEqual(land.standing(line), []);
+  t.is(peekLine(world), undefined);
+});
+
+test('no boat carried at the brake (the stash put it away): one is made from the chests\' planks first; with none to be had the villager stays seated in the cart in the shut yard, the move under way, never let out loose', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  cartOutAsLeft(land, line, world, line.cells[line.cells.length - 1], 101, { villagerOut: 101 });
+  land.items = land.items.filter(i => i.name !== 'oak_boat');
+  land.me = { x: -555.5, y: 63, z: 2121.5 };
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.regex(r.text, /^moved an unemployed villager/);
+  t.true(land.log.includes('craft oak_boat x1'));
+  // none: no boat and no planks
+  const b = lineWorld('laying');
+  const two = new Field(b.world);
+  await laidWhole(two, b.line);
+  cartOutAsLeft(two, b.line, b.world, b.line.cells[b.line.cells.length - 1], 101, { villagerOut: 101 });
+  two.items = two.items.filter(i => i.name !== 'oak_boat' && i.name !== 'oak_planks');
+  two.me = { x: -555.5, y: 63, z: 2121.5 };
+  const no = await run(two, 'move', 20 * MINUTE);
+  t.regex(no.text, /^the villager \(101\) kept seated in the cart on the brake: short of oak_boat .*; again next run$/);
+  t.like(two.cart, { rider: 101 });
+  t.is(b.line.stage, 'moving');
+  t.true(b.world.villagerMoves);
+  t.is(two.block(-556, 63, 2119), FENCE, 'the yard shut');
+  // a boat broken at the pickup whose drop was not picked up: no cart goes down for the villager
+  const c = lineWorld('laying');
+  const three = new Field(c.world, { boatDropLeft: true });
+  await laidWhole(three, c.line);
+  const go = await run(three, 'move', 20 * MINUTE);
+  t.regex(go.text, /^the move not made: the boat broken at the pickup did not come back into the pockets/);
+  t.false(three.log.some(l => /^cart on /.test(l)));
+  t.is(c.line.stage, 'whole');
+});
+
+test('a move cut short with the cart still rolling home, or frozen out on the line past the simulation distance: the next run follows it home and on into the hall, never gives it up', async (t) => {
+  // rolling, in sight
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  cartOutAsLeft(land, line, world, line.cells[100], 101, { villagerOut: 101 });
+  land.cartMoving = true;
+  land.me = { x: line.cells[90].x + 0.5, y: 63, z: line.cells[90].z + 0.5 };
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.regex(r.text, /^moved an unemployed villager/);
+  t.true(world.villagerMoves);
+  // frozen at rest out on the line, the bot in the yard: it walks out, the cart wakes and rolls home
+  const b = lineWorld('laying');
+  const two = new Field(b.world, { simulation: 3, wakes: true });
+  await laidWhole(two, b.line);
+  cartOutAsLeft(two, b.line, b.world, b.line.cells[20], 101, { aimed: 101 });
+  two.me = { x: -555.5, y: 63, z: 2121.5 };
+  const go = await run(two, 'move', 20 * MINUTE);
+  t.regex(go.text, /^moved an unemployed villager/);
+  t.true(two.log.some(l => l.startsWith('cart woke')));
+  t.true(b.world.villagerMoves);
+  // not in sight from home at all: looked for out along the line
+  const c = lineWorld('laying');
+  const three = new Field(c.world, { simulation: 3, wakes: true, sight: 40 });
+  await laidWhole(three, c.line);
+  cartOutAsLeft(three, c.line, c.world, c.line.cells[20], 101, { villagerOut: 101 });
+  three.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  const far = await run(three, 'move', 20 * MINUTE);
+  t.regex(far.text, /^moved an unemployed villager/);
+  t.deepEqual(three.standing(c.line), []);
+});
+
+test('a take-up with the cart and its villager out and not found keeps the cart\'s way home (the brake, the post) until the line is up: never shut out at the fence, let out loose there', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { simulation: 3, wakes: true, sight: 40 });
+  await laidWhole(land, line);
+  cartOutAsLeft(land, line, world, line.cells[20], 101, { villagerOut: 101, stage: 'taking up', why: 'given up by hand' });
+  land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  // close up leaves the post open for it
+  const night = snap(land.items, { now: land.t, timeOfDay: 14000, activity: activityAt(14000) });
+  if (closeUpGoal.wants(night, world)) await closeUpGoal.run(land.ctx()).catch(() => undefined);
+  t.is(idOf(land.block(-556, 63, 2119)), 'rail');
+  await run(land, 'take up', 30 * MINUTE);
+  const v = land.villagers.find(q => q.id === 101)!;
+  t.is(land.cart?.rider, 101, 'kept seated in the cart');
+  t.true(v.position.z > YARD.z1, `in the yard, not outside the fence: ${JSON.stringify(v.position)}`);
+  t.is(land.block(-556, 63, 2119), FENCE);
+});
+
+test('a move cut short as the cart rolled (its took never heard): the next run takes into the hall only the villager it went for; a baby it took instead is left seated, the moves off', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  cartOutAsLeft(land, line, world, line.cells[line.cells.length - 1], 103, { aimed: 101 });
+  land.me = { x: -555.5, y: 63, z: 2121.5 };
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.regex(r.text, /^the move given up: the last move was cut short: the cart at .* holds another \(villager 103\), not the villager \(101\)$/);
+  t.false(world.villagerMoves);
+  t.like(land.cart, { rider: 103 });
+  t.is(peekVillages(world).sites[0].moved, undefined);
+  // the one it went for: on into the hall
+  const b = lineWorld('laying');
+  const two = new Field(b.world);
+  await laidWhole(two, b.line);
+  cartOutAsLeft(two, b.line, b.world, b.line.cells[b.line.cells.length - 1], 101, { aimed: 101 });
+  two.me = { x: -555.5, y: 63, z: 2121.5 };
+  t.regex((await run(two, 'move', 20 * MINUTE)).text, /^moved an unemployed villager/);
 });

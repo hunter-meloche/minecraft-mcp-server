@@ -251,3 +251,29 @@ test('a rail put down as the run is cut short (the answer in, every call after r
   t.like(later, { ok: false, placed: false });
   t.deepEqual(rt.builtNear({ x: 3, y: 64, z: 0 }, 1), []);
 });
+
+test('take-up-rail never digs another block standing in a cell the bot laid (someone broke its rail and put their cobblestone there): the cell is the bot\'s no more', async (t) => {
+  let stone = false;
+  const { rt, calls } = setup({
+    'rail.place': { ok: true, placed: true, block: 'rail', shape: 'north_south', turned: [] },
+    'world.block': () => (stone ? { loaded: true, name: 'cobblestone', properties: {} } : railBlock('north_south')),
+    'dig.here': { dug: true, block: 'cobblestone' }
+  });
+  const at = { x: 0, y: 64, z: 0 };
+  await rt.rails!.lay({ at, item: 'rail' });
+  stone = true;
+  t.like(await rt.rails!.takeUp(at, 'rail'), { ok: false, dug: false, block: 'cobblestone', reason: 'the bot did not put that cobblestone there (its rail is gone)' });
+  t.is(calls('dig.here').length, 0);
+  t.deepEqual(rt.builtNear(at, 1), []);
+  // told nothing: the state it laid says so
+  const two = setup({
+    'rail.place': { ok: true, placed: true, block: 'rail', shape: 'north_south', turned: [] },
+    'world.block': () => (stone ? { loaded: true, name: 'redstone_torch', properties: { lit: 'true' } } : railBlock('north_south')),
+    'dig.here': { dug: true, block: 'redstone_torch' }
+  });
+  stone = false;
+  await two.rt.rails!.lay({ at, item: 'rail' });
+  stone = true;
+  t.like(await two.rt.rails!.takeUp(at), { ok: false, dug: false, reason: 'the bot did not put that redstone_torch there (its rail is gone)' });
+  t.is(two.calls('dig.here').length, 0);
+});

@@ -370,9 +370,10 @@ export interface ClientRuntime {
     /**
      * One block of the line taken back up: only a rail, powered rail, redstone torch or cobblestone the bot put down
      * (protected), dug from where it stands (dig.here: no Baritone), stepping carefully into reach when too far, and the
-     * drop walked onto; protected no more.
+     * drop walked onto; protected no more. `item`: what the bot put there (the brain's record): another block of the line's
+     * kinds standing there now (someone broke the bot's and put their own) is never dug, and the bot's no more.
      */
-    takeUp: (at: Pos) => Promise<RailTaken>;
+    takeUp: (at: Pos, item?: string) => Promise<RailTaken>;
     /** The minecart put on the rail at `at` (cart.place), stepping carefully into reach when too far. */
     placeCart: (at: Pos, opts?: { inVillage?: boolean; newMovement?: boolean }) => Promise<CartPlaced>;
   };
@@ -2107,7 +2108,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   /** The blocks the line is made of: nothing else is taken up. */
   const LINE_BLOCK = /^(rail|powered_rail|redstone_torch|cobblestone)$/;
-  const takeUpRail = async (at: Pos): Promise<RailTaken> => {
+  const takeUpRail = async (at: Pos, item?: string): Promise<RailTaken> => {
     const p = floorPos(at);
     const dim = await dimension();
     const name = (await stateAt(p))?.replace(/\[.*$/, '');
@@ -2116,6 +2117,15 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     if (/^(air|cave_air)$/.test(name)) { protection.remove(dim, p); return { ok: true, dug: false, block: name, reason: 'nothing there' }; }
     if (!LINE_BLOCK.test(name)) return { ok: false, dug: false, block: name, reason: `not a block of the line: ${name}` };
     if (!protection.has(dim, p)) return { ok: false, dug: false, block: name, reason: `the bot did not put that ${name} there` };
+    // (the bot's cell, but not the block it put there: someone broke the bot's rail and put their own cobblestone, rail or
+    // torch in it; theirs, never dug, and the cell the bot's no more)
+    // (the state kept when it was laid, if it names a block of the line: a read that lagged the lay is no answer)
+    const kept = protection.stateOf(dim, p)?.replace(/\[.*$/, '');
+    const was = item ?? (kept && LINE_BLOCK.test(kept) ? kept : undefined);
+    if (was && was !== name) {
+      protection.remove(dim, p);
+      return { ok: false, dug: false, block: name, reason: `the bot did not put that ${name} there (its ${was} is gone)` };
+    }
     const count = async () => (await inventoryCounts()).counts.get(name) ?? 0;
     const had = await count();
     const dig = () => call<{ dug?: boolean; reason?: string }>('dig.here', { ...p, timeoutMs: 15_000 }, 25_000).catch((e: Error) => ({ dug: false, reason: e.message }));

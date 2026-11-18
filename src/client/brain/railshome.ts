@@ -1,7 +1,7 @@
 import type { GoalContext, Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { Zone } from './courtesy.js';
-import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced } from '../tools.js';
+import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
 import { FIRST_BOOST, HEAD, HOP, railBase, railRoom, shapeOf, type RailCell, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, zoneNear, type Entry } from './boatroute.js';
 import { HALL_FRESH, HALL_WANTS, JUDGE_V, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type VillageSite } from './village.js';
@@ -108,8 +108,11 @@ export interface RailLine {
   /** the boat's way into the hall the plan came in by (boatroute.ts entryOf or yardEntry) */
   entry: Entry;
   stage: RailStage;
-  /** every block the job put down and has not taken back up, written before it goes down */
-  laid: { at: Pos; item: RailItem }[];
+  /**
+   * every block the job put down and has not taken back up, written before it goes down; `unsure`: its lay had no answer
+   * and the read after failed too (the client dropped), so it may be down: kept, and read again before it counts
+   */
+  laid: { at: Pos; item: RailItem; unsure?: true }[];
   /** the laying runs so far */
   runs: number;
   /** runs in a row stopped by something unexpected, and the last such */
@@ -135,6 +138,8 @@ export interface RailLine {
   cartAt?: Pos;
   /** the villager taken out of its village in the cart (a give-up after it switches the moves off) */
   villagerOut?: number;
+  /** the villager the cart is launched for, written before the trigger goes down (a move cut short names its rider by it) */
+  aimed?: number;
   /** given up (or done): why, while it is taken up */
   why?: string;
   /** the villager made it into the hall */
@@ -192,6 +197,11 @@ function laidCells(line: RailLine): Set<number> {
 const isLaid = (line: RailLine, p: Pos) => line.laid.some(b => same(b.at, p));
 const record = (line: RailLine, at: Pos, item: RailItem) => { if (!isLaid(line, at)) line.laid.push({ at: { x: at.x, y: at.y, z: at.z }, item }); };
 const forget = (line: RailLine, at: Pos) => { line.laid = line.laid.filter(b => !same(b.at, at)); };
+/** A block kept in the record whose lay had no answer and whose read after failed (it may be down or not). */
+const unsureAt = (line: RailLine, at: Pos) => line.laid.some(b => same(b.at, at) && b.unsure);
+/** One block of the line taken up by the rails tools, told what the record says the bot put there (nothing else is dug). */
+const takeUp = (ctx: GoalContext, line: RailLine, at: Pos): Promise<RailTaken> => ctx.rails!.takeUp(at, line.laid.find(b => same(b.at, at))?.item)
+  .catch((x: Error): RailTaken => ({ ok: false, dug: false, reason: x.message }));
 /** The village's own ground (its area as judged, grown by the 16 the line keeps off others' builds): rails go down there as `inVillage`. */
 const inVillage = (line: RailLine, p: { x: number; z: number }) => !!line.area
   && p.x >= line.area.x1 - FROM_ZONES && p.x <= line.area.x2 + FROM_ZONES && p.z >= line.area.z1 - FROM_ZONES && p.z <= line.area.z2 + FROM_ZONES;
@@ -271,7 +281,7 @@ export const laidOf = (line: RailLine): { rails: number; of: number } => ({ rail
 
 /** Where the next day's laying begins (the first step not down yet), or the launch when every one is. */
 function frontier(line: RailLine): Pos {
-  const keys = new Set(line.laid.map(b => key(b.at)));
+  const keys = new Set(line.laid.filter(b => !b.unsure).map(b => key(b.at)));
   const s = outwardSteps(line).find(x => !keys.has(key(stepAt(line, x))));
   return s ? stepAt(line, s) : line.cells[0];
 }
@@ -447,10 +457,17 @@ export const heldByRails = (world: WorldMemory, at: Pos): boolean => held(peekLi
  * and shuts the fence once the cart rests on the brake (closeRailsYard reads it; one still rolling home is left its
  * way in), the brake and the cart with the villager left for the morning's resumeMove.
  */
+/**
+ * The cart out with the villager in it, not accounted for: a move under way, or one given up with its cart not found yet
+ * (it may still roll home, frozen out on the line past the simulation distance till someone comes near). Its way in, the
+ * brake and the post's rail, is left down until it rests on the brake (the post then shut behind it) or is found.
+ */
+const cartOut = (line: RailLine) => !!line.cart && (line.stage === 'moving' || line.villagerOut !== undefined);
+
 export function railsYardOpen(world: WorldMemory): boolean {
   const line = peekLine(world);
   if (!line || !line.yardOpen) return false;
-  if (line.stage === 'moving' && line.cart) return isLaid(line, line.cells[goalOf(line) + 1]);
+  if (cartOut(line)) return isLaid(line, line.cells[goalOf(line) + 1]);
   const keys = new Set(line.laid.map(b => key(b.at)));
   const v = peekVillages(world);
   return yardSteps(line).some(st => keys.has(key(stepAt(line, st)))) || (v.open ?? []).some(o => line.opens.some(q => same(q.at, o.at)));
@@ -717,24 +734,38 @@ async function lay(ctx: GoalContext, line: RailLine, s: Step, args: RailLay): Pr
     // (a block there that came out of it all the same, the bridge's answer lost: read, not guessed; the cell was read
     // as room just before, so what of the line's stands there now is the bot's)
     const down = await downAfterAll(ctx, line, s, r);
-    if (down) return down;
+    // (not read either, the client dropped as it went down: it may stand there, the bot's; kept in the record, unsure,
+    // for the take-up to find, and read again before the laying counts it)
+    if (down === 'unread') {
+      const b = line.laid.find(x => same(x.at, at));
+      if (b) b.unsure = true;
+      ctx.save?.();
+      return { ...r, reason: `${r.reason ?? 'no answer'}; not read after (kept in the record)` };
+    }
+    if (down) { sure(line, at); return down; }
     forget(line, at);
     ctx.save?.();
+    return r;
   }
+  sure(line, at);
   return r;
 }
+
+/** A block of the record read down at last: no longer unsure (saved with the next write). */
+const sure = (line: RailLine, at: Pos) => { const b = line.laid.find(x => same(x.at, at)); if (b?.unsure) delete b.unsure; };
 
 /**
  * A step the answer says is not down, read: the block there after all (the reply lost, a timeout), kept in the record,
  * `ok` when it and the rails beside it stand as the plan has them with the rails down now (a torch: its rail lit).
- * Undefined when it is not there.
+ * Undefined when it is not there, `unread` when the read failed (it may be).
  */
-async function downAfterAll(ctx: GoalContext, line: RailLine, s: Step, r: RailPlaced): Promise<RailPlaced | undefined> {
+async function downAfterAll(ctx: GoalContext, line: RailLine, s: Step, r: RailPlaced): Promise<RailPlaced | undefined | 'unread'> {
   const p = stepAt(line, s);
   const near = s.kind === 'cell' ? [s.i - 1, s.i, s.i + 1].filter(j => j >= 0 && j < line.cells.length).map(j => line.cells[j]) : s.kind === 'torch' ? [s.t.lights] : [];
   const at = await readAround(ctx, [p, ...near]);
   const st = at(p.x, p.y, p.z);
-  if (!st || idOf(st) !== stepItem(line, s)) return undefined;
+  if (st === undefined || st === null) return 'unread';
+  if (idOf(st) !== stepItem(line, s)) return undefined;
   let ok = true;
   if (s.kind === 'cell') {
     const laid = laidCells(line);
@@ -759,7 +790,8 @@ async function downAfterAll(ctx: GoalContext, line: RailLine, s: Step, r: RailPl
  */
 async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkResult> {
   const home = ctx.s.home ?? ctx.s.position;
-  const keys = new Set(line.laid.map(b => key(b.at)));
+  // (a block kept unsure, its lay unanswered and unread, is laid again: read first, it may stand there already)
+  const keys = new Set(line.laid.filter(b => !b.unsure).map(b => key(b.at)));
   const todo = outwardSteps(line).filter(st => !keys.has(key(stepAt(line, st))));
   if (!todo.length) { line.stage = 'whole'; return { gain: 0, text: 'the line is whole already: the move next', mark: 'forget' }; }
   const need: Record<string, number> = {};
@@ -806,14 +838,27 @@ async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkR
       at = await readAround(ctx, ahead.map(x => stepAt(line, x)));
       readFrom = k;
     }
-    const why = notAsRead(line, st, at);
-    if (why === 'unread') return stopped(ctx, line, `${stepWord(line, st)}: the ground there not read`, put);
-    if (why) return stopped(ctx, line, `${why} (not as read when planned)`, put);
-    const laid = laidCells(line);
-    const args: RailLay = st.kind === 'cell' ? layArgs(line, st.i, laid, st.i > 0 ? st.i - 1 : undefined)
-      : st.kind === 'torch' ? { at: st.t.at, item: 'redstone_torch', lights: st.t.lights, ...(inVillage(line, st.t.at) ? { inVillage: true } : {}) }
-      : { at: line.stop.at, item: 'cobblestone' };
-    const r = await lay(ctx, line, st, args);
+    // (laid again on the way out since: the mending's)
+    if (isLaid(line, p) && !unsureAt(line, p)) continue;
+    let r: RailPlaced;
+    const there = unsureAt(line, p) ? at(p.x, p.y, p.z) : undefined;
+    if (there && idOf(there) === stepItem(line, st)) {
+      // (kept unsure on a run before, and down there all the same: the bot's, read as the lay's own read-back does)
+      const down = await downAfterAll(ctx, line, st, { ok: false, placed: false, reason: 'its lay unanswered on a run before' });
+      if (!down || down === 'unread') return stopped(ctx, line, `${stepWord(line, st)}: not read again`, put);
+      sure(line, p);
+      ctx.save?.();
+      r = down;
+    } else {
+      const why = notAsRead(line, st, at);
+      if (why === 'unread') return stopped(ctx, line, `${stepWord(line, st)}: the ground there not read`, put);
+      if (why) return stopped(ctx, line, `${why} (not as read when planned)`, put);
+      const laid = laidCells(line);
+      const args: RailLay = st.kind === 'cell' ? layArgs(line, st.i, laid, st.i > 0 ? st.i - 1 : undefined)
+        : st.kind === 'torch' ? { at: st.t.at, item: 'redstone_torch', lights: st.t.lights, ...(inVillage(line, st.t.at) ? { inVillage: true } : {}) }
+        : { at: line.stop.at, item: 'cobblestone' };
+      r = await lay(ctx, line, st, args);
+    }
     if (r.newMovement) {
       giveUp(ctx, line, 'the server runs the minecart_improvements experiment: the line was planned on the old minecart rules');
       return { gain: put + (r.placed ? 1 : 0), text: `the line given up: ${line.why}` };
@@ -1026,7 +1071,8 @@ async function openYard(ctx: GoalContext, line: RailLine): Promise<string | unde
   }
   for (const st of yardSteps(line)) {
     const at = stepAt(line, st);
-    if (isLaid(line, at)) continue;
+    // (one kept unsure is laid again: the bridge refuses a cell taken, and the read after finds it there)
+    if (isLaid(line, at) && !unsureAt(line, at)) continue;
     const laid = laidCells(line);
     const args: RailLay = st.kind === 'cell' ? layArgs(line, st.i, laid, st.i + 1 < line.cells.length ? st.i + 1 : undefined)
       : st.kind === 'torch' ? { at: st.t.at, item: 'redstone_torch', lights: st.t.lights } : { at, item: 'cobblestone' };
@@ -1084,6 +1130,14 @@ async function toPickup(ctx: GoalContext, line: RailLine, candidates: readonly S
     await pause(500);
     const why = await takeBoat(ctx, boat);
     if (why) return { why: `the boat with the villager could not be taken up: ${why}` };
+    // (broken, but its drop not picked up: stepped by it once; still none, no cart goes for the villager, whose way into
+    // the hall at the brake is that boat)
+    if (!(await countsNow(ctx)).get(BOAT_ITEM)) {
+      const bf = { x: Math.floor(bp.x), y: Math.floor(bp.y), z: Math.floor(bp.z) };
+      await ctx.call('goto', { ...bf, range: 1, careful: true, timeoutMs: 10_000 }, 20_000).catch(() => undefined);
+      await pause(600);
+      if (!(await countsNow(ctx)).get(BOAT_ITEM)) return { why: `the boat broken at the pickup did not come back into the pockets (its drop by ${fmt(bf)}): no boat for the way into the hall` };
+    }
     if (!dr.ok) { say(ctx, `the hop to the pickup stopped: ${dr.reason ?? 'no reply'}`); continue; }
     say(ctx, `the villager (${e.id}) on the pickup ${fmt(p)}`);
     return { e };
@@ -1138,6 +1192,9 @@ async function launch(ctx: GoalContext, line: RailLine, e: Seen): Promise<{ took
     if (back) return { fail: `${since} as the cart went down, and the cart not taken back up: ${back}` };
     return { blocked: `${since}: the cart taken back up before the trigger` };
   }
+  // (the villager it goes for, written before the trigger (the lay saves): a run cut short as the cart rolls takes into
+  // the hall only that one, never whatever else the cart took)
+  line.aimed = e.id;
   const r = await lay(ctx, line, { kind: 'torch', t: trig }, { at: trig.at, item: 'redstone_torch', lights: trig.lights, ...(inVillage(line, trig.at) ? { inVillage: true } : {}) });
   if (!r.placed) return { fail: `the trigger torch not put down at ${fmt(trig.at)}: ${r.reason ?? 'no answer'}` };
   if (!r.ok) return { fail: `the trigger torch is down but the launch not lit: ${r.reason ?? 'no answer'}` };
@@ -1206,7 +1263,7 @@ async function findCartAt(ctx: GoalContext, line: RailLine): Promise<'found' | '
 async function recoverCart(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
   const trig = triggerOf(line);
   if (trig && isLaid(line, trig.at)) {
-    const t = await ctx.rails!.takeUp(trig.at).catch((x: Error) => ({ ok: false, dug: false, reason: x.message }));
+    const t = await takeUp(ctx, line, trig.at);
     if (!t.ok) return `the trigger torch: ${t.reason ?? 'no answer'}`;
     forget(line, trig.at);
   }
@@ -1232,22 +1289,21 @@ async function takeCart(ctx: GoalContext, line: RailLine): Promise<string | unde
  * the server's simulation distance that has stopped there stays stopped). At the fence, the cart on the brake. Why
  * not, or undefined.
  */
-async function followHome(ctx: GoalContext, line: RailLine, villager: number, clk: Clk): Promise<string | undefined> {
+async function followHome(ctx: GoalContext, line: RailLine, villager: number, clk: Clk, from: number = HEAD.pickup - HEAD.launch): Promise<string | undefined> {
   const g = goalOf(line);
   const stuck = async (): Promise<string | undefined> => {
     const { cart, simulation } = await cartNow(ctx, line);
     if (!cart) return undefined;
     if (!cart.passengers?.some(q => q.id === villager)) return `the villager (${villager}) is out of the cart at ${cart.position ? fmt(cart.position) : '?'}`;
     const i = cellIndexAt(line, cart);
-    const simulated = cart.distance === undefined || simulation === undefined || cart.distance < simulation * 16 - 16;
-    if (!cart.moving && simulated && !onBrake(line, i)) {
+    if (!cart.moving && simulatedAt(cart, simulation) && !onBrake(line, i)) {
       await pause(3000);
       const again = (await cartNow(ctx, line)).cart;
       if (again && !again.moving && !onBrake(line, cellIndexAt(line, again))) return `the cart came to rest short of the brake at ${again.position ? fmt(again.position) : '?'}`;
     }
     return undefined;
   };
-  for (let i = HEAD.pickup - HEAD.launch; i <= g; i = Math.min(g, i + WALK_EVERY)) {
+  for (let i = Math.max(0, Math.min(g, from)); i <= g; i = Math.min(g, i + WALK_EVERY)) {
     aborted(ctx);
     await walkTo(ctx, line.cells[i], 3);
     const why = await stuck();
@@ -1256,12 +1312,13 @@ async function followHome(ctx: GoalContext, line: RailLine, villager: number, cl
   }
   // at the fence: the cart on the brake, at rest
   const deadline = clk.now() + BRAKE_WAIT;
-  for (;;) {
+  for (let n = 0; ; n++) {
     aborted(ctx);
     const { cart } = await cartNow(ctx, line);
     if (cart && !cart.passengers?.some(q => q.id === villager)) return `the villager (${villager}) is out of the cart at ${cart.position ? fmt(cart.position) : '?'}`;
     if (cart && !cart.moving && onBrake(line, cellIndexAt(line, cart))) return undefined;
-    if (clk.now() > deadline) return cart ? `the cart not at rest on the brake (at ${cart.position ? fmt(cart.position) : '?'})` : 'the cart not in sight at the yard';
+    // (the looks counted too: a clock that does not move on while it waits is no endless wait)
+    if (clk.now() > deadline || n > BRAKE_WAIT / 2000) return cart ? `the cart not at rest on the brake (at ${cart.position ? fmt(cart.position) : '?'})` : 'the cart not in sight at the yard';
     if (cart?.id !== undefined) await ctx.call('cart.watch', { id: cart.id, uuid: line.cart!.uuid, until: 'rest', timeoutMs: 10_000 }, 20_000).catch(() => undefined);
     else await pause(2000);
   }
@@ -1278,6 +1335,10 @@ async function intoHall(ctx: GoalContext, line: RailLine, villager: number, clk:
   // the cart broken: the villager steps out where it sat, in the shut yard
   const { cart } = await cartNow(ctx, line);
   if (!cart) return lostOut(ctx, line, 'the cart not in sight at the brake');
+  // (the boat that takes it into the hall carried first, from the chests if the stash put it away: none, the villager
+  // stays seated in the cart in the shut yard, the move under way, and the next run tries again)
+  const noBoat = await boatShort(ctx, line, villager, 'kept seated in the cart on the brake');
+  if (noBoat) return noBoat;
   // (the boat's way read first, the villager still seated: a read that fails leaves it in the cart, never loose)
   const way = await hallWay(ctx, line.entry);
   if ('why' in way) return lostOut(ctx, line, `${way.why} (the villager left in the cart at the brake, the yard shut)`);
@@ -1306,9 +1367,14 @@ async function shutYard(ctx: GoalContext, line: RailLine): Promise<string | unde
   const inside = line.cells[Math.min(line.cells.length - 1, g + 2)];
   await ctx.call('goto', { ...inside, range: 1, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
   if (isLaid(line, post)) {
-    const up = await ctx.rails!.takeUp(post).catch((x: Error) => ({ ok: false, dug: false, reason: x.message }));
-    if (!up.ok) return `the fence's post rail not taken up at ${fmt(post)}: ${up.reason ?? 'no answer'}`;
+    const up = await takeUp(ctx, line, post);
+    // (the fence back on the post already: its rail came up and the fence went back on a run cut short before brain.json
+    // had it; nothing of the line's there to take up)
+    const fenced = !up.ok && !!up.block && line.opens.some(o => same(o.at, post) && idOf(o.block) === up.block);
+    if (!up.ok && !fenced) return `the fence's post rail not taken up at ${fmt(post)}: ${up.reason ?? 'no answer'}`;
     forget(line, post);
+    // (written before the fence goes back: a restart after it must not find the post's rail still in the record)
+    ctx.save?.();
   }
   await ctx.call('goto', { ...inside, range: 1, careful: true, timeoutMs: 15_000 }, 25_000).catch(() => undefined);
   const shut = await closeUp(ctx, o => line.opens.some(q => same(q.at, o.at)));
@@ -1318,6 +1384,8 @@ async function shutYard(ctx: GoalContext, line: RailLine): Promise<string | unde
 /** The villager out of the cart in the shut yard taken into the hall by boat, the move said, the take-up as far as the day goes. */
 async function hallBy(ctx: GoalContext, line: RailLine, e: Seen, clk: Clk, way?: HallWay): Promise<WorkResult> {
   const world = ctx.world;
+  const noBoat = await boatShort(ctx, line, e.id, 'waits in the shut yard');
+  if (noBoat) return noBoat;
   const r = await boatIntoHall(ctx, { entry: line.entry, villager: e, now: clk.now, ...(way ? { way } : {}) });
   if (!r.ok) return lostOut(ctx, line, `${r.why}${r.held === 'boat' ? ' (the villager left seated in the boat in the yard)' : ' (the villager left in the yard, shut)'}`);
   const site = siteFor(villagesOf(world).sites, line.site);
@@ -1337,6 +1405,20 @@ async function hallBy(ctx: GoalContext, line: RailLine, e: Seen, clk: Clk, way?:
 }
 
 /**
+ * The boat for the way into the hall carried (one in the pockets, else from the chests or made): undefined, or the run's
+ * end with the move kept under way (the villager as it is, in the shut yard: the next run tries again), said.
+ */
+async function boatShort(ctx: GoalContext, line: RailLine, villager: number, how: string): Promise<WorkResult | undefined> {
+  const short = await carry(ctx, { [BOAT_ITEM]: 1 });
+  if (!short) return undefined;
+  line.stage = 'moving';
+  ctx.save?.();
+  const text = `the villager (${villager}) ${how}: short of ${short} for the way into the hall; again next run`;
+  say(ctx, text);
+  return { gain: 0, text, mark: 'same' };
+}
+
+/**
  * A move cut short (stage `moving`: a restart, survival, its timeout): the cart found on the brake with the villager in
  * it goes on into the hall; the cart elsewhere, or none, gives the line up (the take-up breaks the cart wherever it is);
  * none put down yet, the line is whole again (its yard stretch close up's).
@@ -1348,16 +1430,75 @@ async function resumeMove(ctx: GoalContext, line: RailLine, clk: Clk): Promise<W
   // (cut short as the cart went down: looked for on the launch; too far to see from here, the next move's launch looks)
   if (!line.cart && line.cartAt) await findCartAt(ctx, line);
   if (!line.cart) return notToday(ctx, line, 'the last move was cut short before the cart went down');
-  const { cart } = await cartNow(ctx, line);
-  const villager = cart?.passengers?.find(q => q.name === 'villager' || q.profession !== undefined)?.id ?? (line.villagerOut !== undefined && cart?.passengers?.some(q => q.id === line.villagerOut) ? line.villagerOut : undefined);
-  if (cart && villager !== undefined && !cart.moving && onBrake(line, cellIndexAt(line, cart))) {
-    say(ctx, `the last move was cut short with the villager (${villager}) in the cart on the brake: on into the hall`);
-    return intoHall(ctx, line, villager, clk);
+  const { cart, simulation, read } = await cartNow(ctx, line);
+  // (only the villager the cart went for, by its id: a baby or a farmer it took instead is the wrong mob's, left seated)
+  const want = line.villagerOut ?? line.aimed;
+  const villager = want !== undefined && cart?.passengers?.some(q => q.id === want) ? want : undefined;
+  const other = cart?.passengers?.find(q => q.id !== want);
+  if (cart && villager === undefined && other) {
+    return lostOut(ctx, line, `the last move was cut short: the cart at ${cart.position ? fmt(cart.position) : '?'} holds another (${other.name ?? 'a mob'}${other.baby ? ' (a baby)' : ''} ${other.id}), not the villager${want !== undefined ? ` (${want})` : ''}`);
   }
-  // (the villager out and the cart gone: cut short after the cart was broken at the brake, before it was written so)
-  if (!cart && line.villagerOut !== undefined) return resumeOut(ctx, line, line.villagerOut, clk);
+  if (cart && villager !== undefined) {
+    if (line.villagerOut === undefined) { line.villagerOut = villager; ctx.save?.(); }
+    if (!cart.moving && onBrake(line, cellIndexAt(line, cart))) {
+      say(ctx, `the last move was cut short with the villager (${villager}) in the cart on the brake: on into the hall`);
+      return intoHall(ctx, line, villager, clk);
+    }
+    // (still rolling home, or out on the line past the server's simulation distance, where a cart waits for the bot to
+    // come near: followed home as the move does; one at rest short of the brake within it has stopped for good)
+    if (cart.moving || !simulatedAt(cart, simulation)) return followOn(ctx, line, villager, clk, cart);
+  }
+  // (the villager out and the cart not in sight: broken at the brake before it was written so, when the brake is in
+  // sight; else out on the line beyond what the client sees, looked for along it)
+  if (!cart && line.villagerOut !== undefined) {
+    const brake = line.cells[line.cells.length - 1];
+    if (read && horiz(await here(ctx), brake) <= BRAKE_SIGHT) return resumeOut(ctx, line, line.villagerOut, clk);
+    return followOn(ctx, line, line.villagerOut, clk);
+  }
   const why = `the last move was cut short: the cart ${cart ? `at ${cart.position ? fmt(cart.position) : '?'}${villager !== undefined ? ' with the villager in it' : ', empty'}` : 'not in sight'}`;
   return line.villagerOut !== undefined ? lostOut(ctx, line, why) : lostIfOut(ctx, line, why);
+}
+
+/** Within this of the brake, a cart.status that reads no cart means none at the brake (a cart is seen much farther). */
+const BRAKE_SIGHT = 24;
+/** Whether the server ticks a cart (within its simulation distance of the bot, as cart.status reads it): unread, it does. */
+const simulatedAt = (cart: CartState, simulation: number | undefined) => cart.distance === undefined || simulation === undefined || cart.distance < simulation * 16 - 16;
+/** The index of the line's cell nearest `p`. */
+const nearestCell = (line: RailLine, p: { x: number; z: number }) => line.cells.reduce((b, c, i) => (horiz(c, p) < horiz(line.cells[b], p) ? i : b), 0);
+
+/**
+ * A move cut short with the villager in the cart out on the line (still rolling, or frozen past the server's simulation
+ * distance): followed home as the move does, from the cell nearest the bot, or from the cart's own when the bot is
+ * nearer home than it (the cart wakes as the bot comes near, and rolls home ahead). A cart not in sight from the yard is
+ * looked for out along the line first. At the brake, on into the hall; a cart at rest short of it, the villager out of it,
+ * or the cart not found, the move is given up (the moves off).
+ */
+async function followOn(ctx: GoalContext, line: RailLine, villager: number, clk: Clk, cart?: CartState): Promise<WorkResult> {
+  const g = goalOf(line);
+  const home = ctx.s.home ?? ctx.s.position;
+  let bi = Math.min(g, nearestCell(line, await here(ctx)));
+  if (!cart) {
+    // (the bot behind it on the line, the cart ahead toward home: home after it; from the yard: out along the line)
+    if (bi < g - WALK_EVERY) {
+      say(ctx, `the last move was cut short with the villager (${villager}) in the cart, not in sight: on home along the line behind it`);
+    } else {
+      for (let i = g; ; i = Math.max(0, i - WALK_EVERY)) {
+        aborted(ctx);
+        if (clk.left() < horiz(line.cells[i], home) / 3 * 1000 + MARGIN + BRAKE_WAIT) return lostOut(ctx, line, 'the last move was cut short: the cart with the villager not found along the line in the run\'s time');
+        await walkTo(ctx, line.cells[i], 3);
+        const now = (await cartNow(ctx, line)).cart;
+        if (now) { cart = now; break; }
+        if (i === 0) return lostOut(ctx, line, 'the last move was cut short: the cart with the villager not found along the line');
+      }
+      bi = Math.min(g, nearestCell(line, await here(ctx)));
+    }
+  }
+  const ci = cart ? cellIndexAt(line, cart) : -1;
+  const from = ci >= 0 && ci <= bi ? ci : bi;
+  if (cart) say(ctx, `the last move was cut short with the villager (${villager}) in the cart at ${cart.position ? fmt(cart.position) : '?'} (${cart.moving ? 'rolling home' : 'past the simulation distance'}): following it home`);
+  const follow = await followHome(ctx, line, villager, clk, from);
+  if (follow) return lostOut(ctx, line, `the last move was cut short, and following the cart home: ${follow}`);
+  return intoHall(ctx, line, villager, clk);
 }
 
 /**
@@ -1395,8 +1536,10 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
   const said: string[] = [];
   if (!line.cart && line.cartAt) await findCartAt(ctx, line);
   if (line.cart) taken += await cartUp(ctx, line, said);
-  // the yard's stretch, from the brake back to the post, and the fence
-  const yardUp = await yardTakeUp(ctx, line);
+  // the yard's stretch, from the brake back to the post, and the fence; not while the cart with the villager is out and
+  // not found (its way home: taken up, it would stop outside the shut fence, the villager let out there): after the line
+  const held = cartOut(line);
+  const yardUp: { taken: number; stop?: string } = held ? { taken: 0 } : await yardTakeUp(ctx, line);
   taken += yardUp.taken;
   if (yardUp.stop) said.push(yardUp.stop);
   // the line from its far end, walking home
@@ -1421,7 +1564,7 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
           if (!line.cart && line.cartAt) await findCartAt(ctx, line);
           if (line.cart) taken += await cartUp(ctx, line, said, true);
         }
-        const r = await ctx.rails!.takeUp(p).catch((x: Error) => ({ ok: false, dug: false, reason: x.message }));
+        const r = await takeUp(ctx, line, p);
         aborted(ctx);
         if (r.ok) { forget(line, p); if (r.dug) taken++; continue; }
         if (!notOurs(r.reason)) { said.push(unreached(line, st, r.reason ?? 'no answer')); continue; }
@@ -1438,10 +1581,20 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
     said.push('a minecart perhaps left on the launch: not seen');
     delete line.cartAt;
   }
-  if (line.cart && !line.laid.length) {
+  const yardKeys = new Set(yardSteps(line).map(st => key(stepAt(line, st))));
+  if (line.cart && !line.laid.some(b => !yardKeys.has(key(b.at)))) {
     const { cart } = await cartNow(ctx, line);
-    const why = cart && !(villagerIn(cart) && cart.position && inFence(ctx.world, cart.position)) ? await takeCart(ctx, line) : 'not found';
-    if (why) { (line.left ??= []).push(`the minecart ${line.cart.uuid}: ${why}`); said.push(`the cart left: ${why}`); delete line.cart; } else taken++;
+    if (cart && villagerIn(cart) && cart.position && inFence(ctx.world, cart.position)) taken += await cartUp(ctx, line, said);
+    else {
+      const why = cart ? await takeCart(ctx, line) : 'not found';
+      if (why) { (line.left ??= []).push(`the minecart ${line.cart.uuid}: ${why}`); said.push(`the cart left: ${why}`); delete line.cart; } else taken++;
+    }
+  }
+  // (the yard's stretch held for a cart out: the line up and the cart found or let go, now)
+  if (held && !cartOut(line) && (line.laid.some(b => yardKeys.has(key(b.at))) || (villagesOf(ctx.world).open ?? []).some(o => line.opens.some(q => same(q.at, o.at))))) {
+    const late = await yardTakeUp(ctx, line);
+    taken += late.taken;
+    if (late.stop) said.push(late.stop);
   }
   const openLeft = (villagesOf(ctx.world).open ?? []).some(o => line.opens.some(q => same(q.at, o.at)));
   if (!line.laid.length && !line.cart && !line.cartAt && !openLeft) {
@@ -1535,17 +1688,21 @@ async function yardTakeUp(ctx: GoalContext, line: RailLine): Promise<{ taken: nu
   for (const st of steps) {
     aborted(ctx);
     const p = stepAt(line, st);
-    const r = await ctx.rails!.takeUp(p).catch((x: Error) => ({ ok: false, dug: false, reason: x.message }));
+    const r = await takeUp(ctx, line, p);
     aborted(ctx);
-    if (r.ok) { forget(line, p); if (r.dug) taken++; continue; }
+    // (saved as each comes off the record: the fence goes back over the post's cell next, and a restart must not find
+    // its rail still in the record under the fence: held from close up, and never taken up again)
+    if (r.ok) { forget(line, p); ctx.save?.(); if (r.dug) taken++; continue; }
     if (!notOurs(r.reason)) {
       const why = unreached(line, st, r.reason ?? 'no answer');
       // (the rail in the post's gap still down: the fence cannot go back over it)
       if (isLaid(line, p)) return { taken, stop: why };
+      ctx.save?.();
       continue;
     }
     (line.left ??= []).push(`${stepWord(line, st)}: ${r.reason ?? 'no answer'}`.slice(0, 120));
     forget(line, p);
+    ctx.save?.();
   }
   const ours = (o: { at: Pos }) => line.opens.some(q => same(q.at, o.at));
   if ((villagesOf(ctx.world).open ?? []).some(ours)) {
@@ -1584,7 +1741,7 @@ async function closeRailsPost(ctx: GoalContext, line: RailLine): Promise<{ taken
 export async function closeRailsYard(ctx: GoalContext): Promise<{ taken: number; text: string; stop?: string }> {
   const line = peekLine(ctx.world);
   if (!line || !ctx.rails) return { taken: 0, text: 'the rails\' yard stretch: no rails tools', stop: 'no rails tools' };
-  if (line.stage === 'moving' && line.cart) return closeRailsPost(ctx, line);
+  if (cartOut(line)) return closeRailsPost(ctx, line);
   const r = await yardTakeUp(ctx, line);
   const text = `the rails' yard stretch: ${r.taken} rail(s) taken up${r.stop ? `; ${r.stop}` : ', the fence back'}`;
   say(ctx, text);
