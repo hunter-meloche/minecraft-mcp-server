@@ -10,7 +10,7 @@ import { withSwapped } from './netherset.js';
 // (deep.ts comes in through community.ts already; its goal is asked inside a function only)
 import { deepTrip } from './deep.js';
 import { NETHER_BLOCKS, NETHER_TRIP } from './mine.js';
-import { chestSlots, chestTotals, freeChestTotals, key, kindChests, peekChest, rememberReply, storeInChests, storeStack, takeFromChests, withoutSpare } from './chests.js';
+import { atChest, chestSlots, chestTotals, freeChestTotals, key, kindChests, markOwn, peekChest, rememberReply, storeInChests, storeStack, takeFromChests, unreachableChests, withoutSpare } from './chests.js';
 import { assignChests, CATEGORIES, categoryOf, depositPlan, misplaced, PACKS, PER_BLOCK, stackSize, type ChestAssign, type Deposit } from './storage.js';
 import { KIT, kitNeeds, stashPlan, storedBySlot, type KitNeed, type PlanStep, type StashEntry, type StashOptions } from './kit.js';
 // the pockets rule's numbers (pockets.ts takes the stash's plan from here: each uses the other's inside functions only)
@@ -192,10 +192,23 @@ export function allNeeds(world: WorldMemory): Record<string, number> {
   return out;
 }
 
-/** Look in every home chest not looked in for a while (plans use what they hold). */
+/**
+ * Look in every home chest not looked in for a while (plans use what they hold). Not one marked out of reach
+ * (chests.ts markUnreachable): its walks would come to nothing again, a minute and a half of them. One found out of
+ * reach now is marked so (markOwn): else, its mark run out, the sort took its kind out of misc for it, failed at it
+ * with the things in the pockets, and the next stash put them back in misc, every 45 min.
+ */
 async function refreshChests(ctx: GoalContext, maxAgeMs = 10 * MINUTE): Promise<void> {
   if (since(ctx.world, 'chests', ctx.s.now) < maxAgeMs && ctx.world.landmarks.chests.every(c => ctx.world.chestItems?.[key(c)])) return;
-  for (const c of ctx.world.landmarks.chests) await peekChest(ctx, c).catch(e => ctx.progress(`chest at ${key(c)}: ${(e as Error).message}`));
+  const far = unreachableChests(ctx.world, ctx.s.now);
+  for (const c of ctx.world.landmarks.chests) {
+    if (!far.has(key(c))) {
+      await peekChest(ctx, c).catch(async (e: unknown) => {
+        await markOwn(ctx, c, e);
+        ctx.progress(`chest at ${key(c)}: ${(e as Error).message}`);
+      });
+    }
+  }
   done(ctx.world, 'chests', ctx.s.now);
 }
 
@@ -471,8 +484,9 @@ export function stashWork(s: Snapshot, world: WorldMemory, keep: StashOptions = 
   const want = new Map<string, number>();
   for (const e of deposit) want.set(e.name, (want.get(e.name) ?? 0) + e.count);
   const total = (n: string) => s.items.filter(i => i.name === n && i.slot < 36).reduce((a, i) => a + i.count, 0);
+  // (a chest marked out of reach gets nothing: the next of its kind does)
   const sorted = depositPlan(s.items, item => (want.has(item.name) ? total(item.name) - want.get(item.name)! : item.count), assign, world.chestItems ?? {},
-    chestSlots(world));
+    chestSlots(world), unreachableChests(world, s.now));
   return { moves: sorted.moves, rest: sorted.unplaced, drop, full: sorted.full, bySlot };
 }
 
@@ -489,14 +503,35 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
   const sorts = world.landmarks.chests.length >= 3;
   const work = stashWork(s, world, keep, sorts ? chestAssignment(world) : undefined);
   let stored = 0;
-  for (const m of work.moves) {
+  // each move by itself: a chest that fails is passed by (and marked when out of reach), not tried again this run,
+  // and the rest still go in. Before, one chest out of reach ended the whole stash, and the next run planned it first
+  // again: every stash, the pack chore and every goal's room-making failed so on Nov 18, at 36/36 slots for an hour
+  const failed = new Map<string, string>();
+  const store = async (m: Deposit): Promise<boolean> => {
+    // (a chest that failed for one kind fails for the next it was to take: no second minute of walks to it)
+    if (failed.has(m.chest)) return false;
     const [x, y, z] = m.chest.split(',').map(Number);
-    const r = await ctx.act('store-in-chest', { x, y, z, item: m.name, count: m.count });
+    const r = await atChest(ctx, { x, y, z }, `the ${m.name} into the chest`, () => ctx.act('store-in-chest', { x, y, z, item: m.name, count: m.count }), failed);
+    if (!r) return false;
     rememberReply(world, { x, y, z }, r.text);
     stored += Number(/^Stored (\d+)/.exec(r.text)?.[1] ?? 0);
+    return true;
+  };
+  const missed: Deposit[] = [];
+  for (const m of work.moves) if (!(await store(m))) missed.push(m);
+  // what a chest that failed was to take, planned again without it (nor any other that failed or is marked): the next
+  // chest of its kind, then misc, then the first with room, as the plan's own rest goes
+  const rest = [...work.rest];
+  if (missed.length && world.chestAssign) {
+    const skip = new Set([...unreachableChests(world, s.now).keys(), ...failed.keys()]);
+    const again = depositPlan(missed.map(m => ({ name: m.name, count: m.count, slot: 0 })), () => 0, world.chestAssign, world.chestItems ?? {}, chestSlots(world), skip);
+    // (one whose next chest fails too, often the other half or a neighbour in the same row, goes on to the first
+    // chest with room, as the rest do)
+    for (const m of again.moves) if (!(await store(m))) rest.push({ name: m.name, count: m.count });
+    rest.push(...again.unplaced);
   }
   if (sorts) world.storageFull = work.full ?? [];
-  for (const e of work.rest) stored += await storeInChests(ctx, e.name, e.count);
+  for (const e of rest) stored += await storeInChests(ctx, e.name, e.count, failed);
   // (an enchanted one's stack is remembered by the chest it went into: the fishing rung takes it back out by it)
   for (const e of work.bySlot) if (await storeStack(ctx, e.name, e.slot!, kindChests(world, e.name))) stored += e.count;
   done(world, 'stash', s.now);
@@ -546,13 +581,25 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
     await goHome(ctx, 120_000).catch(() => undefined);
   }
   ctx.progress(`stored ${stored}, dropped ${dropped}`);
-  return note ? { stored, dropped, note } : { stored, dropped };
+  // what the chests that failed said (could not reach the chest at ...), for a caller that needed the room: what the
+  // throw used to tell makeRoom ("pockets still ... after putting away: ...")
+  const said = [...new Set(failed.values()), ...(note ? [note] : [])].join('; ');
+  return said ? { stored, dropped, note: said } : { stored, dropped };
 }
 
 /** Which home chest holds which kind of thing: kept, extended to new chests. */
 export function chestAssignment(world: WorldMemory): ChestAssign {
   world.chestAssign = assignChests(world.landmarks.chests, CATEGORIES, world.chestItems ?? {}, world.chestAssign ?? {});
   return world.chestAssign;
+}
+
+/**
+ * The chests' kinds less the chests marked out of reach (chests.ts markUnreachable): the sort neither takes from nor
+ * puts into one of those, and walks to none of them, until its mark is up.
+ */
+function reachable(assign: ChestAssign, world: WorldMemory, now: number): ChestAssign {
+  const far = unreachableChests(world, now);
+  return far.size ? Object.fromEntries(Object.entries(assign).filter(([k]) => !far.has(k))) : assign;
 }
 
 /** Now and then, by day at home: move things sitting in the wrong chest to their own. */
@@ -565,8 +612,9 @@ export const sortStorage: Goal = {
     if (s.activity !== 'work' || !awakeForRound(s, world) || world.landmarks.chests.length < 3 || s.slotsUsed > 28) return null;
     // after 30 min, and then in the evening, or when no trip could go instead (or it has waited an hour)
     if (!roundDue(s, world, 'sort', 30 * MINUTE)) return null;
-    // (never the spare set's pieces: they stay in the slots it remembers them by, whatever chest they are in)
-    const moves = misplaced(chestAssignment(world), withoutSpare(world), undefined, chestSlots(world));
+    // (never the spare set's pieces: they stay in the slots it remembers them by, whatever chest they are in; nor a
+    // chest marked out of reach, from or to: reachable)
+    const moves = misplaced(reachable(chestAssignment(world), world, s.now), withoutSpare(world), undefined, chestSlots(world));
     return moves.length ? `${moves.length} kind(s) of things in the wrong chest` : null;
   },
   // within 10 of home it cuts in as ever; from out in the yard it waits for what runs to end
@@ -577,7 +625,7 @@ export const sortStorage: Goal = {
     done(ctx.world, 'sort', ctx.s.now);
     await refreshChests(ctx, 0);
     let moved = 0;
-    for (const m of misplaced(chestAssignment(ctx.world), withoutSpare(ctx.world), undefined, chestSlots(ctx.world))) {
+    for (const m of misplaced(reachable(chestAssignment(ctx.world), ctx.world, ctx.s.now), withoutSpare(ctx.world), undefined, chestSlots(ctx.world))) {
       const [fx, fy, fz] = m.from.split(',').map(Number);
       const [tx, ty, tz] = m.to.split(',').map(Number);
       const t = await ctx.act('take-from-chest', { x: fx, y: fy, z: fz, item: m.name, count: m.count });

@@ -572,6 +572,39 @@ test('a chest out of reach is walked up to on foot only at first; the walk that 
   t.is(lost.request.getCalls().filter(c => c.args[0] === 'chest.open').length, 3);
 });
 
+test('F9: a chest still too far after both walks is named, with where the walk stopped and why (the bridge\'s "chest too far to open" named neither)', async (t) => {
+  // live on Nov 18: no path into storehouse2's south row; every stash failed with the bare words for an hour
+  const chest = { x: -557, y: 64, z: 2195 };
+  const given = (goto: unknown) => ({
+    inventory: { items: [{ slot: 3, name: 'fishing_rod', count: 1 }], selectedSlot: 0, held: null },
+    'world.block': { loaded: true, name: 'chest' },
+    'chest.open': () => { throw new Error('chest too far to open'); },
+    goto,
+    'chest.withdraw': { slots: 54, free: 20, items: {}, moved: 0 },
+    'container.close': { ok: true }
+  });
+  const stopped = { arrived: false, reason: 'done', seconds: 3, baritone: ['[Baritone] Unable to find any path'], at: { x: -550, y: 63, z: 2195 }, distance: 2.83 };
+  const said = 'could not reach the chest at (-557, 64, 2195): no path found. Stopped at (-550, 63, 2195), 2.83 blocks away. Baritone: Unable to find any path';
+  const store = setup(given(stopped));
+  await t.throwsAsync(store.rt.actions['store-in-chest']({ ...chest, item: 'fishing_rod' }), { message: said });
+  t.is((await store.run('store-in-chest', { ...chest, item: 'fishing_rod' })).text, `Failed: ${said}`);
+  t.is(store.request.lastCall.args[0], 'container.close');
+  const take = setup(given(stopped));
+  await t.throwsAsync(take.rt.actions['take-from-chest']({ ...chest, item: 'iron_ingot', count: 5 }), { message: said });
+  // a walk that timed out, one that arrived (and the chest still too far), one the bridge gave no answer to
+  const late = setup(given({ ...stopped, reason: 'timeout', seconds: 30, baritone: [] }));
+  await t.throwsAsync(late.rt.actions['store-in-chest']({ ...chest, item: 'fishing_rod' }),
+    { message: 'could not reach the chest at (-557, 64, 2195): timed out after 30s. Stopped at (-550, 63, 2195), 2.83 blocks away.' });
+  const there = setup(given({ ...stopped, arrived: true, baritone: [] }));
+  await t.throwsAsync(there.rt.actions['store-in-chest']({ ...chest, item: 'fishing_rod' }),
+    { message: 'could not reach the chest at (-557, 64, 2195): arrived, and still too far to open it. Stopped at (-550, 63, 2195), 2.83 blocks away.' });
+  const lost = setup(given(() => { throw new Error('bridge call goto timed out'); }));
+  await t.throwsAsync(lost.rt.actions['store-in-chest']({ ...chest, item: 'fishing_rod' }),
+    { message: 'could not reach the chest at (-557, 64, 2195): the walk failed: bridge call goto timed out' });
+  // both walks were still taken, the careful one first
+  t.deepEqual(lost.request.getCalls().filter(c => c.args[0] === 'goto').map(c => Boolean((c.args[1] as { careful?: boolean }).careful)), [true, false]);
+});
+
 test('a chest in reach with its lid held down is not walked up to again: the lid is freed', async (t) => {
   // "did not open" is a chest in reach: the walk to within 2 could not help, and for a chest two layers up it pillars
   const chest = { x: 1, y: 65, z: 0 };

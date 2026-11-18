@@ -240,14 +240,18 @@ export interface DepositPlan {
  * the 36 pack slots are considered: worn armour and the off-hand stay on the bot. `slotsPerChest`: the slots each
  * chest is counted as holding, none for one seen with every slot used (live on Nov 14 the misc chest held 19 kinds in
  * all its 27 slots, 23 of them packed, and the plan sent what fit nowhere else there, run after run: "nothing could be
- * put away").
+ * put away"). `skip`: chests given no room at all, not even in their own stacks (those marked out of reach: chests.ts
+ * unreachableChests), so the next chest of the kind is used, then misc. A kind short of room with one of its own
+ * chests skipped is not `full`: its chest is out of reach, not out of room, and another chest built for it would stand
+ * empty once the walk gets there again.
  */
 export function depositPlan(
   items: { name: string; count: number; slot: number }[],
   keep: Set<string> | ((item: { name: string; count: number }) => number),
   assign: ChestAssign,
   contents: ChestContents = {},
-  slotsPerChest: ChestSlots = CHEST_SLOTS
+  slotsPerChest: ChestSlots = CHEST_SLOTS,
+  skip: { has: (chest: string) => boolean } = new Set<string>()
 ): DepositPlan {
   const carried = new Map<string, number>();
   for (const it of items) if (it.slot >= 0 && it.slot <= 35) carried.set(it.name, (carried.get(it.name) ?? 0) + it.count);
@@ -267,6 +271,7 @@ export function depositPlan(
     const put = (targets: string[]) => {
       for (const k of targets) {
         if (left <= 0) return;
+        if (skip.has(k)) continue;
         const n = Math.min(left, roomFor(work[k], name, slotsOf(slotsPerChest, k)));
         if (n <= 0) continue;
         work[k][name] = (work[k][name] ?? 0) + n;
@@ -276,7 +281,7 @@ export function depositPlan(
     };
     put(own);
     if (left > 0) {
-      full.add(cat);
+      if (!own.some(k => skip.has(k))) full.add(cat);
       if (cat !== 'misc') put(chestsOf('misc'));
     }
     if (left > 0) unplaced.push({ name, count: left });

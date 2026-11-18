@@ -1,6 +1,6 @@
 import type { InventoryItem } from '../tools.js';
 import { nearHome, no, onHomeLevel, outsideBy, type Decline, type GoalContext, type Snapshot } from './goals.js';
-import { key, kindChests, storeSlots } from './chests.js';
+import { key, kindChests, storeSlots, unreachableChests } from './chests.js';
 import { roomFor } from './storage.js';
 import type { WorldMemory } from './memory.js';
 import { activityAt } from './schedule.js';
@@ -118,7 +118,9 @@ export interface StashReach {
  */
 export function stashReach(s: Snapshot, world: WorldMemory, kind?: RoomKind): StashReach {
   const work = stashWork(s, world, stashKeep(world, kind));
-  const chests = world.landmarks.chests.map(key);
+  // (not a chest marked out of reach: storeInChests and storeStack pass it by, as the plan does)
+  const far = unreachableChests(world, s.now);
+  const chests = world.landmarks.chests.map(key).filter(k => !far.has(k));
   const slots = storeSlots(world);
   const held: Record<string, Record<string, number>> = {};
   for (const k of chests) held[k] = { ...(world.chestItems?.[k] ?? {}) };
@@ -146,7 +148,7 @@ export function stashReach(s: Snapshot, world: WorldMemory, kind?: RoomKind): St
   // the fishing rods beyond the keeper, each by its slot into the first of the three chests storeStack tries (those
   // of its kind first) with room for it
   for (const e of work.bySlot) {
-    const k = kindChests(world, e.name).slice(0, 3).map(key).find(c => roomFor(held[c] ??= {}, e.name, slots(c)) >= e.count);
+    const k = kindChests(world, e.name).map(key).filter(c => !far.has(c)).slice(0, 3).find(c => roomFor(held[c] ??= {}, e.name, slots(c)) >= e.count);
     if (k) {
       held[k][e.name] = (held[k][e.name] ?? 0) + e.count;
       add(e.name, e.count);

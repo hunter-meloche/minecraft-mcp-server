@@ -544,6 +544,69 @@ test('sort: things in the wrong chest go to their own', async (t) => {
   t.is(sortStorage.wants(snap(gear()), w), null);
 });
 
+test('F9: the sort leaves a chest marked out of reach alone, from or to, and does not look in it; after 45 min it sorts it again', async (t) => {
+  const NOW = 10 * 60 * 60_000, MIN = 60_000;
+  const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
+  const contents: Record<string, Record<string, number>> = { '1,64,0': { cobblestone: 64, oak_log: 10 }, '2,64,0': { oak_planks: 5 }, '3,64,0': {} };
+  const at = (unreachableChests: Record<string, number>) => world({ landmarks: { chests, farmland: [] }, chestItems: contents,
+    chestAssign: { '1,64,0': 'stone', '2,64,0': 'wood', '3,64,0': 'ores' }, unreachableChests });
+  // the logs sit in the stone chest: out of reach, or their own chest out of reach, and nothing is to be sorted
+  t.is(sortStorage.wants(snap(gear()), at({ '1,64,0': NOW })), null);
+  t.is(sortStorage.wants(snap(gear()), at({ '2,64,0': NOW - 44 * MIN })), null);
+  t.regex(sortStorage.wants(snap(gear()), at({ '2,64,0': NOW - 45 * MIN })) ?? '', /wrong chest/);
+  // the run's look in every chest first passes the marked one by (its walks come to nothing, a minute and a half)
+  const w = at({ '3,64,0': NOW });
+  const opened: string[] = [];
+  const acts: string[] = [];
+  const ctx = {
+    s: snap(gear()), world: w, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ inWorld: true, username: 'b', screen: null }),
+    call: (async (m: string, p: Record<string, number>) => {
+      if (m === 'chest.open') { opened.push(`${p.x},${p.y},${p.z}`); return { items: contents[`${p.x},${p.y},${p.z}`] }; }
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      const k = `${a.x},${a.y},${a.z}`, item = String(a.item), n = Number(a.count);
+      acts.push(`${tool} ${k} ${item} ${n}`);
+      return { ok: true, text: tool === 'take-from-chest' ? `Took ${n} ${item} from the chest.` : `Stored ${n} ${item} in the chest.` };
+    }
+  } as unknown as GoalContext;
+  t.is(await sortStorage.run(ctx), 'moved 1 kind(s) of things to their own chest');
+  t.deepEqual(opened, ['1,64,0', '2,64,0']);
+  t.deepEqual(acts, ['take-from-chest 1,64,0 oak_log 10', 'store-in-chest 2,64,0 oak_log 10']);
+});
+
+test('F9: the sort\'s look in finds a chest still out of reach once its mark is up: marked again, and nothing taken out for it', async (t) => {
+  const NOW = 10 * 60 * 60_000, MIN = 60_000;
+  const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];
+  const contents: Record<string, Record<string, number>> = { '1,64,0': { cobblestone: 64, oak_log: 10 }, '2,64,0': { oak_planks: 5 }, '3,64,0': {} };
+  // the logs went to the stone chest while the wood chest was marked; its 45 min are up, and still no walk gets there
+  const w = world({ landmarks: { chests, farmland: [] }, chestItems: contents,
+    chestAssign: { '1,64,0': 'stone', '2,64,0': 'wood', '3,64,0': 'ores' }, unreachableChests: { '2,64,0': NOW - 46 * MIN } });
+  t.regex(sortStorage.wants(snap(gear()), w) ?? '', /wrong chest/);
+  const acts: string[] = [];
+  const ctx = {
+    s: snap(gear()), world: w, signal: new AbortController().signal, progress: () => undefined,
+    status: async () => ({ inWorld: true, username: 'b', screen: null, position: { x: 0, y: 64, z: 0 } }),
+    call: (async (m: string, p: Record<string, number>) => {
+      const k = `${p.x},${p.y},${p.z}`;
+      if (m === 'chest.open') { if (k === '2,64,0') throw new Error('chest too far to open'); return { items: contents[k] }; }
+      return {};
+    }) as GoalContext['call'],
+    act: async (tool: string, a: Record<string, unknown> = {}) => {
+      const k = `${a.x},${a.y},${a.z}`, item = String(a.item), n = Number(a.count);
+      acts.push(`${tool} ${k}`);
+      if (tool === 'move-to-position') return { ok: false, text: 'no path found' };
+      return { ok: true, text: tool === 'take-from-chest' ? `Took ${n} ${item} from the chest.` : `Stored ${n} ${item} in the chest.` };
+    }
+  } as unknown as GoalContext;
+  // before: the logs came out of the stone chest, the store into the wood chest failed with them carried, and the next
+  // stash put them back, every 45 min
+  t.is(await sortStorage.run(ctx), 'moved 0 kind(s) of things to their own chest');
+  t.deepEqual(acts, ['move-to-position 2,64,0']);
+  t.deepEqual(w.unreachableChests, { '2,64,0': NOW });
+});
+
 test('sort: a lava bucket in the wrong chest is carried to its own with a harmless item in hand, not the bucket', async (t) => {
   // the withdraw's shift-click put the bucket in the selected slot (the hotbar fills from its far end)
   const chests = [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }];

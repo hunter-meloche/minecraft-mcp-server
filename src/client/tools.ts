@@ -919,14 +919,26 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
    * pillaring up in the house (scaffold left there once stood on the home cell and kept the bot from its bed). That
    * walk comes second, for a chest that needs a dug or bridged way, and not at all for a chest in reach whose lid is
    * held down: no walk opens that one, the lid is freed.
+   *
+   * A chest still too far after both walks is named, with where the last walk stopped and why: the bridge's own words
+   * ("chest too far to open") named neither, and on Nov 18 every stash failed so for an hour with nothing in the log
+   * to say which chest of 54, or that Baritone had found no path to it (brain/chests.ts marks it and goes on).
    */
   const openChest = async <T>(at: Pos): Promise<T> => {
+    type Walk = ProcessResult & { arrived?: boolean; distance?: number };
+    const walked = (r: Walk) => {
+      const where = r.at ? ` Stopped at ${fmt(floorPos(r.at))}, ${r.distance} blocks away.` : '';
+      if (r.arrived) return `arrived, and still too far to open it.${where}`;
+      return `${r.reason === 'timeout' ? `timed out after ${r.seconds}s` : 'no path found'}.${where}${baritoneSaid(r.baritone ?? [])}`;
+    };
+    const walk = (p: Promise<Walk>) => p.then(walked, (e: unknown) => `the walk failed: ${e instanceof Error ? e.message : String(e)}`);
     try { return await call<T>('chest.open', { ...at }); } catch { /* out of reach, or the lid */ }
-    await call('goto', { ...floorPos(at), range: 3, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    let last = await walk(call<Walk>('goto', { ...floorPos(at), range: 3, careful: true, timeoutMs: 30_000 }, 45_000));
     let lid = false;
     try { return await call<T>('chest.open', { ...at }); } catch (e) { lid = /did not open/.test((e as Error).message); }
-    if (!lid) await goNear(at, 2);
+    if (!lid) last = await walk(goNear(at, 2));
     try { return await call<T>('chest.open', { ...at }); } catch (e) {
+      if (/too far/.test((e as Error).message)) throw new Error(`could not reach the chest at ${fmt(at)}: ${last}`);
       const freed = /did not open/.test((e as Error).message) ? await freeLid(call, at) : [];
       if (!freed.length) throw e;
       const dim = await dimension();

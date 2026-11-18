@@ -49,7 +49,7 @@ import { holdHarmless, unsafeInHand } from './fluidpick.js';
 import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 import { netherSparesGoal, regearGoal } from './regear.js';
 import { homeSetGoal, netherGearLine } from './netherset.js';
-import { oneSpareSet } from './chests.js';
+import { oneSpareSet, unreachableLine } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 import { homeBed } from './villagers.js';
 import { closeUpGoal, tooFarFrom } from './villagemove.js';
@@ -514,6 +514,9 @@ export class Brain {
       const p = (q?: { x: number; y: number; z: number }) => (q ? `(${q.x}, ${q.y}, ${q.z})` : 'none');
       // (and what it cooks, as the smelt left it: it loads the furnace and goes)
       lines.push(`Landmarks: bed ${p(l.bed)}, chests ${l.chests.length}, furnace ${p(l.furnace)}${furnaceLine(world, this.now())}, table ${p(l.table)}, farmland ${l.farmland.length}.`);
+      // (a chest the stores and takes could not get to, left out for a while: which, since when)
+      const far = unreachableLine(world, this.now());
+      if (far) lines.push(far);
     }
     const waiting = [...this.retryAt].filter(([, t]) => t > this.now()).map(([g, t]) => `${g} ${Math.round((t - this.now()) / 1000)}s`);
     if (waiting.length) lines.push(`Retrying later: ${waiting.join(', ')}.`);

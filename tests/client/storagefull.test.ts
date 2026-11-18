@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { chestSlots, fullChests, peekChest, rememberReply, storeInChests, storeSlots } from '../../src/client/brain/chests.js';
+import { chestSlots, fullChests, markUnreachable, peekChest, rememberReply, storeInChests, storeSlots, takeFromChests, UNREACHABLE_FOR, unreachableChests, unreachableLine } from '../../src/client/brain/chests.js';
 import { putAway, stash, stashKeep, stashWork } from '../../src/client/brain/chores.js';
 import { makeRoom, noRoom, pockets, room, stashReach } from '../../src/client/brain/pockets.js';
 import { depositPlan, misplaced, stackSize } from '../../src/client/brain/storage.js';
@@ -81,11 +81,13 @@ const house = (): Record<string, Stack[]> => ({ [FOOD]: full('carrot', 27), [ORE
 interface Game {
   inv: InventoryItem[]; chests: Record<string, { size: number; stacks: Stack[] }>; acts: string[]; pos: Pos;
   count: (name: string) => number; used: () => number;
+  /** chests no walk gets to (F9): the chest tools fail there with their own words, chest.open with the bridge's */
+  far: Set<string>;
 }
 
 function game(items: InventoryItem[], chests: Record<string, Stack[]>, sizes: Record<string, number> = {}): { g: Game; ctx: (s: Snapshot, w: WorldMemory) => GoalContext & { said: string[] } } {
   const g: Game = {
-    inv: items.map(i => ({ ...i })), acts: [], pos: { x: 0, y: 64, z: 0 },
+    inv: items.map(i => ({ ...i })), acts: [], pos: { x: 0, y: 64, z: 0 }, far: new Set(),
     chests: Object.fromEntries(Object.entries(chests).map(([k, st]) => [k, { size: sizes[k] ?? 27, stacks: st.map(x => ({ ...x })) }])),
     count: name => g.inv.filter(i => i.name === name && i.slot < 36).reduce((n, i) => n + i.count, 0),
     used: () => g.inv.filter(i => i.slot < 36).length
@@ -95,6 +97,27 @@ function game(items: InventoryItem[], chests: Record<string, Stack[]>, sizes: Re
     const k = `${a.x},${a.y},${a.z}`;
     const where = `(${a.x}, ${a.y}, ${a.z})`;
     const item = String(a.item);
+    if ((name === 'store-in-chest' || name === 'take-from-chest') && g.far.has(k)) {
+      g.acts.push(`no way to ${k}`);
+      throw new Error(`could not reach the chest at ${where}: no path found. Stopped at (2, 64, 0), 2.83 blocks away.`);
+    }
+    if (name === 'take-from-chest') {
+      const chest = g.chests[k];
+      const want = Number(a.count);
+      let left = want;
+      for (const st of chest.stacks) {
+        if (st.name !== item || !left) continue;
+        const n = Math.min(left, st.count);
+        st.count -= n;
+        left -= n;
+        const slot = [...Array(36).keys()].find(i => !g.inv.some(x => x.slot === i))!;
+        g.inv.push({ slot, name: item, count: n });
+      }
+      chest.stacks = chest.stacks.filter(st => st.count > 0);
+      const moved = want - left;
+      g.acts.push(`take ${moved}/${want} ${item} at ${k}`);
+      return { ok: true, text: `Took ${moved} ${item} from the chest at ${where}. It holds: ${holds(k)}; ${chest.size - chest.stacks.length}/${chest.size} slots free.` };
+    }
     if (name === 'store-in-chest') {
       const have = g.count(item);
       if (!have) return { ok: false, text: `No ${item} in the inventory` };
@@ -141,6 +164,7 @@ function game(items: InventoryItem[], chests: Record<string, Stack[]>, sizes: Re
     if (method === 'inventory') return { items: g.inv.map(i => ({ ...i })) };
     if (method === 'goto') { g.pos = { x: p.x as number, y: p.y as number, z: p.z as number }; return {}; }
     if (method === 'chest.open') {
+      if (g.far.has(`${p.x},${p.y},${p.z}`)) throw new Error('chest too far to open');
       open = `${p.x},${p.y},${p.z}`;
       const c = g.chests[open];
       g.acts.push(`open ${open}`);
@@ -607,5 +631,182 @@ test('the watchdog\'s let-go keeps the early release\'s mark on a goal failing t
   t.is(runs, 4);
   await ticks(97);                    // 14:13:05: the hold has run its full time
   t.is(runs, 5);
+  brain.setEnabled(false);
+});
+
+// ---- F9 (Nov 18): one chest out of reach ----
+// Baritone found no way into storehouse2's south row, and every stash, the pack chore and every goal's room-making
+// stopped at its first chest there ("chest too far to open"): the bot stood about at 36/36 slots for over an hour.
+
+const STONE2 = '5,64,0';
+const NO_WAY = 'could not reach the chest at (4, 64, 0): no path found. Stopped at (2, 64, 0), 2.83 blocks away.';
+/** the other kinds' chests: with one each, the second stone chest stays stone's (assignChests) */
+const OTHERS = { '6,64,0': 'gear', '7,64,0': 'wood', '8,64,0': 'farming', '9,64,0': 'mobdrops' };
+/** a chest for each kind and a second stone chest, the first stone one holding a stack of cobblestone */
+const nine = (): Record<string, Stack[]> => ({ [FOOD]: [], [ORES]: [], [MISC]: [], [STONE]: full('cobblestone', 1), [STONE2]: [],
+  ...Object.fromEntries(Object.keys(OTHERS).map(k => [k, []])) });
+const NINE = { ...SORTED, [STONE2]: 'stone', ...OTHERS };
+/** the kit, 50 raw iron and a stack of cobblestone over the kit's own */
+const haul = (): InventoryItem[] => [...kit(), { slot: 9, name: 'raw_iron', count: 50 }, { slot: 10, name: 'cobblestone', count: 64 }];
+
+test('F9: a stash with one chest out of reach stores the rest, marks that chest, and its things go to the next chest of their kind', async t => {
+  const s = snap(haul());
+  const w = world(nine(), { chestAssign: NINE });
+  // the plan: the cobblestone to the stone chest that holds some, the iron to the ores chest
+  t.deepEqual(stashWork(s, w).moves, [{ chest: STONE, name: 'cobblestone', count: 64 }, { chest: ORES, name: 'raw_iron', count: 50 }]);
+  const { g, ctx } = game(haul(), nine());
+  g.far.add(STONE);
+  const c = ctx(s, w);
+  // before: the first chest's failure ended the stash, nothing stored
+  t.deepEqual(await putAway(c, s, stashKeep(w)), { stored: 114, dropped: 0, note: NO_WAY });
+  t.deepEqual(g.acts, [`no way to ${STONE}`, `store 50/50 raw_iron at ${ORES}`, `store 64/64 cobblestone at ${STONE2}`]);
+  t.deepEqual(w.unreachableChests, { [STONE]: NOW });
+  t.true(c.said.includes(`the cobblestone into the chest at (4, 64, 0): ${NO_WAY} (left out for 45 min)`), c.said.join(' | '));
+  t.deepEqual(w.storageFull, []);
+  // the next plan gives it no room, not even in its own stack: the second stone chest takes the cobblestone
+  const more = snap([...kit(), { slot: 9, name: 'cobblestone', count: 64 }]);
+  t.deepEqual(stashWork(more, w).moves, [{ chest: STONE2, name: 'cobblestone', count: 64 }]);
+  t.deepEqual([...stashReach(more, w).goes], [['cobblestone', 64]]);
+  // and with that chest all its kind had and every other one full, the stash says why it put nothing away: the chest
+  // it could not get to is named (makeRoom's "pockets still ..." carries the same words)
+  const lone = world({ [FOOD]: [], [ORES]: [], [MISC]: MISC_STACKS(), [STONE]: [] }, { chestAssign: SORTED, fullChests: [MISC] });
+  const iron = [...kit(), { slot: 9, name: 'raw_iron', count: 50 }];
+  const shut = game(iron, { [FOOD]: full('carrot', 27), [ORES]: [], [MISC]: MISC_STACKS(), [STONE]: full('cobblestone', 27) });
+  shut.g.far.add(ORES);
+  const far = 'could not reach the chest at (2, 64, 0): no path found. Stopped at (2, 64, 0), 2.83 blocks away.';
+  await t.throwsAsync(stash.run(shut.ctx(snap(iron), lone)), { message: `storage full: raw_iron (the chests for ores have no room); ${far}` });
+  t.deepEqual(shut.g.acts, [`no way to ${ORES}`, `store 0/50 raw_iron at ${FOOD}`, `store 0/50 raw_iron at ${STONE}`]);
+  t.deepEqual(lone.unreachableChests, { [ORES]: NOW });
+});
+
+test('F9: a kind whose only chest is out of reach goes to the misc chest, and is not full: no chest is built for it', t => {
+  const items = [{ slot: 0, name: 'raw_iron', count: 50 }];
+  const assign = { [ORES]: 'ores', [MISC]: 'misc' };
+  t.deepEqual(depositPlan(items, new Set(), assign), { moves: [{ chest: ORES, name: 'raw_iron', count: 50 }], full: [], unplaced: [] });
+  t.deepEqual(depositPlan(items, new Set(), assign, {}, 27, new Set([ORES])), { moves: [{ chest: MISC, name: 'raw_iron', count: 50 }], full: [], unplaced: [] });
+  // a kind really out of room still is (its own chests all within reach)
+  t.deepEqual(depositPlan(items, new Set(), assign, { [ORES]: { cobblestone: 27 * 64 } }, 27, new Set([MISC])).full, ['ores']);
+});
+
+test('F9: the mark lasts 45 min, then the chest is planned again; a chest that opens is in reach again', async t => {
+  const w = world(nine(), { chestAssign: NINE });
+  markUnreachable(w, at(STONE), NOW);
+  const more = (min: number) => snap([...kit(), { slot: 9, name: 'cobblestone', count: 64 }], { now: NOW + min * MIN });
+  t.deepEqual([...unreachableChests(w, NOW + 44 * MIN).keys()], [STONE]);
+  t.deepEqual(stashWork(more(44), w).moves, [{ chest: STONE2, name: 'cobblestone', count: 64 }]);
+  t.is(UNREACHABLE_FOR, 45 * MIN);
+  t.deepEqual([...unreachableChests(w, NOW + 45 * MIN).keys()], []);
+  t.deepEqual(stashWork(more(45), w).moves, [{ chest: STONE, name: 'cobblestone', count: 64 }], 'tried again: its own stack first, as ever');
+  // a mark made later drops those whose time is up
+  markUnreachable(w, at(ORES), NOW + 46 * MIN);
+  t.deepEqual(w.unreachableChests, { [ORES]: NOW + 46 * MIN });
+  // the chest opened after all (a look in by another chore): the mark goes
+  const { ctx } = game([], nine());
+  await peekChest(ctx(more(47), w), at(ORES));
+  t.is(w.unreachableChests, undefined);
+  // a brain.json with something else there, or no time to judge by: none marked
+  t.deepEqual([...unreachableChests(world(nine(), { unreachableChests: 'all' as unknown as Record<string, number> }), NOW)], []);
+  t.deepEqual([...unreachableChests(world(nine(), { unreachableChests: { [STONE]: NOW } }), undefined)], []);
+});
+
+test('F9: a chest that failed is not walked to again for the next kind planned into it, and a re-planned chest that fails too sends its things on', async t => {
+  // raw iron and raw gold both planned into the ores chest the walk cannot get to: one walk there, both to misc
+  const both = (): InventoryItem[] => [...kit(), { slot: 9, name: 'raw_iron', count: 50 }, { slot: 10, name: 'raw_gold', count: 20 }];
+  const s = snap(both());
+  const w = world(nine(), { chestAssign: NINE });
+  t.deepEqual(stashWork(s, w).moves, [{ chest: ORES, name: 'raw_iron', count: 50 }, { chest: ORES, name: 'raw_gold', count: 20 }]);
+  const { g, ctx } = game(both(), nine());
+  g.far.add(ORES);
+  const c = ctx(s, w);
+  const far = 'could not reach the chest at (2, 64, 0): no path found. Stopped at (2, 64, 0), 2.83 blocks away.';
+  t.deepEqual(await putAway(c, s, stashKeep(w)), { stored: 70, dropped: 0, note: far });
+  t.deepEqual(g.acts, [`no way to ${ORES}`, `store 50/50 raw_iron at ${MISC}`, `store 20/20 raw_gold at ${MISC}`]);
+  t.is(c.said.filter(l => l.includes('into the chest at (2, 64, 0)')).length, 1, c.said.join(' | '));
+  // both stone chests out of reach: the second, tried for what the first was to take, fails too, and the cobblestone
+  // goes to the first chest with room (before: left carried, "stored 0", the misc chest's room unused)
+  const s2 = snap(haul());
+  const w2 = world(nine(), { chestAssign: NINE });
+  const two = game(haul(), nine());
+  two.g.far.add(STONE).add(STONE2);
+  t.is((await putAway(two.ctx(s2, w2), s2, stashKeep(w2))).stored, 114);
+  t.deepEqual(two.g.acts, [`no way to ${STONE}`, `store 50/50 raw_iron at ${ORES}`, `no way to ${STONE2}`, `store 64/64 cobblestone at ${FOOD}`]);
+  t.deepEqual(w2.unreachableChests, { [STONE]: NOW, [STONE2]: NOW });
+});
+
+test('F9: a chest out of reach with the bot far from it is the bot\'s own walk failing: nothing is marked, and the stash ends there as before', async t => {
+  const s = snap(haul());
+  const w = world(nine(), { chestAssign: NINE });
+  const { g, ctx } = game(haul(), nine());
+  g.far.add(STONE);
+  // shut in out in the yard (a gate's stray cobble, the pit under the yard): every chest would fail the same
+  g.pos = { x: 40, y: 50, z: 30 };
+  await t.throwsAsync(putAway(ctx(s, w), s, stashKeep(w)), { message: NO_WAY });
+  t.deepEqual(g.acts, [`no way to ${STONE}`]);
+  t.is(w.unreachableChests, undefined);
+  // nor does a take mark it, or go on to every other chest holding the item
+  await t.throwsAsync(takeFromChests(ctx(snap([]), w), 'cobblestone', 10), { message: NO_WAY });
+  t.is(w.unreachableChests, undefined);
+  // and with no position to tell by (the status call failed), none either
+  const blind = game(haul(), nine());
+  blind.g.far.add(STONE);
+  const c = { ...blind.ctx(s, w), status: async () => { throw new Error('bridge call status timed out'); } };
+  await t.throwsAsync(putAway(c, s, stashKeep(w)), { message: NO_WAY });
+  t.is(w.unreachableChests, undefined);
+});
+
+test('F9: a take passes a chest out of reach by, marks it, and takes from the others holding the item; a store passes it by', async t => {
+  // most of the iron in the ores chest the walk cannot get to; a stack of it in the misc chest
+  const chests = (): Record<string, Stack[]> => ({ [FOOD]: [], [ORES]: full('raw_iron', 3), [MISC]: full('raw_iron', 1), [STONE]: [] });
+  const w = world(chests(), { chestAssign: SORTED });
+  const { g, ctx } = game([], chests());
+  g.far.add(ORES);
+  const c = ctx(snap([]), w);
+  // before: the first chest's failure ended the take (the pack chore's "chest too far to open")
+  t.is(await takeFromChests(c, 'raw_iron', 100), 64);
+  t.deepEqual(g.acts, [`no way to ${ORES}`, `take 64/100 raw_iron at ${MISC}`]);
+  t.deepEqual(w.unreachableChests, { [ORES]: NOW });
+  t.true(c.said.some(l => l.startsWith('the raw_iron from the chest at (2, 64, 0): could not reach the chest at (2, 64, 0)')), c.said.join(' | '));
+  // marked: the next take does not walk there at all
+  g.acts = [];
+  t.is(await takeFromChests(c, 'raw_iron', 10), 0);
+  t.deepEqual(g.acts, []);
+  // nor does a store: the next chest with room takes it
+  t.is(await storeInChests(c, 'raw_iron', 64), 64);
+  t.deepEqual(g.acts, [`store 64/64 raw_iron at ${FOOD}`]);
+  // a store finding one so now passes it by and marks it too
+  const w2 = world({ [FOOD]: [], [ORES]: [] });
+  const two = game([{ slot: 0, name: 'raw_gold', count: 10 }], { [FOOD]: [], [ORES]: [] });
+  two.g.far.add(FOOD);
+  t.is(await storeInChests(two.ctx(snap([]), w2), 'raw_gold'), 10);
+  t.deepEqual(two.g.acts, [`no way to ${FOOD}`, `store 10/10 raw_gold at ${ORES}`]);
+  t.deepEqual(w2.unreachableChests, { [FOOD]: NOW });
+  // a run the brain gives up still ends at once, nothing marked
+  const w3 = world({ [FOOD]: [], [ORES]: [] });
+  const cut = game([{ slot: 0, name: 'raw_gold', count: 10 }], { [FOOD]: [], [ORES]: [] });
+  const abort = new AbortController();
+  const base = cut.ctx(snap([]), w3);
+  const given: GoalContext = { ...base, signal: abort.signal, act: async () => { abort.abort(); throw new Error('aborted'); } };
+  await t.throwsAsync(storeInChests(given, 'raw_gold'), { message: 'aborted' });
+  t.is(w3.unreachableChests, undefined);
+});
+
+test('F9: brain-status names the chests marked out of reach, since when and when they are tried again', async t => {
+  const T = Date.UTC(2026, 10, 18, 18, 7, 59);
+  const w = world(nine(), { chestAssign: NINE });
+  t.is(unreachableLine(w, T), '');
+  markUnreachable(w, at(STONE), T);
+  markUnreachable(w, at(ORES), T + 5 * MIN);
+  t.is(unreachableLine(w, T + 10 * MIN),
+    'Chests out of reach (left out of the stash, the takes and the sort till then): (4, 64, 0) since 18:07Z, tried again at 18:52Z; (2, 64, 0) since 18:12Z, tried again at 18:57Z.');
+  t.is(unreachableLine(w, T + 46 * MIN), 'Chests out of reach (left out of the stash, the takes and the sort till then): (2, 64, 0) since 18:12Z, tried again at 18:57Z.');
+  // in the brain's own status
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'storagefull-'));
+  const file = path.join(dir, 'brain.json');
+  fs.writeFileSync(file, JSON.stringify({ 'seed:1': w }));
+  const { rt } = fakeRuntime();
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => T + 10 * MIN, goals: [], memoryFile: file });
+  brain.setEnabled(true);
+  await brain.tick();
+  t.regex(brain.status(), /\nChests out of reach \(left out of the stash, the takes and the sort till then\): \(4, 64, 0\) since 18:07Z, tried again at 18:52Z; \(2, 64, 0\) since 18:12Z/);
   brain.setEnabled(false);
 });

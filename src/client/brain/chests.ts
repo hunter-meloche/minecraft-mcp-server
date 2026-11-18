@@ -90,10 +90,12 @@ async function openAt(ctx: GoalContext, at: Pos): Promise<ChestContents> {
  * total changed are left out: the text says how many went, not from which slot, and a remembered slot that no longer
  * holds its stack would take another one (the book with unbreaking for the one with mending). The other names'
  * stacks stand where they were: a chest's stacks never move when others are taken or put in. `free`: its empty slots,
- * where the reply says (fullChests); `slots`: all of them, 27 or 54 (chestSize).
+ * where the reply says (fullChests); `slots`: all of them, 27 or 54 (chestSize). A chest that opened is in reach: a
+ * mark of it out of reach goes (markUnreachable).
  */
 export function remember(world: WorldMemory, at: Pos, items: Record<string, number>, stacks?: ChestStack[], free?: number, slots?: number): void {
   const k = key(at);
+  noteReached(world, k);
   noteFree(world, k, free);
   noteSize(world, k, slots);
   world.chestItems ??= {};
@@ -175,7 +177,9 @@ export async function storeStack(ctx: GoalContext, name: string, slot: number, c
  * (undefined when the jar sends no stacks): the spare set is remembered by it (portal.ts).
  */
 export async function storeStackAt(ctx: GoalContext, name: string, slot: number, chests: Pos[] = ctx.world.landmarks.chests, tries = 3): Promise<{ chest: Pos; slot?: number } | undefined> {
-  for (const c of chests.slice(0, tries)) {
+  // (not a chest marked out of reach: the next of the list instead)
+  const far = unreachableChests(ctx.world, ctx.s?.now);
+  for (const c of chests.filter(x => !far.has(key(x))).slice(0, tries)) {
     if (ctx.signal.aborted) break;
     try {
       const opened = await openAt(ctx, c);
@@ -190,6 +194,7 @@ export async function storeStackAt(ctx: GoalContext, name: string, slot: number,
         return { chest: c, slot: into?.slot };
       }
     } catch (e) {
+      await markOwn(ctx, c, e);
       ctx.progress(`the ${name} into the chest at ${fmt(c)}: ${(e as Error).message}`);
     } finally {
       await closeChest(ctx);
@@ -273,6 +278,104 @@ function noteFree(world: WorldMemory, k: string, free: number | undefined): void
 /** The home chests seen with every slot used (noteFree), by key: none for a memory without the list, or with something else there. */
 export function fullChests(world: WorldMemory): Set<string> {
   return new Set(Array.isArray(world.fullChests) ? world.fullChests.filter(k => typeof k === 'string') : []);
+}
+
+// ------------------------------------------------------------------------------------------------ out of reach
+
+/**
+ * How long a home chest no walk could get to is left out (markUnreachable). Live on Nov 18 Baritone found no way into
+ * storehouse2's south row (the gear chest at (-557, 64, 2195), an ores chest at (-558, 63, 2195)), and every stash,
+ * the pack chore and every goal's room-making stopped at that one chest within 5 s ("chest too far to open"): the bot
+ * stood about with 36/36 slots for over an hour while the other chests had room. After that it is tried again: what
+ * kept the walk out may be gone, and its kind's things are not sent to other chests for good.
+ */
+export const UNREACHABLE_FOR = 45 * 60_000;
+
+/** A store's or a take's failure for want of reach: the walk found no way there, or stopped too far off to open it. */
+export const outOfReach = (e: unknown): boolean => /could not reach|too far to open/i.test(e instanceof Error ? e.message : String(e));
+
+/**
+ * The home chests ("x,y,z") marked out of reach at `now` (markUnreachable), each with when it was marked: none once
+ * its 45 min are up, none without a time to judge by, and none for a memory with something else there.
+ */
+export function unreachableChests(world: WorldMemory, now: number | undefined): Map<string, number> {
+  const out = new Map<string, number>();
+  const marks: unknown = world.unreachableChests;
+  if (now === undefined || !Number.isFinite(now) || !marks || typeof marks !== 'object' || Array.isArray(marks)) return out;
+  for (const [k, at] of Object.entries(marks as Record<string, unknown>)) {
+    if (typeof at === 'number' && now - at >= 0 && now - at < UNREACHABLE_FOR) out.set(k, at);
+  }
+  return out;
+}
+
+/** Mark a home chest out of reach from `now` (the marks whose time is up go with it). */
+export function markUnreachable(world: WorldMemory, at: Pos, now: number): void {
+  const marks = unreachableChests(world, now);
+  marks.set(key(at), now);
+  world.unreachableChests = Object.fromEntries(marks);
+}
+
+/**
+ * How near (3D) the bot stands to a chest no walk got to, for that to be the chest's own: it got to the storage, not
+ * into that corner of it. Live on Nov 18 the walks stopped 5 to 9 from storehouse2's south row. Farther off, the bot
+ * itself is likely what cannot walk (shut in by a gate's stray cobble, stuck under its own yard, a careful walk that
+ * timed out out in the yard): every chest it tried would be marked, and once it was free the stash, the takes and the
+ * sort would find none to go to for 45 min.
+ */
+export const NEAR_CHEST = 12;
+
+/**
+ * Mark a chest out of reach for a failure `e` that is its own (outOfReach, with the bot within NEAR_CHEST of it now,
+ * as its position says); whether it did. Not with no time to judge by, nor with no position to tell by.
+ */
+export async function markOwn(ctx: GoalContext, at: Pos, e: unknown): Promise<boolean> {
+  const now = ctx.s?.now;
+  if (!outOfReach(e) || now === undefined) return false;
+  const here = (await Promise.resolve().then(() => ctx.status()).catch(() => undefined))?.position;
+  if (!here || Math.hypot(here.x - at.x, here.y - at.y, here.z - at.z) > NEAR_CHEST) return false;
+  markUnreachable(ctx.world, at, now);
+  return true;
+}
+
+/** A chest ("x,y,z") just opened: its mark out of reach goes, if it had one. */
+function noteReached(world: WorldMemory, k: string): void {
+  const marks: unknown = world.unreachableChests;
+  if (!marks || typeof marks !== 'object' || Array.isArray(marks) || !(k in marks)) return;
+  delete (marks as Record<string, number>)[k];
+  if (!Object.keys(marks).length) delete world.unreachableChests;
+}
+
+/** The brain-status line for the chests marked out of reach: which, since when, and when they are tried again ('' for none). */
+export function unreachableLine(world: WorldMemory, now: number): string {
+  const marks = [...unreachableChests(world, now)];
+  if (!marks.length) return '';
+  const hm = (t: number) => `${new Date(t).toISOString().slice(11, 16)}Z`;
+  return `Chests out of reach (left out of the stash, the takes and the sort till then): ${marks.map(([k, at]) =>
+    `(${k.split(',').join(', ')}) since ${hm(at)}, tried again at ${hm(at + UNREACHABLE_FOR)}`).join('; ')}.`;
+}
+
+/**
+ * One chest's store or take in a round of several (the stash's moves, storeInChests, storeStackAt, takeFromChests):
+ * a chest that fails is passed by, said, and the round goes on to the next; one out of reach is marked so
+ * (markUnreachable), and the plans leave it out for a while. Before, the first chest that failed ended the round, and
+ * the next round planned the same chest first again (live on Nov 18). A run the brain gives up still ends at once, and
+ * so does one whose chest is out of reach with the bot not near it (markOwn): the bot is what cannot walk, every other
+ * chest would fail the same, and the next round tries them all again, as before.
+ * Undefined when it failed; `failed` (the caller's, for its own words) gets the chest ("x,y,z") and what went wrong.
+ */
+export async function atChest<T>(ctx: GoalContext, at: Pos, what: string, fn: () => Promise<T>, failed?: Map<string, string>): Promise<T | undefined> {
+  try {
+    return await fn();
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    // (the brain's own words for a run it gave up, whichever call heard first: brain.ts act, tools.ts call)
+    if (ctx.signal?.aborted || /^aborted/.test(why)) throw e;
+    const far = outOfReach(e);
+    if (far && !(await markOwn(ctx, at, e))) throw e;
+    failed?.set(key(at), why);
+    ctx.progress?.(`${what} at ${fmt(at)}: ${why}${far ? ' (left out for 45 min)' : ''}`);
+    return undefined;
+  }
 }
 
 /**
@@ -465,12 +568,16 @@ export async function takeFromChests(ctx: GoalContext, item: string, count: numb
   if (held) count = Math.min(count, Math.max(0, (chestTotals(ctx.world)[item] ?? 0) - held));
   if (count <= 0) return 0;
   let got = 0;
-  for (const c of chestsWith(ctx.world, item)) {
+  // not a chest marked out of reach: the others holding it are looked in instead (and one found so now is passed by
+  // and marked: the pack chore's take stopped at it, Nov 18)
+  const far = unreachableChests(ctx.world, ctx.s?.now);
+  for (const c of chestsWith(ctx.world, item).filter(x => !far.has(key(x)))) {
     if (got >= count) break;
     // the chest with the spare set's piece of this name: the other stacks by their slots, never the spare one
     const kept = opts.forJob === SPARE ? new Set<number>() : spareSlots(ctx.world, c, item);
-    if (kept.size) { got += await takeAround(ctx, c, item, count - got, kept); continue; }
-    const r = await ctx.act('take-from-chest', { ...c, item, count: count - got });
+    if (kept.size) { got += (await atChest(ctx, c, `the ${item} from the chest`, () => takeAround(ctx, c, item, count - got, kept))) ?? 0; continue; }
+    const r = await atChest(ctx, c, `the ${item} from the chest`, () => ctx.act('take-from-chest', { ...c, item, count: count - got }));
+    if (!r) continue;
     rememberReply(ctx.world, c, r.text);
     const m = /^Took (\d+)/.exec(r.text);
     if (m) got += Number(m[1]);
@@ -482,16 +589,20 @@ export async function takeFromChests(ctx: GoalContext, item: string, count: numb
 /**
  * Store an item in the first home chest with room; returns how many went in. Not a chest seen with every slot used
  * whose own stacks of the item are full (fullChests): the plan counts no room there (pockets.ts stashReach), and the
- * walk to it stores nothing. Any other is tried, whatever its memory packs into 27 slots: a double chest is one
- * chest of 54 to the game, and its second half takes what the plan leaves out.
+ * walk to it stores nothing. Nor one marked out of reach (markUnreachable), and one that fails now is passed by (and
+ * marked when out of reach). Any other is tried, whatever its memory packs into 27 slots: a double chest is one chest
+ * of 54 to the game, and its second half takes what the plan leaves out. `failed`: the chests that failed (atChest),
+ * the caller's over several of these: one already in it is not tried again.
  */
-export async function storeInChests(ctx: GoalContext, item: string, count?: number): Promise<number> {
+export async function storeInChests(ctx: GoalContext, item: string, count?: number, failed?: Map<string, string>): Promise<number> {
   let stored = 0;
   const slots = chestSlots(ctx.world);
+  const far = unreachableChests(ctx.world, ctx.s?.now);
   for (const c of ctx.world.landmarks.chests) {
     const k = key(c);
-    if (!slots(k) && roomFor(ctx.world.chestItems?.[k] ?? {}, item, 0) <= 0) continue;
-    const r = await ctx.act('store-in-chest', { ...c, item, ...(count ? { count: count - stored } : {}) });
+    if (far.has(k) || failed?.has(k) || (!slots(k) && roomFor(ctx.world.chestItems?.[k] ?? {}, item, 0) <= 0)) continue;
+    const r = await atChest(ctx, c, `the ${item} into the chest`, () => ctx.act('store-in-chest', { ...c, item, ...(count ? { count: count - stored } : {}) }), failed);
+    if (!r) continue;
     rememberReply(ctx.world, c, r.text);
     const m = /^Stored (\d+)/.exec(r.text);
     if (m) stored += Number(m[1]);

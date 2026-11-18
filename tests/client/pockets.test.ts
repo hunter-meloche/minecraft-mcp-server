@@ -782,7 +782,8 @@ test('a put-away that made no room is remembered by kind for 10 min: the goal de
     },
   };
   await t.throwsAsync(makeRoom(blocked, 'deep'), { message: 'pockets still 30/36 after putting away: The chest at (1, 64, 0) did not open' });
-  t.true(blocked.said.includes('making room: The chest at (1, 64, 0) did not open'));
+  // (the put-away passes the chest by and says so, chest and all (F9): it no longer throws on it)
+  t.true(blocked.said.includes('the oak_log into the chest at (1, 64, 0): The chest at (1, 64, 0) did not open'), blocked.said.join(' | '));
   t.deepEqual(lid.m.acts, []);
   t.is(shut.lastDone?.['no room: deep'], full.now);
   t.is(room('deep', full, shut), 'no');
@@ -1319,7 +1320,9 @@ test.serial('a rung whose room could not be made steps aside for 10 min, and the
   await settle();
   t.deepEqual(recent().slice(2), [
     'start work: cane: only: 20 blocks out',
-    'work: cane: making room: The chest at (1, 64, 0) did not open',
+    // (the put-away passes the chest by, says so and finishes (F9): what the chest said is still why it fell short)
+    'work: cane: the oak_log into the chest at (1, 64, 0): The chest at (1, 64, 0) did not open',
+    'work: cane: stored 0, dropped 0',
     'failed work: cane: pockets still 34/36 after putting away: The chest at (1, 64, 0) did not open',
   ]);
   const w = brain.worldMemory()!;
@@ -1331,7 +1334,7 @@ test.serial('a rung whose room could not be made steps aside for 10 min, and the
   at.clock += 1000;
   await brain.tick();
   await settle();
-  t.deepEqual(recent().slice(5), [
+  t.deepEqual(recent().slice(6), [
     'start work: tidy: only: in the yard',
     'work: tidy: skipped: cane (pockets: 34/36 slots, the stash made no room just now (cane needs 3 free))',
     'done work: tidy in 0s: [only] done',

@@ -178,6 +178,11 @@ export interface WorldMemory {
    * not go again for those for 30 min (chores.ts stash)
    */
   stashStuck?: { at: number; kinds: string[] };
+  /**
+   * home chests ("x,y,z") a store or a take could not get to, and when (ms; chests.ts markUnreachable): the stash's
+   * plan, the takes and the sort leave them out for 45 min, then try them again
+   */
+  unreachableChests?: Record<string, number>;
   /** when the storage house was found full up (six double chests) with a kind still without room */
   storageMaxedAt?: number;
   /** built cells ("x,y,z") the repair round failed to put back, and how often */
