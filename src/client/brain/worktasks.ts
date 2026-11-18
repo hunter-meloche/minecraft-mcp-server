@@ -455,7 +455,7 @@ export interface NetherWork {
 }
 
 /**
- * What fetching the Nether kit and putting the Nether set on may take before a trip sets out, ms. The rung let a trip
+ * What fetching the Nether kit and putting the golden helmet on may take before a trip sets out, ms. The rung let a trip
  * go with the day's least (nether.ts NETHER_WORTH_MS, 3 min) and the trip checked its own least only after the kit:
  * the scouting, 3 min of its own, fetched the kit, put the Nether set on, found too little left and came straight back
  * to take it off again (Nov 17 07:01, Nov 18 07:55 and 14:09: "not setting out: the kit took 7 / 116 / 34 s, too
@@ -555,10 +555,10 @@ const debrisWork: NetherWork = {
 /**
  * `fortress` (P3c, netherfortress.ts): from stage 3 with no potion (the user's strict rules of Nov 17: nether.ts
  * NETHER_STAGES says what each work needs), to a natural fortress a scouting leg found, by that leg's way: at full
- * health and food in the Nether set with a shield, blazes fought from the shield and wither skeletons with the sword,
- * home at once under 10 health, with the wither, on a hold, at its time or where the way on needs fire resistance;
- * blaze rods, a few wart, some soul sand and its chests' loot while the rods or the wart are short. A death on one
- * turns the fortress trips off until the lead switches them back.
+ * health and food in the fire gear (netherset.ts fireGear) with a shield, blazes fought from the shield and wither
+ * skeletons with the sword, home at once under 10 health, with the wither, on a hold, at its time or where the way on
+ * needs fire resistance; blaze rods, a few wart, some soul sand and its chests' loot while the rods or the wart are
+ * short. A death on one turns the fortress trips off until the lead switches them back.
  */
 const fortressWork: NetherWork = {
   id: 'fortress',

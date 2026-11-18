@@ -928,18 +928,18 @@ test('anvil goal: the book from the chest goes in by what it holds, not the firs
   t.deepEqual(w.items.filter(i => i.name === 'enchanted_book').map(i => i.enchantments), [en('bane_of_arthropods 5')]);
 });
 
-test('anvil goal: the Nether set\'s piece comes out of its chest before the walk, so the anvil opens within reach', async (t) => {
+test('anvil goal: the Nether helmet comes out of its chest before the walk, so the anvil opens within reach', async (t) => {
   // Nov 17-18 live, seven runs: "unbreaking 3 onto the nether set's diamond_chestplate (in its chest)", then "failed
   // anvil: anvil too far to open (41.77 blocks, max 4.5)": it walked to the anvil, then to the chestplate's chest,
-  // and opened the anvil from there
-  const chestplate: ChestStack = { slot: 5, name: 'diamond_chestplate', count: 1, enchanted: true, enchantments: en('fire_protection 4') } as ChestStack;
-  const stacks = [book(3, 'unbreaking 3'), chestplate];
+  // and opened the anvil from there (the old diamond Nether set's then; the golden helmet's now)
+  const helmet: ChestStack = { slot: 5, name: 'golden_helmet', count: 1, enchanted: true, enchantments: en('fire_protection 4') } as ChestStack;
+  const stacks = [book(3, 'unbreaking 3'), helmet];
   const world = workshopWorld(stacks);
   const w = atWorkshop(kitOnly(), world, stacks);
-  t.is(anvilGoal.wants(w.ctx.s, world), "level 52: unbreaking 3 onto the nether set's diamond_chestplate (in its chest)");
-  t.regex(await anvilGoal.run(w.ctx), /^unbreaking 3 onto the nether set's diamond_chestplate \(cost \d+, level 52 -> \d+\)/);
+  t.is(anvilGoal.wants(w.ctx.s, world), 'level 52: unbreaking 3 onto the nether golden_helmet (in its chest)');
+  t.regex(await anvilGoal.run(w.ctx), /^unbreaking 3 onto the nether golden_helmet \(cost \d+, level 52 -> \d+\)/);
   const walk = w.calls.indexOf(`goto ${JSON.stringify({ ...ANVIL, range: 2, careful: true, timeoutMs: 60_000 })}`);
-  const fetched = w.calls.indexOf('chest.withdraw {"name":"diamond_chestplate","slot":5,"count":1}');
+  const fetched = w.calls.indexOf('chest.withdraw {"name":"golden_helmet","slot":5,"count":1}');
   t.true(fetched >= 0 && walk > fetched, w.calls.join('\n'));
   // nothing between the walk and the anvil takes it elsewhere
   t.deepEqual(w.calls.slice(walk + 1, w.calls.indexOf(`anvil.open ${JSON.stringify(ANVIL)}`)), []);

@@ -36,8 +36,9 @@ const ORES = '-547,63,2180';
 /** Its own Nether-side portal where the setup trip builds it in the test Nether (dug into the cliff, its door east at z 267). */
 const OWN_BOX: Box = { x1: -79, y1: 70, z1: 266, x2: -79, y2: 72, z2: 267 };
 
-/** The Nether set worn: fire protection on every piece, the golden helmet its helmet (D1). */
-const SET: InventoryItem[] = ['diamond_boots', 'diamond_leggings', 'diamond_chestplate', 'golden_helmet'].map((name, i) => ({ slot: 36 + i, name, count: 1, enchantments: [{ name: 'fire_protection', level: 4 }] }));
+/** The fire gear worn (D1): the golden helmet with fire protection 4 over the main set's protection 4 (20 EPF against fire). */
+const SET: InventoryItem[] = ['diamond_boots', 'diamond_leggings', 'diamond_chestplate', 'golden_helmet'].map((name, i) =>
+  ({ slot: 36 + i, name, count: 1, enchantments: [{ name: name === 'golden_helmet' ? 'fire_protection' : 'protection', level: 4 }] }));
 const dressed = (items: InventoryItem[]): InventoryItem[] => [...items.filter(i => i.slot < 36 || i.slot === 40), ...SET.map(i => ({ ...i }))];
 
 /** Potions of fire resistance (by their contents) in the gear chest, by their stacks as the memory has them. */
@@ -145,14 +146,21 @@ test.serial('the stage gate: the tunnelling opens at stage 3 (its own ready asks
   t.is(JSON.stringify(w), before);
 });
 
-test.serial('ready: no potion in stock shuts it; no nether set with fire protection; the debris enough at home (its scrap, ingots and netherite counted); a piglin\'s hold; every tunnel shut with no room for more', async (t) => {
+test.serial('ready: no potion in stock shuts it; the fire gear short of 20 EPF against fire; the debris enough at home (its scrap, ingots and netherite counted); a piglin\'s hold; every tunnel shut with no room for more', async (t) => {
   const { w, later, f } = await atStage3();
   const s = lookAt(f.inv, 1000, { now: later });
   const none = structuredClone(w);
   stock(none, []);
   t.deepEqual(tunnelReady(s, none), { cause: 'kit', text: 'tunnelling shut: no potion of fire resistance in stock (carried or in the chests)' });
   const plain = lookAt(f.inv.map(i => (i.slot >= 36 && i.slot <= 38 ? { ...i, enchantments: [] } : i)), 1000, { now: later });
-  t.deepEqual(tunnelReady(plain, w), { cause: 'kit', text: 'tunnelling: the nether set has no chestplate, leggings, boots with fire protection yet (it tunnels only in it)' });
+  t.deepEqual(tunnelReady(plain, w), {
+    cause: 'kit',
+    text: 'tunnelling: the fire gear is short: fire EPF 8 < 20 (the diamond_chestplate has protection 0 (4 wanted); the diamond_leggings has protection 0 (4 wanted); the diamond_boots has protection 0 (4 wanted)) (it tunnels only in it)'
+  });
+  const fp3 = lookAt(f.inv.map(i => (i.slot === 39 ? { ...i, enchantments: [{ name: 'fire_protection', level: 3 }] } : i)), 1000, { now: later });
+  t.like(tunnelReady(fp3, w), { cause: 'kit', text: 'tunnelling: the fire gear is short: fire EPF 18 < 20 (the golden_helmet has fire_protection 3 (4 wanted)) (it tunnels only in it)' });
+  const unenchanted = lookAt(f.inv.map(i => (i.slot === 39 ? { ...i, enchantments: [] } : i)), 1000, { now: later });
+  t.like(tunnelReady(unenchanted, w), { cause: 'kit', text: 'tunnelling: the fire gear is short: fire EPF 12 < 20 (the golden_helmet has fire_protection 0 (4 wanted)) (it tunnels only in it)' });
   const rich = structuredClone(w);
   Object.assign(rich.chestItems![ORES], { ancient_debris: 2, netherite_scrap: 2, netherite_ingot: 1 });
   rich.chestItems![GEAR].netherite_chestplate = 1;
@@ -477,11 +485,11 @@ test.serial('a hit in the tunnel (the ghast rule b and the barter\'s other dange
   t.true(mouthAt > 0);
 });
 
-test.serial('at home: the Nether set not worn, or no cobblestone to plug lava with: it does not set out (untried)', async (t) => {
+test.serial('at home: the fire gear not worn, or no cobblestone to plug lava with: it does not set out (untried)', async (t) => {
   const a = await atStage3();
   a.f.inv.splice(0, a.f.inv.length, ...a.f.inv.map(i => (i.slot === 38 ? { ...i, enchantments: [] } : i)));
   const r = await tunnelRun(a.f.ctx, HOUR, () => a.later);
-  t.is(r.text, 'not setting out to tunnel: the diamond_chestplate worn is not the nether set\'s');
+  t.is(r.text, 'not setting out to tunnel: fire EPF 16 < 20 (the diamond_chestplate has protection 0 (4 wanted))');
   t.like(r, { untried: true, gain: 0 });
   t.false(a.f.did.some(d => d.startsWith('portal ')));
   const b = await atStage3();

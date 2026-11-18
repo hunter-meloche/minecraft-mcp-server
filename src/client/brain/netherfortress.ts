@@ -13,7 +13,8 @@
  * in a corridor of its nether bricks, a single one, nothing else by it); every walk 16 from every other zone.
  *
  * The strict rules (the user's): it sets out only at full health and food (20 and 20, after the kit's meals and the
- * healing), with the Nether set worn (D1: every piece of it with fire protection, netherset.ts) and a shield. Down
+ * healing), with the fire gear worn (D1: 20 EPF against fire, the golden helmet's fire protection 4 over the main
+ * set's protection 4, netherset.ts fireGear) and a shield. Down
  * there it leaves at once, from wherever it is (fortressStop, looked at between every leg, dig and bout of a fight,
  * and walking back the way it came): under 10 health (half: leave nether's 12 waits for it while the run is under way,
  * nether.ts ownHealth), with the wither on it (a wither
@@ -52,7 +53,7 @@ import {
   BACK_MS, FAR_STEP_MS, FAR_TURN_MS, KNOCK_GAP, backThroughOwn, barterDanger, ghastAbout, ghastWatched, lavaBy, lootWords, overDrop, takesAt, toOwnPortal, type Seen
 } from './netherbarter.js';
 import { DROP_RANGE, digStance } from './netherquartz.js';
-import { netherSetMissing, netherSetPiece } from './netherset.js';
+import { dressedFireGear, fireGear } from './netherset.js';
 import {
   EYE, FROM_BUILDS, GONE, SETUP_HEALTH, SETUP_WAITS, blockAt, boxGap, boxOf, cellOf, clearTo, fetchSetupKit, footing, inNether, pathOf, placedIn, readGround,
   setOpen, setupShort, walkAlong, walkFrom, zoneBox, type Box, type Grid, type NetherZone
@@ -272,8 +273,9 @@ export function fortressOpen(world: WorldMemory): boolean {
 /**
  * Whether the fortress trip can set out now, pure: not switched off after a death on one (the lead switches them back);
  * not held (a piglin turned on the bot by its portal today: the barter's hold, the way out starts by the same hut); the
- * blaze rods or the wart wanted (fortressWant); a natural fortress known by a scouted way (fortressWay); the Nether set
- * whole (every piece of it with fire protection, carried, worn or in the chests: netherset.ts netherSetMissing); not
+ * blaze rods or the wart wanted (fortressWant); a natural fortress known by a scouted way (fortressWay); the fire gear
+ * as it will be dressed for the Nether (netherset.ts dressedFireGear: 20 EPF against fire, the golden helmet's fire
+ * protection 4 over the main set's protection 4, and every main piece sound); not
  * hurt past what the run heals at home (its full health and food are the run's, after the kit's meals); nothing of the
  * Nether kit short that the chests lack (the setup's own list: the shield among it). The hour is the rung's.
  */
@@ -284,8 +286,8 @@ export function fortressReady(s: Snapshot, world: WorldMemory): Decline | null {
   if (held) return { cause: 'hold', text: `fortress held for the day: ${held.why}` };
   if (!fortressWant(s, world).length) return { cause: 'unneeded', text: `fortress: ${FORTRESS_STOCK.blaze_rod} blaze rods and ${FORTRESS_STOCK.nether_wart} nether wart at home` };
   if (!fortressWay(world)) return { cause: 'unneeded', text: 'fortress: no natural fortress known by a scouted way' };
-  const missing = netherSetMissing(s.items, world);
-  if (missing.length) return { cause: 'kit', text: `fortress: the nether set has no ${missing.join(', ')} with fire protection yet (the fortress goes only in it)` };
+  const gear = dressedFireGear(s.items, world);
+  if (!gear.ok) return { cause: 'kit', text: `fortress: the fire gear is short: ${gear.missing.join('; ')} (the fortress goes only in it)` };
   if (s.health < SETUP_HEALTH) return no.health(s, 'the fortress', SETUP_HEALTH, 10);
   const short = setupShort(s, world);
   if (short.length) return { cause: 'kit', text: `fortress: short of ${short.join(', ')} (carried or in the chests)` };
@@ -303,9 +305,6 @@ const tally = (items: InventoryItem[]) => {
   for (const i of items) if (i.slot >= 0 && (i.slot < 36 || i.slot === 40)) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
   return m;
 };
-/** The pieces worn that are not the Nether set's (slot 36 boots to 39 helmet), in words (the tunnelling's rule too: nethertunnel.ts). */
-export const notNetherSet = (items: InventoryItem[]) => [36, 37, 38, 39].map(slot => items.find(i => i.slot === slot)).flatMap((i, n) =>
-  !i ? [`no ${['boots', 'leggings', 'chestplate', 'helmet'][n]} worn`] : netherSetPiece(i) ? [] : [`the ${i.name} worn is not the nether set's`]);
 
 /** A box to read round a cell and a box (the fortress's ground by the way's last waypoint). */
 const readBoxFor = (zone: Box, wp: Pos): Box => {
@@ -328,7 +327,7 @@ const stretchBox = (cells: Pos[]): Box => {
 const seesThrough = (g: Grid) => (p: Pos) => { const c = cellOf(blockAt(g, p)); return c === 'open' || c === 'plant' || c === 'hot' || c === 'portal' || c === 'unknown'; };
 
 /**
- * The fortress trip (see the top of the file). From home with the Nether kit and the Nether set on, at full health and
+ * The fortress trip (see the top of the file). From home with the Nether kit and the fire gear on, at full health and
  * food (or it does not set out: untried), through the home portal into its own hut, out along the scouting leg's way
  * to its waypoint by the fortress, into the fortress's ground there; the foes fought as they come, its chests, wart
  * and soul sand taken by its rules; back along the way it walked and through its own portal. Gain: the things it
@@ -347,13 +346,13 @@ export async function fortressRun(ctx: GoalContext, budgetMs: number, now: () =>
   if (!fw) return { gain: 0, text: 'no natural fortress known by a scouted way', untried: true };
   const lacking = await fetchSetupKit(ctx);
   if (lacking) return { gain: 0, text: `not setting out: ${lacking}`, untried: true };
-  // the strict rules at home: full health and food, the Nether set worn, a shield (the kit's meals and healing came first)
+  // the strict rules at home: full health and food, the fire gear worn (netherset.ts fireGear), a shield (the kit's meals and healing came first)
   const st0 = await ctx.status().catch(() => undefined);
   const kit = await inventory(ctx);
   const why = [
     ...((st0?.health ?? 0) < FORTRESS_HEALTH ? [`health ${Math.round(st0?.health ?? 0)} < ${FORTRESS_HEALTH}`] : []),
     ...((st0?.food ?? 0) < FORTRESS_FOOD ? [`food ${st0?.food ?? 0} < ${FORTRESS_FOOD}`] : []),
-    ...notNetherSet(kit),
+    ...fireGear(kit).missing,
     ...(kit.some(i => i.name === 'shield') ? [] : ['no shield'])
   ];
   if (why.length) return { gain: 0, text: `not setting out for the fortress: ${why.join('; ')}`, untried: true };

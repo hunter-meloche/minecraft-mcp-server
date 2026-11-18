@@ -44,7 +44,7 @@ import {
   NETHER, OVERWORLD, REFUSED_SPOTS, SEARCH, isFirePotion, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells,
   scaled, spotFault, type PortalShape, type SetupSpot
 } from './nether.js';
-import { wearNetherSet } from './netherset.js';
+import { wearNetherHelmet } from './netherset.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -770,8 +770,8 @@ export async function findKit(ctx: GoalContext, names: readonly string[]): Promi
  * it out of the chests (never the spare set: takeFromChests leaves its pieces), food enough for 40 points, room made
  * again for the trip's 12 free slots with the Nether's own keep (the kit and nothing else), the golden helmet last (the
  * home stash would put it away as spare gear) with a potion of fire resistance where the home has one (D1); eaten to
- * full first, healed last, and then, nothing else short, dressed in the Nether set (netherset.ts wearNetherSet: the
- * main set into the chests). The golden helmet, the flint and
+ * full first, healed last, and then, nothing else short, dressed for the Nether (netherset.ts wearNetherHelmet: the
+ * golden helmet with fire protection on, the main diamond helmet into the chests). The golden helmet, the flint and
  * steel and the frame's obsidian are looked for in the chests (findKit) where neither the pockets nor the memory hold
  * them, and again where a take found none where the memory said. Undefined when the bot is ready, else what it is
  * still short of, said only after all that.
@@ -883,9 +883,9 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
     ...(freeSlots(s.items) < NETHER_TRIP.slotsFree ? [`${freeSlots(s.items)} free slots < ${NETHER_TRIP.slotsFree}`] : [])
   ];
   if (why.length) return why.join('; ');
-  // last, once nothing else keeps it home: the Nether set on and the main set in the chests (netherset.ts), so a death
-  // down there loses that set only. Never down there: this is the one place the trips dress for it
-  return wearNetherSet(ctx);
+  // last, once nothing else keeps it home: the golden helmet on and the main helmet in the chests (netherset.ts), so a
+  // death down there loses the golden one, never the main one. Never down there: this is the one place the trips dress for it
+  return wearNetherHelmet(ctx);
 }
 
 // ------------------------------------------------------------------------------------------------ the run

@@ -53,8 +53,9 @@ const WAY: Pos[] = [at(-77, 70, 267), at(-76, 70, 259), at(-76, 70, 251), at(-76
 const LOOT = [{ name: 'diamond', count: 3 }, { name: 'gold_ingot', count: 5 }, { name: 'nether_wart', count: 4 }];
 const BLAZE: Mob = { id: 71, name: 'blaze', position: { x: -40.5, y: 71, z: 233.5 } };
 
-/** The Nether set worn: fire protection on every piece, the golden helmet its helmet (D1), the shield in the off hand. */
-const SET: InventoryItem[] = ['diamond_boots', 'diamond_leggings', 'diamond_chestplate', 'golden_helmet'].map((name, i) => ({ slot: 36 + i, name, count: 1, enchantments: [{ name: 'fire_protection', level: 4 }] }));
+/** The fire gear worn (D1): the golden helmet with fire protection 4 over the main set's protection 4 (20 EPF against fire). */
+const SET: InventoryItem[] = ['diamond_boots', 'diamond_leggings', 'diamond_chestplate', 'golden_helmet'].map((name, i) =>
+  ({ slot: 36 + i, name, count: 1, enchantments: [{ name: name === 'golden_helmet' ? 'fire_protection' : 'protection', level: 4 }] }));
 const dressed = (items: InventoryItem[]): InventoryItem[] => [...items.filter(i => i.slot < 36 || i.slot === 40), ...SET.map(i => ({ ...i }))];
 
 /** Every bearing scouted an hour before `when` (the scouting declines), the north one along WAY. */
@@ -142,7 +143,7 @@ test.serial('the fortress choice: only a natural fortress a scouting leg found b
   t.like(fortressReady(lookAt(dressed([]), 1000, { now: later }), c), { cause: 'unneeded', text: 'fortress: no natural fortress known by a scouted way' });
 });
 
-test.serial('its ready: off after a death (until the lead switches it back), the barter\'s hold, the rods and the wart wanted, the Nether set whole, the kit', async (t) => {
+test.serial('its ready: off after a death (until the lead switches it back), the barter\'s hold, the rods and the wart wanted, the fire gear (20 EPF against fire, the main pieces sound), the kit', async (t) => {
   const { w, later, f } = await atStage3();
   const s = lookAt(f.inv, 1000, { now: later });
   t.is(fortressReady(s, w), null);
@@ -153,9 +154,22 @@ test.serial('its ready: off after a death (until the lead switches it back), the
   // both met: nothing wanted
   const stocked = lookAt([...f.inv, { slot: 30, name: 'blaze_rod', count: FORTRESS_STOCK.blaze_rod }, { slot: 31, name: 'nether_wart', count: FORTRESS_STOCK.nether_wart }], 1000, { now: later });
   t.deepEqual(fortressReady(stocked, w), { cause: 'unneeded', text: 'fortress: 8 blaze rods and 8 nether wart at home' });
-  // the Nether set not whole: plain boots worn and none with fire protection anywhere
+  // the fire gear short: plain boots worn (16 against fire), the golden helmet's fire protection 3 (18), boots nearly worn out
   const plain = f.inv.map(i => (i.slot === 36 ? { ...i, enchantments: [] } : i));
-  t.deepEqual(fortressReady(lookAt(plain, 1000, { now: later }), w), { cause: 'kit', text: 'fortress: the nether set has no boots with fire protection yet (the fortress goes only in it)' });
+  t.deepEqual(fortressReady(lookAt(plain, 1000, { now: later }), w),
+    { cause: 'kit', text: 'fortress: the fire gear is short: fire EPF 16 < 20 (the diamond_boots has protection 0 (4 wanted)) (the fortress goes only in it)' });
+  const fp3 = f.inv.map(i => (i.slot === 39 ? { ...i, enchantments: [{ name: 'fire_protection', level: 3 }] } : i));
+  t.deepEqual(fortressReady(lookAt(fp3, 1000, { now: later }), w),
+    { cause: 'kit', text: 'fortress: the fire gear is short: fire EPF 18 < 20 (the golden_helmet has fire_protection 3 (4 wanted)) (the fortress goes only in it)' });
+  const worn = f.inv.map(i => (i.slot === 36 ? { ...i, damage: 420, maxDamage: 429 } : i));
+  t.deepEqual(fortressReady(lookAt(worn, 1000, { now: later }), w), { cause: 'kit', text: 'fortress: the fire gear is short: the diamond_boots worn is worn out (the fortress goes only in it)' });
+  // the made helmet in a chest while a plain one is worn (before the swap at home): it counts
+  const ch = structuredClone(w);
+  const gear = '-547,64,2182';
+  ch.chestStacks = { ...(ch.chestStacks ?? {}), [gear]: [...(ch.chestStacks?.[gear] ?? []), { slot: 26, name: 'golden_helmet', count: 1, enchantments: [{ name: 'fire_protection', level: 4 }] }] };
+  const plainHelmet = f.inv.map(i => (i.slot === 39 ? { ...i, enchantments: [] } : i));
+  t.like(fortressReady(lookAt(plainHelmet, 1000, { now: later }), w), { cause: 'kit' });
+  t.is(fortressReady(lookAt(plainHelmet, 1000, { now: later }), ch), null);
   t.like(fortressReady(lookAt(f.inv, 1000, { now: later, health: 14 }), w), { cause: 'health' });
   // a piglin turned on it by its hut today: held with the barter
   const h = structuredClone(w);
@@ -263,7 +277,7 @@ test.serial('a blaze that never comes into reach: fought twice for nothing, then
   t.regex(r.text, /^fortress at nether \(-44, 71, 233\): 8 nether_wart, 5 gold_ingot, 3 diamond, 2 soul_sand; nothing more it may take by the way in; back at overworld/);
 });
 
-test.serial('the strict rules at home: not at full health, or the Nether set not worn: it does not set out (untried)', async (t) => {
+test.serial('the strict rules at home: not at full health, or the fire gear not worn: it does not set out (untried)', async (t) => {
   const a = await atStage3();
   a.f.state.health = 18;
   const r = await fortressRun(a.f.ctx, HOUR, () => a.later);
@@ -275,7 +289,7 @@ test.serial('the strict rules at home: not at full health, or the Nether set not
   const plain = b.f.inv.find(i => i.slot === 38)!;
   plain.enchantments = [];
   const r2 = await fortressRun(b.f.ctx, HOUR, () => b.later);
-  t.deepEqual(r2, { gain: 0, text: 'not setting out for the fortress: the diamond_chestplate worn is not the nether set\'s', untried: true });
+  t.deepEqual(r2, { gain: 0, text: 'not setting out for the fortress: fire EPF 16 < 20 (the diamond_chestplate has protection 0 (4 wanted))', untried: true });
   t.deepEqual(netherWalks(b.f), []);
 });
 

@@ -74,22 +74,23 @@ export function enchantLevels(item: Pick<InventoryItem, 'enchantments' | 'enchan
 }
 
 /**
- * A piece of the Nether set (netherset.ts, D1 of the progression plan): armour with fire protection on it. The main set
- * wants protection, which excludes fire protection, so no piece of it ever has both: the enchantment alone tells the
- * two sets apart, in the chests too (their stacks carry the enchantments), with no record to go stale.
+ * Armour with fire protection on it: the Nether helmet (netherset.ts, D1 of the progression plan: the golden helmet
+ * with fire protection 4), or one of the old diamond Nether set's pieces made until Nov 18 (plain stock now). The main
+ * set wants protection, which excludes fire protection, so no piece of it ever has both: the enchantment alone tells
+ * them apart, in the chests too (their stacks carry the enchantments), with no record to go stale.
  */
 export function fireProtected(i: Pick<InventoryItem, 'name' | 'enchantments'>): boolean {
   return ARMOUR.has(gearKind(i.name) as GearKind) && !!i.enchantments?.some(e => e.name === 'fire_protection');
 }
 
 /**
- * Best first: higher tier, then the main set before the Nether set's fire protection pieces (fireProtected: the home
- * kit's armour is the main set, as the Guardian's Combat.setRank wears it there; down there only the Nether set is
- * carried), then more enchantment levels, then more durability left. An enchanted piece beats a plain one of its tier
- * even a little worn: the table spent levels on it. And it is the one the stash leaves carried: of a fresh plain
- * diamond chestplate worn and an enchanted one carried, durability alone kept the worn one as the best and put the
- * enchanted one away. A Nether piece the anvil or the table had out at home with more levels than the main one would
- * otherwise have been the best, and the stash would have put the main one away.
+ * Best first: higher tier, then the main set before a fire protection piece (fireProtected: the kit's armour is the
+ * main set, as the Guardian's Combat.setRank wears it at home; an old diamond Nether set's piece stays in the chests
+ * while a main one of its tier is there), then more enchantment levels, then more durability left. An enchanted piece
+ * beats a plain one of its tier even a little worn: the table spent levels on it. And it is the one the stash leaves
+ * carried: of a fresh plain diamond chestplate worn and an enchanted one carried, durability alone kept the worn one as
+ * the best and put the enchanted one away. A fire protection piece with more levels than the main one would otherwise
+ * have been the best, and the stash would have put the main one away.
  */
 export const better = (a: InventoryItem, b: InventoryItem) =>
   tier(b.name) - tier(a.name) || Number(fireProtected(a)) - Number(fireProtected(b)) || enchantLevels(b) - enchantLevels(a) || left(b) - left(a);

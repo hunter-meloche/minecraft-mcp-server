@@ -9,8 +9,8 @@ import { prepare } from './project.js';
 import { billKinds } from './chores.js';
 // (anvil.ts takes plainLeft and wornSlot from here: each uses the other's exports inside functions only)
 import { bookOfUse } from './anvil.js';
-import { carriedKit, gearKind, isWorn, tier, type ArmourKind } from './kit.js';
-import { NETHER_HELMET, isNetherPiece, netherSetDue, netherSetMissing, storedNetherPieces } from './netherset.js';
+import { carriedKit, gearKind, isWorn, tier } from './kit.js';
+import { NETHER_HELMET, netherHelmetMissing, netherHelmetPiece, netherSetDue, storedNetherHelmets } from './netherset.js';
 import { obsidianStep } from './cast.js';
 import { ROOM } from './pockets.js';
 
@@ -71,9 +71,9 @@ const ARMOUR = new Set<string>(['helmet', 'chestplate', 'leggings', 'boots']);
 /**
  * A plain piece the table enchants for the kit (enchantPick, plainLeft): of a kind in ENCHANT_ORDER, of diamond or
  * better, carried or worn; and of the armour only one the kit may wear: not a plain one beside a sound enchanted piece
- * of its kind, which is no piece of the main set's but the Nether set's blank (netherset.ts: the table gives it fire
- * protection or nothing, netherTableJob) or a spare for the chests. Enchanted with whatever the table offered, a blank
- * came out with protection as often as not (10 of the 28 weights of a chestplate's), shut out of the Nether set for good.
+ * of its kind, which is no piece of the main set's but a spare for the chests. (Until Nov 18 such a piece was the old
+ * diamond Nether set's blank; the Nether's own table job is the golden helmet now, netherTableJob, which this never
+ * takes: gold is below diamond.)
  */
 function tableTakes(i: InventoryItem, items: InventoryItem[]): boolean {
   const kind = gearKind(i.name);
@@ -139,9 +139,9 @@ export const enchantGoal: Goal = {
     if (lapis < 3) return null;
     const piece = pickFor(s);
     if (piece) return `level ${s.xpLevel}: enchant the ${piece.name}${wornSlot(piece) ? ' (worn)' : ''}`;
-    // the Nether set's next piece before any book: the user's "prioritize getting fire resistance gear for nether"
+    // the Nether helmet before any book: the user's "prioritize getting fire resistance gear for nether"
     const nether = netherTableJob(s, world);
-    if (nether) return `level ${s.xpLevel}: enchant the nether set's ${nether.name} (fire protection)`;
+    if (nether) return `level ${s.xpLevel}: enchant the nether ${nether.name} (fire protection)`;
     const book = bookFor(s, world);
     return book ? `level ${s.xpLevel}: enchant a book (${book.ofUse} of use in store, keeps ${BOOK_STOCK})` : null;
   },
@@ -152,7 +152,7 @@ export const enchantGoal: Goal = {
   run: async ctx => {
     const table = ctx.world.zones!['enchanting:table'][0];
     const piece = pickFor(ctx.s);
-    // every piece done: the Nether set's next piece, else a book for the anvil (anvil.ts), if one is wanted
+    // every piece done: the Nether helmet, else a book for the anvil (anvil.ts), if one is wanted
     if (!piece) {
       const nether = netherTableJob(ctx.s, ctx.world);
       return nether ? enchantNetherPiece(ctx, table, nether) : enchantBook(ctx, table);
@@ -237,10 +237,11 @@ export const enchantGoal: Goal = {
 /**
  * The offer the table takes for a piece of the kit (pure): the dearest the level pays; for armour only the dearest that
  * shows protection (its clue is one of the result's enchantments, and protection excludes fire protection), or none:
- * the run turns the seed with a book, or waits its retry. Fire protection would make it the Nether set's piece for good
- * (netherset.ts) and the main set lose its protection in that slot: live on Nov 14 and 16 the dearest offers made a
- * diamond helmet and chestplate with fire protection 4, and an offer showing unbreaking or thorns still brings fire
- * protection along about one time in eight (a chestplate at level 34, 15 shelves).
+ * the run turns the seed with a book, or waits its retry. Fire protection would shut protection out of that slot of
+ * the main set for good (the Nether's 20 against fire counts on the main set's protection 4: netherset.ts fireGear):
+ * live on Nov 14 and 16 the dearest offers made a diamond helmet and chestplate with fire protection 4, and an offer
+ * showing unbreaking or thorns still brings fire protection along about one time in eight (a chestplate at level 34,
+ * 15 shelves).
  */
 export function mainOffer<O extends { cost: number; enchant?: string | null }>(offers: readonly O[], xpLevel: number, armour: boolean): O | undefined {
   const paid = [...offers].filter(o => o.cost > 0 && o.cost <= xpLevel).sort((a, b) => b.cost - a.cost);
@@ -315,8 +316,8 @@ export function booksStored(s: Snapshot, world: WorldMemory): { all: number; ofU
   const inChests = chestTotals(world).enchanted_book ?? 0;
   const count = (list: InventoryItem[]) => list.reduce((n, i) => n + i.count, 0);
   const unknown = Math.max(0, inChests - count(known));
-  // (the Nether set's pieces in the chests too: a fire protection book is of use to them alone)
-  const nether = storedNetherPieces(world);
+  // (the Nether helmet in the chests too: a fire protection book is of use to it alone)
+  const nether = storedNetherHelmets(world);
   return { all: inChests + count(carried), ofUse: count([...carried, ...known].filter(b => bookOfUse(s.items, b, nether))) + unknown };
 }
 
@@ -385,15 +386,8 @@ async function enchantBook(ctx: GoalContext, table: Pos): Promise<string> {
   return `${done}; ${chest ? `into the chest at ${fmt(chest)}` : 'kept carried: no chest took it'}`;
 }
 
-// ------------------------------------------------------------------------------------------------ the Nether set
+// ------------------------------------------------------------------------------------------------ the Nether helmet
 
-/**
- * The diamonds the Nether set's pieces leave in the chests: the regear's spare set and the anvil's repairs and the
- * plan's netherite (regear.ts DIAMONDS_KEPT, 24 + 28).
- */
-export const NETHER_DIAMONDS_KEPT = 52;
-/** A Nether piece's diamonds, made new (the golden helmet is the nether spares chore's to make). */
-const PIECE_DIAMONDS: Partial<Record<ArmourKind, number>> = { chestplate: 8, leggings: 7, boots: 4 };
 /**
  * Books a run puts through the table to turn its seed (each at the dearest offer it can pay: a book for the anvil as
  * well), before it waits for the retry: the offers stay the same until something is enchanted.
@@ -415,8 +409,8 @@ export const FIRE_OFFER_FROM = 1;
 export interface TableOffer { slot: number; cost: number; enchant?: string | null; level?: number | null; available?: boolean }
 
 /**
- * The offer that puts fire protection on a Nether piece, pure: one the table shows fire protection for (its clue is one
- * of the enchantments the result will have, so it has fire protection, and with it none of protection, blast or
+ * The offer that puts fire protection on the Nether helmet, pure: one the table shows fire protection for (its clue is
+ * one of the enchantments the result will have, so it has fire protection, and with it none of protection, blast or
  * projectile protection), from FIRE_OFFER_FROM on, that the level pays; the dearest. Undefined when none does: then the
  * seed is turned with a book, or it waits.
  */
@@ -425,33 +419,28 @@ export function fireOffer(offers: readonly TableOffer[], xpLevel: number): Table
     .sort((a, b) => b.cost - a.cost)[0];
 }
 
-/** The Nether set's next table job: its kind and piece, and where the plain piece comes from (carried, a chest's slot, or made from diamonds). */
-export interface NetherJob { kind: ArmourKind; name: string; from: 'carried' | 'stored' | 'made'; slot?: number; chest?: Pos }
+/** The Nether helmet's table job: the plain golden helmet, and where it is (carried, or a chest's slot). */
+export interface NetherJob { kind: 'helmet'; name: string; from: 'carried' | 'stored'; slot?: number; chest?: Pos }
 
 /**
- * What the table does next for the Nether set (netherset.ts), pure, or undefined: with the trips on and the portal
- * milestone done, at level 30, the first kind of the set it has no piece of (netherSetMissing: the chestplate first,
- * the golden helmet last), from a plain piece of it carried that is no piece of the kit's (tableTakes), or lying in a
- * chest (never the spare set's: its slots are the regear's), or, for the diamond ones, made from the diamonds over
- * NETHER_DIAMONDS_KEPT. With room for the piece (from a chest or made), the lapis and a book for the seed.
+ * What the table does next for the Nether (netherset.ts), pure, or undefined: with the trips on and the portal milestone
+ * done, at level 30, and no Nether helmet made yet (netherHelmetMissing: a golden helmet with fire protection, carried,
+ * worn or in the chests), the plain golden helmet carried, or lying in a chest (never the spare set's slots: they are
+ * the regear's). Nothing is made for it here: the golden helmet is the nether spares chore's and the kit's. With room
+ * for the piece (from a chest), the lapis and a book for the seed. The chestplate, leggings and boots are the main
+ * set's, with protection (the main chore, mainOffer): no diamond piece is made or enchanted for the Nether.
  */
 export function netherTableJob(s: Snapshot, world: WorldMemory): NetherJob | undefined {
-  if (!netherSetDue(world) || (s.xpLevel ?? 0) < 30) return undefined;
+  if (!netherSetDue(world) || (s.xpLevel ?? 0) < 30 || !netherHelmetMissing(s.items, world)) return undefined;
   const spare = new Set(spareHeld(world).map(p => `${key(p.chest)}|${p.slot}`));
-  const diamonds = (s.counts.get('diamond') ?? 0) + (freeChestTotals(world).diamond ?? 0);
-  for (const kind of netherSetMissing(s.items, world)) {
-    const name = kind === 'helmet' ? NETHER_HELMET : `diamond_${kind}`;
-    const blank = (i: InventoryItem) => i.name === name && plain(i);
-    const carried = s.items.find(i => i.slot >= 0 && i.slot < 36 && blank(i) && !tableTakes(i, s.items));
-    const stored = carried ? undefined : storedStacks(world, blank).find(f => !spare.has(`${key(f.chest)}|${f.stack.slot}`));
-    const made = !carried && !stored && PIECE_DIAMONDS[kind] !== undefined && diamonds >= PIECE_DIAMONDS[kind]! + NETHER_DIAMONDS_KEPT;
-    const job: NetherJob | undefined = carried ? { kind, name, from: 'carried', slot: carried.slot }
-      : stored ? { kind, name, from: 'stored', slot: stored.stack.slot, chest: stored.chest }
-        : made ? { kind, name, from: 'made' } : undefined;
-    if (!job) continue;
-    return freeFor(s) - (job.from === 'carried' ? 0 : 1) - 1 >= 0 ? job : undefined;
-  }
-  return undefined;
+  const name = NETHER_HELMET;
+  const blank = (i: InventoryItem) => i.name === name && plain(i);
+  const carried = s.items.find(i => i.slot >= 0 && i.slot < 36 && blank(i));
+  const stored = carried ? undefined : storedStacks(world, blank).find(f => !spare.has(`${key(f.chest)}|${f.stack.slot}`));
+  const job: NetherJob | undefined = carried ? { kind: 'helmet', name, from: 'carried', slot: carried.slot }
+    : stored ? { kind: 'helmet', name, from: 'stored', slot: stored.stack.slot, chest: stored.chest } : undefined;
+  if (!job) return undefined;
+  return freeFor(s) - (job.from === 'carried' ? 0 : 1) - 1 >= 0 ? job : undefined;
 }
 
 type Put = { offers: TableOffer[]; enchantable?: boolean; put?: string };
@@ -459,8 +448,8 @@ type Chose = { ok: boolean; enchantments?: ItemEnchantment[]; reason?: string };
 const clueText = (offers: readonly TableOffer[]) => offers.filter(o => o.cost > 0).map(o => `${o.cost}: ${o.enchant ?? '?'}${o.level ? ` ${o.level}` : ''}`).join(', ') || 'none';
 
 /**
- * A piece of the Nether set at the table (netherTableJob says which): the plain piece into the pockets (out of its
- * chest by its slot, or crafted from the diamonds), a book or two made for the seed where the cane and leather allow
+ * The Nether helmet at the table (netherTableJob): the plain golden helmet into the pockets (out of its chest by its
+ * slot, or the one carried), a book or two made for the seed where the cane and leather allow
  * (none while a bill has a use for them), the walk on foot (A11), and at the table the piece put in: an offer showing
  * fire protection (fireOffer) is taken; else a book is enchanted at its dearest offer to turn the seed (NETHER_REROLLS
  * at most, while the books in store are under NETHER_BOOK_PILE) and the piece put in again. The table closed in a finally
@@ -475,13 +464,8 @@ async function enchantNetherPiece(ctx: GoalContext, table: Pos, job: NetherJob):
   if ((ctx.s.counts.get('lapis_lazuli') ?? 0) < 3) await takeFromChests(ctx, 'lapis_lazuli', 16);
   if (job.from === 'stored' && job.chest && job.slot !== undefined) {
     if (await takeSlot(ctx, job.chest, job.slot, 1) < 1) throw new Error(`the plain ${job.name} was not in the chest at ${fmt(job.chest)} any more`);
-  } else if (job.from === 'made') {
-    const short = await prepare(ctx, 'diamond', PIECE_DIAMONDS[job.kind] ?? 0);
-    if (Object.keys(short).length) throw new Error(`no ${job.name} for the nether set: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`);
-    const c = await ctx.act('craft-item', { outputItem: job.name, amount: 1 });
-    if (!c.ok) throw new Error(`could not craft the nether set's ${job.name}: ${c.text.replace(/\s+/g, ' ').slice(0, 120)}`);
   }
-  if (!blankOf(await inv())) throw new Error(`the plain ${job.name} for the nether set is not in the pockets`);
+  if (!blankOf(await inv())) throw new Error(`the plain ${job.name} for the nether is not in the pockets`);
   // the books for the seed: made where they can be (prepare gathers nothing), none while a bill has a use for their kinds
   const rolls = seedBooks(ctx);
   if (rolls) await prepare(ctx, 'book', rolls).catch(() => undefined);
@@ -516,12 +500,12 @@ async function enchantNetherPiece(ctx: GoalContext, table: Pos, job: NetherJob):
   // the books into theirs, the piece into the gear chests (enchanted, or plain again for the next try)
   const stored = await storeBooks(ctx, books);
   const after = await inv();
-  const piece = made ? after.find(i => i.slot < 36 && i.name === job.name && isNetherPiece(i)) : blankOf(after);
+  const piece = made ? after.find(i => i.slot < 36 && i.name === job.name && netherHelmetPiece(i)) : blankOf(after);
   const at = piece && await storeStackAt(ctx, piece.name, piece.slot, kindChests(ctx.world, piece.name));
   const turned = books.length ? `; the seed turned with ${books.length} book${books.length === 1 ? '' : 's'} (${stored.length ? stored.join('; ') : 'kept carried'})` : '';
   const where = at ? `into the chest at ${fmt(at.chest)}` : 'kept carried: no chest took it';
-  if (!made) throw new Error(`no fire protection offer for the nether set's ${job.name} (${seen.join(' | ')})${turned}; ${where}`);
-  const done = `enchanted the nether set's ${job.name}: ${named(made)}`;
+  if (!made) throw new Error(`no fire protection offer for the nether ${job.name} (${seen.join(' | ')})${turned}; ${where}`);
+  const done = `enchanted the nether ${job.name}: ${named(made)}`;
   ctx.progress(done);
   return `${done}${turned}; ${where}`;
 }

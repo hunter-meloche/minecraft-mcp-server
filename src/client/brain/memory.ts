@@ -234,9 +234,9 @@ export interface WorldMemory {
    */
   spareSet?: import('./chests.js').SpareSet;
   /**
-   * The swap of armour sets at home (netherset.ts, D1): set while the Nether set is worn for a trip, with where the
-   * main set's pieces went (each by its chest and the chest's slot); the swap back at home takes them out again and
-   * lets this go
+   * The helmet swap at home (netherset.ts, D1): set while the golden helmet is worn for a trip, with where the main
+   * helmet went (by its chest and the chest's slot; an older record may hold more pieces); the swap back at home takes
+   * it out again and lets this go
    */
   gearSwap?: import('./netherset.js').GearSwap;
 }

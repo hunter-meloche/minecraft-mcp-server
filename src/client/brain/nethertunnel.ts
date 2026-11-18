@@ -27,8 +27,9 @@
  * still lasts out the walk back to its portal. The debris its tunnels bare (beside, over the head, ahead; never one
  * under its own floor, which would leave a hole in the tunnel) is mined by its own hand with a diamond or netherite
  * pickaxe in hand when the debris's own rules hold (netherdebris.ts bareFault: no lava within 2, nothing that falls
- * over it), at most 4 a trip, and picked up where it falls (the tunnel's cell beside it). The Nether set worn
- * (netherset.ts, every piece of it with fire protection), as the fortress goes.
+ * over it), at most 4 a trip, and picked up where it falls (the tunnel's cell beside it). The fire gear worn
+ * (netherset.ts fireGear: 20 EPF against fire, the golden helmet's fire protection 4 over the main set), as the
+ * fortress goes.
  *
  * It stops at the trip's 4, its time (the way back kept), the effect running low, on the ghast rule and the barter's
  * other dangers (barterDanger: a hit, a piglin turned, a hoglin or a brute near), on fire, the pockets full or the
@@ -52,8 +53,7 @@ import {
 import { BACK_MS, LAVA_GAP, NEAR, backThroughOwn, barterDanger, barterGround, ghastSees, toOwnPortal, type Seen } from './netherbarter.js';
 import { HUT_GAP } from './netherquartz.js';
 import { DEBRIS, EFFECT_LEAST_S, bareFault, debrisPick, fetchDebrisKit, fireOf, placeBox, potionSeconds, potionToDrink } from './netherdebris.js';
-import { notNetherSet } from './netherfortress.js';
-import { netherSetMissing } from './netherset.js';
+import { dressedFireGear, fireGear } from './netherset.js';
 import {
   FROM_BUILDS, GONE, PLACED_GAP, SETUP_HEALTH, SETUP_WAITS, blockAt, boxGap, boxOf, cellOf, fetchSetupKit, footing, grow, inNether, pathOf, placedIn, readGround, setOpen,
   setupShort, standable, walkAlong, walkFrom, zoneBox, type Box, type Grid, type NetherZone
@@ -418,7 +418,7 @@ export function tunnelOpenAt(world: WorldMemory): boolean {
  * Whether the tunnel trip can set out now, pure: not held (a piglin turned on the bot by its portal today: the
  * barter's hold); the home short of DEBRIS_WANT; something left to dig (tunnelPlan); a potion of fire resistance in
  * stock (carried or in the chests, by its contents); a diamond or netherite pickaxe (the debris module's own check);
- * the Nether set whole (every piece of it with fire protection: the fortress's rule); not hurt past what the run heals
+ * the fire gear as it will be dressed for the Nether (netherset.ts dressedFireGear: the fortress's rule); not hurt past what the run heals
  * at home; nothing of the Nether kit short that the chests lack. The hour is the rung's.
  */
 export function tunnelReady(s: Snapshot, world: WorldMemory): Decline | null {
@@ -433,8 +433,8 @@ export function tunnelReady(s: Snapshot, world: WorldMemory): Decline | null {
   if (!debrisPick(s.items) && !['netherite_pickaxe', 'diamond_pickaxe'].some(n => (free[n] ?? 0) > 0)) {
     return { cause: 'kit', text: 'tunnelling: no diamond or netherite pickaxe (carried or in the chests): ancient debris drops nothing to any other' };
   }
-  const missing = netherSetMissing(s.items, world);
-  if (missing.length) return { cause: 'kit', text: `tunnelling: the nether set has no ${missing.join(', ')} with fire protection yet (it tunnels only in it)` };
+  const gear = dressedFireGear(s.items, world);
+  if (!gear.ok) return { cause: 'kit', text: `tunnelling: the fire gear is short: ${gear.missing.join('; ')} (it tunnels only in it)` };
   if (s.health < SETUP_HEALTH) return no.health(s, 'the tunnelling', SETUP_HEALTH, 10);
   const short = setupShort(s, world);
   if (short.length) return { cause: 'kit', text: `tunnelling: short of ${short.join(', ')} (carried or in the chests)` };
@@ -457,7 +457,7 @@ function tunnelsOf(world: WorldMemory, own: Pos): TunnelMemory {
 }
 
 /**
- * The tunnel trip (see the top of the file). From home with the Nether kit, the Nether set on, a pickaxe for debris,
+ * The tunnel trip (see the top of the file). From home with the Nether kit, the fire gear on, a pickaxe for debris,
  * a potion and cobblestone (or it does not set out: untried), through the home portal into its own hut, over the
  * ground to a tunnel's mouth, down it to its end, the potion drunk there and the tunnel dug on, branch after branch;
  * back along its tunnel and through its own portal. Gain: the debris it brought back. Out of the Nether halfway (a
@@ -476,7 +476,7 @@ export async function tunnelRun(ctx: GoalContext, budgetMs: number, now: () => n
   const short = await fetchDebrisKit(ctx);
   if (short) return { gain: 0, text: `not setting out: ${short}`, untried: true };
   const kit = await inventory(ctx);
-  const why = [...notNetherSet(kit), ...(plugOf(kit) ? [] : ['no cobblestone to plug lava with'])];
+  const why = [...fireGear(kit).missing, ...(plugOf(kit) ? [] : ['no cobblestone to plug lava with'])];
   if (why.length) return { gain: 0, text: `not setting out to tunnel: ${why.join('; ')}`, untried: true };
   if (left() < TUNNEL_LEAST_MS) {
     return { gain: 0, text: `not setting out: the kit took ${Math.round((now() - began) / 1000)} s, too little of the tunnel trip's ${TUNNEL_MAX_MS / MINUTE} min is left`, untried: true };

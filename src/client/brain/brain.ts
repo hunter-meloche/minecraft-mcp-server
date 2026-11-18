@@ -45,7 +45,7 @@ import { penFences } from './yardgates.js';
 import { holdHarmless, unsafeInHand } from './fluidpick.js';
 import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 import { netherSparesGoal, regearGoal } from './regear.js';
-import { homeSetGoal } from './netherset.js';
+import { homeSetGoal, netherGearLine } from './netherset.js';
 import { oneSpareSet } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 import { homeBed } from './villagers.js';
@@ -525,6 +525,8 @@ export class Brain {
     if (world?.yard) lines.push(`Yard: x ${world.yard.x1}..${world.yard.x2}, z ${world.yard.z1}..${world.yard.z2}, ground y ${world.yard.y}.`);
     // the Nether: the switch, the stage, the clean trips, the deaths, the portals known
     if (world) this.measure('status', () => lines.push(netherLine(world, this.now())));
+    // the Nether gear: the EPF against fire dressed for it, and what the fortress's and the tunnel's 20 are short of
+    if (world && s) this.measure('status', () => lines.push(netherGearLine(s.items, world)));
     // the villagers: the switch, the hall and its villagers, the villages known and judged, the last move
     if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined)));
     // the rails home (the villager move's fallback): the switch, the line's state
