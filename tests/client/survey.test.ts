@@ -50,3 +50,15 @@ test('survey counts the cells not loaded (null), so a far area does not pass for
   const far: (string | null)[] = b.map((s, i) => (i % 9 < 4 ? null : s)); // the west 4 columns out of sight
   t.is(survey(box, far).unloaded, 4 * 9 * 7);
 });
+
+test('survey: a lone gravel or grass block stood a block high on the ground looks placed (a placed dirt grows grass); the ground itself, and a step of the land two wide, do not', (t) => {
+  const { box, b, set } = world();
+  // Nov 19: a gravel on the levelled yard, in the villager boat's one lane west of the cow pen
+  set(2, 4, 2, 'gravel');
+  set(6, 4, 6, 'grass_block[snowy=false]');
+  // a step of the land, two wide and two long: two sides open each, the land's own
+  for (const [x, z] of [[6, 1], [7, 1], [6, 2], [7, 2]]) set(x, 4, z, 'grass_block[snowy=false]');
+  const r = survey(box, b);
+  t.deepEqual(r.placed.map(c => c.kinds).sort((a, b) => Object.keys(a)[0].localeCompare(Object.keys(b)[0])), [{ grass_block: 1 }, { gravel: 1 }]);
+  t.true(r.placed.every(c => c.blocks === 1 && c.min.y === 64));
+});

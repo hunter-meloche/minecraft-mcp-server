@@ -28,6 +28,12 @@ const MINUTE = 60_000;
 /** Near enough home to start the round where it is; from further out in the yard it walks home first (work.ts roundFrom). */
 const REACH = 12;
 const STRAY = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|netherrack)$/;
+/**
+ * Ground kinds a stray on the lawn may be too, inside the yard's ring only (the yard is levelled, so one above its
+ * ground is no hill): a placed dirt grown over with grass, a gravel or sand put down from the pockets. Outside the ring
+ * they are the land's own, and left out of a cluster as the survey left them before it saw them (survey.ts LOOSE).
+ */
+const LAWN_STRAY = /^(grass_block|gravel|sand|red_sand)$/;
 const MAX_CLUSTER = 16;
 /** A cluster against the yard fence is a way over it, and is cleared up to this size (live, the north gate's was over 20). */
 const FENCE_CLUSTER = 32;
@@ -97,8 +103,12 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
     return false;
   };
   const out: (Pos & { fence?: true })[] = [];
-  for (const c of clusters) {
-    if (!c.cells.every(b => STRAY.test(b.block))) continue;
+  const inRing = (p: Pos) => !!yard && p.x > yard.ring.x1 && p.x < yard.ring.x2 && p.z > yard.ring.z1 && p.z < yard.ring.z2;
+  for (const c0 of clusters) {
+    const own = c0.cells.filter(b => !LAWN_STRAY.test(b.block) || inRing(b));
+    if (!own.length) continue;
+    const c = own.length === c0.cells.length ? c0 : { ...c0, cells: own, blocks: own.length };
+    if (!c.cells.every(b => STRAY.test(b.block) || LAWN_STRAY.test(b.block))) continue;
     const cells = c.cells.filter(b => b.y > groundY);
     if (!cells.length) continue;
     let dig: Pos[];

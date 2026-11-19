@@ -24,6 +24,14 @@ const name = (state: string | null | undefined) => (state ?? '').replace(/^minec
 const AIRY = /^(air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|leaf_litter|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|allium|lily_of_the_valley|pink_petals|wildflowers|bush|firefly_bush|dead_bush|sweet_berry_bush|snow|torch|wall_torch|red_mushroom|brown_mushroom)$/;
 /** Blocks the world doesn't put on the surface by itself: what Baritone scaffolds with and emergency walls are made of. */
 const PLACED = /^(cobblestone|cobbled_deepslate|.*_planks|glass|stone_bricks|netherrack|cobblestone_slab|.*_planks_slab)$/;
+/**
+ * Ground blocks that look placed when one floats or stands alone (three sides open) over the ground: dirt, and what
+ * the ground's own kinds turn into or come as from the bot's pockets. A placed dirt grows grass, and a lone gravel stood
+ * a block high on the levelled yard (Nov 19: (-562, 63, 2169), in the one lane west of the cow pen the villager boat had
+ * left, every villagers try "no way across the yard"), and neither read as placed. The tidy round digs only dirt of
+ * these outside the yard's ring (strayCells).
+ */
+const LOOSE = /^(dirt|coarse_dirt|grass_block|gravel|sand|red_sand)$/;
 /** The bot's furniture and farm: never leftovers. */
 const KEEP = /^(crafting_table|furnace|chest|barrel|.*_bed|.*_door|.*_pressure_plate|farmland|wheat|carrots|potatoes|beetroots|water|torch|wall_torch|.*_trapdoor|ladder)$/;
 
@@ -56,7 +64,7 @@ export function survey(box: Box, blocks: (string | null)[], isProtected: (p: Pos
     const p = { x: box.x + x, y: box.y + y, z: box.z + z };
     if (isProtected(p)) continue;
     let hit = PLACED.test(n) && y >= Math.min(g, median) - 3;
-    if (!hit && /^(dirt|coarse_dirt)$/.test(n) && y > Math.max(g, median) - 1) {
+    if (!hit && LOOSE.test(n) && y > Math.max(g, median) - 1) {
       const sides = [at(x + 1, y, z), at(x - 1, y, z), at(x, y, z + 1), at(x, y, z - 1)].filter(s => AIRY.test(s)).length;
       hit = AIRY.test(at(x, y - 1, z)) || sides >= 3;
     }

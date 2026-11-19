@@ -233,3 +233,21 @@ test('strayCells: the cobblestone in the west gate\'s way comes down, though the
   const walled = new Set([...built, '-567,65,2184']);
   t.deepEqual(strayCells([cluster(shut)], 62, walled, lookOf(new Map(stand).set('-567,65,2184', 'oak_planks'), walled)), []);
 });
+
+test('strayCells: a lone gravel or grass block on the lawn inside the ring is a stray (Nov 19: a gravel at (-562, 63, 2169) shut the villager boat\'s lane west of the cow pen); outside the ring they are the land\'s, and a dirt there goes as before', t => {
+  const { built, stand } = northFence();
+  const look = lookOf(stand, built);
+  const one = (x: number, y: number, z: number, block: string) => cluster([{ x, y, z, block }]);
+  t.deepEqual(strayCells([one(-562, 63, 2169, 'gravel')], 62, built, look), [{ x: -562, y: 63, z: 2169 }]);
+  t.deepEqual(strayCells([one(-550, 63, 2160, 'grass_block')], 62, built, look), [{ x: -550, y: 63, z: 2160 }]);
+  // outside the ring (the hill west of it), or with no fence's look: left be
+  t.deepEqual(strayCells([one(-568, 63, 2160, 'grass_block')], 62, built, look), []);
+  t.deepEqual(strayCells([one(-562, 63, 2169, 'gravel')], 62, built), []);
+  t.deepEqual(strayCells([one(-568, 63, 2160, 'dirt')], 62, built, look), [{ x: -568, y: 63, z: 2160 }]);
+  // a cobblestone scaffold beside the land's grass outside the ring: the grass is left out, the cobblestone goes
+  const mixed = cluster([{ x: -568, y: 63, z: 2160, block: 'grass_block' }, { x: -569, y: 64, z: 2160, block: 'cobblestone' }]);
+  t.deepEqual(strayCells([mixed], 62, built, look), [{ x: -569, y: 64, z: 2160 }]);
+  // still not by a build of the bot's
+  built.add('-561,63,2169');
+  t.deepEqual(strayCells([one(-562, 63, 2169, 'gravel')], 62, built, look), []);
+});
