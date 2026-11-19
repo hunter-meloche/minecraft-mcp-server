@@ -27,9 +27,9 @@ import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally,
  * Staying alive: never backed off by the loop watch, and the only goals that cut a trip short out there. Leaving the
  * Nether is one (a trip down there is home by dusk, and whatever stops one leaves the bot there).
  */
-export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 'break out', 'recover', 'retreat', 'shelter', 'food', 'leave nether']);
+export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 'out of a pit', 'break out', 'recover', 'retreat', 'shelter', 'food', 'leave nether']);
 import { breakOut, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
-import { outFromUnder } from './underyard.js';
+import { outFromUnder, outOfPit } from './underyard.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
 import { farm, furnaceLine, kit, lights, packOres, smelt, sortStorage, stash, stock } from './chores.js';
 import { repairGoal } from './repair.js';
@@ -212,7 +212,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, breakOut, recoverGoal(() => rt.lastDeath()), smithDropsGoal, leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, outOfPit, breakOut, recoverGoal(() => rt.lastDeath()), smithDropsGoal, leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;

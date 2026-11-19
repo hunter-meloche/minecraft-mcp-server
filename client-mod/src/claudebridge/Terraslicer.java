@@ -92,6 +92,12 @@ public final class Terraslicer {
                         // above the cell the feet were in: the block can go there now
                         if (pl.getY() > base + 1.02) {
                             m.options.keyJump.setDown(false);
+                            // the block in hand again at the click: what the hand held could change between the jump
+                            // and here (the Guardian's sword or tool). Live on Nov 19 the brain's pillar out of a pit in
+                            // the yard placed nothing three times running at dawn, with mobs about
+                            try { Interact.select(item); } catch (Exception e) { return fail(m, e.getMessage()); }
+                            // and the shield down for the click (the Guardian raises it with mobs near)
+                            if (pl.isUsingItem()) m.gameMode.releaseUsingItem(pl);
                             Vec3 hit = new Vec3(floor.getX() + 0.5, floor.getY() + 1.0, floor.getZ() + 0.5);
                             m.gameMode.useItemOn(pl, InteractionHand.MAIN_HAND, new BlockHitResult(hit, Direction.UP, floor, false));
                             phase = 2; age = 0;
@@ -101,7 +107,8 @@ public final class Terraslicer {
                     // landed on the new block, or fell back without it
                     if (pl.onGround() && age > 2) {
                         BlockPos placed = floor.above();
-                        if (Interact.replaceable(m.level.getBlockState(placed))) return fail(m, "the block didn't go in under the feet");
+                        if (Interact.replaceable(m.level.getBlockState(placed))) return fail(m, "the block didn't go in under the feet (held "
+                            + Names.item(pl.getMainHandItem()) + (pl.isUsingItem() ? ", using " + Names.item(pl.getUseItem()) : "") + ")");
                         done++;
                         if (done >= count) { c.ok(obj("placed", done, "at", pos(pl.blockPosition()))); return true; }
                         phase = 0; age = 0;

@@ -114,7 +114,7 @@ const NOT_GROUND = /^(minecraft:)?(air|cave_air|void_air|\w+_leaves|\w+_log|\w+_
 /** Open to walk in: what the tunnel's cells may hold once dug. */
 const OPEN = /^(minecraft:)?(air|cave_air|void_air|torch|wall_torch|short_grass|tall_grass|fern|vine)(\[|$)/;
 
-type Region = { x: number; y: number; z: number; width: number; height: number; length: number };
+export type Region = { x: number; y: number; z: number; width: number; height: number; length: number };
 /**
  * The blocks of a box; undefined when the look failed or came back short (that is no "nothing there": a way into lava
  * would count as clear). Its own cells only: a reply longer than the box says nothing more of it (read on, a column's
@@ -512,3 +512,128 @@ export async function fillShaft(ctx: GoalContext, col: Column, climb: Pos, top: 
   const did = placed.length ? `filled the top of its shaft with ${[...kinds].join(' and ')}: ${placed.map(fmt).join(', ')}` : '';
   return [did, stopped && `${placed.length ? '' : 'the top of its shaft: '}${stopped}`].filter(Boolean).join('; ');
 }
+
+/** Standing this long in the same block of a pit in the yard: shut in there (a walk through one is gone in seconds). */
+const PIT_STILL_MS = 2 * MINUTE;
+/** The yard's livestock (the pens' kinds and the farm's): one fallen into a pit with the bot is culled for the way up. */
+const PIT_LIVESTOCK: ReadonlySet<string> = new Set(['cow', 'sheep', 'pig', 'chicken']);
+/** And only one within this of the bot (the pit's cell is 1 wide). */
+const PIT_REACH = 1.5;
+/** Where the bot last stood still, and since when (the snapshot's clock): for the pit's wants. */
+let stillAt: { key: string; since: number } | undefined;
+/** For tests: the bot has stood nowhere yet. */
+export function resetYardPit(): void { stillAt = undefined; }
+
+/**
+ * Shut in a pit in the yard: of the cells round the bot (the box from 1 under its feet to 2 over the lawn), none it
+ * can walk into or step up onto (open 2 high, with ground under it) at its feet's level or one up, and open over its
+ * head up to the lawn's level and a head over it, the way a pillar of `climb` blocks goes up. `cells` are the box's,
+ * x fastest, then z, then y (world.region). `why`: no pit, or no pillar out of it.
+ */
+export function pitOut(cells: (string | null)[], box: Region, feet: Pos, ground: number): { climb: number } | { why: string } {
+  const at = (x: number, y: number, z: number) => cells[(y - box.y) * box.width * box.length + (z - box.z) * box.width + (x - box.x)];
+  const open = (x: number, y: number, z: number) => { const b = at(x, y, z); return !!b && OPEN.test(b); };
+  const solid = (x: number, y: number, z: number) => { const b = at(x, y, z); return !!b && !NOT_GROUND.test(b) && !LIQUID.test(b); };
+  const climb = ground + 1 - feet.y;
+  if (climb < 2) return { why: `on the lawn's level at ${fmt(feet)}` };
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const x = feet.x + dx, z = feet.z + dz;
+    for (const y of [feet.y, feet.y + 1]) {
+      if (open(x, y, z) && open(x, y + 1, z) && solid(x, y - 1, z)) return { why: `a way out of ${fmt(feet)} by ${fmt({ x, y, z })}: no pit` };
+    }
+  }
+  for (let y = feet.y + 2; y <= ground + 2; y++) {
+    if (!open(feet.x, y, feet.z)) return { why: `${at(feet.x, y, feet.z) ?? 'nothing seen'} over its head at ${fmt({ x: feet.x, y, z: feet.z })}: no pillar up` };
+  }
+  return { climb };
+}
+
+/**
+ * Out of a pit in the yard. In the home zone's column Baritone may break no ground (Protection.java zoneBreak), and
+ * the yard's walks pile nothing up: a pit 2 deep shut on every side keeps the bot for good, however near home it is.
+ * Live on Nov 19 (00:40Z) the pens' sheep round walked it into a hole at (-557, 61, 2199), 2 cells the homestead's
+ * repair (job #10) had given up on: Baritone's searches from there found no move at all (a path map of one node), and
+ * for 1.5 hours every chore failed 18 blocks from home, the shelter walled it in each night, and break out dug that
+ * wall away each morning, into the same hole. Once it has stood still in such a pit a while, it pillars up out of it
+ * (the bridge's pillar: jump, a block under its feet) on what it carries to fill with, the pit filled behind it; its
+ * wall-in's roof over its head, by night, dug first, and one of the yard's animals fallen in with it (a cow, live)
+ * culled first.
+ */
+export const outOfPit: Goal = {
+  name: 'out of a pit',
+  // with out from under (the two never want at once) and above break out: the box is no way out of the pit
+  priority: 93,
+  timeoutMs: MINUTE,
+  retryMs: 20_000,
+  failHoldMs: 10 * MINUTE,
+  wants: (s, world) => {
+    if (s.sleeping || !s.home || s.home.dimension !== s.dimension || underNow(s, world)) { stillAt = undefined; return null; }
+    const c = homeColumn(s.home, world.yard);
+    const feet = floored(s.position);
+    if (!inColumn(c, feet) || below(c, feet) < 1) { stillAt = undefined; return null; }
+    const key = fmt(feet);
+    if (stillAt?.key !== key) stillAt = { key, since: s.now };
+    const still = s.now - stillAt.since;
+    return still >= PIT_STILL_MS ? `${Math.round(still / 1000)}s in the same cell ${below(c, feet) + 1} under the lawn at ${key}` : null;
+  },
+  run: async ctx => {
+    const stopped = () => { if (ctx.signal.aborted) throw new Error('aborted'); };
+    const home = ctx.s.home!;
+    const col = homeColumn(home, ctx.world.yard);
+    const st = await ctx.status().catch(() => undefined);
+    stopped();
+    const feet = floored(st?.position ?? ctx.s.position);
+    if (!inColumn(col, feet) || underYard(feet, home, ctx.world.yard)) return `not in a pit in the yard at ${fmt(feet)}`;
+    if (st?.inLava || st?.underWater) throw new Error(`in ${st.inLava ? 'lava' : 'water'} at ${fmt(feet)}: no pillar up`);
+    const box = { x: feet.x - 1, y: feet.y - 1, z: feet.z - 1, width: 3, height: col.ground + 2 - feet.y + 2, length: 3 };
+    if (box.height < 4) return `on the lawn's level at ${fmt(feet)}`;
+    // the shelter's wall-in roofs the pit over (its own cobblestone, 2 over its feet): those cells of its own over its
+    // head are dug first. Live the first run found it so at night and could not pillar up
+    const roof = (st?.boxedIn ?? ctx.s.boxedIn ?? []).filter(c => c.x === feet.x && c.z === feet.z && c.y >= feet.y + 2 && c.y <= col.ground + 2).sort((a, b) => a.y - b.y);
+    for (const c of roof) {
+      const r = await ctx.act('dig-block', { ...c }).catch((e: Error) => ({ ok: false, text: e.message }));
+      stopped();
+      if (!r.ok || !/^(Dug|No block)/.test(r.text)) throw new Error(`could not dig its wall-in's roof at ${fmt(c)}: ${r.text.slice(0, 80)}`);
+      ctx.progress(`dug its wall-in's roof at ${fmt(c)}`);
+    }
+    const cells = await region(ctx, box);
+    stopped();
+    if (!cells) throw new Error(`could not look round ${fmt(feet)}`);
+    const out = pitOut(cells, box, feet, col.ground);
+    // a way out (a cellar, a stair down): no pit, and the cell is left alone a while as if the bot had just come
+    if ('why' in out && /: no pit$/.test(out.why)) { stillAt = { key: fmt(feet), since: ctx.s.now + 10 * MINUTE }; return out.why; }
+    if ('why' in out) throw new Error(out.why);
+    const items = (await ctx.call<{ items?: InventoryItem[] }>('inventory').catch(() => undefined))?.items ?? ctx.s.items;
+    stopped();
+    const kind = FILL.find(k => items.filter(i => i.slot < 36 && i.name === k).reduce((n, i) => n + i.count, 0) >= out.climb);
+    if (!kind) throw new Error(`nothing to pillar out of the pit at ${fmt(feet)} with (${out.climb} of ${FILL.join(', ')} carried)`);
+    // an animal in the pit with it: no block goes in where it stands (the game places none in a mob's box). Live the
+    // first pillars placed nothing three times running: one of the yard's cows had fallen in with the bot. The yard's
+    // own livestock is culled, as the pens' round culls; anything else in there (a pet, a villager, a player) stays
+    type Seen = { id: number; name: string; category?: string; position?: Pos; distance?: number };
+    const seen = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 2 }).catch(() => undefined))?.entities;
+    stopped();
+    if (!seen) throw new Error(`could not look for anything in the pit with it at ${fmt(feet)}`);
+    // (within reach as well: live a look listed 16 of the pens' animals at the pit's cell, none of them within 4 for
+    // the fight that came after; one cow was there)
+    const inPit = seen.filter(e => e.position && (e.distance ?? 0) <= PIT_REACH && Math.floor(e.position.x) === feet.x && Math.floor(e.position.z) === feet.z && Math.abs(e.position.y - feet.y) < 2);
+    const other = inPit.find(e => !PIT_LIVESTOCK.has(e.name));
+    if (other) throw new Error(`a ${other.name} in the pit with it at ${fmt(feet)}: no pillar up`);
+    for (const e of inPit) {
+      const r = await ctx.act('attack-entity', { target: `#${e.id}`, maxDistance: 4, timeoutMs: 20_000, collect: false }).catch((err: Error) => ({ ok: false, text: err.message }));
+      stopped();
+      if (!r.ok) throw new Error(`a ${e.name} in the pit with it at ${fmt(feet)}, not culled: ${r.text.slice(0, 80)}`);
+      // (gone already: nothing was culled, and nothing said)
+      if (/^No /.test(r.text)) continue;
+      ctx.progress(`culled the ${e.name} in the pit with it (${r.text.split('\n')[0].slice(0, 60)})`);
+    }
+    const r = await ctx.call<{ placed?: number; reason?: string }>('pillar', { item: kind, count: out.climb }, 10_000 + out.climb * 2000)
+      .catch((e: Error) => ({ placed: 0, reason: e.message }));
+    stopped();
+    const placed = r.placed ?? 0;
+    if (placed) ctx.gain(placed);
+    if (placed < out.climb) throw new Error(`pillared ${placed} of ${out.climb} ${kind} out of the pit at ${fmt(feet)}: ${r.reason ?? 'stopped'}`);
+    stillAt = undefined;
+    return `pillared up out of a pit ${out.climb} deep at ${fmt(feet)} on ${out.climb} ${kind} (the pit filled with it)`;
+  }
+};
