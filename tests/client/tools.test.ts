@@ -1013,6 +1013,17 @@ test('drop-item throws items out', async (t) => {
   t.true((await run('drop-item', { item: 'gold_ingot' })).isError);
 });
 
+test('drop-item throws toward the point given (the bridge turns to it first: a throw at the ground came straight back)', async (t) => {
+  const { run, request } = setup({
+    inventory: { items: [{ slot: 9, name: 'tuff', count: 64 }], selectedSlot: 0, held: null },
+    'item.drop': { dropped: 64 }
+  });
+  await run('drop-item', { item: 'tuff', x: -549, y: 64, z: 2103 });
+  t.deepEqual(request.getCalls().find(c => c.args[0] === 'item.drop')!.args[1], { name: 'tuff', toward: { x: -549, y: 64, z: 2103 } });
+  await run('drop-item', { item: 'tuff' });
+  t.deepEqual(request.getCalls().filter(c => c.args[0] === 'item.drop')[1].args[1], { name: 'tuff' });
+});
+
 test('fish finds open water, walks there and reports the catch', async (t) => {
   // the nearest surface water is a 3x3 pool at (1, 62, 1); the middle of a lake is at (9, 62, 1): the lake wins
   const pool = (p: Record<string, unknown>) => Number(p.x) + 2 === 1;

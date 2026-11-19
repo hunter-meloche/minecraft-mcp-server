@@ -52,7 +52,7 @@ const liveWorld = (over: Partial<WorldMemory> = {}): WorldMemory => ({
  */
 function bot(at: Pos, opts: { world?: WorldMemory; shut?: (to: Pos) => boolean; dimension?: string; items?: InventoryItem[]; timeOfDay?: number } = {}) {
   const world = opts.world ?? liveWorld();
-  const me = { pos: { ...at }, walks: [] as string[], climbs: [] as string[], said: [] as string[], acts: [] as string[], homeMs: [] as number[], looks: 0, explored: [] as Pos[] };
+  const me = { pos: { ...at }, walks: [] as string[], climbs: [] as string[], said: [] as string[], acts: [] as string[], homeMs: [] as number[], looks: 0, explored: [] as Pos[], throws: [] as string[] };
   const move = (to: Pos, how: string) => {
     if (inside(me.pos) !== inside(to) && !throughGate(me.pos, to)) me.climbs.push(`${how} ${fmt(me.pos)} to ${fmt(to)}`);
     me.pos = { ...to };
@@ -106,7 +106,7 @@ function bot(at: Pos, opts: { world?: WorldMemory; shut?: (to: Pos) => boolean; 
         return { ok: true, text: `No ${a.target} within ${a.maxDistance} blocks ${a.direction}` };
       }
       if (tool === 'mine-blocks') { move({ x: -500, y: 63, z: 2150 }, tool); return { ok: true, text: `Mined 0 ${a.block}: nothing gained` }; }
-      if (tool === 'drop-item') return { ok: true, text: `Dropped ${a.count} ${a.item}` };
+      if (tool === 'drop-item') { me.throws.push(`${a.item} from ${fmt(me.pos)} toward ${fmt(to)}`); return { ok: true, text: `Dropped ${a.count} ${a.item}` }; }
       if (tool === 'store-in-chest') return { ok: true, text: `Stored ${a.count} ${a.item} in the chest at ${fmt(to)}` };
       return { ok: true, text: 'ok' };
     }
@@ -286,6 +286,9 @@ test('the walks that leave the yard go out by a gate: the deep trip to its mine 
   const junk = bot({ ...HOME }, { items });
   await putAway(junk.ctx, junk.ctx.s, stashKeep(junk.world, 'trip'));
   t.deepEqual(junk.me.acts, ['move-to-position', 'drop-item', 'go-home']);
+  // thrown away from the fence, 8 further out from the yard's middle (along the look it had, at the ground or a hill,
+  // it fell at its feet and came back: "stored 0, dropped 605", three stashes in a row, Nov 19)
+  t.deepEqual(junk.me.throws, ['dirt from (-549, 63, 2111) toward (-549, 64, 2103)']);
   // (from 6 out the walk back to the gate's cell is careful: by the fence)
   t.deepEqual(junk.me.walks, [...cells('north', false), '-549,63,2117 careful', '-549,63,2121 careful']);
   // the iron over what the bot and the work queue keep, to the community chest 120 out east-north-east: out by the

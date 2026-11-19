@@ -664,6 +664,16 @@ test('dumpSpot: 8 out from the side the bot walks least', async (t) => {
   t.deepEqual(all[0], { x: 28, y: 65, z: 5 });
 });
 
+test('dumpAim: the junk is thrown 8 further out from the yard, away from its fence', async (t) => {
+  const { dumpAim, dumpSpots } = await import('../../src/client/brain/chores.js');
+  const yard = { x1: 0, z1: 0, x2: 20, z2: 10, y: 64 };
+  // each of the four spots: straight on out from the middle of its side, at eye height
+  t.deepEqual(dumpSpots(yard).map(d => dumpAim(yard, d)), [{ x: 10, y: 66, z: -16 }, { x: 10, y: 66, z: 26 }, { x: -16, y: 66, z: 5 }, { x: 36, y: 66, z: 5 }]);
+  // a spot off the middle (the bot stopped short): still away from the yard's middle
+  const aim = dumpAim(yard, { x: 25, y: 65, z: 0 });
+  t.true(Math.hypot(aim.x - 10, aim.z - 5) > Math.hypot(25 - 10, 0 - 5) + 7);
+});
+
 test('smelt: ore still carried after the smelt is a failure, not "done" (the 7 raw copper smelted every 5 seconds)', async (t) => {
   const items = [{ slot: 0, name: 'raw_copper', count: 7 }, { slot: 1, name: 'coal', count: 3 }];
   const s = snap(items);

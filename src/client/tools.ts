@@ -1953,15 +1953,19 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   register(
     'drop-item',
-    'Throw items out of the inventory (to make room: Baritone picks up everything it digs). All of that item unless `count` is given.',
+    'Throw items out of the inventory (to make room: Baritone picks up everything it digs). All of that item unless `count` is given. Thrown toward x, y, z when given, else along the most open way round the bot (a throw at the ground or a wall falls at its feet and is picked straight back up).',
     {
       item: z.string().describe("Item to drop, e.g. 'diorite'"),
-      count: z.coerce.number().int().positive().optional().describe('How many (default: all)')
+      count: z.coerce.number().int().positive().optional().describe('How many (default: all)'),
+      x: z.coerce.number().optional().describe('X of a point to throw toward'),
+      y: z.coerce.number().optional().describe('Y of that point'),
+      z: z.coerce.number().optional().describe('Z of that point')
     },
-    async ({ item, count }: { item: string; count?: number }) => {
+    async ({ item, count, x, y, z: zz }: { item: string; count?: number; x?: number; y?: number; z?: number }) => {
       const name = item.replace(/^minecraft:/, '');
       if (!((await inventoryCounts()).counts.get(name))) return factory.createErrorResponse(`No ${name} in the inventory`);
-      const r = await call<{ dropped: number }>('item.drop', { name, ...(count ? { count } : {}) });
+      const toward = x !== undefined && zz !== undefined ? { toward: { x, y: y ?? 0, z: zz } } : {};
+      const r = await call<{ dropped: number }>('item.drop', { name, ...(count ? { count } : {}), ...toward });
       return factory.createResponse(`Dropped ${r.dropped} ${name}`);
     }
   );

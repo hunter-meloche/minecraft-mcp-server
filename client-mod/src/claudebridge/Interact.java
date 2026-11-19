@@ -152,6 +152,40 @@ public final class Interact {
         return i < 9 ? containerSlots + 27 + i : containerSlots + (i - 9);
     }
 
+    /** A throw's pitch: a little up (it carries furthest), out of the bot's 1-block reach where it comes down. */
+    static final float DROP_PITCH = -25f;
+
+    /**
+     * The yaw item.drop throws along: toward the point `toward` when given; else the most open of the 8 ways round the
+     * bot (cells it can see through at its feet and its eyes, out to 4), the one nearest its own look among equals.
+     */
+    static float dropYaw(LocalPlayer pl, JsonObject p) {
+        if (p.has("toward") && p.get("toward").isJsonObject()) {
+            JsonObject t = p.getAsJsonObject("toward");
+            double dx = numParam(t, "x", pl.getX()) - pl.getX(), dz = numParam(t, "z", pl.getZ()) - pl.getZ();
+            if (Math.hypot(dx, dz) > 0.5) return Toss.yaw(dx, dz);
+        }
+        Minecraft mc = Minecraft.getInstance();
+        float own = pl.getYRot();
+        float best = own;
+        int bestOpen = -1;
+        double bestTurn = 0;
+        for (int k = 0; k < 8; k++) {
+            float yaw = k * 45f;
+            double ux = -Math.sin(Math.toRadians(yaw)), uz = Math.cos(Math.toRadians(yaw));
+            int open = 0;
+            for (int d = 1; d <= 4; d++) {
+                BlockPos feet = BlockPos.containing(pl.getX() + ux * d, pl.getY() + 0.5, pl.getZ() + uz * d);
+                if (!mc.level.getBlockState(feet).getCollisionShape(mc.level, feet).isEmpty()) break;
+                if (!mc.level.getBlockState(feet.above()).getCollisionShape(mc.level, feet.above()).isEmpty()) break;
+                open++;
+            }
+            double turn = Math.abs(((yaw - own) % 360 + 540) % 360 - 180);
+            if (open > bestOpen || (open == bestOpen && turn < bestTurn)) { best = yaw; bestOpen = open; bestTurn = turn; }
+        }
+        return best;
+    }
+
     static void click(AbstractContainerMenu menu, int slot, int button, ContainerInput input) {
         Minecraft mc = Minecraft.getInstance();
         mc.gameMode.handleContainerInput(menu.containerId, slot, button, input, mc.player);
@@ -960,12 +994,21 @@ public final class Interact {
             return r;
         });
 
-        // throw items out of the inventory (whole stacks, or one at a time for an exact count)
+        // throw items out of the inventory (whole stacks, or one at a time for an exact count). Turned first, the look
+        // sent before the throw (the server throws along the look it has for the bot, as item.toss): toward `toward`
+        // when given, else along the most open of the 8 ways round it, a little up, so the throw carries some 3 out.
+        // Along the look it had, a throw at the ground or into a wall fell at its feet and was picked straight back up
+        // once its 2 s were up (Nov 19: "stored 0, dropped 605" and the pockets still 32/36, three stashes in a row)
         s.register("item.drop", true, (p, c) -> {
             LocalPlayer pl = player();
             if (pl.containerMenu != pl.inventoryMenu) pl.closeContainer();
             String name = required(p, "name").replace("minecraft:", "");
             int want = intParam(p, "count", Integer.MAX_VALUE);
+            float yaw = dropYaw(pl, p);
+            pl.setYRot(yaw);
+            pl.setXRot(DROP_PITCH);
+            pl.setYHeadRot(yaw);
+            pl.connection.send(new net.minecraft.network.protocol.game.ServerboundMovePlayerPacket.Rot(yaw, DROP_PITCH, pl.onGround(), pl.horizontalCollision));
             int dropped = 0;
             for (int i = 0; i < 36 && dropped < want; i++) {
                 ItemStack st = pl.getInventory().getItem(i);

@@ -554,6 +554,7 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
     // the least walked side first, the next if it can't get there (the east spot was in a stone hill, and the stash
     // failed there every time, storing nothing and dropping nothing, all day)
     let there = false;
+    let dumpAt: { x: number; y: number; z: number } | undefined;
     for (const dump of dumps) {
       if (ctx.signal.aborted) break;
       // (the spot is outside the fence: out by the gate on the way to it, not over the fence: yardgates.ts)
@@ -566,11 +567,14 @@ export async function putAway(ctx: GoalContext, s: Snapshot, keep: StashOptions)
         const me = (await ctx.status()).position;
         there = !!me && (!yard || outsideBy(yard, me) >= 4);
       }
-      if (there) break;
+      if (there) { dumpAt = dump; break; }
     }
     if (there) {
+      // thrown away from the fence, where it lands out of the bot's reach (dumpAim; with no yard, the bridge throws
+      // along the most open way round the bot)
+      const toward = yard && dumpAt ? dumpAim(yard, dumpAt) : undefined;
       for (const e of work.drop) {
-        const r = await ctx.act('drop-item', { item: e.name, count: e.count });
+        const r = await ctx.act('drop-item', { item: e.name, count: e.count, ...(toward ?? {}) });
         const m = /^Dropped (\d+)/.exec(r.text);
         if (m) dropped += Number(m[1]);
       }
@@ -1419,6 +1423,19 @@ const BAND = { from: 2, to: 12 };
 /** Where to throw junk: 8 out from the middle of the yard's least walked side (heat summed within 6 of each spot). */
 export function dumpSpot(yard: { x1: number; z1: number; x2: number; z2: number; y: number }, heat?: HeatMap): { x: number; y: number; z: number } {
   return dumpSpots(yard, heat)[0];
+}
+
+/**
+ * Where the junk is thrown toward at a dump spot: 8 further out along the line from the yard's middle through the
+ * spot, at eye height. A throw goes along the bot's look, and the look after the walk out was anything: down at the
+ * ground or into a hill, where the stack fell at its feet and came straight back into the pockets once its 2 s were
+ * up (Nov 19: "stored 0, dropped 605", the pockets still 32/36, three stashes in a row; the farm round "gained" 392
+ * cobbled deepslate). Away from the fence: none of it lies where the bot walks home.
+ */
+export function dumpAim(yard: { x1: number; z1: number; x2: number; z2: number; y: number }, dump: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  const dx = dump.x - (yard.x1 + yard.x2) / 2, dz = dump.z - (yard.z1 + yard.z2) / 2;
+  const len = Math.hypot(dx, dz) || 1;
+  return { x: Math.round(dump.x + dx / len * 8), y: dump.y + 1, z: Math.round(dump.z + dz / len * 8) };
 }
 
 /** The four dump spots, the least walked first: one may be in a hill or a lake (the east one was in stone). */
