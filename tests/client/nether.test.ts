@@ -14,7 +14,7 @@ import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   LEAVE_LEAD_TICKS, NETHER, NETHER_PER_DAY, NETHER_PROBATION, NETHER_WORTH_MS, allOwnPortals, deathHold, leaveNetherGoal, leaveWhy, linkedTo,
   netherBudgetMs, netherCheck, netherHome, netherLine, netherOf, netherPortalSpot, netherTick, notePortals, peekNether, portalCells, scaled, spotFault,
-  tripHold, type PortalShape
+  tripHold, tripWorn, type PortalShape
 } from '../../src/client/brain/nether.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit } from '../../src/client/brain/mine.js';
 import { ROOM, out as afield } from '../../src/client/brain/pockets.js';
@@ -370,6 +370,24 @@ test('a death in the Nether is a death away: the far trips wait for the kit, and
 });
 
 // ------------------------------------------------------------------------------------------------ leave nether
+
+test('a nether trip does not set out in armour leave nether would send home at once (under 20%), the golden helmet as it will be worn', (t) => {
+  const world = portalWorld(true);
+  const task = LADDER.find(r => r.name === 'nether')!;
+  // the live chestplate of Nov 20: 11% left, above the kit's 10% worn-out, under leave nether's 20%
+  const worn = KIT.map(i => (i.slot === 38 ? { ...i, damage: 470, maxDamage: 528 } : i));
+  const s = lookAt(worn, 1000);
+  t.deepEqual(tripWorn(s, world), { cause: 'kit', text: 'the diamond_chestplate at 11%: no nether trip until it is mended or replaced' });
+  for (const v of NETHER_WORK) t.is(task.ready(s, world, v.id)?.text, tripWorn(s, world)!.text, v.id);
+  t.is(leaveWhy(lookAt(worn, 1000, { dimension: NETHER, position: { ...DOWN }, distHome: Infinity }), world), 'the diamond_chestplate at 11%: home from the nether', 'the rule it keeps to');
+  t.is(tripWorn(lookAt(KIT, 1000), world), null);
+  // the helmet worn at home is swapped for the golden one: its wear is not the trip's, the golden helmet's is
+  const tiredHelmet = KIT.map(i => (i.slot === 39 ? { ...i, damage: 350, maxDamage: 363 } : i));
+  t.truthy(tripWorn(lookAt(tiredHelmet, 1000), world), 'no golden helmet anywhere: the one worn is what goes');
+  const gold: InventoryItem = { slot: 20, name: 'golden_helmet', count: 1, damage: 10, maxDamage: 77 };
+  t.is(tripWorn(lookAt([...tiredHelmet, gold], 1000), world), null);
+  t.regex(tripWorn(lookAt([...KIT, { ...gold, damage: 70 }], 1000), world)?.text ?? '', /^the golden_helmet at 9%/);
+});
 
 test('leave nether wants only in the Nether: hurt, hungry, the day near its end, the trips held or off, armour worn through, or no trip under way', (t) => {
   const world = portalWorld(true);

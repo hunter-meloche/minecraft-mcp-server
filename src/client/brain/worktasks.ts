@@ -31,7 +31,7 @@ import { IN_SIGHT, cowRange, fetchForPens, penAt } from './pens.js';
 import { addSite, dropSite, dryUntil, penCount, sitesOf, tierOf, type WorkResult, type WorkTask } from './work.js';
 import { leaveYard } from './yardgates.js';
 import { homePortal, tripsOn } from './portal.js';
-import { netherKitDecline, peekNether } from './nether.js';
+import { netherKitDecline, peekNether, tripWorn } from './nether.js';
 import { SETUP_LEAST_MS, setupOpen, setupReady, setupRun } from './nethersetup.js';
 import { LOOK_LEAST_MS, lookOpen, lookReady, lookRun } from './netherlook.js';
 import { BARTER_LEAST_MS, barterOpen, barterReady, barterRun } from './netherbarter.js';
@@ -639,8 +639,10 @@ const nether: WorkTask = {
     text: !tripsOn(world) ? 'nether trips are off' : portalReady(world) ? 'no nether work yet' : 'no nether work yet: the home portal is not lit'
   }),
   // each work's own (the setup and the look fetch what the chests hold of the kit: their ready says what they do not),
-  // else the kit carried
+  // else the kit carried; first of all armour that would send it home as soon as it is in (nether.ts tripWorn)
   ready: (s, world, variant) => {
+    const worn = tripWorn(s, world);
+    if (worn) return worn;
     const work = NETHER_WORK.find(v => v.id === variant);
     return work ? work.ready(s, world) : netherKitDecline(s);
   },

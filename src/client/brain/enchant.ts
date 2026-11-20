@@ -8,7 +8,7 @@ import { chestTotals, freeChestTotals, key, kindChests, sameStack, spareHeld, st
 import { prepare } from './project.js';
 import { billKinds } from './chores.js';
 // (anvil.ts takes plainLeft and wornSlot from here: each uses the other's exports inside functions only)
-import { bookOfUse } from './anvil.js';
+import { bookOfUse, repairWaits } from './anvil.js';
 import { carriedKit, gearKind, isWorn, tier } from './kit.js';
 import { NETHER_HELMET, netherHelmetMissing, netherHelmetPiece, netherSetDue, storedNetherHelmets } from './netherset.js';
 import { obsidianStep } from './cast.js';
@@ -323,8 +323,8 @@ export function booksStored(s: Snapshot, world: WorldMemory): { all: number; ofU
 
 /**
  * Whether the chore makes a book now, and where its plain book comes from. Only once no plain piece is left (plainLeft:
- * the table's levels are theirs first), at BOOK_LEVEL or more, with fewer than BOOK_STOCK books of use and BOOK_PILE in
- * all. Nothing is gathered for it: a book carried or stored, else paper from the cane and leather from the cows as the
+ * the table's levels are theirs first), at BOOK_LEVEL or more, never while a worn piece's repair waits on more levels
+ * (repairWaits), with fewer than BOOK_STOCK books of use and BOOK_PILE in all. Nothing is gathered for it: a book carried or stored, else paper from the cane and leather from the cows as the
  * cane round and the pens bring them in (CANE_KEEP of the cane stays), and none of it while a bill has a use for any
  * of them (the project's, a build job's, the community's). And with the pockets' room for a piece (freeFor), less what
  * the book takes on its way: a slot from the chests, two while it is made (the cane and the leather, the paper and the
@@ -332,6 +332,9 @@ export function booksStored(s: Snapshot, world: WorldMemory): { all: number; ofU
  */
 export function bookFor(s: Snapshot, world: WorldMemory): { from: 'carried' | 'stored' | 'made'; ofUse: number } | undefined {
   if ((s.xpLevel ?? 0) < BOOK_LEVEL || plainLeft(s.items)) return undefined;
+  // a worn piece's repair that the levels are short of has them first (anvil.ts repairWaits): an enchanted piece that
+  // breaks takes its enchantments with it, and a book is never more than a wish
+  if (repairWaits(s.items, s.xpLevel ?? 0)) return undefined;
   const { all, ofUse } = booksStored(s, world);
   if (ofUse >= BOOK_STOCK || all >= BOOK_PILE) return undefined;
   const billed = billKinds(s, world);

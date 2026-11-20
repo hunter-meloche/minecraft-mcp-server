@@ -5,6 +5,7 @@ import {
 import { stash } from '../../src/client/brain/chores.js';
 import type { Goal, GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import { decide } from '../../src/client/brain/brain.js';
+import { repairWaits } from '../../src/client/brain/anvil.js';
 import { projectGoal } from '../../src/client/brain/project.js';
 import { TREE } from '../../src/client/brain/tree.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
@@ -307,6 +308,25 @@ test('enchant: a book only once no plain piece is left, at level 33 or more', (t
   t.is(BOOK_LEVEL, 33);
   t.is(bookFor(at45(allDone(), { xpLevel: 32 }), world), undefined);
   t.like(bookFor(at45(allDone(), { xpLevel: 33 }), world), { from: 'made' });
+});
+
+test('enchant: no book while a worn piece\'s repair waits on more levels than there are (the anvil\'s first)', (t) => {
+  const world = booksWorld();
+  // the live chestplate of Nov 20: 9% left, worked on five times (repairCost 31): four diamonds cost 35
+  const worn = allDone().map(i => (i.slot === 38 ? { ...i, damage: 480, maxDamage: 528, repairCost: 31 } : i));
+  t.deepEqual(repairWaits(worn, 33)?.cost, 35);
+  t.is(bookFor(at45(worn, { xpLevel: 33 }), world), undefined);
+  t.is(enchantGoal.wants(at45(worn, { xpLevel: 34 }), world), null);
+  // at 35 the anvil can pay it: nothing waits, and the books come again (the anvil runs first: anvilPlan's step 1)
+  t.is(repairWaits(worn, 35), undefined);
+  t.like(bookFor(at45(worn, { xpLevel: 35 }), world), { from: 'made' });
+  // a repair past the anvil's 39 waits on nothing: the levels would never do
+  const dear = worn.map(i => (i.slot === 38 ? { ...i, repairCost: 63 } : i));
+  t.is(repairWaits(dear, 33), undefined);
+  t.like(bookFor(at45(dear, { xpLevel: 33 }), world), { from: 'made' });
+  // above the repair line (30% left) there is no repair to wait for
+  const sound = worn.map(i => (i.slot === 38 ? { ...i, damage: 300 } : i));
+  t.like(bookFor(at45(sound, { xpLevel: 33 }), world), { from: 'made' });
 });
 
 test('enchant: books are kept to 6 the anvil has a use for, and 24 in all; one whose stack memory lost counts as of use', (t) => {

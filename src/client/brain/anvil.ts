@@ -264,6 +264,21 @@ const durability = (i: Pick<InventoryItem, 'damage' | 'maxDamage'>) => (i.maxDam
 
 /** Below this much of its durability an enchanted piece is mended with diamonds, before anything else is done. */
 export const REPAIR_BELOW = 0.3;
+
+/**
+ * The diamond repair (anvilPlan's step 1) that waits on levels, pure: the most worn enchanted diamond piece of the main
+ * set's in use below REPAIR_BELOW whose repair costs more than `xpLevel` but no more than ANVIL_MAX_COST; undefined
+ * when none waits. The enchant chore's books keep off the levels while one does (enchant.ts bookFor): a piece worked
+ * on five times costs 31 + 4 to mend, and the books spent them at 33 each time they came (Nov 20: the
+ * diamond_chestplate at 9% with repairCost 31, the bot at level 33 all night, a lure 2 and a piercing 3 book made).
+ */
+export function repairWaits(items: InventoryItem[], xpLevel: number): { piece: InventoryItem; cost: number } | undefined {
+  return mainSubjects(items).map(sub => sub.piece)
+    .filter(p => p.name.startsWith('diamond_') && workable(p) && durability(p) < REPAIR_BELOW)
+    .map(piece => ({ piece, cost: (piece.repairCost ?? 0) + repairUnits(piece) }))
+    .filter(r => r.cost > xpLevel && r.cost <= ANVIL_MAX_COST)
+    .sort((a, b) => durability(a.piece) - durability(b.piece))[0];
+}
 /**
  * A piece worked on this much before (its repairCost: 0, 1, 3, 7, 15, 31 after each job) gets no more books: each one
  * costs more than the last, and two more would be too expensive. Mending and the repairs it still gets.

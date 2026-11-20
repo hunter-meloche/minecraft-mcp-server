@@ -8,6 +8,7 @@
  * the home side. Nothing here is used at the module's top level (it reaches portal.ts, food.ts and pockets.ts, which
  * reach most of the brain).
  */
+import type { InventoryItem } from '../tools.js';
 import { no, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { daylightLeft } from './schedule.js';
@@ -17,6 +18,7 @@ import { homePortal, ownPortals, tripsOn } from './portal.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit, type NetherCheck } from './mine.js';
 import { readyFoodPoints } from './food.js';
 import { freeChestTotals, storedStacks } from './chests.js';
+import { netherHelmetFor } from './netherset.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -1065,10 +1067,10 @@ const LEAVE_FOOD = 10;
 const LEAVE_WEAR = 0.2;
 const ARMOUR_SLOTS: [number, string][] = [[36, 'boots'], [37, 'leggings'], [38, 'chestplate'], [39, 'helmet']];
 
-/** The worn piece that is gone or nearly worn through, in words; undefined while every piece holds. */
-function wornThrough(s: Snapshot): string | undefined {
+/** The worn piece that is gone or nearly worn through, in words (`helmet` in place of the one worn); undefined while every piece holds. */
+function wornThrough(items: readonly InventoryItem[], helmet?: InventoryItem): string | undefined {
   for (const [slot, kind] of ARMOUR_SLOTS) {
-    const i = s.items.find(x => x.slot === slot);
+    const i = slot === 39 && helmet ? helmet : items.find(x => x.slot === slot);
     if (!i) return `no ${kind} worn`;
     if (i.maxDamage && (i.maxDamage - (i.damage ?? 0)) / i.maxDamage < LEAVE_WEAR) return `the ${i.name} at ${Math.round(100 * (i.maxDamage - (i.damage ?? 0)) / i.maxDamage)}%`;
   }
@@ -1090,10 +1092,22 @@ export function leaveWhy(s: Snapshot, world: WorldMemory): string | null {
   if (!tripsOn(world)) return 'nether trips are off: home';
   const held = deathHold(s, world);
   if (held) return `${held.text}: home`;
-  const worn = wornThrough(s);
+  const worn = wornThrough(s.items);
   if (worn) return `${worn}: home from the nether`;
   if (!afield.work) return 'in the nether with no trip under way: home';
   return null;
+}
+
+/**
+ * Why a Nether trip should not set out for the armour (pure): leaveWhy's wear rule on the pieces as they will be
+ * dressed (netherset.ts netherHelmetFor: the golden helmet in place of the one worn), so no trip goes through only to
+ * be sent home at once (Nov 20: the diamond_chestplate at 11%, above the kit's 10% worn-out but under leaveWhy's 20%;
+ * six barter trips in 25 minutes went in and came straight back, the day's two trips spent on nothing). Null while
+ * every piece holds.
+ */
+export function tripWorn(s: Snapshot, world: WorldMemory): Decline | null {
+  const worn = wornThrough(s.items, netherHelmetFor(s.items, world));
+  return worn ? { cause: 'kit', text: `${worn}: no nether trip until it is mended or replaced` } : null;
 }
 
 /**
