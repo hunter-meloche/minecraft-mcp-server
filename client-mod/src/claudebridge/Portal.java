@@ -279,6 +279,29 @@ public final class Portal {
         return null;
     }
 
+    /**
+     * Out of a portal only to go in again (portal.enter started in it): a cell a step out across its plane from a bottom
+     * cell (the one nearest the bot first) to stand in for a moment, and that bottom cell to walk out from. Fire or lava
+     * beside it is no bar here, only in it (standable): the body stands in the cell's middle, and staying in the portal
+     * can never take the bot through. Null: no cell beside it at all. Pure.
+     *
+     * Nov 20: fire on the netherrack by its Nether portal (one beside the east column, two a step out of the west's)
+     * left stepOut no cell, and the bot stood in the portal 20 s a try, stranded down there for good.
+     */
+    static StepOut stepAside(Shape portal, double fromX, double fromZ, Function<BlockPos, Cell> cell) {
+        List<BlockPos> cols = new ArrayList<>(portal.bottom());
+        cols.sort(Comparator.comparingDouble(b -> Math.hypot(b.getX() + 0.5 - fromX, b.getZ() + 0.5 - fromZ)));
+        for (BlockPos p : cols) {
+            for (Direction side : portal.sides()) {
+                for (int dy : new int[]{0, -1, 1}) {
+                    BlockPos via = p.relative(side).offset(0, dy, 0);
+                    if (step(cell, p, via)) return new StepOut(via, p, side);
+                }
+            }
+        }
+        return null;
+    }
+
     /** Live: a cell of the level as the step out judges it. */
     static Cell cell(Level level, BlockPos p) {
         if (!level.isLoaded(p)) return Cell.OTHER;
@@ -360,9 +383,9 @@ public final class Portal {
     static void enter(BridgeServer.Call c, Shape portal, BlockPos asked, String from, int timeoutTicks, double[] toward) {
         Ticker.add(new Ticker.Task() {
             int age, phase = WALK, idle, steerAge, outAge, loadAge, settle, stepAge, inside, leaveAge, leaveSteer;
-            boolean walking, seenActive, everInside;
+            boolean walking, seenActive, everInside, atLeaveFrom;
             final long seq = Events.baritoneLogSeq(), deaths = Events.deaths();
-            BlockPos entry, leaveTo;
+            BlockPos entry, leaveTo, leaveFrom;
             Shape arrived;
             StepOut out;
             BlockPos arrivalBlock;
@@ -388,14 +411,16 @@ public final class Portal {
                             return false;
                         }
                         if (++leaveSteer > 60) { releaseKeys(m); return fail(m, "could not step out of the portal to go in again"); }
-                        steer(m, me, leaveTo, 0.15);
+                        // through its own column first: straight across, not cornerwise past what burns beside the cell
+                        if (!atLeaveFrom && (me.blockPosition().equals(leaveFrom) || !insideOf(me, portal))) atLeaveFrom = true;
+                        steer(m, me, atLeaveFrom ? leaveTo : leaveFrom, 0.15);
                     }
                     case WALK -> {
                         // the block asked for when it is a bottom cell (`portal:frame`), else the bottom cell nearest the bot
                         if (entry == null) entry = portal.bottom().contains(asked) ? asked : nearest(portal.bottom(), me.position());
                         if (age == 1 && insideOf(me, portal)) {
-                            StepOut away = stepOut(portal, me.getX(), me.getZ(), b -> cell(m.level, b), null);
-                            if (away != null) { leaveTo = away.via(); phase = LEAVE; return false; }
+                            StepOut away = stepAside(portal, me.getX(), me.getZ(), b -> cell(m.level, b));
+                            if (away != null) { leaveTo = away.via(); leaveFrom = away.to(); phase = LEAVE; return false; }
                         }
                         if (insideOf(me, portal)) { endWalk(m); phase = STAND; return false; }
                         if (!walking) {
