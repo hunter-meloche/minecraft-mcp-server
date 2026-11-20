@@ -4,7 +4,7 @@ import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   BLOCKS_KEPT, FROM_BUILDS, FROM_UNKNOWN, GONE, PLACED_GAP, SETUP_HOLD_MS, SETUP_LEAST_MS, SETUP_OBSIDIAN, SETUP_WAITS, SPOT_DY, SPOT_RADIUS, WAY_OUT, boxGap,
-  cellOf, chooseHut, fetchSetupKit, footing, grow, hutOf, hutSteps, inBox, judgeHut, judgedBox, maybeServers, overworldSideKnown, planHut, setupObsidian,
+  FIRE_GAP, cellOf, chooseHut, fetchSetupKit, firesBy, footing, grow, hutOf, hutSteps, inBox, judgeHut, judgedBox, maybeServers, overworldSideKnown, planHut, setupObsidian,
   setupOpen, setupReady, setupRun, setupShort, shapeOf, standable, wayOut, zoneBox, type Box, type Grid, type HutStep, type NetherZone, type SetupView
 } from '../../src/client/brain/nethersetup.js';
 import {
@@ -127,6 +127,35 @@ test('the ground judged: lava by it, gravel over it, no ground under the frame, 
   t.is(why({}, { cobblestone: 40, obsidian: 10 }), `28 cobblestone to place (40 carried, ${BLOCKS_KEPT} kept for the way home)`);
   t.is(why({}, { cobblestone: 64, obsidian: 6 }), '10 obsidian for the frame (6 carried)');
   t.false(standable(gridOf(flat({ [k({ x: 0, y: 69, z: 0 })]: 'magma_block' }), box), { x: 0, y: 70, z: 0 }), 'no standing on magma');
+});
+
+test('ghast fire by its portal: no footing by it until put out; firesBy names the fire a hit reaches from the eye, the nearest first', (t) => {
+  // the live hut, Nov 20: the portal x -78..-77 at z 260 (frame -79 and -76), the wall behind it, the floor at y 90,
+  // fire on it from a ghast's fireball in front of the east column and the west's; the bot out in the east column
+  const fire = new Set([k({ x: -77, y: 91, z: 259 }), k({ x: -79, y: 91, z: 259 }), k({ x: -79, y: 91, z: 258 }), k({ x: -70, y: 91, z: 255 })]);
+  const lit = new Set(fire);
+  const get = (p: Pos) => {
+    if (lit.has(k(p))) return 'fire[age=15,east=false,north=false,south=false,up=false,west=false]'; // as the live read had it
+    if (p.y <= 90) return 'netherrack';
+    if (p.z === 260 && (p.x === -78 || p.x === -77) && p.y <= 93) return 'nether_portal';
+    if (p.z === 260 && (p.x === -79 || p.x === -76) && p.y <= 94) return 'obsidian';
+    if (p.z === 261 && p.y <= 94) return 'cobblestone';
+    return 'air';
+  };
+  const box = { x1: -90, y1: 85, z1: 250, x2: -65, y2: 100, z2: 270 };
+  const portal = { x1: -78, y1: 91, z1: 260, x2: -77, y2: 93, z2: 260 };
+  const me = { x: -76.5, y: 91, z: 260.5 };
+  const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+  t.is(footing(gridOf(get, box), me), undefined, 'every cell by it is in fire or beside it: the trips\' "no ground to stand on"');
+  const hits = firesBy(gridOf(get, box), portal, eye);
+  t.deepEqual(hits, [{ x: -77, y: 91, z: 259 }, { x: -79, y: 91, z: 259 }, { x: -79, y: 91, z: 258 }], 'the one 7 off (past FIRE_GAP) is left');
+  t.true(FIRE_GAP >= 2, 'out to the far cell of the step out');
+  for (const h of hits) lit.delete(k(h));
+  t.deepEqual(footing(gridOf(get, box), me), { x: -77, y: 91, z: 259 }, 'put out: the cell in front of the portal is ground again');
+  // out of reach from the eye: not named (a hit would not get there)
+  t.deepEqual(firesBy(gridOf(get, box), portal, { x: -81.5, y: 92.62, z: 266.5 }), []);
+  lit.add(k({ x: -79, y: 91, z: 259 }));
+  t.deepEqual(firesBy(gridOf(get, box), portal, eye), [{ x: -79, y: 91, z: 259 }]);
 });
 
 // ------------------------------------------------------------------------------------------------ the spot

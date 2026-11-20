@@ -214,6 +214,28 @@ export function footing(g: Grid, p: Pos): Pos | undefined {
   return undefined;
 }
 
+/** How far round its portal fire is put out on the way in (the room in front is 2 deep, and stepOut's far cell 2 out). */
+export const FIRE_GAP = 3;
+/** A hit's reach from the eye to a fire cell's middle (the bridge's blockInteractionRange, 4.5, less a margin). */
+export const FIRE_REACH = 4.4;
+
+/**
+ * The fire round a portal (FIRE_GAP of its cells) a hit from the eye reaches, the nearest first. Fire on netherrack
+ * burns for good, and a cell with fire within 1 is no standing cell (standable): ghast fire by its own portal left every
+ * trip no ground to stand on by it from Nov 20 04:56 on (and the step out no cell), until a hand put it out.
+ */
+export function firesBy(g: Grid, portal: Box, eye: { x: number; y: number; z: number }, reach = FIRE_REACH): Pos[] {
+  const out: { p: Pos; d: number }[] = [];
+  const b = grow(portal, FIRE_GAP);
+  for (let y = b.y1; y <= b.y2; y++) for (let z = b.z1; z <= b.z2; z++) for (let x = b.x1; x <= b.x2; x++) {
+    const p = { x, y, z };
+    if (!/^(fire|soul_fire)$/.test(blockAt(g, p) ?? '')) continue;
+    const d = Math.hypot(x + 0.5 - eye.x, y + 0.5 - eye.y, z + 0.5 - eye.z);
+    if (d <= reach) out.push({ p, d });
+  }
+  return out.sort((a, b2) => a.d - b2.d).map(o => o.p);
+}
+
 // ------------------------------------------------------------------------------------------------ boxes
 
 export interface Box { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number }

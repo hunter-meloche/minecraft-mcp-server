@@ -800,6 +800,15 @@ public final class Interact {
                     }
                 }
             }
+            // fire: put out with a hit, as a player does (a hit breaks it at once). Its outline is a sliver on the floor
+            // and the eye of a bot that came out in a portal stands inside the portal block, which every ray from it hits
+            // first; the server asks only that it be in reach (Nov 20: ghast fire by its Nether portal stayed there for
+            // good, and every trip found no ground to stand on by it)
+            boolean fire = before.getBlock() instanceof net.minecraft.world.level.block.BaseFireBlock;
+            if (face == null && fire && Vec3.atCenterOf(target).distanceTo(eye) <= reach - 0.1) {
+                face = Direction.UP;
+                aim = Vec3.atBottomCenterOf(target);
+            }
             if (face == null) return obj("dug", false, "reason", "out of reach or out of sight", "block", Names.block(before));
             final Direction f = face;
             final Vec3 a = aim;
@@ -810,7 +819,9 @@ public final class Interact {
                     if (c.isDone()) { if (m.gameMode != null) m.gameMode.stopDestroyBlock(); return true; }
                     age++;
                     if (m.player == null || m.level == null) { c.fail("not in a world"); return true; }
-                    if (replaceable(m.level.getBlockState(target))) {
+                    // (fire is replaceable already: done once it is out, not before the hit)
+                    BlockState nowState = m.level.getBlockState(target);
+                    if (replaceable(nowState) && !(fire && nowState.getBlock() instanceof net.minecraft.world.level.block.BaseFireBlock)) {
                         ItemStack held = m.player.getMainHandItem();
                         c.ok(obj("dug", true, "block", Names.block(before), "tool", held.isEmpty() ? null : Names.item(held)));
                         return true;

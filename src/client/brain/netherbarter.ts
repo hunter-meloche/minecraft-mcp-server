@@ -52,7 +52,7 @@ import {
 } from './nether.js';
 import { DEEP_WALK_BACK, DEEP_WORTH, tripBudgetMs } from './mine.js';
 import {
-  EYE, FROM_BUILDS, GONE, LINK_RANGE, MAX_DROP, SETUP_HEALTH, SETUP_WAITS, blockAt, bottomOf, boxGap, boxOf, cellOf, clearTo, enter, fetchSetupKit, footing,
+  EYE, FROM_BUILDS, GONE, LINK_RANGE, FIRE_GAP, MAX_DROP, SETUP_HEALTH, SETUP_WAITS, blockAt, bottomOf, boxGap, boxOf, cellOf, clearTo, enter, fetchSetupKit, firesBy, footing, grow,
   holdSetup, inNether, intoNether, listPortals, pathOf, readGround, setupShort, walkAlong, walkFrom, zoneBox, type Box, type Cell, type Entered, type Grid,
   type Listed, type NetherZone
 } from './nethersetup.js';
@@ -539,7 +539,10 @@ export async function toOwnPortal(ctx: GoalContext, home: Pos, own: Pos, now: ()
   }
   if (!arrived) return { result: { gain: 0, text: `came out at nether ${fmt(block)} by no portal the bridge lists: no ${work}` } };
   const isOwn = (p: PortalShape) => portalCells(p).some(c => Math.abs(c.x - own.x) <= 1 && Math.abs(c.y - own.y) <= 1 && Math.abs(c.z - own.z) <= 1);
-  if (isOwn(arrived)) return { arrived, homeShape, me };
+  if (isOwn(arrived)) {
+    await putOutFire(ctx, arrived);
+    return { arrived, homeShape, me: (await ctx.status().catch(() => undefined))?.position ?? me };
+  }
   const theirs = arrived;
   const seen = (await ctx.call<{ portals?: PortalShape[] }>('foreign.portals', { dimension: NETHER }).catch(() => ({ portals: [] as PortalShape[] }))).portals ?? [];
   notePortals(ctx.world, NETHER, seen.some(p => p.x === theirs.x && p.y === theirs.y && p.z === theirs.z) ? seen : [...seen, theirs]);
@@ -555,6 +558,28 @@ export async function toOwnPortal(ctx: GoalContext, home: Pos, own: Pos, now: ()
       ...(ok ? { cameBack: true as const } : {})
     }
   };
+}
+
+/**
+ * The fire round its own portal put out with a hit each, from where it came out (firesBy: those in reach). Ghast fire
+ * on the netherrack there burns for good, and every trip after it found no ground to stand on by its portal (Nov 20).
+ * Says `nether: put out N fire(s) by its portal` when there was any.
+ */
+async function putOutFire(ctx: GoalContext, arrived: Listed): Promise<void> {
+  const g = await readGround(ctx, grow(boxOf(portalCells(arrived)), FIRE_GAP), 1);
+  const st = await ctx.status().catch(() => undefined);
+  if (!st?.position) return;
+  const fires = firesBy(g, boxOf(portalCells(arrived)), { x: st.position.x, y: st.position.y + EYE, z: st.position.z });
+  if (!fires.length) return;
+  let out = 0;
+  const why: string[] = [];
+  for (const p of fires) {
+    const r = await ctx.call<{ dug?: boolean; reason?: string }>('dig.here', { ...p, timeoutMs: 3_000 }, 10_000).catch((e: Error) => ({ dug: false, reason: e.message }));
+    if (ctx.signal.aborted) throw new Error('aborted');
+    if (r?.dug || r?.reason === 'air') out++;
+    else why.push(`${fmt(p)}: ${r?.reason ?? 'no answer'}`);
+  }
+  ctx.progress(`nether: put out ${out} of ${fires.length} fire(s) by its portal${why.length ? ` (not: ${why.slice(0, 2).join('; ')})` : ''}`);
 }
 
 /** A portal's bottom cell nearest a place: where the bot steps in. */
