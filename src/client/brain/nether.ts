@@ -999,7 +999,23 @@ export function netherEnd(world: WorldMemory, startedAt: number, death: DeathSee
 
 
 type Listed = PortalShape & { distance?: number; own?: boolean };
-interface Entered { ok?: boolean; reason?: string; dimension?: string; position?: Pos; block?: Pos; portal?: Pos | null; stepped?: boolean; note?: string }
+interface Entered { ok?: boolean; reason?: string; dimension?: string; position?: Pos; block?: Pos; portal?: Pos | null; stepped?: boolean; note?: string; inPortal?: boolean; everInside?: boolean }
+
+/**
+ * Why portal.enter did not go through, with where the bridge says the bot was at the end: `timed out in the portal
+ * (20 s in it) (at nether (-78, 91, 260), in the portal: yes, in it at all: yes)`. Pure. The bridge's reply had the
+ * position and both flags, and the lines kept the reason only: from Nov 20 every way back from some arrivals in the
+ * west column of its Nether portal timed out 20 s in it first, then a second try went through in seconds, and
+ * nothing in the logs told the two apart.
+ */
+export function enterFailText(r: { reason?: string; dimension?: string; position?: Pos; inPortal?: boolean; everInside?: boolean }): string {
+  const why = r.reason ?? 'no answer';
+  const where: string[] = [];
+  if (r.position) where.push(`at ${r.dimension === NETHER ? 'nether ' : r.dimension === OVERWORLD ? 'overworld ' : ''}${fmt(r.position)}`);
+  if (typeof r.inPortal === 'boolean') where.push(`in the portal: ${r.inPortal ? 'yes' : 'no'}`);
+  if (typeof r.everInside === 'boolean') where.push(`in it at all: ${r.everInside ? 'yes' : 'no'}`);
+  return where.length ? `${why} (${where.join(', ')})` : why;
+}
 
 /** The portal of a list a point lies in or by (within `by` of one of its blocks), the nearest. */
 function portalBy(list: Listed[], p: Pos, by: number): Listed | undefined {
@@ -1040,7 +1056,7 @@ export async function netherHome(ctx: GoalContext): Promise<{ ok: boolean; text:
   const r = await ctx.call<Entered>('portal.enter', { ...cell, timeoutMs: 60_000, ...(home ? { toward: { x: home.x, z: home.z } } : {}) }, 90_000)
     .catch((e: Error) => ({ ok: false, reason: e.message } as Entered));
   if (ctx.signal.aborted) throw new Error('aborted');
-  if (!r.ok) return { ok: false, text: `through ${which} at nether ${fmt(cell)}: ${r.reason ?? 'no answer'}` };
+  if (!r.ok) return { ok: false, text: `through ${which} at nether ${fmt(cell)}: ${enterFailText(r)}` };
   if ((r.dimension ?? NETHER) !== OVERWORLD) return { ok: false, text: `through ${which} at nether ${fmt(cell)}: came out in ${r.dimension ?? 'the same place'}` };
   const at = r.portal ?? r.block ?? r.position;
   const line = `nether: home through the portal at nether ${fmt(cell)} -> overworld ${at ? fmt(at) : '(unknown)'}`;

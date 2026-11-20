@@ -4,7 +4,7 @@ import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   BLOCKS_KEPT, FROM_BUILDS, FROM_UNKNOWN, GONE, PLACED_GAP, SETUP_HOLD_MS, SETUP_LEAST_MS, SETUP_OBSIDIAN, SETUP_WAITS, SPOT_DY, SPOT_RADIUS, WAY_OUT, boxGap,
-  FIRE_GAP, cellOf, chooseHut, fetchSetupKit, firesBy, footing, grow, hutOf, hutSteps, inBox, judgeHut, judgedBox, maybeServers, overworldSideKnown, planHut, setupObsidian,
+  FIRE_GAP, cellOf, chooseHut, enter, fetchSetupKit, firesBy, footing, grow, hutOf, hutSteps, inBox, judgeHut, judgedBox, maybeServers, overworldSideKnown, planHut, setupObsidian,
   setupOpen, setupReady, setupRun, setupShort, shapeOf, standable, wayOut, zoneBox, type Box, type Grid, type HutStep, type NetherZone, type SetupView
 } from '../../src/client/brain/nethersetup.js';
 import {
@@ -967,4 +967,15 @@ test.serial('F3: a look again on the spot that finds lava by it (come since the 
   t.regex(r2.text, /^its own portal at nether \(-?\d+, \d+, \d+\), linked with the home portal$/, g.said.join(' | '));
   t.notDeepEqual(peekNether(w).portal, { x: -79, y: 70, z: 266 });
   t.truthy(peekNether(w).portal);
+});
+
+test('enter: a portal that did not take it says where the bridge had it (every trip\'s way back says the reason)', async (t) => {
+  const reply: Record<string, unknown> = { ok: false, reason: 'timed out in the portal (20 s in it)', dimension: NETHER, position: { x: -77.5, y: 91, z: 260.5 }, inPortal: true, everInside: true };
+  const ctx = {
+    s: { home: { x: -549, y: 63, z: 2183 } }, signal: new AbortController().signal,
+    call: async <T>(method: string): Promise<T> => { t.is(method, 'portal.enter'); return reply as T; }
+  } as unknown as GoalContext;
+  t.is((await enter(ctx, { x: -78, y: 91, z: 260 })).reason, 'timed out in the portal (20 s in it) (at nether (-78, 91, 260), in the portal: yes, in it at all: yes)');
+  reply.ok = true; reply.reason = undefined;
+  t.is((await enter(ctx, { x: -78, y: 91, z: 260 })).reason, undefined, 'a way through is left as it came');
 });

@@ -13,7 +13,7 @@ import { shelterGoal, type GoalContext, type Snapshot } from '../../src/client/b
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   LEAVE_LEAD_TICKS, NETHER, NETHER_PER_DAY, NETHER_PROBATION, NETHER_WORTH_MS, allOwnPortals, deathHold, leaveNetherGoal, leaveWhy, linkedTo,
-  netherBudgetMs, netherCheck, netherHome, netherLine, netherOf, netherPortalSpot, netherTick, notePortals, peekNether, portalCells, scaled, spotFault,
+  enterFailText, netherBudgetMs, netherCheck, netherHome, netherLine, netherOf, netherPortalSpot, netherTick, notePortals, peekNether, portalCells, scaled, spotFault,
   tripHold, tripWorn, type PortalShape
 } from '../../src/client/brain/nether.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit } from '../../src/client/brain/mine.js';
@@ -474,6 +474,21 @@ test('netherHome: to its own Nether-side portal, else the one it came in by, els
   t.like(await netherHome(downThere(plain, []).ctx), { ok: false, text: 'no lit portal in sight' });
   t.like(await netherHome(downThere(plain, [cameBy], { walk: false }).ctx), { ok: false, text: 'no way on foot to the nearest portal at nether (-79, 64, 270)' });
   t.like(await netherHome(downThere(plain, [near], { enter: { ok: false, reason: 'timed out in the portal (30 s in it)' } }).ctx), { ok: false, text: 'through the nearest portal at nether (-70, 64, 274): timed out in the portal (30 s in it)' });
+});
+
+test('a portal that did not take the bot says where the bridge had it: its position and whether it stood in the portal (Nov 20)', async (t) => {
+  t.is(enterFailText({ reason: 'timed out in the portal (20 s in it)', dimension: NETHER, position: { x: -77.4, y: 91, z: 260.6 }, inPortal: true, everInside: true }),
+    'timed out in the portal (20 s in it) (at nether (-78, 91, 260), in the portal: yes, in it at all: yes)');
+  t.is(enterFailText({ reason: 'pushed out of the portal', dimension: 'overworld', position: { x: -560.5, y: 64, z: 2147.5 }, inPortal: false, everInside: true }),
+    'pushed out of the portal (at overworld (-561, 64, 2147), in the portal: no, in it at all: yes)');
+  t.is(enterFailText({ reason: 'no answer from the bridge' }), 'no answer from the bridge', 'nothing more known: the reason alone');
+  t.is(enterFailText({}), 'no answer');
+  // netherHome's line has it too
+  const plain = portalWorld(true);
+  const r = await netherHome(downThere(plain, [{ x: -71, y: 64, z: 274, axis: 'x' }], {
+    enter: { ok: false, reason: 'timed out in the portal (20 s in it)', dimension: NETHER, position: { x: -70.5, y: 64, z: 274.5 }, inPortal: true, everInside: true }
+  }).ctx);
+  t.like(r, { ok: false, text: 'through the nearest portal at nether (-70, 64, 274): timed out in the portal (20 s in it) (at nether (-71, 64, 274), in the portal: yes, in it at all: yes)' });
 });
 
 test('leave nether: home through a portal; stranded, it says so once this time in and goes on trying (every 2 min)', async (t) => {

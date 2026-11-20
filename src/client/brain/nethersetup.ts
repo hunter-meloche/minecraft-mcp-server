@@ -41,7 +41,7 @@ import { putAway, stashKeep } from './chores.js';
 import { homePortal } from './portal.js';
 import { NETHER_BLOCKS, NETHER_TRIP, netherTripKit } from './mine.js';
 import {
-  NETHER, OVERWORLD, REFUSED_SPOTS, SEARCH, isFirePotion, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells,
+  NETHER, OVERWORLD, REFUSED_SPOTS, SEARCH, enterFailText, isFirePotion, linkedTo, netherBudgetMs, netherCheck, netherOf, netherPortalSpot, notePortals, peekNether, portalCells,
   scaled, spotFault, type PortalShape, type SetupSpot
 } from './nether.js';
 import { wearNetherHelmet } from './netherset.js';
@@ -915,7 +915,7 @@ export async function fetchSetupKit(ctx: GoalContext): Promise<string | undefine
 /** A portal as the bridge lists it. */
 export type Listed = PortalShape & { blocks?: number; own?: boolean; distance?: number };
 /** portal.enter's reply. */
-export interface Entered { ok?: boolean; reason?: string; dimension?: string; position?: Pos; block?: Pos; portal?: Pos | null; arrived?: Listed | null; stepped?: boolean }
+export interface Entered { ok?: boolean; reason?: string; dimension?: string; position?: Pos; block?: Pos; portal?: Pos | null; arrived?: Listed | null; stepped?: boolean; inPortal?: boolean; everInside?: boolean }
 
 export const listPortals = async (ctx: GoalContext, range = 96): Promise<Listed[]> =>
   (await ctx.call<{ portals?: Listed[] }>('portal.list', { range }).catch(() => ({ portals: [] as Listed[] }))).portals ?? [];
@@ -944,7 +944,8 @@ export async function enter(ctx: GoalContext, cell: Pos): Promise<Entered> {
   const r = await ctx.call<Entered>('portal.enter', { ...cell, timeoutMs: 60_000, ...(home ? { toward: { x: home.x, z: home.z } } : {}) }, 90_000)
     .catch((e: Error) => ({ ok: false, reason: e.message } as Entered));
   if (ctx.signal.aborted) throw new Error('aborted');
-  return r;
+  // a failure's reason carries where the bridge says it was (enterFailText): every caller says the reason
+  return r.ok ? r : { ...r, reason: enterFailText(r) };
 }
 
 /**
