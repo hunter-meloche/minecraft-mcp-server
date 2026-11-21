@@ -627,7 +627,8 @@ export type Verdict =
   /** `notes`: what once made a village someone's and no longer decides (version 4): a player seen, a marker, a build, a pen */
   | { kind: 'free'; why: string; area: Area; own: Zone[]; candidates: Seen[]; villagers: number; outposts: Zone[]; notes: string[] }
   | { kind: 'theirs'; why: string; area?: Area; rule: TheirsRule }
-  | { kind: 'wait'; why: string; area?: Area }
+  /** `unseen`: the wait is only for what the look did not see (not all of it, its bell): judgeOnWhole */
+  | { kind: 'wait'; why: string; area?: Area; unseen?: true }
   | { kind: 'none'; why: string };
 
 /** The village's area (pure): the box round its bell, beds, job sites and villagers, grown by AREA_GROW. */
@@ -668,7 +669,7 @@ export function coreMarks(look: Pick<VillageLook, 'bells' | 'beds' | 'jobs'>): P
 }
 
 /** How far a point is from an area, across the ground (0 inside). */
-export const offArea = (a: Area, p: { x: number; z: number }) => Math.hypot(Math.max(0, a.x1 - p.x, p.x - a.x2), Math.max(0, a.z1 - p.z, p.z - a.z2));
+export const offArea = (a: Pick<Area, 'x1' | 'z1' | 'x2' | 'z2'>, p: { x: number; z: number }) => Math.hypot(Math.max(0, a.x1 - p.x, p.x - a.x2), Math.max(0, a.z1 - p.z, p.z - a.z2));
 /** How far a zone is from an area, across the ground (0 where they meet). */
 const zoneOff = (a: Area, z: Zone) => Math.hypot(Math.max(0, a.x1 - z.x2, z.x1 - a.x2), Math.max(0, a.z1 - z.z2, z.z1 - a.z2));
 const at = (p: { x: number; y?: number; z: number }) => `(${Math.floor(p.x)}, ${p.y === undefined ? '' : `${Math.floor(p.y)}, `}${Math.floor(p.z)})`;
@@ -718,8 +719,49 @@ export function judgeVillage(look: VillageLook): Verdict {
   const villagers = look.seen.filter(e => e.name === 'villager' && isPos(e.position));
   const area = villageArea(look);
   if (!area || (!look.bells.length && !look.beds.length && !look.jobs.length && !villagers.length)) return { kind: 'none', why: 'no bell, bed, job site or villager there' };
-  const theirs = (why: string, rule: TheirsRule): Verdict => ({ kind: 'theirs', why, area, rule });
-  const wait = (why: string): Verdict => ({ kind: 'wait', why, area });
+  const wait = (why: string, unseen?: true): Verdict => ({ kind: 'wait', why, area, ...(unseen ? { unseen } : {}) });
+  const said = theirsOf(look, area, villagers);
+  if (said.theirs) return said.theirs;
+  const notes = said.notes;
+  // its own builds: those by its bell and the marks chained to it (without its bell seen, nothing tells them apart)
+  if (!look.bells.length) return wait('its bell not seen yet (every village has one at its meeting point)', true);
+  const builds = buildsBy(look, area, notes);
+  if (look.unread?.length) return wait(`${look.unread.join(' and ')} not read`);
+  if (look.looked.chunks < look.looked.of) return wait(`not all of it seen yet (${look.looked.chunks} of ${look.looked.of} chunks)`, true);
+  const danger = illagersBy(look, area);
+  if (danger) return wait(danger);
+  const inner = boxRound(builds.core)!;
+  const ours = villagers.filter(e => offArea(inner, e.position!) === 0);
+  if (ours.length < VILLAGE_MIN) return wait(`${ours.length} villager(s) seen${ours.length < villagers.length ? ` in it (${villagers.length - ours.length} more round it)` : ''}, ${VILLAGE_MIN} or more wanted`);
+  return freeWith(look, area, ours, builds, notes);
+}
+
+/**
+ * The judge on a move day whose look saw only part of the village (pure): `whole`, the area of a free word of today's
+ * judge given on a look that saw it whole, a few hours ago (railshome.ts FRESH_FREE). The judge's own word first: a
+ * village someone's on what this look saw (the spawn, two villagers used) stays someone's, and any wait but the unseen
+ * (not all of it seen, its bell not seen) stays a wait. Else what can change in hours is judged from this look alone:
+ * illagers by it (a wait), and the villagers it saw in the area seen whole, the unemployed adults among them the ones to
+ * take (as the judge picks them). Free, with that area joined to this look's.
+ */
+export function judgeOnWhole(look: VillageLook, whole: { x1: number; z1: number; x2: number; z2: number }): Verdict {
+  const v = judgeVillage(look);
+  if (v.kind !== 'wait' || !v.unseen || look.unread?.length || !v.area) return v;
+  const a = v.area;
+  const area: Area = { x1: Math.min(a.x1, whole.x1), z1: Math.min(a.z1, whole.z1), x2: Math.max(a.x2, whole.x2), z2: Math.max(a.z2, whole.z2), y1: a.y1, y2: a.y2 };
+  const villagers = look.seen.filter(e => e.name === 'villager' && isPos(e.position));
+  const said = theirsOf(look, area, villagers);
+  if (said.theirs) return said.theirs;
+  const builds = buildsBy(look, area, said.notes);
+  const danger = illagersBy(look, area);
+  if (danger) return { kind: 'wait', why: danger, area };
+  const ours = villagers.filter(e => offArea(whole, e.position!) === 0);
+  return freeWith(look, area, ours, builds, said.notes);
+}
+
+/** The judge's rules of someone's (pure): the spawn, a trading setup in use; and what no longer decides, noted. */
+function theirsOf(look: VillageLook, area: Area, villagers: readonly Seen[]): { theirs?: Verdict; notes: string[] } {
+  const theirs = (why: string, rule: TheirsRule): { theirs: Verdict; notes: string[] } => ({ theirs: { kind: 'theirs', why, area, rule }, notes: [] });
   if (look.spawn) {
     const d = offArea(area, look.spawn);
     if (d < SPAWN_CLEAR) return theirs(`within ${SPAWN_CLEAR} of the world spawn (${Math.round(d)} off)`, 'spawn');
@@ -739,9 +781,14 @@ export function judgeVillage(look: VillageLook): Verdict {
   const marks = Object.fromEntries(Object.entries(look.kinds).map(([n, c]) => [n, c - ominous(n)] as const).filter(([n, c]) => c > 0 && PLAYER_ONLY.test(n)));
   if (Object.keys(marks).length) notes.push(`a player's marks within ${MARKERS_NEAR}: ${list(marks)}`);
   if (used.length) notes.push(`a villager ${at(used[0].e.position!)} ${used[0].how} (not taken)`);
-  // its own builds: those by its bell and the marks chained to it (without its bell seen, nothing tells them apart)
+  return { notes };
+}
+
+interface Builds { core: Pos[]; own: Zone[]; outposts: Zone[] }
+
+/** The builds round the village (pure): its own (houses by its marks, outbuildings), the outposts, another build noted. */
+function buildsBy(look: VillageLook, area: Area, notes: string[]): Builds {
   const core = coreMarks(look);
-  if (!look.bells.length) return wait('its bell not seen yet (every village has one at its meeting point)');
   const surface = look.zones.filter(z => z.surface ?? true);
   const houses = surface.filter(z => core.some(m => zoneDistance(m, z) <= OWN_NEAR));
   const rest = surface.filter(z => !houses.includes(z));
@@ -753,14 +800,18 @@ export function judgeVillage(look: VillageLook): Verdict {
   // (an outpost within ZONES_NEAR is another build too: the game never puts one there, so one that near is a player's)
   const other = rest.filter(z => !own.includes(z)).map(z => ({ z, d: zoneOff(area, z) })).filter(x => x.d < ZONES_NEAR).sort((a, b) => a.d - b.d)[0];
   if (other) notes.push(`another build ${Math.round(other.d)} from it (x ${other.z.x1}..${other.z.x2}, z ${other.z.z1}..${other.z.z2}${other.z.sample ? `, ${other.z.sample}` : ''})`);
-  if (look.unread?.length) return wait(`${look.unread.join(' and ')} not read`);
-  if (look.looked.chunks < look.looked.of) return wait(`not all of it seen yet (${look.looked.chunks} of ${look.looked.of} chunks)`);
-  // (danger, not courtesy: illagers by it now, an outpost's or a patrol's, and the move waits for another day)
+  return { core, own, outposts };
+}
+
+/** Danger, not courtesy (pure): illagers by it now, an outpost's or a patrol's, and the move waits for another day. Said, or undefined. */
+function illagersBy(look: VillageLook, area: Area): string | undefined {
   const illagers = look.seen.filter(e => ILLAGER.test(e.name) && isPos(e.position) && offArea(area, e.position) < OUTPOST_CLEAR);
-  if (illagers.length) return wait(`${illagers.length} illager(s) about (a ${illagers[0].name} at ${at(illagers[0].position!)}): no move by pillagers`);
-  const inner = boxRound(core)!;
-  const ours = villagers.filter(e => offArea(inner, e.position!) === 0);
-  if (ours.length < VILLAGE_MIN) return wait(`${ours.length} villager(s) seen${ours.length < villagers.length ? ` in it (${villagers.length - ours.length} more round it)` : ''}, ${VILLAGE_MIN} or more wanted`);
+  return illagers.length ? `${illagers.length} illager(s) about (a ${illagers[0].name} at ${at(illagers[0].position!)}): no move by pillagers` : undefined;
+}
+
+/** The free word (pure): of `ours`, the villagers that may be taken, and why. */
+function freeWith(look: VillageLook, area: Area, ours: Seen[], b: Builds, notes: string[]): Verdict {
+  const { own, outposts } = b;
   const counts = { employed: 0, babies: 0, nitwits: 0, byJob: 0, used: 0, penned: 0, byOutpost: 0 };
   const candidates = ours.filter(e => {
     if (e.baby) { counts.babies++; return false; }

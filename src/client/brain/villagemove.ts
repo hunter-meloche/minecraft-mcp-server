@@ -96,7 +96,7 @@ export const VIEWPOINT_MS = 75_000;
 /** The look round a village: how far round its middle the bells, beds and villagers are looked for. */
 const LOOK = 96;
 /** The most extra places walked to for the scans to see all of a village. */
-const VIEWPOINTS = 4;
+export const VIEWPOINTS = 4;
 /**
  * The ground read on the walk out reaches this far under and over the yard's and the village's levels, for the rails'
  * plan (a hill the boat cannot cross is what they are for): one world.region a tile still (64 high at most).

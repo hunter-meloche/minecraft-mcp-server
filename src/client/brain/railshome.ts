@@ -4,13 +4,13 @@ import type { Zone } from './courtesy.js';
 import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
 import { FIRST_BOOST, HEAD, HOP, railBase, railRoom, shapeOf, type RailCell, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, footprint, planRoute, zoneNear, type BoatAt, type Entry } from './boatroute.js';
-import { HALL_FRESH, HALL_WANTS, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type VillageSite } from './village.js';
+import { HALL_FRESH, HALL_WANTS, JUDGE_V, joinAreas, judgeOnWhole, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type Verdict, type VillageLook, type VillageSite } from './village.js';
 import { prepare } from './project.js';
 import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
 import { MIN_WORK, inFence, outByGate, type WorkResult, type WorkTask } from './work.js';
 import { clock } from './idlelog.js';
 import {
-  BOAT_ITEM, BOAT_PACE, PLAYER_SIGHT, VIEWPOINT_MS, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, ridingOf, takeBoat, wayZones, wordOn, yieldNow,
+  BOAT_ITEM, BOAT_PACE, PLAYER_SIGHT, VIEWPOINTS, VIEWPOINT_MS, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, ridingOf, takeBoat, wayZones, wordOn, yieldNow,
   type Boat, type HallWay
 } from './villagemove.js';
 
@@ -63,6 +63,11 @@ export const MOVE_TRIES = 3;
  * each of them having opened the fence and walked the line.
  */
 export const MISSES = 4;
+/**
+ * A free word on the village seen whole this recently holds on a move day whose look saw only part of it (freshFree):
+ * the move day's run has the time for one or two viewpoints at most once out along the line.
+ */
+export const FRESH_FREE = 6 * 60 * 60_000;
 /** Runs a block of the line would not be reached for the take-up (not loaded, out of reach) before it is left, said. */
 export const UP_TRIES = 3;
 
@@ -305,6 +310,16 @@ export function railMoveNeedMs(line: RailLine, home: { x: number; z: number }): 
   return Math.round(2 * out / 3 * 1000) + LOOK_MS + PICKUP_MS + YARD_MS;
 }
 
+/**
+ * What a look-only day needs of the day, ms (pure): out to the head along the line and back at a walk, and the look
+ * round the village at its fullest (LOOK_MS and VIEWPOINTS walks of VIEWPOINT_MS). The rung's day check (work.ts
+ * lateFor) holds this against the daylight left, so such a day sets out early or waits for the next morning.
+ */
+export function railLookNeedMs(line: RailLine, home: { x: number; z: number }): number {
+  const out = Math.max(horiz(line.cells[0], home), (line.cells.length - line.yard) * 0.8);
+  return Math.round(2 * out / 3 * 1000) + LOOK_MS + VIEWPOINTS * VIEWPOINT_MS;
+}
+
 // ------------------------------------------------------------------------------------------------ the gates
 
 /** The village the line serves, as remembered now (read only), or undefined. */
@@ -360,6 +375,8 @@ export const railsTask: WorkTask = {
       const d = horiz(frontier(line), home);
       return [{ id: 'lay', dist: Math.round(d), needMs: Math.round(2 * d / 3 * 1000) + MIN_WORK.far }];
     }
+    // (no free word seen whole within FRESH_FREE: a look-only day first, early in the day: it needs the whole look round)
+    if (!freeToMove(world, line, s.now)) return [{ id: 'look', dist: Math.round(horiz(line.cells[0], home)), needMs: railLookNeedMs(line, home) }];
     return [{ id: 'move', dist: Math.round(horiz(line.cells[0], home)), needMs: railMoveNeedMs(line, home) }];
   },
   none: (s, world) => (!peekLine(world) ? { cause: 'unneeded', text: 'rails: no line to lay' }
@@ -388,6 +405,7 @@ export const railsTask: WorkTask = {
       if (variant === 'bill') return await billRun(ctx, line);
       if (variant === 'lay') return await layRun(ctx, line, clk);
       if (variant === 'move') return await moveRun(ctx, line, clk);
+      if (variant === 'look') return line.stage === 'whole' ? await lookRun(ctx, line, clk) : { gain: 0, text: `no look-only day with the line ${line.stage}`, untried: true };
       return { gain: 0, text: `no such step: ${variant}`, untried: true };
     } finally {
       if (line.run) line.run.end = now();
@@ -1035,9 +1053,12 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   // nothing touched, while the walk there, back to the pickup and the move after still fit the run. Nov 21, set out near
   // dusk, the run had no time for a viewpoint: 45 of 132 chunks of the west village seen from the line's end, a miss)
   const lookBy = (to?: { x: number; z: number }) => enough() || (!!to && clk.left() < moveRest(line, home) + VIEWPOINT_MS + horiz(to, line.pickup) / 3 * 1000);
-  const look = await lookVillage(ctx, { x: site.x, y: site.y, z: site.z }, clk.now(), lookBy);
-  const v = judgeVillage(look);
-  const kept = noteVerdict(world, site, look, v, clk.now());
+  // (the village's free word as it stood before this look: seen whole a few hours ago, it holds where today's look saw
+  // only part of it)
+  const before = freshFree(site, clk.now());
+  const { look, today, kept } = await judgeAgain(ctx, site, clk, lookBy);
+  const v = before && today.kind === 'wait' && today.unseen ? judgeOnWhole(look, before.area) : today;
+  if (v !== today && kept?.judged?.kind === 'free') say(ctx, `the village as judged free at ${clock(before!.judged.at)}Z (seen whole); today's look saw ${look.looked.chunks} of ${look.looked.of} chunks`);
   const word = wordOn(v, kept);
   if (v.kind === 'theirs' || word.kind === 'theirs') { giveUp(ctx, line, `the village at ${fmt(line.site)} is someone's: ${word.why}`); return { gain: 0, text: `the line given up: ${line.why}` }; }
   // (not all of it seen, its bell not seen, too little of it, illagers by it, a read that did not answer: the judge
@@ -1099,6 +1120,83 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   const follow = await followHome(ctx, line, took.id, clk);
   if (follow) return lostOut(ctx, line, follow);
   return intoHall(ctx, line, took.id, clk);
+}
+
+/**
+ * The look round the village and today's judge, its word kept on the site (noteVerdict), but for a wait only for what the
+ * look did not see (not all of it, its bell): that never overwrites a free word kept (fresh or not), which stays the
+ * site's with the time it was given (and ages past FRESH_FREE as ever). Live, Nov 21: the move days before this rule
+ * overwrote the west village's free word (seen whole at 04:28Z) with "not all of it seen yet (101 of 132 chunks)".
+ */
+async function judgeAgain(ctx: GoalContext, site: VillageSite, clk: Clk, lookBy: (to?: { x: number; z: number }) => boolean): Promise<{ look: VillageLook; today: Verdict; kept: VillageSite | undefined }> {
+  const was = site.judged?.kind === 'free' ? { judged: { ...site.judged }, area: site.area ? { ...site.area } : undefined } : undefined;
+  const look = await lookVillage(ctx, { x: site.x, y: site.y, z: site.z }, clk.now(), lookBy);
+  const today = judgeVillage(look);
+  const kept = noteVerdict(ctx.world, site, look, today, clk.now());
+  if (was && today.kind === 'wait' && today.unseen && kept?.judged?.kind === 'wait') {
+    kept.judged = was.judged;
+    if (was.area) kept.area = joinAreas(kept.area, was.area);
+  }
+  return { look, today, kept };
+}
+
+/**
+ * A look-only day (the `look` variant: the line whole, the village with no free word seen whole within FRESH_FREE): out
+ * of the yard by its gate and along the line to the pickup (the yard's stretch not laid, the fence's post not opened:
+ * nothing of the move), the look round the village with all the run's time but the walk home along the line, and its
+ * word kept. Free: the next move day goes on it (fresh). Someone's: the line given up. Still not seen whole, or another
+ * wait: not made today, neither a miss nor a stop. No villager to take in a village seen whole: a miss, as on a move day.
+ */
+async function lookRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkResult> {
+  const counted = await countHall(ctx, clk.now());
+  if (counted !== undefined && counted >= HALL_WANTS) { giveUp(ctx, line, `the hall has ${counted} villagers already`); return { gain: 0, text: `the line given up: ${line.why}`, mark: 'forget' }; }
+  const zone = await zonesOnLine(ctx, line);
+  if (zone === 'unread') return { gain: 0, text: 'not setting out to look at the village: the builds round the line not read', untried: true };
+  if (zone) { giveUp(ctx, line, zone); return { gain: 0, text: `the line given up: ${zone}`, mark: 'forget' }; }
+  const g = goalOf(line);
+  const gate = await outByGate(ctx, line.cells[g]);
+  if (gate.shut) return notToday(ctx, line, `not out of the yard: ${gate.shut}`);
+  const walked = await alongLine(ctx, line, g, 0, clk);
+  if (walked.stop) return notToday(ctx, line, walked.stop, walked.late || walked.off);
+  await walkTo(ctx, line.pickup, 3);
+  const site = siteFor(villagesOf(ctx.world).sites, line.site);
+  if (!site) { giveUp(ctx, line, `the village at ${fmt(line.site)} is no longer known`); return { gain: 0, text: `the line given up: ${line.why}` }; }
+  const home = ctx.s.home ?? ctx.s.position;
+  // (the run's whole time for the look, but the walk home along the line from where it ends)
+  const back = (from: { x: number; z: number }) => (horiz(from, line.pickup) + Math.max(horiz(line.cells[0], home), line.cells.length - line.yard)) / 3 * 1000 + MARGIN;
+  const lookBy = (to?: { x: number; z: number }) => clk.left() < back(line.pickup) || (!!to && clk.left() < back(to) + VIEWPOINT_MS);
+  const { look, today: v, kept } = await judgeAgain(ctx, site, clk, lookBy);
+  const word = wordOn(v, kept);
+  const seen = `${look.looked.chunks} of ${look.looked.of} chunks seen`;
+  say(ctx, `a look-only day at the village at ${fmt(line.site)} (${seen}): ${word.kind}: ${word.why}`);
+  if (v.kind === 'theirs' || word.kind === 'theirs') { giveUp(ctx, line, `the village at ${fmt(line.site)} is someone's: ${word.why}`); return { gain: 0, text: `the line given up: ${line.why}` }; }
+  if (v.kind === 'wait') return notToday(ctx, line, `the village not judged free today: ${v.why}`, true);
+  if (v.kind !== 'free') return notToday(ctx, line, `the village not judged free today: ${v.why}`, 'miss');
+  if (!v.candidates.length) return notToday(ctx, line, `the village judged free, but no unemployed villager in it to take: ${v.why}`, 'miss');
+  clean(line);
+  const text = `the village at ${fmt(line.site)} looked at whole and judged free (${seen}): ${v.why}; the move on the next move day`;
+  return { gain: 0, text, mark: 'same' };
+}
+
+/** Whether the move day has a free word on the village to go on (pure, the gates' and the variants'): seen whole within FRESH_FREE. */
+const freeToMove = (world: WorldMemory, line: RailLine, now: number): boolean => {
+  const site = siteNowOf(world, line);
+  return !!site && !!freshFree(site, now);
+};
+
+/**
+ * The village's free word of today's judge (JUDGE_V), given on a look that saw it whole (the judge says free of no other)
+ * less than FRESH_FREE ago, and the area it saw, or undefined. Live, Nov 21: the west village seen whole and judged free
+ * at 04:28Z (relook) and on the move days at 06:15 and 06:47Z; the move day of 09:05Z had the time for one viewpoint (42
+ * of 121 chunks seen), and waited on "not all of it seen yet (101 of 132 chunks)". A village does not change in a few
+ * hours but by what the move day's own look reads afresh: its villagers (the ones to take are the ones it saw), illagers
+ * by it, a player by the bot or it now (toPickup's look), and two villagers used (someone's at once).
+ */
+function freshFree(site: VillageSite, now: number): { judged: NonNullable<VillageSite['judged']>; area: NonNullable<VillageSite['area']> } | undefined {
+  const j = site.judged, a = site.area;
+  if (!j || j.kind !== 'free' || typeof j.v !== 'number' || j.v < JUDGE_V || !Number.isFinite(j.at) || now - j.at >= FRESH_FREE || now < j.at) return undefined;
+  if (!a || ![a.x1, a.z1, a.x2, a.z2].every(Number.isFinite)) return undefined;
+  return { judged: { ...j }, area: { x1: a.x1, z1: a.z1, x2: a.x2, z2: a.z2 } };
 }
 
 /** What of the run the move still needs once at the village: the hop and the start, home along the line, the yard. */

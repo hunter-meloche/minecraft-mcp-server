@@ -11,7 +11,7 @@ import { pick, workTick } from '../../src/client/brain/work.js';
 import { closeUpGoal } from '../../src/client/brain/villagemove.js';
 import { JUDGE_V, peekVillages } from '../../src/client/brain/village.js';
 import {
-  MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, railsTick, railsYardOpen, shapeWith, startLine, stepAt, yardSteps, type RailLine
+  FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, railsTick, railsYardOpen, shapeWith, startLine, stepAt, yardSteps, type RailLine
 } from '../../src/client/brain/railshome.js';
 
 /**
@@ -1224,6 +1224,12 @@ const BUDGET_TIGHT = 6 * MINUTE;
 const wideVillage = (land: Field) => {
   land.marks.push({ name: 'white_bed', at: { x: -650, y: 63, z: 2040 } }, { name: 'white_bed', at: { x: -650, y: 63, z: 1960 } });
 };
+/** The village's free word (seen whole) given `ago` before the field's clock now. */
+const judgedAgo = (world: WorldMemory, land: Field, ago: number) => {
+  const s = world.villages!.sites[0];
+  s.judged = { ...s.judged!, kind: 'free', v: JUDGE_V, at: land.t - ago };
+  return s.judged.at;
+};
 
 test('the move day looks round the village as relook does (Nov 21: 45 of 132 chunks seen from the line\'s end, a miss): on to its viewpoints, carefully, judged free, back to the pickup, and the move goes on', async (t) => {
   const { world, line } = lineWorld('laying');
@@ -1246,6 +1252,7 @@ test('a move day whose look waits (not all of the village seen, even from its vi
     const land = new Field(world, { scanSight: 8 });
     wideVillage(land);
     await laidWhole(land, line);
+    judgedAgo(world, land, FRESH_FREE + HOUR);
     line.misses = 3;
     const r = await run(land, 'move', 20 * MINUTE);
     t.regex(r.text, /^the move not made today: the village not judged free today: not all of it seen yet \(\d+ of \d+ chunks\)/);
@@ -1253,7 +1260,8 @@ test('a move day whose look waits (not all of the village seen, even from its vi
     t.falsy(line.stops);
     t.is(r.mark, 'same');
     t.false(land.log.some(l => /^boat down|^cart on/.test(l)));
-    t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['move']);
+    // (the free word older than FRESH_FREE: the next day of it is a look-only day)
+    t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['look']);
   }
   {
     // (the live case, Nov 21: set out near dusk, the run's time left at the line's end held the move but no viewpoint)
@@ -1262,6 +1270,7 @@ test('a move day whose look waits (not all of the village seen, even from its vi
     wideVillage(land);
     await laidWhole(land, line);
     land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+    judgedAgo(world, land, FRESH_FREE + HOUR);
     line.misses = 3;
     const said0 = land.said.length;
     const r = await run(land, 'move', BUDGET_TIGHT);
@@ -1281,6 +1290,123 @@ test('a move day whose look waits (not all of the village seen, even from its vi
   t.regex(r.text, /^the move not made: no unemployed villager the judge allows in the village/);
   t.like(line, { stage: 'whole', misses: 1 });
   t.falsy(line.stops);
+});
+
+/** The live case of Nov 21 09:05Z: a move day out near dusk, the look from the line's end sees only part of the village. */
+async function partialDay(ago: number, setup: (land: Field) => void = () => undefined) {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { scanSight: 48 });
+  wideVillage(land);
+  await laidWhole(land, line);
+  land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  const at = judgedAgo(world, land, ago);
+  line.misses = 2;
+  setup(land);
+  const said0 = land.said.length;
+  const log0 = land.log.length;
+  const r = await run(land, 'move', BUDGET_TIGHT);
+  return { world, line, land, at, r, said: land.said.slice(said0), did: land.log.slice(log0) };
+}
+
+test('a move day whose look sees only part of the village goes on with its free word seen whole less than FRESH_FREE ago (Nov 21: 42 of 121 chunks, then 101 of 132): the villagers this look saw, the hop and the cart; the word kept as it was', async (t) => {
+  const { world, line, at, r, said, did } = await partialDay(2 * HOUR);
+  const hhmm = new Date(at).toISOString().slice(11, 16);
+  t.true(said.some(l => new RegExp(`^rails: the village as judged free at ${hhmm}Z \\(seen whole\\); today's look saw \\d+ of \\d+ chunks$`).test(l)), said.join('\n'));
+  t.true(said.some(l => /^rails: the village at \(-572, 63, 2000\) is free to take from: \d+ villagers, \d+ unemployed adult\(s\) to take/.test(l)), said.join('\n'));
+  t.true(did.some(l => /^cart took villager \d+, home to the brake/.test(l)), did.join(' | '));
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home/);
+  t.falsy(line.stops);
+  // (the partial look's wait never written over the word seen whole: it ages past FRESH_FREE as ever)
+  t.like(peekVillages(world).sites[0].judged, { kind: 'free', at, v: JUDGE_V });
+});
+
+test('a move day whose look sees only part of the village, its free word older than FRESH_FREE: not made today, neither a miss nor a stop', async (t) => {
+  const { line, r, said, did } = await partialDay(FRESH_FREE + 10 * MINUTE);
+  t.false(said.some(l => /as judged free at/.test(l)), said.join('\n'));
+  t.regex(r.text, /^the move not made today: the village not judged free today: not all of it seen yet \(\d+ of \d+ chunks\)/);
+  t.is(r.mark, 'same');
+  t.like(line, { stage: 'whole', misses: 2 });
+  t.falsy(line.stops);
+  t.false(did.some(l => /^boat down|^cart on/.test(l)));
+});
+
+test('a move day\'s look that sees only part of the village never writes its wait over a free word kept, fresh or not', async (t) => {
+  const { world, at, r } = await partialDay(FRESH_FREE + 10 * MINUTE);
+  t.regex(r.text, /^the move not made today: the village not judged free today: not all of it seen yet/);
+  t.like(peekVillages(world).sites[0].judged, { kind: 'free', at, v: JUDGE_V });
+});
+
+/** The village's word a wait (the live one of Nov 21 09:06Z, written over the free word by a move day before the fix). */
+const waitKept = (world: WorldMemory, land: Field) => {
+  const s = world.villages!.sites[0];
+  s.judged = { at: land.t - HOUR, kind: 'wait', why: 'not all of it seen yet (101 of 132 chunks)', v: JUDGE_V };
+};
+
+test('no free word seen whole within FRESH_FREE (a wait kept): the rung takes a look-only day (early: it needs the whole look round), which walks the viewpoints, nothing of the move laid; free kept, the next run is the move and moves', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { scanSight: 48 });
+  wideVillage(land);
+  await laidWhole(land, line);
+  land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  waitKept(world, land);
+  line.misses = 2;
+  const vs = railsTask.variants(snap(KIT(), { now: land.t }), world);
+  t.deepEqual(vs.map(v => v.id), ['look']);
+  const laid0 = line.laid.length;
+  const said0 = land.said.length;
+  const log0 = land.log.length;
+  const r = await run(land, 'look', 12 * MINUTE);
+  const said = land.said.slice(said0);
+  t.true(said.some(l => /looking round the village from/.test(l)), said.join('\n'));
+  t.true(said.some(l => /^rails: a look-only day at the village at \(-572, 63, 2000\) \((\d+) of \1 chunks seen\): free: /.test(l)), said.join('\n'));
+  t.regex(r.text, /^the village at \(-572, 63, 2000\) looked at whole and judged free/);
+  t.is(r.mark, 'same');
+  t.like(line, { stage: 'whole', misses: 2 });
+  t.falsy(line.yardOpen);
+  t.is(line.laid.length, laid0);
+  t.false(land.log.slice(log0).some(l => /^boat down|^cart on/.test(l)));
+  const judged = peekVillages(world).sites[0].judged!;
+  t.like(judged, { kind: 'free', v: JUDGE_V });
+  t.true(land.t - judged.at < FRESH_FREE);
+  // the next run: the move, on the free word kept (fresh)
+  t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['move']);
+  land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  const m = await run(land, 'move', BUDGET_TIGHT);
+  t.regex(m.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home/);
+});
+
+test('a look-only day that still cannot see the village whole: not made today, neither a miss nor a stop; the wait kept, the next day a look-only day again', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { scanSight: 8 });
+  wideVillage(land);
+  await laidWhole(land, line);
+  waitKept(world, land);
+  line.misses = 2;
+  const r = await run(land, 'look', 12 * MINUTE);
+  t.true(land.said.some(l => /^rails: a look-only day at the village at \(-572, 63, 2000\) \(\d+ of \d+ chunks seen\): wait: not all of it seen yet/.test(l)));
+  t.regex(r.text, /^the move not made today: the village not judged free today: not all of it seen yet/);
+  t.is(r.mark, 'same');
+  t.like(line, { stage: 'whole', misses: 2 });
+  t.falsy(line.stops);
+  t.falsy(line.yardOpen);
+  t.is(peekVillages(world).sites[0].judged?.kind, 'wait');
+  t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['look']);
+});
+
+test('a move day whose partial look sees two villagers named: someone\'s, the line given up, whatever its fresh free word', async (t) => {
+  const { line, r, did } = await partialDay(2 * HOUR, land => { for (const v of land.villagers) if (v.id === 101 || v.id === 106) v.named = true; });
+  t.regex(r.text, /^the line given up: the village at \(-572, 63, 2000\) is someone's: 2 villagers used by a player/);
+  t.is(line.stage, 'taking up');
+  t.false(did.some(l => /^boat down|^cart on/.test(l)));
+});
+
+test('a move day whose partial look goes on with the fresh free word, a player within 32 of the village: not made today, neither a miss nor a stop', async (t) => {
+  const { line, r, said, did } = await partialDay(2 * HOUR, land => { land.players = [{ id: 9, name: 'player', position: { x: -590.5, y: 63, z: 2000.5 } }]; });
+  t.true(said.some(l => /as judged free at/.test(l)), said.join('\n'));
+  t.regex(r.text, /^the move not made today: a player at \(-591, 63, 2000\), \d+ from the (bot|village): no villager taken this run/);
+  t.like(line, { stage: 'whole', misses: 2 });
+  t.falsy(line.stops);
+  t.false(did.some(l => /^boat down|^cart on/.test(l)));
 });
 
 test('a hop that cannot reach the pickup (the boat stopped on the way): driven back to where it came down, the villager let out there in its village, the boat taken up, the line kept whole (a miss)', async (t) => {
