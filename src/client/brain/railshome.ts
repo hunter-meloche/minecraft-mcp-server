@@ -4,13 +4,13 @@ import type { Zone } from './courtesy.js';
 import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
 import { FIRST_BOOST, HEAD, HOP, railBase, railRoom, shapeOf, type RailCell, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, zoneNear, type Entry } from './boatroute.js';
-import { HALL_FRESH, HALL_WANTS, JUDGE_V, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type VillageSite } from './village.js';
+import { HALL_FRESH, HALL_WANTS, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type VillageSite } from './village.js';
 import { prepare } from './project.js';
 import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
 import { MIN_WORK, inFence, outByGate, type WorkResult, type WorkTask } from './work.js';
 import { clock } from './idlelog.js';
 import {
-  BOAT_ITEM, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, takeBoat, wordOn, type Boat, type HallWay
+  BOAT_ITEM, PLAYER_SIGHT, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, takeBoat, wordOn, type Boat, type HallWay
 } from './villagemove.js';
 
 /**
@@ -1049,7 +1049,7 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
     if (sky?.raining || sky?.thundering) return notToday(ctx, line, 'it began to rain: no villager is moved in the rain', true);
     const pick = await toPickup(ctx, line, v.candidates, look.jobs, clk.now());
     if ('why' in pick) {
-      if (pick.player) { giveUp(ctx, line, pick.why); return { gain: 0, text: `the line given up: ${pick.why}` }; }
+      if (pick.player) return notToday(ctx, line, pick.why, true);
       // (none near the fixed pickup today: villagers wander a village 60 across; a miss, not a stop)
       if (!missed) return notToday(ctx, line, pick.why, 'miss');
       break;
@@ -1163,20 +1163,17 @@ async function fenceAsPlanned(ctx: GoalContext, line: RailLine): Promise<string 
 /**
  * An unemployed villager the judge allows, near the pickup, taken onto it by boat (the plan's hop: straight, on the
  * ground as read now), the bot out and the boat broken back into its item: the villager stands on the pickup's rail.
- * `player`: a player came by (the village is someone's now, for good).
+ * `player`: a player within PLAYER_NOW of the bot or the village (villagemove.ts playerNow): no move this run.
  */
 async function toPickup(ctx: GoalContext, line: RailLine, candidates: readonly Seen[], jobs: readonly { at: Pos }[], now: number): Promise<{ e: Seen } | { why: string; player?: true }> {
   const p = line.pickup;
   const mid = { x: p.x + 0.5, z: p.z + 0.5 };
   const g = new Ground(p.y - MAX_DROP - 3, 12);
   await g.read(ctx, p.x - HOP - 4, p.z - HOP - 4, p.x + HOP + 4, p.z + HOP + 4);
-  const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 64 }).catch(() => undefined))?.entities ?? [];
-  const player = round.find(x => x.name === 'player' && x.position);
-  if (player) {
-    const site = siteFor(villagesOf(ctx.world).sites, line.site);
-    if (site) site.judged = { at: now, kind: 'theirs', why: `a player came by at ${fmt(player.position!)} as the bot was about to take a villager`, rule: 'player', v: JUDGE_V };
-    return { why: `a player came by at ${fmt(player.position!)}: the village is someone's, left alone`, player: true };
-  }
+  const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities ?? [];
+  // (a player by the bot or the village right now: no move this run, the village still free)
+  const player = playerNow(round, (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position, siteFor(villagesOf(ctx.world).sites, line.site)?.area);
+  if (player) return { why: `${player}: no villager taken this run`, player: true };
   const ids = new Set(candidates.map(c => c.id));
   const order = round.filter(e => e.name === 'villager' && e.position && ids.has(e.id) && !notFree(e, jobs) && horiz(e.position, mid) <= HOP + 2)
     .sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid));

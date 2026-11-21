@@ -907,7 +907,7 @@ export class Brain {
       call: <T>(m: string, p?: Record<string, unknown>, t?: number) => {
         const r = this.rt.call<T>(m, p, t);
         // every look round a run makes, remembered for the villages' judge: the players seen anywhere in the
-        // overworld (a village within 64 of one is someone's), and villagers out in the world (village.ts noteSeen)
+        // overworld (the judge notes one seen by a village), and villagers out in the world (village.ts noteSeen)
         if (m === 'world.entities') {
           r.then(x => this.measure('villages', () => {
             const seen = (x as { entities?: Seen[] } | undefined)?.entities;

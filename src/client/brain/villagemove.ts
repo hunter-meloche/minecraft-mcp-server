@@ -13,8 +13,8 @@ import { chestTotals } from './chests.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
 import { noteHall } from './hallchores.js';
 import {
-  AREA_GROW, HALL_FRESH, HALL_WANTS, ILLAGER, JOB_SITE, JUDGE_V, MARKERS_NEAR, OUTPOST_CLEAR, VILLAGE_MARK, VILLAGE_RANGE, VILLAGE_REACH, ZONES_NEAR, byJobSite, joinAreas, judgeVillage,
-  knownVillage, movesOn, noteSeen, noteVillage, peekVillages, pennedIn, reachOf, rejudge, siteNow, siteOf, siteOpen, variantOf, villageArea, villagesOf,
+  AREA_GROW, HALL_FRESH, HALL_WANTS, ILLAGER, JOB_SITE, JUDGE_V, MARKERS_NEAR, OUTPOST_CLEAR, PLAYER_NOW, VILLAGE_MARK, VILLAGE_RANGE, VILLAGE_REACH, ZONES_NEAR, byJobSite, joinAreas, judgeVillage,
+  knownVillage, movesOn, noteSeen, noteVillage, peekVillages, pennedIn, reachOf, rejudge, siteNow, siteOf, siteOpen, usedHow, variantOf, villageArea, villagesOf,
   type LookZone, type Seen, type Verdict, type VillageLook, type VillageSite
 } from './village.js';
 
@@ -434,8 +434,8 @@ function split(at: { x: number; y: number; z: number; name: string }[]): Pick<Vi
 export function noteVerdict(world: WorldMemory, site: VillageSite, look: VillageLook, v: Verdict, now: number): VillageSite | undefined {
   const counts = { bells: look.bells.length, beds: look.beds.length, jobs: look.jobs.length, villagers: look.seen.filter(e => e.name === 'villager').length };
   const w = villagesOf(world);
-  // (the run's own site, or the one a fold took it into as the look went round (a player seen by another site of the
-  // village makes that one someone's, and the fold takes this one into it): that one's word is this village's. Else
+  // (the run's own site, or the one a fold took it into as the look went round (another site of the village, noted
+  // from its villagers, judged someone's before, and the fold takes this one into it): that one's word is this village's. Else
   // the site as it was by its place, moved to its bell: not another one made beside it)
   const own = siteNow(w.sites, site) ?? w.sites.find(q => q.x === site.x && q.z === site.z);
   if (v.kind === 'none') {
@@ -445,17 +445,16 @@ export function noteVerdict(world: WorldMemory, site: VillageSite, look: Village
     return undefined;
   }
   const kept = own ?? noteVillage(world, look.bells[0] ?? site, counts, now);
-  // (someone's on it already stays someone's: a player seen as the look went round writes that for good (noteSeen), and
-  // a fold may have made the village's someone's site the one found here; the judge's narrower word does not undo it,
-  // and the ground it covered stays its as it moves to the bell and takes the judge's area. But for an older judge's
-  // word today's may undo (rejudge: another build, white banners alone), which this verdict replaces, area and all)
+  // (someone's on it already stays someone's: a fold may have made the village's someone's site the one found here;
+  // the judge's narrower word does not undo it, and the ground it covered stays its as it moves to the bell and takes
+  // the judge's area. But for an older judge's word today's may undo (rejudge: another build, a player's marker or
+  // banner, a player seen, a villager penned in), which this verdict replaces, area and all)
   const held = kept.judged?.kind === 'theirs' && !rejudge(kept) ? reachOf(kept) : undefined;
   const was = held && v.kind !== 'theirs' ? kept.judged : undefined;
   const bell = look.bells[0];
   if (bell) { kept.x = bell.x; kept.y = bell.y; kept.z = bell.z; }
-  // (today's judge's word for good, but a word of someone's on what the look could not read whole: judged again later)
-  const sure = !(v.kind === 'theirs' && v.sure === false);
-  const judged: NonNullable<VillageSite['judged']> = { at: now, kind: v.kind, why: v.why.slice(0, 160), ...(v.kind === 'theirs' ? { rule: v.rule } : {}), ...(sure ? { v: JUDGE_V } : {}) };
+  // (today's judge's word, with its version)
+  const judged: NonNullable<VillageSite['judged']> = { at: now, kind: v.kind, why: v.why.slice(0, 160), ...(v.kind === 'theirs' ? { rule: v.rule } : {}), v: JUDGE_V };
   Object.assign(kept, counts, { seenAt: now, judged: was ?? judged });
   const area = v.area ? { x1: v.area.x1, z1: v.area.z1, x2: v.area.x2, z2: v.area.z2 } : undefined;
   if (area || held) kept.area = held ? joinAreas(area, held) : area;
@@ -575,14 +574,14 @@ async function walkOut(ctx: GoalContext, from: { x: number; z: number }, site: V
 
 /**
  * A village judged someone's by an older judge for a reason today's may undo (village.ts rejudge: another build by it,
- * or white banners alone, each maybe an ominous one) is looked at and judged again, once: out to it a leg at a time
+ * a player's marker or banner, a player seen, a villager penned in) is looked at and judged again, once: out to it a leg at a time
  * (by the gate that way), the look round it, today's judge, its word kept for good (JUDGE_V). Free, the move is the
  * next run's. No villager is touched, nothing is carried for a move.
  */
 async function relook(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<WorkResult> {
   const { now, enough } = clk;
   const was = site.judged?.why ?? '';
-  say(ctx, `to the village at ${fmt(site)} to judge it again (someone's to the judge before Nov 17: ${was})`);
+  say(ctx, `to the village at ${fmt(site)} to judge it again (someone's to an older judge: ${was})`);
   const gate = await outByGate(ctx, site);
   if (gate.shut) return { gain: 0, text: `the village at ${fmt(site)} not judged again: ${gate.shut}`, untried: true };
   const stopped = await walkOut(ctx, gate.at ?? await here(ctx), site, enough);
@@ -597,12 +596,11 @@ async function relook(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<
   // (nothing of it seen from there: its old word stands until a look that sees it)
   const text = v.kind === 'none' ? `nothing of the village at ${fmt(site)} seen to judge it again (${v.why}): its word stands, looked at again later`
     : `judged the village at ${fmt(site)} again (was someone's: ${was}): ${word.kind === 'free' ? `free (${word.why}): ${tooFarWord(horiz(site, ctx.s.home ?? ctx.s.position)) ?? 'the move next run'}`
-      : word.kind === 'theirs' ? `someone's, left alone: ${word.why}${v.kind === 'theirs' && v.sure === false ? ' (not all of it read: judged again later)' : ''}` : word.why}`;
+      : word.kind === 'theirs' ? `someone's, left alone: ${word.why}` : word.why}`;
   say(ctx, text);
-  // (judged: its word stands, and the move, if any, is the next run's. Nothing seen there, or someone's on what was not
-  // all read: tried again later, the longer each time)
-  const again = v.kind === 'none' || (v.kind === 'theirs' && v.sure === false);
-  return { gain: 0, text, ...(again ? {} : { mark: 'first' as const }) };
+  // (judged: its word stands, and the move, if any, is the next run's. Nothing seen there: tried again later, the
+  // longer each time)
+  return { gain: 0, text, ...(v.kind === 'none' ? {} : { mark: 'first' as const }) };
 }
 
 // ------------------------------------------------------------------------------------------------ the move
@@ -793,13 +791,20 @@ async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promis
   const word = wordOn(v, kept);
   if (v.kind === 'theirs' || word.kind === 'theirs') {
     say(ctx, `the village at ${fmt(site)} is someone's, left alone: ${word.why}`);
-    // (someone's on what the look could not read whole: judged again later, after the dry mark's wait)
-    return { gain: 0, text: `left the village at ${fmt(site)} alone: ${word.why}`, ...(v.kind === 'theirs' && v.sure === false ? {} : { mark: 'forget' as const }) };
+    return { gain: 0, text: `left the village at ${fmt(site)} alone: ${word.why}`, mark: 'forget' };
   }
   if (v.kind === 'none') return forgotten;
   if (v.kind === 'wait') return { gain: 0, text: `the village at ${fmt(site)}: ${v.why}` };
   say(ctx, `the village at ${fmt(site)} is free to take from: ${v.why}`);
   if (!v.candidates.length) return { gain: 0, text: `no villager to take at ${fmt(site)}: ${v.why}` };
+  // (a player by the bot or the village right now: nothing done this run, the village still free. Looked at again just
+  // before the boat goes down, too)
+  const by = playerNow((await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities ?? [], await here(ctx), v.area);
+  if (by) {
+    const text = `no villager taken at ${fmt(site)} this run: ${by}`;
+    say(ctx, text);
+    return { gain: 0, text };
+  }
   // its ground, for the boat's first legs out of it; the way home keeps off every build but its own
   await ground.read(ctx, Math.max(v.area.x1, Math.floor(target.x) - READ_NEAR), Math.max(v.area.z1, Math.floor(target.z) - READ_NEAR),
     Math.min(v.area.x2, Math.floor(target.x) + READ_NEAR), Math.min(v.area.z2, Math.floor(target.z) + READ_NEAR));
@@ -980,8 +985,30 @@ export function notFree(e: Seen, jobs: readonly { at: Pos }[]): string {
   if (e.named) return 'is named';
   if (e.vehicle) return `rides a ${e.vehicle}`;
   if (e.leashed) return 'is on a lead';
+  // (traded with since: a player's)
+  const used = usedHow(e);
+  if (used) return used;
   if (byJobSite(e, jobs)) return 'stands by a job site';
   return '';
+}
+
+/** How far round the bot a look for players at move time reaches (a village's area is up to some 100 across). */
+export const PLAYER_SIGHT = 128;
+
+/**
+ * A player within PLAYER_NOW of the bot or of the village's area right now (pure): what is said of it, or undefined.
+ * The judge no longer makes a village someone's for a player seen by it (the user's word of Nov 20: "A player utilizing
+ * it should know to give them some distance"), but nothing is taken with one standing by.
+ */
+export function playerNow(seen: readonly Seen[], me: { x: number; z: number }, area?: { x1: number; z1: number; x2: number; z2: number }): string | undefined {
+  for (const e of seen) {
+    if (e.name !== 'player' || !e.position) continue;
+    const d = horiz(e.position, me);
+    if (d <= PLAYER_NOW) return `a player at ${fmt(e.position)}, ${Math.round(d)} from the bot`;
+    const off = area ? Math.hypot(Math.max(0, area.x1 - e.position.x, e.position.x - area.x2), Math.max(0, area.z1 - e.position.z, e.position.z - area.z2)) : Infinity;
+    if (off <= PLAYER_NOW) return `a player at ${fmt(e.position)}, ${Math.round(off)} from the village`;
+  }
+  return undefined;
 }
 
 const secs = (ms: number) => Math.max(0, Math.round(ms / 1000));
@@ -1035,14 +1062,11 @@ async function boatHome(ctx: GoalContext, t: Trip): Promise<WorkResult> {
       if (sky?.raining || sky?.thundering) return await giveUp('it began to rain: no villager is taken in the rain');
       await ctx.call('goto', { ...under(e.position!), y: Math.floor(e.position!.y), range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
       // looked at again just before: where the villager is now, and whether a player has come by since the judge's look
-      // (a village a player is seen within 64 of is someone's: left alone, and for good)
-      const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 64 }).catch(() => undefined))?.entities ?? [];
+      // (one within PLAYER_NOW of the bot or the village: nothing taken this run, the village still free)
+      const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities ?? [];
       noteSeen(world, round, now(), ctx.s.dimension);
-      const player = round.find(x => x.name === 'player' && x.position);
-      if (player) {
-        site.judged = { at: now(), kind: 'theirs', why: `a player came by at ${fmt(player.position!)} as the bot was about to take a villager`, rule: 'player', v: JUDGE_V };
-        return await giveUp(`a player came by at ${fmt(player.position!)}: the village is someone's, left alone`);
-      }
+      const player = playerNow(round, await here(ctx), site.area);
+      if (player) return await giveUp(`${player}: no villager taken this run`);
       const fresh = round.find(x => x.id === e.id && x.name === 'villager');
       if (!fresh?.position) return await giveUp(`the villager (${e.id}) went out of sight`);
       e = fresh;

@@ -472,32 +472,55 @@ test('the courtesy judge: the live village is free, and of its seven only the tw
   t.deepEqual(v.area, { x1: -594, z1: 1842, x2: -517, z2: 1914, y1: 39, y2: 87 });
 });
 
-test('the courtesy judge: someone\'s, and left alone, for each of the plan\'s rules', (t) => {
+test('the courtesy judge since Nov 20: someone\'s only near the spawn or with a trading setup in use (two villagers named, traded with, on a lead or riding); a pen, a player seen, a sign, another build are noted, the village free', (t) => {
   const theirs = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'theirs' ? v.why : `not theirs: ${v.kind} ${v.why}`; };
+  const free = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'free' ? v : undefined; };
+  // two villagers named: a setup in use, someone's
   const named = VILLAGERS();
   named[3] = { ...named[3], named: true, customName: 'Bob' };
-  t.is(theirs(freeLook({ seen: named })), 'a villager (-546, 63, 1872) is named (Bob)');
-  const riding = VILLAGERS();
-  riding[1] = { ...riding[1], vehicle: 'minecart', vehicleId: 7 };
-  t.is(theirs(freeLook({ seen: riding })), 'a villager (-567, 63, 1878) rides a minecart');
-  t.is(theirs(freeLook({ penned: new Set([105]) })), 'a villager (-541, 63, 1882) is penned in (it can walk to fewer than 24 cells)');
-  // what only a player puts down, in it or within 16: a sign, a rail, redstone, a portal
-  for (const [kind, n] of [['oak_sign', 1], ['rail', 6], ['redstone_wire', 3], ['repeater', 1], ['nether_portal', 6], ['spruce_wall_hanging_sign', 1], ['white_concrete', 40]] as const) {
-    t.is(theirs(freeLook({ kinds: { ...freeLook().kinds, [kind]: n } })), `what only a player puts down in it or within 16: ${kind} x${n}`);
+  named[0] = { ...named[0], named: true };
+  t.is(theirs(freeLook({ seen: named })), '2 villagers used by a player: (-557, 63, 1890) is named, (-546, 63, 1872) is named (Bob)');
+  // two traded with (above level 1, or with trade xp where reported)
+  const traded = VILLAGERS();
+  traded[1] = { ...traded[1], level: 3 };
+  traded[4] = { ...traded[4], xp: 12 };
+  t.is(theirs(freeLook({ seen: traded })), '2 villagers used by a player: (-567, 63, 1878) is at level 3, (-541, 63, 1882) has 12 trade xp');
+  // a lead and a seat count alike
+  const tied = VILLAGERS();
+  tied[1] = { ...tied[1], vehicle: 'minecart', vehicleId: 7 };
+  tied[2] = { ...tied[2], leashed: true };
+  t.like(judgeVillage(freeLook({ seen: tied })), { kind: 'theirs', rule: 'villager' });
+  // one named villager: free, but that villager never taken
+  const one = VILLAGERS();
+  one[0] = { ...one[0], named: true, customName: 'Bob' };
+  const v1 = free(freeLook({ seen: one }));
+  t.truthy(v1);
+  t.deepEqual(v1?.candidates.map(e => e.id), [107]);
+  t.regex(v1?.why ?? '', /1 used by a player/);
+  t.regex(v1?.why ?? '', /noted: a villager \(-557, 63, 1890\) is named \(Bob\) \(not taken\)/);
+  // one villager penned in: skipped, the village free
+  const pen = free(freeLook({ penned: new Set([101]) }));
+  t.deepEqual(pen?.candidates.map(e => e.id), [107]);
+  t.regex(pen?.why ?? '', /1 penned in/);
+  // what only a player puts down, in it or within 16: noted, the village free
+  for (const [kind, n] of [['oak_sign', 1], ['rail', 6], ['redstone_wire', 3], ['nether_portal', 6], ['white_banner', 1], ['white_concrete', 40]] as const) {
+    const v = free(freeLook({ kinds: { ...freeLook().kinds, [kind]: n } }));
+    t.truthy(v, kind);
+    t.deepEqual(v?.notes, [`a player's marks within 16: ${kind} x${n}`]);
+    t.deepEqual(v?.candidates.map(e => e.id), [101, 107]);
   }
-  // a player seen within 64 of its area, ever (the time said); at 70 it is no one's for that
+  // a player seen within 64 of its area, ever: noted, the village free
   const area = judgeVillage(freeLook());
   if (area.kind !== 'free') return t.fail();
-  t.is(theirs(freeLook({ players: [{ x: area.area.x2 + 63, z: 1880, at: T0 - 3 * 24 * 60 * MINUTE }] })), 'a player was seen 63 from it, at (-454, 1880) (14:00)');
-  t.is(judgeVillage(freeLook({ players: [{ x: area.area.x2 + 70, z: 1880, at: T0 }] })).kind, 'free');
-  // near the world spawn: within 256 of it
+  t.deepEqual(free(freeLook({ players: [{ x: area.area.x2 + 63, z: 1880, at: T0 - 3 * 24 * 60 * MINUTE }] }))?.notes, ['a player was seen 63 from it, at (-454, 1880) (14:00)']);
+  t.deepEqual(free(freeLook({ players: [{ x: area.area.x2 + 70, z: 1880, at: T0 }] }))?.notes, []);
+  // near the world spawn: within 256 of it, someone's still
   t.is(theirs(freeLook({ spawn: { x: -556, z: 1914 + 200 } })), 'within 256 of the world spawn (200 off)');
-  // another build of others near it (not one of its own houses, which meet its area)
+  // another build of others next to it: noted, the village free
   const other: Zone = { x1: -500, y1: 60, z1: 1870, x2: -490, y2: 70, z2: 1880, markers: 30, surface: true, sample: 'stone_bricks' };
-  t.is(theirs(freeLook({ zones: [...VILLAGE_ZONES(), other] })), 'another build 17 from it (x -500..-490, z 1870..1880, stone_bricks)');
-  t.is(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), { ...other, x1: -460, x2: -450 }] })).kind, 'free', '57 off: far enough');
-  // (a mineshaft under it is the world's, not another build)
-  t.is(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), { ...other, surface: false }] })).kind, 'free');
+  t.deepEqual(free(freeLook({ zones: [...VILLAGE_ZONES(), other] }))?.notes, ['another build 17 from it (x -500..-490, z 1870..1880, stone_bricks)']);
+  t.deepEqual(free(freeLook({ zones: [...VILLAGE_ZONES(), { ...other, x1: -460, x2: -450 }] }))?.notes, [], '57 off: not even noted');
+  t.deepEqual(free(freeLook({ zones: [...VILLAGE_ZONES(), { ...other, surface: false }] }))?.notes, [], 'a mineshaft under it is the world\'s');
 });
 
 test('the courtesy judge: a village of fewer than 5, or not all seen yet, waits; nothing there is no village', (t) => {
@@ -505,9 +528,11 @@ test('the courtesy judge: a village of fewer than 5, or not all seen yet, waits;
   t.like(judgeVillage(freeLook({ seen: four })), { kind: 'wait', why: '4 villager(s) seen, 5 or more wanted' });
   t.like(judgeVillage(freeLook({ looked: { chunks: 20, of: 30 } })), { kind: 'wait', why: 'not all of it seen yet (20 of 30 chunks)' });
   t.like(judgeVillage({ ...freeLook(), bells: [], beds: [], jobs: [], seen: [] }), { kind: 'none' });
-  // the rules that make it someone's come before the wait: a named villager in a village of four is someone's still
-  const named = four.map((e, i) => (i ? e : { ...e, named: true }));
+  // the rules that make it someone's come before the wait: two named villagers in a village of four is someone's still;
+  // one alone is no setup, and the village waits
+  const named = four.map((e, i) => (i > 1 ? e : { ...e, named: true }));
   t.is(judgeVillage(freeLook({ seen: named })).kind, 'theirs');
+  t.is(judgeVillage(freeLook({ seen: four.map((e, i) => (i ? e : { ...e, named: true })) })).kind, 'wait');
   // no unemployed adult: free, with none to take, and why
   const busy = VILLAGERS().map(e => (e.profession === 'none' && !e.baby ? { ...e, profession: 'mason' } : e));
   t.like(judgeVillage(freeLook({ seen: busy })), { kind: 'free', candidates: [], why: '7 villagers, 0 unemployed adult(s) to take (5 employed, 1 babies, 1 nitwits)' });
@@ -700,8 +725,11 @@ test('the rung\'s gates: no hall, the hall full (as counted under half an hour a
   // someone's: never again; its boat way failed today: not until tomorrow; too small: in 6 hours; beyond the range: not at all
   const w = hallWorld();
   const site = w.villages!.sites[0];
-  site.judged = { at: T0 - MINUTE, kind: 'theirs', why: 'a player was seen 20 from it' };
+  site.judged = { at: T0 - MINUTE, kind: 'theirs', why: 'within 256 of the world spawn (200 off)', rule: 'spawn', v: JUDGE_V };
   t.deepEqual(villagersTask.variants(s, w).map(v => v.id), SEARCHES);
+  // (an older word for a player seen by it no longer decides since Nov 20: offered for a look)
+  site.judged = { at: T0 - MINUTE, kind: 'theirs', why: 'a player was seen 20 from it' };
+  t.deepEqual(villagersTask.variants(s, w).map(v => v.id)[0], 'village -556,1880');
   site.judged = undefined;
   site.noBoat = { at: T0 - 60 * MINUTE, why: 'a hill' };
   t.deepEqual(villagersTask.variants(s, w).map(v => v.id)[0], 'north');
@@ -879,7 +907,7 @@ test('rain begun since the run set out: no villager is taken, nothing touched', 
   t.true(world.villagerMoves, 'given up before the drive: the switch as it was');
 });
 
-test('a player comes by as the bot is about to take a villager: nothing taken, the village someone\'s for good', async (t) => {
+test('a player comes by as the bot is about to take a villager (within 32 of it): nothing taken this run, the village still free (Nov 20); one farther off is no matter', async (t) => {
   const world = hallWorld();
   const land = new Land(world);
   const call = land.call.bind(land);
@@ -889,10 +917,20 @@ test('a player comes by as the bot is about to take a villager: nothing taken, t
     return call(m, p);
   };
   const text = await rung(land).run(land.ctx());
-  t.is(text, '[village -556,1880] gave up: a player came by at (-530, 63, 1900): the village is someone\'s, left alone; back home');
+  t.is(text, '[village -556,1880] gave up: a player at (-530, 63, 1900), 27 from the bot: no villager taken this run; back home');
   t.false(land.log.some(l => l.startsWith('boat down')));
-  t.like(peekVillages(world).sites[0].judged, { kind: 'theirs', why: 'a player came by at (-530, 63, 1900) as the bot was about to take a villager' });
+  t.like(peekVillages(world).sites[0].judged, { kind: 'free' });
   t.like(peekVillages(world).players, [{ x: -530, y: 63, z: 1900 }]);
+  t.is(villagersTask.variants(snap(KIT(), { now: land.t }), world)[0].id, 'village -556,1880', 'offered again');
+  // 57 off the village's area (x2 -517) and some 100 from the bot: the move goes on
+  const w2 = hallWorld();
+  const l2 = new Land(w2);
+  const call2 = l2.call.bind(l2);
+  l2.call = (m, p = {}) => {
+    if (m === 'world.entities' && l2.log.includes('goto (-557, 63, 1890) careful')) l2.players = [{ id: 77, name: 'player', position: { x: -460, y: 63, z: 1880 } }];
+    return call2(m, p);
+  };
+  t.regex(await rung(l2).run(l2.ctx()), /^\[village -556,1880\] moved an unemployed villager from the village at \(-556, 63, 1880\) to the hall/);
 });
 
 test('the budget runs out on the walk out: the move gives up before anything is touched, home', async (t) => {
@@ -907,20 +945,32 @@ test('the budget runs out on the walk out: the move gives up before anything is 
   t.deepEqual(asBuilt(land), BUILT);
 });
 
-test('a village judged someone\'s at the look (a sign by it, a player seen near it): left alone, nothing touched, and never gone to again', async (t) => {
-  for (const [what, setup, why] of [
-    ['a sign', (l: Land) => { l.marks.push({ name: 'oak_sign', at: { x: -560, y: 64, z: 1900 } }); }, 'what only a player puts down in it or within 16: oak_sign x1'],
-    ['a player', (l: Land) => { l.players.push({ id: 77, name: 'player', position: { x: -520, y: 63, z: 1880 } }); }, 'a player was seen 0 from it, at (-520, 63, 1880) (14:04)']
-  ] as const) {
-    const world = hallWorld();
-    const land = new Land(world);
-    setup(land);
-    const text = await rung(land).run(land.ctx());
-    t.regex(text, new RegExp(`^\\[village -556,1880\\] left the village at \\(-556, 63, 1880\\) alone: ${why.replace(/[()]/g, '\\$&').replace(/14:04/, '\\d\\d:\\d\\d')}; back home$`), what);
-    t.false(land.log.some(l => l.startsWith('boat down')), what);
-    t.like(peekVillages(world).sites[0].judged, { kind: 'theirs' }, what);
-    t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES, what);
-  }
+test('a village judged someone\'s at the look (two of its villagers named: a setup in use): left alone, nothing touched, and never gone to again', async (t) => {
+  const world = hallWorld();
+  const land = new Land(world);
+  land.villagers[1].named = true;
+  land.villagers[2].named = true;
+  const text = await rung(land).run(land.ctx());
+  t.regex(text, /^\[village -556,1880\] left the village at \(-556, 63, 1880\) alone: 2 villagers used by a player: .*; back home$/);
+  t.false(land.log.some(l => l.startsWith('boat down')));
+  t.like(peekVillages(world).sites[0].judged, { kind: 'theirs', rule: 'villager', v: JUDGE_V });
+  t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES);
+});
+
+test('since Nov 20 a sign by a village is noted and the move goes on; a player in the village at the look is noted, and the move waits for a run with none within 32', async (t) => {
+  const world = hallWorld();
+  const land = new Land(world);
+  land.marks.push({ name: 'oak_sign', at: { x: -560, y: 64, z: 1900 } });
+  t.regex(await rung(land).run(land.ctx()), /^\[village -556,1880\] moved an unemployed villager from the village at \(-556, 63, 1880\) to the hall/);
+  t.true(land.said.some(l => /free to take from: .*noted: a player's marks within 16: oak_sign x1/.test(l)), land.said.filter(l => /free to take/.test(l)).join(' | '));
+  const w2 = hallWorld();
+  const l2 = new Land(w2);
+  l2.players.push({ id: 77, name: 'player', position: { x: -520, y: 63, z: 1880 } });
+  t.is(await rung(l2).run(l2.ctx()), '[village -556,1880] no villager taken at (-556, 63, 1880) this run: a player at (-520, 63, 1880), 0 from the village; back home');
+  t.false(l2.log.some(l => l.startsWith('boat down')));
+  t.like(peekVillages(w2).sites[0].judged, { kind: 'free' });
+  t.regex(peekVillages(w2).sites[0].judged!.why, /noted: a player was seen 0 from it/);
+  t.is(villagersTask.variants(snap(KIT(), { now: l2.t }), w2)[0].id, 'village -556,1880');
 });
 
 test('the search: no village known, the north side walked out by the north gate, a bell in sight, walked over and judged; the move is the next run\'s', async (t) => {
@@ -1058,7 +1108,7 @@ test('brain-status\'s Villagers line: the switch, the hall and its count, the vi
   w.villages!.last = { at: T0 - 30 * MINUTE, text: 'moved an unemployed villager from the village at (-556, 63, 1880) to the hall (1 in it now)', moved: true };
   w.villages!.open = [{ at: TORCH, block: 'torch' }];
   t.is(villagersLine(w, T0), 'Villagers: moves on; the hall at (-561, 62, 2126): 1 of 3 villagers (counted 12 min ago); 3 village(s) known (1 not judged, 1 theirs, 1 no boat way); ' +
-    'someone\'s: (-300, 2300): a player was seen 20 from it; 1 block(s) of the hall or the fence still open; last move 13:30: moved an unemployed villager from the village at (-556, 63, 1880) to the hall (1 in it now)');
+    'someone\'s: (-300, 2300): a player was seen 20 from it (to be judged again: an older word); 1 block(s) of the hall or the fence still open; last move 13:30: moved an unemployed villager from the village at (-556, 63, 1880) to the hall (1 in it now)');
 });
 
 // ------------------------------------------------------------------------------------------------ the rails fallback (a dry run)
@@ -1305,21 +1355,21 @@ test('seated in its own boat with no run to steer it (a restart, or a let-go tha
   brain.setEnabled(false);
 });
 
-test('the courtesy judge: a player\'s house by a village is another build of others, a bed and a barrel in it or villagers by it notwithstanding; a village whose beds chain out to 70 from its bell keeps its own houses', (t) => {
-  const why = (look: VillageLook) => { const v = judgeVillage(look); return `${v.kind}: ${v.why}`; };
+test('the courtesy judge: a player\'s house by a village is another build of others (noted since Nov 20, the village free), a bed and a barrel in it or villagers by it notwithstanding; a village whose beds chain out to 70 from its bell keeps its own houses', (t) => {
+  const why = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'free' ? `free: ${v.notes.join('; ')}` : `${v.kind}: ${v.why}`; };
   // a cobblestone house 12 east of the village's east bed (-541, 1887): no bed, bell or job site of the village by it
   const cobble: Zone = { x1: -529, y1: 59, z1: 1880, x2: -520, y2: 70, z2: 1892, markers: 40, surface: true, sample: 'cobblestone' };
-  t.is(why(freeLook({ zones: [...VILLAGE_ZONES(), cobble] })), 'theirs: another build 0 from it (x -529..-520, z 1880..1892, cobblestone)');
+  t.is(why(freeLook({ zones: [...VILLAGE_ZONES(), cobble] })), 'free: another build 0 from it (x -529..-520, z 1880..1892, cobblestone)');
   // a player's house 80 east of the bell with a white bed and a barrel: 65 from the village's nearest bed, not chained in
   const house: Zone = { x1: -481, y1: 59, z1: 1875, x2: -470, y2: 70, z2: 1887, markers: 60, surface: true, sample: 'spruce_planks' };
   const look = freeLook({ zones: [...VILLAGE_ZONES(), house] });
   t.is(why({ ...look, beds: [...look.beds, { x: -476, y: 63, z: 1880 }], jobs: [...look.jobs, { name: 'barrel', at: { x: -474, y: 63, z: 1882 } }] }),
-    'theirs: another build 0 from it (x -481..-470, z 1875..1887, spruce_planks)');
+    'free: another build 0 from it (x -481..-470, z 1875..1887, spruce_planks)');
   // a player's house alone 17 off, and the same with two unemployed villagers standing by it
   const by: Zone = { x1: -500, y1: 60, z1: 1870, x2: -490, y2: 70, z2: 1880, markers: 30, surface: true, sample: 'spruce_planks' };
   const two: Villager[] = [{ id: 120, name: 'villager', position: { x: -495.5, y: 63, z: 1885.5 }, profession: 'none', level: 1, baby: false }, { id: 121, name: 'villager', position: { x: -492.5, y: 63, z: 1866.5 }, profession: 'none', level: 1, baby: false }];
-  t.is(why(freeLook({ zones: [...VILLAGE_ZONES(), by] })), 'theirs: another build 17 from it (x -500..-490, z 1870..1880, spruce_planks)');
-  t.is(why(freeLook({ zones: [...VILLAGE_ZONES(), by], seen: [...VILLAGERS(), ...two] })), 'theirs: another build 0 from it (x -500..-490, z 1870..1880, spruce_planks)');
+  t.is(why(freeLook({ zones: [...VILLAGE_ZONES(), by] })), 'free: another build 17 from it (x -500..-490, z 1870..1880, spruce_planks)');
+  t.is(why(freeLook({ zones: [...VILLAGE_ZONES(), by], seen: [...VILLAGERS(), ...two] })), 'free: another build 0 from it (x -500..-490, z 1870..1880, spruce_planks)');
   // a village's own beds chained out east, 30, 60 and 70 from the bell, each in a house: its own, and the village free
   const beds = [{ x: -526, y: 63, z: 1880 }, { x: -496, y: 63, z: 1880 }, { x: -486, y: 63, z: 1882 }];
   const houses: Zone[] = beds.map(b => ({ x1: b.x - 4, y1: 59, z1: b.z - 4, x2: b.x + 4, y2: 70, z2: b.z + 4, markers: 50, surface: true, sample: 'oak_planks' }));
@@ -1331,10 +1381,16 @@ test('the courtesy judge: a player\'s house by a village is another build of oth
   t.like(judgeVillage(freeLook({ seen: [...VILLAGERS(), stray] })), { kind: 'free', candidates: [{ id: 101 }, { id: 107 }], why: '7 villagers, 2 unemployed adult(s) to take (2 employed, 1 babies, 1 nitwits, 1 by a job site)' });
 });
 
-test('the courtesy judge: a villager traded with (above level 1) makes the village someone\'s; no bell seen, or a call that did not answer, waits', (t) => {
+test('the courtesy judge: two villagers traded with (above level 1) make the village someone\'s, one alone is noted and never taken; no bell seen, or a call that did not answer, waits', (t) => {
   const traded = VILLAGERS();
   traded[1] = { ...traded[1], level: 2 };
-  t.like(judgeVillage(freeLook({ seen: traded })), { kind: 'theirs', why: 'a villager (-567, 63, 1878) is at level 2: a player trades here' });
+  t.like(judgeVillage(freeLook({ seen: traded })), { kind: 'free', notes: ['a villager (-567, 63, 1878) is at level 2 (not taken)'] });
+  traded[0] = { ...traded[0], level: 2 };
+  t.like(judgeVillage(freeLook({ seen: traded })), { kind: 'theirs', rule: 'villager', why: '2 villagers used by a player: (-557, 63, 1890) is at level 2, (-567, 63, 1878) is at level 2' });
+  // (an unemployed one traded with: a player cured it, or it lost its job: not taken)
+  const cured = VILLAGERS();
+  cured[0] = { ...cured[0], level: 2 };
+  t.like(judgeVillage(freeLook({ seen: cured })), { kind: 'free', candidates: [{ id: 107 }] });
   t.like(judgeVillage(freeLook({ bells: [] })), { kind: 'wait', why: 'its bell not seen yet (every village has one at its meeting point)' });
   t.like(judgeVillage(freeLook({ zones: [], unread: ['the builds of others round it'] })), { kind: 'wait', why: 'the builds of others round it not read' });
   t.like(judgeVillage(freeLook({ spawn: undefined, unread: ['the world spawn'] })), { kind: 'wait', why: 'the world spawn not read' });
@@ -1350,7 +1406,7 @@ test('the look: foreign.zones not answering is no "no builds round it": the vill
   t.deepEqual(acted(land), []);
 });
 
-test('remembered for good: a village judged someone\'s outlives 8 newer sites, a player seen by a village outlives hundreds of sightings elsewhere, and a player seen by a known village makes it someone\'s at once', (t) => {
+test('remembered for good: a village judged someone\'s outlives 8 newer sites, a player seen by a village outlives hundreds of sightings elsewhere (noted by the judge), and a player seen by a known village no longer makes it someone\'s (Nov 20)', (t) => {
   const world = hallWorld({ villages: { sites: [{ x: -300, y: 70, z: 2300, seenAt: T0, judged: { at: T0, kind: 'theirs', why: 'a sign by it' } }], players: [] } });
   for (let i = 0; i < 10; i++) noteSeen(world, [{ id: 500 + i, name: 'villager', position: { x: -1000 + 100 * i, y: 63, z: 1700 } }], T0 + i);
   t.true(peekVillages(world).sites.some(s => s.x === -300 && s.judged?.kind === 'theirs'), 'someone\'s kept');
@@ -1363,7 +1419,7 @@ test('remembered for good: a village judged someone\'s outlives 8 newer sites, a
   const w2 = hallWorld({ villages: { sites: [], players: [] } });
   noteSeen(w2, [{ id: 9, name: 'player', position: { x: -520, y: 63, z: 1880 } }], T0);
   for (let i = 0; i < 100; i++) noteSeen(w2, [{ id: 9, name: 'player', position: { x: -437 + 20 * (i % 10), y: 63, z: 2134 + 20 * Math.floor(i / 10) } }], T0 + (i + 1) * MINUTE);
-  t.is(judgeVillage(freeLook({ players: peekVillages(w2).players })).kind, 'theirs');
+  t.like(judgeVillage(freeLook({ players: peekVillages(w2).players })), { kind: 'free', notes: ['a player was seen 0 from it, at (-520, 63, 1880) (14:00)'] });
   // far from the yard (1000 out): not kept
   noteSeen(w2, [{ id: 9, name: 'player', position: { x: -549, y: 63, z: 3183 } }], T0);
   t.false(peekVillages(w2).players.some(p => p.z === 3183));
@@ -1377,18 +1433,18 @@ test('remembered for good: a village judged someone\'s outlives 8 newer sites, a
   t.is(kept.length, 512);
   t.true(kept.some(p => p.x === place(0).x && p.z === place(0).z), 'seen again: kept');
   t.false(kept.some(p => p.x === place(1).x && p.z === place(1).z), 'seen longest ago: gone');
-  // a player seen 36 from a known village's middle: someone's, for good; 100 off: not
+  // a player seen 36 from a known village's middle: remembered, the village's word untouched (since Nov 20)
   const w4 = hallWorld();
-  noteSeen(w4, [{ id: 9, name: 'player', position: { x: -456, y: 63, z: 1880 } }], T0);
-  t.is(w4.villages!.sites[0].judged, undefined);
   noteSeen(w4, [{ id: 9, name: 'player', position: { x: -520, y: 63, z: 1880 } }], T0);
-  t.like(w4.villages!.sites[0].judged, { kind: 'theirs', why: 'a player was seen 36 from it, at (-520, 63, 1880) (14:00)' });
+  t.is(w4.villages!.sites[0].judged, undefined);
+  t.true(peekVillages(w4).players.some(p => p.x === -520 && p.z === 1880));
 });
 
 test('the side search walks on past a village already judged (someone\'s here): not walked into or looked at again, and the side gets the plain dry mark', async (t) => {
   const world = hallWorld();
   const land = new Land(world);
-  land.marks.push({ name: 'oak_sign', at: { x: -560, y: 64, z: 1900 } });
+  land.villagers[1].named = true;
+  land.villagers[2].named = true;
   await rung(land).run(land.ctx());
   t.like(peekVillages(world).sites[0].judged, { kind: 'theirs' });
   const from = land.log.length;
@@ -1492,7 +1548,7 @@ function westVillage(land: Land): Villager[] {
   return land.villagers;
 }
 
-test('one village, one verdict: the live run of Nov 15 (its villagers noted at three places on the walk, then the judge at its bell: someone\'s) leaves one site, someone\'s, and no move sets out for it', async (t) => {
+test('one village, one verdict: the live run of Nov 15 (its villagers noted at three places on the walk, then the judge at its bell) leaves one site; since Nov 20 free, its stable (not read) noted, the move offered for it once', async (t) => {
   const world = hallWorld({ villages: { sites: [], players: [] } });
   world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
   const land = new Land(world, { houses: [] });
@@ -1501,19 +1557,16 @@ test('one village, one verdict: the live run of Nov 15 (its villagers noted at t
   noteSeen(world, vs, T0 - MINUTE);
   t.deepEqual(peekVillages(world).sites.map(s => `${s.x},${s.z} ${s.villagers}`), ['-660,2245 2', '-700,2301 5', '-752,2259 4']);
   const r = await villagersTask.run(land.ctx(), 'west', MOVE_BUDGET, () => land.t);
-  t.is(r.text, 'found a village at (-693, 63, 2262): someone\'s, left alone: another build 0 from it (x -703..-670, z 2315..2344, hay_block)');
-  // one site: the bell's, someone's, the other two folded into it (their counts kept: the most seen), its area kept
+  t.is(r.text, 'found a village at (-693, 63, 2262): free (5 villagers, 3 unemployed adult(s) to take (2 employed); noted: another build 0 from it (x -703..-670, z 2315..2344, hay_block)): the move next run');
+  // one site: the bell's, the other two folded into it (their counts kept: the most seen), its area kept
   const sites = peekVillages(world).sites;
   t.is(sites.length, 1, JSON.stringify(sites));
-  t.like(sites[0], { x: -693, y: 63, z: 2262, bells: 1, beds: 3, jobs: 2, villagers: 11, judged: { kind: 'theirs' }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
-  // no move sets out for it (live, the next run did: "start work: villagers: village -700,2301: 192 blocks out"). Its
-  // stable read none of its 40 markers (the scans hold none of them here): someone's, but not for good (D1: it may be
-  // the village's own), so the one run offered for it is a look again, never a move
-  t.like(sites[0].judged, { kind: 'theirs', rule: 'build', v: undefined });
-  t.true(rejudge(sites[0]));
+  t.like(sites[0], { x: -693, y: 63, z: 2262, bells: 1, beds: 3, jobs: 2, villagers: 11, judged: { kind: 'free', v: JUDGE_V }, area: { x1: -776, z1: 2221, x2: -635, z2: 2326 } });
+  // one move offered for it, from the bell's site (live, the next run went to a knot's: "village -700,2301")
+  t.false(rejudge(sites[0]));
   const vs2 = villagersTask.variants(snap(KIT(), { now: land.t }), world);
   t.deepEqual(vs2.map(v => v.id), ['village -693,2262', ...SEARCHES]);
-  t.like(vs2[0], { needMs: lookNeedMs(Math.hypot(-693 - HOME.x, 2262 - HOME.z)) });
+  t.like(vs2[0], { needMs: moveNeedMs(Math.hypot(-693 - HOME.x, 2262 - HOME.z)) });
   // and the west side walks on past it next time, as past any village judged
   t.truthy(knownVillage(world, { x: -700, z: 2301 }));
   t.truthy(knownVillage(world, { x: -760, z: 2300 }), 'inside its area, 77 from its bell');
@@ -1587,10 +1640,10 @@ test('one village, one verdict: a move\'s fresh look that finds its village free
 });
 
 
-test('one village, one verdict, folded both ways and to the end: a site someone\'s by a player seen (no area) inside the area of a newer word 98 off, and a site the fold reaches only once its judged one has moved to a bell; the gates and the write alike', (t) => {
-  // (someone's by a player seen by it: no area, no bell; its village's bell 98 south, judged too small 7 hours ago, its
-  // area holding the first: open again, and a look there may find it free with the sighting rolled off the list)
-  const theirs = { at: T0 - 8 * HOUR, kind: 'theirs' as const, why: 'a player was seen 20 from it, at (-556, 63, 1780) (06:00)' };
+test('one village, one verdict, folded both ways and to the end: a site someone\'s for good (no area) inside the area of a newer word 98 off, and a site the fold reaches only once its judged one has moved to a bell; the gates and the write alike', (t) => {
+  // (someone's for good, by two villagers named there: no area, no bell (a word of a knot of villagers); its village's bell
+  // 98 south, judged too small 7 hours ago, its area holding the first: open again)
+  const theirs = { at: T0 - 8 * HOUR, kind: 'theirs' as const, why: '2 villagers used by a player: (-556, 63, 1780) is named, (-557, 63, 1781) is named', rule: 'villager' as const, v: JUDGE_V };
   const both = () => hallWorld({
     villages: {
       sites: [{ x: -556, y: 63, z: 1800, villagers: 3, seenAt: T0 - 8 * HOUR, judged: { ...theirs } },
@@ -1625,10 +1678,10 @@ test('one village, one verdict, folded both ways and to the end: a site someone\
   t.is(foldedInto(knot), w2.villages!.sites[0]);
 });
 
-test('one village, one verdict, the run\'s word: its site folded after the judge into one judged someone\'s, the run reads that one\'s word (not a site nearer the bell, not judged); someone\'s written on its own site as the look went round stays: left alone, nothing touched', async (t) => {
+test('one village, one verdict, the run\'s word: its site folded after the judge into one judged someone\'s, the run reads that one\'s word (not a site nearer the bell, not judged); a player seen by its own site as the look went round no longer makes it someone\'s (Nov 20)', async (t) => {
   // (the run's knot 12 from the bell; another knot 60 from the bell, outside the village's area; a site judged someone's
   // 80 from the bell, its own bell there: the run's site, moved to the bell, is that village, the other knot not)
-  const theirs = { at: T0 - HOUR, kind: 'theirs' as const, why: 'a player was seen 20 from it, at (-556, 63, 1980) (13:00)' };
+  const theirs = { at: T0 - HOUR, kind: 'theirs' as const, why: '2 villagers used by a player: (-556, 63, 1980) is named, (-557, 63, 1981) is named', rule: 'villager' as const, v: JUDGE_V };
   const world = hallWorld({
     villages: {
       sites: [{ x: -556, y: 63, z: 1820, villagers: 3, seenAt: T0 - HOUR }, { x: -556, y: 63, z: 1868, villagers: 6, seenAt: T0 - HOUR },
@@ -1641,15 +1694,15 @@ test('one village, one verdict, the run\'s word: its site folded after the judge
   t.is(await rung(land).run(land.ctx()), `[village -556,1868] left the village at (-556, 63, 1880) alone: ${theirs.why}; back home`);
   t.deepEqual(acted(land), []);
   t.like(peekVillages(world).sites.find(s => s.z === 1960), { bells: 1, judged: theirs, area: { z1: 1842 } });
-  // a player seen 80 from the run's own site (148 from the bell) as the look goes round: someone's there and then, for
-  // good (noteSeen); the judge's own rule (a player within 64 of the village's area) says free, and does not undo it
+  // a player seen 80 from the run's own site (148 from the bell) as the look goes round: no longer someone's (Nov 20),
+  // remembered only: the village at its bell is free, the player too far off to stop the move
   const w2 = hallWorld({ villages: { sites: [{ x: -556, y: 63, z: 1812, villagers: 3, seenAt: T0 - HOUR }], players: [] } });
   const l2 = new Land(w2);
   l2.players.push({ id: 77, name: 'player', position: { x: -556, y: 63, z: 1732 } });
-  t.regex(await rung(l2).run(l2.ctx()), /^\[village -556,1812\] left the village at \(-556, 63, 1880\) alone: a player was seen 80 from it, at \(-556, 63, 1732\) \(\d\d:\d\d\); back home$/);
-  t.deepEqual(acted(l2), []);
-  t.like(peekVillages(w2).sites, [{ x: -556, z: 1880, bells: 1, judged: { kind: 'theirs' } }]);
+  t.regex(await rung(l2).run(l2.ctx()), /^\[village -556,1812\] moved an unemployed villager from the village at \(-556, 63, 1880\)/);
+  t.like(peekVillages(w2).sites, [{ x: -556, z: 1880, bells: 1, judged: { kind: 'free' } }]);
   t.is(peekVillages(w2).sites.length, 1);
+  t.true(peekVillages(w2).players.some(p => p.z === 1732));
 });
 
 test('one village, one verdict, at the run\'s start: a variant whose site has been folded into its village\'s judged one since it was offered (the hall not counted, so nothing else wrote the memory) is no village of its own: forgotten, nothing done', async (t) => {
@@ -1670,44 +1723,32 @@ test('one village, one verdict, at the run\'s start: a variant whose site has be
   t.deepEqual(world.villages!.sites.map(s => `${s.x},${s.z} ${s.judged?.kind ?? '-'}`), ['-556,1880 theirs']);
 });
 
-test('one village, one verdict, as the look goes round: a player seen by another site of the village makes that one someone\'s and the fold takes the run\'s site into it: the run reads that word, never a free one at the bell; and a look that sees nothing there forgets no site someone\'s', async (t) => {
+test('one village, one verdict, as the look goes round: a player seen by another site of the village no longer makes that one someone\'s (Nov 20): the fold takes the run\'s site to the bell, judged free, the move made; a look that sees nothing there forgets the run\'s site, the player remembered', async (t) => {
   // (the run's site 50 north of the bell, where the bell's own villagers were seen; another 70 on, where 3 were; a player
-  // 25 past that one, seen as the look goes round. The judge's own rule, a player within 64 of the area round the bell
-  // and the villagers it sees, says free: 111 off)
+  // 25 past that one, seen as the look goes round: 111 off the village's area, far from the bot)
   const two = () => hallWorld({ villages: { sites: [{ x: -556, y: 63, z: 1930, villagers: 4, seenAt: T0 - HOUR }, { x: -556, y: 63, z: 2000, villagers: 3, seenAt: T0 - HOUR }], players: [] } });
   const player: Seen = { id: 77, name: 'player', position: { x: -556, y: 63, z: 2025 } };
   const world = two();
   const land = new Land(world);
   land.players.push({ ...player });
   const r = await villagersTask.run(land.ctx(), 'village -556,1930', MOVE_BUDGET, () => land.t);
-  t.regex(r.text, /^left the village at \(-556, 63, 1930\) alone: a player was seen 25 from it, at \(-556, 63, 2025\) \(\d\d:\d\d\)$/);
-  t.deepEqual(acted(land), []);
-  // one site, someone's, at the bell, the ground round where its someone's site stood still its (the player's place)
-  t.deepEqual(peekVillages(world).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1880 theirs']);
-  t.truthy(knownVillage(world, { x: -556, z: 2025 }));
-  t.deepEqual(villagersTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), SEARCHES);
-  // nothing seen there at all (no villager, no bell: gone, or the look's calls not answered): the site someone's that the
-  // run's was folded into is kept, and the run's word is its
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-556, 63, 1880\) to the hall/);
+  t.false(peekVillages(world).sites.some(s => s.judged?.kind === 'theirs'));
+  t.true(peekVillages(world).players.some(p => p.z === 2025));
+  // nothing seen there at all (no villager, no bell: gone, or the look's calls not answered): the run's site forgotten,
+  // the other kept as it was
   const w2 = two();
   const l2 = new Land(w2);
   l2.villagers = [];
   l2.marks = [];
   l2.players.push({ ...player });
-  t.regex((await villagersTask.run(l2.ctx(), 'village -556,1930', MOVE_BUDGET, () => l2.t)).text, /^left the village at \(-556, 63, 1930\) alone: a player was seen 25 from it/);
-  t.deepEqual(peekVillages(w2).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,2000 theirs']);
-  // and the run's own site, someone's by a player seen 60 from it in that same look
-  const w3 = hallWorld({ villages: { sites: [{ x: -556, y: 63, z: 1930, villagers: 4, seenAt: T0 - HOUR }], players: [] } });
-  const l3 = new Land(w3);
-  l3.villagers = [];
-  l3.marks = [];
-  l3.players.push({ ...player, position: { x: -556, y: 63, z: 1990 } });
-  t.regex((await villagersTask.run(l3.ctx(), 'village -556,1930', MOVE_BUDGET, () => l3.t)).text, /^left the village at \(-556, 63, 1930\) alone: a player was seen 60 from it/);
-  t.deepEqual(peekVillages(w3).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1930 theirs']);
+  t.like(await villagersTask.run(l2.ctx(), 'village -556,1930', MOVE_BUDGET, () => l2.t), { text: 'no village at (-556, 63, 1930) any more: forgotten', mark: 'forget' });
+  t.deepEqual(peekVillages(w2).sites.map(s => `${s.x},${s.z} ${s.judged?.kind ?? '-'}`), ['-556,2000 -']);
 });
 
 test('one village, one verdict, its ground kept: a site someone\'s that a fold moves to its village\'s bell still covers the ground round where it stood (a villager seen there is that village: no site of its own, no move offered); so does one with no area that takes a free site\'s bell', (t) => {
-  // (the bell's site someone's, its area 40 round it; a villager 70 east of the bell makes a site of its own, and a
-  // player seen 30 east of that makes it someone's, for good; the next write folds the two, at the bell)
+  // (the bell's site someone's, its area 40 round it; a villager 70 east of the bell makes a site of its own, judged
+  // someone's for good (two villagers named there); the next write folds the two, at the bell)
   const world = hallWorld({
     villages: {
       sites: [{ x: -556, y: 63, z: 1880, bells: 1, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it' }, area: { x1: -596, z1: 1840, x2: -516, z2: 1920 } }],
@@ -1715,19 +1756,19 @@ test('one village, one verdict, its ground kept: a site someone\'s that a fold m
     }
   });
   noteSeen(world, [{ id: 1, name: 'villager', position: { x: -485.5, y: 63, z: 1880.5 } }], T0 - 30 * MINUTE);
-  noteSeen(world, [{ id: 2, name: 'player', position: { x: -455.5, y: 63, z: 1880.5 } }], T0 - 20 * MINUTE);
+  world.villages!.sites[1].judged = { at: T0 - 20 * MINUTE, kind: 'theirs', why: '2 villagers used by a player: (-486, 63, 1880) is named, (-485, 63, 1881) is named', rule: 'villager', v: JUDGE_V };
   t.deepEqual(world.villages!.sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1880 theirs', '-486,1880 theirs']);
   t.deepEqual(villagesOf(world).sites.map(s => `${s.x},${s.z} ${s.judged?.kind}`), ['-556,1880 theirs']);
-  // a villager 50 from where the site someone's by the player stood, 120 from the bell
+  // a villager 50 from where the second site someone's stood, 120 from the bell
   noteSeen(world, [{ id: 3, name: 'villager', position: { x: -435.5, y: 63, z: 1880.5 } }], T0 - 10 * MINUTE);
   t.is(world.villages!.sites.length, 1, JSON.stringify(world.villages!.sites));
   t.truthy(knownVillage(world, { x: -436, z: 1880 }));
   t.deepEqual(villagersTask.variants(snap(KIT()), world).map(v => v.id), SEARCHES);
-  // someone's by a player seen (no area, no bell), a free site's bell 80 off it: kept at the bell, and a villager 50 the
+  // someone's for good (no area, no bell), a free site's bell 80 off it: kept at the bell, and a villager 50 the
   // other way from where it stood (130 from the bell) is that village too
   const w2 = hallWorld({
     villages: {
-      sites: [{ x: -556, y: 63, z: 1880, villagers: 3, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'a player was seen 20 from it, at (-576, 63, 1880) (13:00)' } },
+      sites: [{ x: -556, y: 63, z: 1880, villagers: 3, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'within 256 of the world spawn (200 off)', rule: 'spawn', v: JUDGE_V } },
         { x: -476, y: 63, z: 1880, bells: 1, villagers: 6, seenAt: T0 - 30 * MINUTE, judged: { at: T0 - 30 * MINUTE, kind: 'free', why: '6 villagers' }, area: { x1: -500, z1: 1856, x2: -452, z2: 1904 } }],
       players: []
     }
@@ -2171,67 +2212,69 @@ function westLook(over: Partial<VillageLook> = {}): VillageLook {
   };
 }
 
-test('D1 the village\'s own outbuildings: the live hay stable (in its area, by its beds, of hay, planks, wall torches and fences) is the village\'s own, not another build; read short, it is another build as before', (t) => {
+test('D1 the village\'s own outbuildings: the live hay stable (in its area, by its beds, of hay, planks, wall torches and fences) is the village\'s own, not another build; read short, it is another build (noted since Nov 20, the village free)', (t) => {
   const v = judgeVillage(westLook());
   t.is(v.kind, 'free', v.why);
   if (v.kind !== 'free') return;
   t.is(v.why, '5 villagers, 3 unemployed adult(s) to take (2 employed)');
   t.is(v.own.length, 1, 'the stable is its own: the way home is not kept 16 off it');
   t.like(v.own[0], { x1: -703, z1: 2315, sample: 'hay_block' });
-  // (not read whole: no read, a read short of its markers (chunks unloaded since), nothing read: someone's, as on Nov 15)
+  // (not read whole: no read, a read short of its markers (chunks unloaded since), nothing read: another build, noted;
+  // the way home keeps 16 off it)
   const live = 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)';
-  for (const z of [STABLE({ all: undefined }), STABLE({ all: { hay_block: 24, oak_planks: 23 } }), STABLE({ all: {} })]) t.like(judgeVillage(westLook({ zones: [z] })), { kind: 'theirs', why: live, rule: 'build' });
+  for (const z of [STABLE({ all: undefined }), STABLE({ all: { hay_block: 24, oak_planks: 23 } }), STABLE({ all: {} })]) t.like(judgeVillage(westLook({ zones: [z] })), { kind: 'free', notes: [live], own: [] });
   // every block of it one a natural village is built of
   for (const n of ['hay_block', 'oak_planks', 'wall_torch', 'oak_fence', 'lantern', 'farmland', 'wheat', 'carrots', 'white_wool', 'glass_pane', 'white_bed', 'composter']) t.true(VILLAGE_MADE.has(n), n);
   for (const n of ['chest', 'spruce_wall_sign', 'white_wall_banner', 'brown_wall_banner', 'birch_planks', 'dark_oak_planks', 'hopper', 'rail', 'white_concrete']) t.false(VILLAGE_MADE.has(n), n);
 });
 
-test('D1 a player\'s build by a village stays another build: a hay barn beside it (off its area, or 40 from its marks), the stable with a chest, a sign, a banner or a player\'s block in it; and every other rule as it was', (t) => {
-  const theirs = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'theirs' ? `${v.rule}: ${v.why}` : `not theirs: ${v.kind} ${v.why}`; };
+test('D1 a player\'s build by a village stays another build (noted since Nov 20): a hay barn beside it (off its area, or 40 from its marks), the stable with a chest, a sign, a banner or a player\'s block in it; and every other rule as it is now', (t) => {
+  const word = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'theirs' ? `theirs ${v.rule}: ${v.why}` : v.kind === 'free' ? `free: ${v.notes.join('; ')}` : `${v.kind}: ${v.why}`; };
   // a player's hay barn just beside the village: 34 off its area (z 2326), of the same hay and planks
-  t.is(theirs(westLook({ zones: [STABLE({ z1: 2360, z2: 2380 })] })), 'build: another build 34 from it (x -703..-670, z 2360..2380, hay_block)');
+  t.is(word(westLook({ zones: [STABLE({ z1: 2360, z2: 2380 })] })), 'free: another build 34 from it (x -703..-670, z 2360..2380, hay_block)');
   // meeting its area but 40 and more from every mark of its own (a barn at its edge, east of the knot of farmers)
-  t.is(theirs(westLook({ zones: [STABLE({ x1: -652, x2: -640, z1: 2240, z2: 2250 })] })), 'build: another build 0 from it (x -652..-640, z 2240..2250, hay_block)');
+  t.is(word(westLook({ zones: [STABLE({ x1: -652, x2: -640, z1: 2240, z2: 2250 })] })), 'free: another build 0 from it (x -652..-640, z 2240..2250, hay_block)');
   // the stable itself with something only a player (or a looted village house) has in it
   for (const [n, c] of [['chest', 1], ['spruce_wall_sign', 1], ['white_wall_banner', 1], ['birch_planks', 4], ['hopper', 1]] as const) {
-    t.is(theirs(westLook({ zones: [STABLE({ markers: 61 + c, all: { ...STABLE().all, [n]: c } })] })), 'build: another build 0 from it (x -703..-670, z 2315..2344, hay_block)', n);
+    t.is(word(westLook({ zones: [STABLE({ markers: 61 + c, all: { ...STABLE().all, [n]: c } })] })), 'free: another build 0 from it (x -703..-670, z 2315..2344, hay_block)', n);
   }
-  // a mineshaft under it is the world's, a player's house beside the live village someone's, as before
+  // a mineshaft under it is the world's, a player's house beside the live village another build, noted
   const house: Zone = { x1: -529, y1: 59, z1: 1880, x2: -520, y2: 70, z2: 1892, markers: 40, surface: true, sample: 'cobblestone' };
-  t.is(theirs(freeLook({ zones: [...VILLAGE_ZONES(), house] })), 'build: another build 0 from it (x -529..-520, z 1880..1892, cobblestone)');
+  t.is(word(freeLook({ zones: [...VILLAGE_ZONES(), house] })), 'free: another build 0 from it (x -529..-520, z 1880..1892, cobblestone)');
   const named = VILLAGERS();
   named[3] = { ...named[3], named: true, customName: 'Bob' };
-  t.is(theirs(freeLook({ seen: named })), 'villager: a villager (-546, 63, 1872) is named (Bob)');
-  t.is(theirs(freeLook({ kinds: { ...freeLook().kinds, oak_sign: 1 } })), 'marker: what only a player puts down in it or within 16: oak_sign x1');
-  t.is(theirs(freeLook({ players: [{ x: -560, z: 1900, at: T0 }] })), 'player: a player was seen 0 from it, at (-560, 1900) (14:00)');
-  t.is(theirs(freeLook({ spawn: { x: -556, z: 2100 } })), 'spawn: within 256 of the world spawn (186 off)');
+  t.is(word(freeLook({ seen: named })), 'free: a villager (-546, 63, 1872) is named (Bob) (not taken)');
+  named[5] = { ...named[5], leashed: true };
+  t.is(word(freeLook({ seen: named })), 'theirs villager: 2 villagers used by a player: (-546, 63, 1872) is named (Bob), (-562, 63, 1884) is on a lead');
+  t.is(word(freeLook({ kinds: { ...freeLook().kinds, oak_sign: 1 } })), 'free: a player\'s marks within 16: oak_sign x1');
+  t.is(word(freeLook({ players: [{ x: -560, z: 1900, at: T0 }] })), 'free: a player was seen 0 from it, at (-560, 1900) (14:00)');
+  t.is(word(freeLook({ spawn: { x: -556, z: 2100 } })), 'theirs spawn: within 256 of the world spawn (186 off)');
 });
 
-test('the user\'s word of Nov 17 (again, told one by a village is likely a raid trophy: "Ignore it"): an ominous banner in a village or within 16 of it is no player\'s mark, the village judged on its other rules; a plain banner of any colour, or a player\'s beside an ominous one, is', (t) => {
+test('the user\'s word of Nov 17 (again, told one by a village is likely a raid trophy: "Ignore it"): an ominous banner in a village or within 16 of it is no player\'s mark, not even noted; a plain banner of any colour, or a player\'s beside an ominous one, is noted (since Nov 20 no mark makes a village someone\'s)', (t) => {
   const banner = { ...freeLook().kinds, white_wall_banner: 1 };
+  const notes = (look: VillageLook) => { const v = judgeVillage(look); return v.kind === 'free' ? v.notes : [`${v.kind}: ${v.why}`]; };
   // ominous: no mark, the village free as without it
   const v = judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 } }));
   t.is(v.kind, 'free', v.why);
   t.is(v.why, judgeVillage(freeLook()).why);
   t.is(judgeVillage(freeLook({ kinds: { ...freeLook().kinds, white_banner: 2 }, ominous: { white_banner: 2 } })).kind, 'free', 'standing ones too');
-  // ... and judged on its other rules all the same: a named villager, a sign by it, another build
-  const named = VILLAGERS().map((e, i) => (i ? e : { ...e, named: true }));
+  // ... and judged on its other rules all the same: two named villagers, a sign by it, a player seen
+  const named = VILLAGERS().map((e, i) => (i > 1 ? e : { ...e, named: true }));
   t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, seen: named })), { kind: 'theirs', rule: 'villager' });
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'marker', why: 'what only a player puts down in it or within 16: oak_sign x1' });
-  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, players: [{ x: -560, z: 1900, at: T0 }] })), { kind: 'theirs', rule: 'player' });
-  // a plain white banner (the bridge said: none ominous), or one of another colour: someone's, for good
-  t.like(judgeVillage(freeLook({ kinds: banner, ominous: {} })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
-  t.false('sure' in judgeVillage(freeLook({ kinds: banner, ominous: {} })), 'for good');
-  t.like(judgeVillage(freeLook({ kinds: { ...freeLook().kinds, red_banner: 1 }, ominous: {} })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: red_banner x1' });
+  t.deepEqual(notes(freeLook({ kinds: { ...banner, oak_sign: 1 }, ominous: { white_wall_banner: 1 } })), ['a player\'s marks within 16: oak_sign x1']);
+  t.deepEqual(notes(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, players: [{ x: -560, z: 1900, at: T0 }] })), ['a player was seen 0 from it, at (-560, 1900) (14:00)']);
+  // a plain white banner (the bridge said: none ominous), or one of another colour: noted
+  t.deepEqual(notes(freeLook({ kinds: banner, ominous: {} })), ['a player\'s marks within 16: white_wall_banner x1']);
+  t.deepEqual(notes(freeLook({ kinds: { ...freeLook().kinds, red_banner: 1 }, ominous: {} })), ['a player\'s marks within 16: red_banner x1']);
   // a player's banner beside an ominous one: the player's is a mark (the ominous one not counted)
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, white_wall_banner: 2 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, brown_banner: 1 }, ominous: { white_wall_banner: 1 } })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: brown_banner x1' });
+  t.deepEqual(notes(freeLook({ kinds: { ...banner, white_wall_banner: 2 }, ominous: { white_wall_banner: 1 } })), ['a player\'s marks within 16: white_wall_banner x1']);
+  t.deepEqual(notes(freeLook({ kinds: { ...banner, brown_banner: 1 }, ominous: { white_wall_banner: 1 } })), ['a player\'s marks within 16: brown_banner x1']);
   // an older jar's look (no word of ominous ones): every banner a mark, as before
-  t.like(judgeVillage(freeLook({ kinds: banner })), { kind: 'theirs', rule: 'banner', why: 'what only a player puts down in it or within 16: white_wall_banner x1' });
-  // a banner and a sign: a player's mark that is not banners alone
-  t.like(judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 } })), { kind: 'theirs', rule: 'marker', why: 'what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1' });
-  // (the pillager outposts' rules as they were: one by the village is another build, one 60 off danger kept 48 off)
-  t.like(judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, zones: [...VILLAGE_ZONES(), OUTPOST()] })), { kind: 'theirs', rule: 'build' });
+  t.deepEqual(notes(freeLook({ kinds: banner })), ['a player\'s marks within 16: white_wall_banner x1']);
+  t.deepEqual(notes(freeLook({ kinds: { ...banner, oak_sign: 1 } })), ['a player\'s marks within 16: white_wall_banner x1, oak_sign x1']);
+  // (the pillager outposts' rules as they were: one by the village is another build, noted; one 60 off danger kept 48 off)
+  t.deepEqual(notes(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, zones: [...VILLAGE_ZONES(), OUTPOST()] })), ['another build 17 from it (x -500..-490, z 1860..1870, dark_oak_planks)']);
   const far = judgeVillage(freeLook({ kinds: banner, ominous: { white_wall_banner: 1 }, zones: [...VILLAGE_ZONES(), OUTPOST({ x1: -457, x2: -447 })] }));
   t.like(far, { kind: 'free', outposts: [{ x1: -457 }] });
 });
@@ -2242,7 +2285,7 @@ const OUTPOST = (over: Partial<LookZone> = {}): LookZone => ({
   all: { dark_oak_planks: 40, cobblestone_wall: 12, dark_oak_fence: 8, white_wall_banner: 4, chest: 1, torch: 3, birch_planks: 2 }, ominous: 4, ...over
 });
 
-test('D1 a pillager outpost by a village is danger, not someone\'s: its distance said, the way home kept 48 off it; one within 48 of it is another build (a trophy banner: the game keeps outposts 10 chunks off a village); a raid farm on one is someone\'s; illagers by the village make it wait', (t) => {
+test('D1 a pillager outpost by a village is danger, not someone\'s: its distance said, the way home kept 48 off it; one within 48 of it is another build (a trophy banner: the game keeps outposts 10 chunks off a village), noted; so is a raid farm on one; illagers by the village make it wait', (t) => {
   // 60 off the live village's area (x2 -517): no other build within 48, the village free, the outpost listed for the way home
   const FAR = { x1: -457, x2: -447 };
   const v = judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST(FAR)] }));
@@ -2252,64 +2295,75 @@ test('D1 a pillager outpost by a village is danger, not someone\'s: its distance
   t.false(v.own.some(z => z.sample === 'dark_oak_planks'), 'not the village\'s own: the way home keeps off it');
   t.is(v.why, '7 villagers, 2 unemployed adult(s) to take (2 employed, 1 babies, 1 nitwits, 1 by a job site); a pillager outpost 60 from it (x -457..-447, z 1860..1870): kept 48 off');
   t.true(60 >= ZONES_NEAR && 60 < ZONES_NEAR + OUTPOST_CLEAR, 'within what the look reads whole');
-  // 17 off it (no outpost the game would put there: a player's with a raid captain's banner): another build, someone's
-  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST()] })), { kind: 'theirs', rule: 'build', why: 'another build 17 from it (x -500..-490, z 1860..1870, dark_oak_planks)' });
-  // a dark oak shed with two chests, a crafting table, torches and a trophy ominous banner, 17 off: someone's, as any build there
+  // 17 off it (no outpost the game would put there: a player's with a raid captain's banner): another build, noted
+  const built = (look: VillageLook) => { const w = judgeVillage(look); return w.kind === 'free' && w.notes.some(n => /^another build 17 from it/.test(n)); };
+  // (danger all the same: no villager within 48 of it taken)
+  const near17 = judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST()] }));
+  t.like(near17, { kind: 'free', notes: ['another build 17 from it (x -500..-490, z 1860..1870, dark_oak_planks)'] });
+  if (near17.kind === 'free') t.is(near17.outposts.length, 1);
+  // a dark oak shed with two chests, a crafting table, torches and a trophy ominous banner, 17 off: another build, as any there
   const shed = OUTPOST({ markers: 9, sample: 'torch', all: { chest: 2, crafting_table: 1, torch: 4, dark_oak_planks: 1, white_wall_banner: 1 }, ominous: 1 });
   t.true(outpostMade(shed), 'of outpost blocks alone, with an ominous banner');
-  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), shed] })), { kind: 'theirs', rule: 'build' });
-  // a raid farm built on one (a hopper, rails), or a player's banner beside the ominous ones: someone's
-  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ markers: 74, all: { ...OUTPOST().all, hopper: 2, rail: 2 } })] })), { kind: 'theirs', rule: 'build' });
-  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ markers: 71, all: { ...OUTPOST().all, white_wall_banner: 5 } })] })), { kind: 'theirs', rule: 'build' });
+  t.true(built(freeLook({ zones: [...VILLAGE_ZONES(), shed] })));
+  // a raid farm built on one (a hopper, rails), or a player's banner beside the ominous ones: another build
+  t.true(built(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ markers: 74, all: { ...OUTPOST().all, hopper: 2, rail: 2 } })] })));
+  t.true(built(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ markers: 71, all: { ...OUTPOST().all, white_wall_banner: 5 } })] })));
   // no ominous banner read in it: another build
-  t.like(judgeVillage(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ ominous: undefined })] })), { kind: 'theirs', rule: 'build' });
+  t.true(built(freeLook({ zones: [...VILLAGE_ZONES(), OUTPOST({ ominous: undefined })] })));
   // a pillager by the village: it waits (danger now); one 100 off it is no matter
   const pillager: Seen = { id: 300, name: 'pillager', position: { x: -505.5, y: 63, z: 1880.5 } };
   t.like(judgeVillage(freeLook({ seen: [...VILLAGERS(), pillager] })), { kind: 'wait', why: '1 illager(s) about (a pillager at (-506, 63, 1880)): no move by pillagers' });
   t.is(judgeVillage(freeLook({ seen: [...VILLAGERS(), { ...pillager, position: { x: -417.5, y: 63, z: 1880.5 } }] })).kind, 'free');
-  // the rules of someone's come first: a named villager with a pillager by is someone's
-  const named = VILLAGERS().map((e, i) => (i ? e : { ...e, named: true }));
+  // the rules of someone's come first: two named villagers with a pillager by is someone's
+  const named = VILLAGERS().map((e, i) => (i > 1 ? e : { ...e, named: true }));
   t.is(judgeVillage(freeLook({ seen: [...named, pillager] })).kind, 'theirs');
 });
 
-test('D1 judged again: a word of someone\'s given before Nov 17 for another build, or for white banners alone (each maybe an ominous one), is looked at again, once; every other stays for good, and a player seen by one makes it for good', (t) => {
+test('judged again (Nov 20): every word of someone\'s an older judge gave for another build, a player\'s marker or banner, a player seen or a villager penned in is looked at again, once; one for the spawn or a villager named, riding, on a lead or traded with stays for good, as does every word of today\'s judge', (t) => {
   const theirs = (why: string, more: Partial<NonNullable<VillageSite['judged']>> = {}): Pick<VillageSite, 'judged'> => ({ judged: { at: T0, kind: 'theirs', why, ...more } });
+  t.is(JUDGE_V, 4);
   t.true(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)')), 'the west village (Nov 15)');
-  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1')), 'the north-west one (Nov 15): its banner may be an ominous one');
-  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x2, white_banner x1')));
-  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1', { rule: 'banner', v: 2 })), 'when every banner was a mark');
-  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1', { rule: 'banner', v: JUDGE_V })), 'today\'s judge: the ominous ones not counted');
-  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, brown_banner x2')), 'a brown one is never ominous');
-  t.false(rejudge(theirs('what only a player puts down in it or within 16: red_banner x1', { rule: 'banner' })));
-  t.false(rejudge(theirs('whatever it said', { rule: 'banner' })));
+  t.true(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: 3 })));
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1')), 'the north-west one (Nov 15)');
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1', { rule: 'banner', v: 3 })), 'live: the north-west one (-748, 1874)');
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, brown_banner x2')));
+  t.true(rejudge(theirs('what only a player puts down in it or within 16: oak_sign x1', { rule: 'marker', v: 3 })));
+  t.true(rejudge(theirs('whatever it said', { rule: 'banner' })));
   t.true(rejudge(theirs('whatever it said', { rule: 'build' })));
-  t.false(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: 2 })), 'the outbuildings\' judge: version 3 changed only the banners');
-  t.false(rejudge(theirs('what only a player puts down in it or within 16: white_wall_banner x1, oak_sign x1')));
-  t.false(rejudge(theirs('a player was seen 20 from it, at (-560, 63, 1810) (13:00)')));
+  t.true(rejudge(theirs('a player was seen 20 from it, at (-560, 63, 1810) (13:00)')));
+  t.true(rejudge(theirs('a player came by at (-560, 63, 1810) as the bot was about to take a villager', { rule: 'player', v: 3 })));
+  t.true(rejudge(theirs('a villager (-699, 77, 2245) is penned in (it can walk to fewer than 24 cells)', { rule: 'villager', v: 3 })), 'live: the west village (-693, 2262), Nov 20');
+  t.true(rejudge(theirs('a villager (-699, 77, 2245) is penned in (it can walk to fewer than 24 cells)')));
   t.false(rejudge(theirs('within 256 of the world spawn (100 off)')));
+  t.false(rejudge(theirs('within 256 of the world spawn (100 off)', { rule: 'spawn', v: 3 })));
   t.false(rejudge(theirs('a villager (-546, 63, 1872) is named (Bob)')));
-  t.false(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: JUDGE_V })), 'judged by today\'s judge: for good');
+  t.false(rejudge(theirs('a villager (-546, 63, 1872) is named (Bob)', { rule: 'villager', v: 3 })));
+  t.false(rejudge(theirs('a villager (-567, 63, 1878) is at level 2: a player trades here', { rule: 'villager', v: 3 })));
+  t.false(rejudge(theirs('2 villagers used by a player: (-557, 63, 1890) is named, (-546, 63, 1872) is named', { rule: 'villager', v: JUDGE_V })));
+  t.false(rejudge(theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)', { rule: 'build', v: JUDGE_V })), 'judged by today\'s judge (none such now): for good');
   t.false(rejudge({ judged: { at: T0, kind: 'wait', why: 'another build' } }));
   t.false(rejudge({}));
-  t.false(rejudge({ judged: { at: T0, kind: 'theirs', rule: 'banner' } as unknown as VillageSite['judged'] }), 'a banner word with no why (a damaged brain.json): someone\'s still, no throw');
+  t.true(rejudge({ judged: { at: T0, kind: 'theirs', rule: 'banner' } as unknown as VillageSite['judged'] }), 'a banner word with no why (a damaged brain.json): no throw');
+  t.false(rejudge({ judged: { at: T0, kind: 'theirs', rule: 'villager' } as unknown as VillageSite['judged'] }), 'a villager word with no why: no throw, kept');
   // the gate lets it through for a look, a word for good does not
   const site: VillageSite = { x: -693, y: 63, z: 2262, seenAt: T0, ...theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)') };
   t.true(siteOpen(site, HOME, T0));
-  t.false(siteOpen({ ...site, ...theirs('a player was seen 20 from it') }, HOME, T0));
-  // a player seen by it makes it someone's for good (the old word was none such)
+  t.true(siteOpen({ ...site, ...theirs('a player was seen 20 from it') }, HOME, T0));
+  t.false(siteOpen({ ...site, ...theirs('within 256 of the world spawn (100 off)', { rule: 'spawn', v: JUDGE_V }) }, HOME, T0));
+  // a player seen by it no longer makes it someone's: the word to be judged again stays so
   const world = hallWorld({ villages: { sites: [{ ...site }], players: [] } });
   noteSeen(world, [{ id: 9, name: 'player', position: { x: -690, y: 63, z: 2300 } }], T0 + MINUTE);
-  t.like(peekVillages(world).sites[0].judged, { kind: 'theirs', rule: 'player', v: JUDGE_V });
-  t.false(rejudge(peekVillages(world).sites[0]));
-  // two sites of one village, the newer word to be judged again, the older a player's: one site, the player's word kept
+  t.like(peekVillages(world).sites[0].judged, { kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' });
+  t.true(rejudge(peekVillages(world).sites[0]));
+  // two sites of one village, the newer word to be judged again, the older a spawn's: one site, the spawn's word kept
   const w2 = hallWorld({
     villages: {
       sites: [{ x: -693, y: 63, z: 2262, seenAt: T0, ...theirs('another build 0 from it (x -703..-670, z 2315..2344, hay_block)') },
-        { x: -700, y: 63, z: 2301, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'a player was seen 10 from it, at (-700, 63, 2311) (13:00)' } }],
+        { x: -700, y: 63, z: 2301, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'within 256 of the world spawn (200 off)', rule: 'spawn', v: JUDGE_V } }],
       players: []
     }
   });
-  t.deepEqual(peekVillages(w2).sites.map(s => s.judged?.why), ['a player was seen 10 from it, at (-700, 63, 2311) (13:00)']);
+  t.deepEqual(peekVillages(w2).sites.map(s => s.judged?.why), ['within 256 of the world spawn (200 off)']);
   t.deepEqual(villagersTask.variants(snap(KIT()), w2).map(v => v.id), SEARCHES);
 });
 
@@ -2325,7 +2379,7 @@ function westStable(land: Land, extra: { name: string; n: number }[] = []): void
   land.zones = [{ x1: z.x1, y1: z.y1, z1: z.z1, x2: z.x2, y2: z.y2, z2: z.z2, surface: true, sample: z.sample, markers: 61 + extra.reduce((a, e) => a + e.n, 0) }];
 }
 
-test('D1 judged again live: the west village (someone\'s on Nov 15 by its hay stable) is looked at and judged free, nothing touched, the move offered next; with a chest in the stable it is someone\'s for good', async (t) => {
+test('D1 judged again live: the west village (someone\'s on Nov 15 by its hay stable) is looked at and judged free, nothing touched, the move offered next; with a chest in the stable it is another build, noted (Nov 20), free all the same', async (t) => {
   const world = hallWorld({ villages: { sites: [], players: [] } });
   world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
   world.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, bells: 1, beds: 3, jobs: 2, seenAt: T0 - HOUR,
@@ -2348,19 +2402,20 @@ test('D1 judged again live: the west village (someone\'s on Nov 15 by its hay st
   const later = snap(KIT(), { now: land.t + 2 * HOUR });
   t.like(villagersTask.variants(later, world)[0], { id: 'village -693,2262', first: true, needMs: moveNeedMs(dist) });
 
-  // the same with a chest in the stable: someone's, for good, never offered again
+  // the same with a chest in the stable: another build, noted, the village free (Nov 20), the move offered next
   const w2 = hallWorld({ villages: { sites: [], players: [] } });
   w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
   w2.villages!.sites.push({ x: -693, y: 63, z: 2262, seenAt: T0 - HOUR, judged: { at: T0 - HOUR, kind: 'theirs', why: 'another build 0 from it (x -703..-670, z 2315..2344, hay_block)' } });
   const l2 = new Land(w2, { houses: [] });
   westStable(l2, [{ name: 'chest', n: 1 }]);
   const t2 = await rung(l2).run(l2.ctx());
-  t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: another build .*\): someone's, left alone: another build 0 from it \(x -703\.\.-670, z 2315\.\.2344, hay_block\); back home$/);
-  t.like(peekVillages(w2).sites[0].judged, { kind: 'theirs', rule: 'build', v: JUDGE_V });
-  t.deepEqual(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2).map(v => v.id), SEARCHES);
+  t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: another build .*\): free \(5 villagers, 3 unemployed adult\(s\) to take \(2 employed\); noted: another build 0 from it \(x -703\.\.-670, z 2315\.\.2344, hay_block\)\): the move next run; back home$/);
+  t.deepEqual(acted(l2), []);
+  t.like(peekVillages(w2).sites[0].judged, { kind: 'free', v: JUDGE_V });
+  t.is(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2)[0].id, 'village -693,2262');
 });
 
-test('the user\'s word of Nov 17, live: the north-west village (someone\'s on Nov 15 for its one white wall banner, every banner a mark then) is offered for a look only and judged again: its banner ominous, free, nothing touched, the move the next run\'s; a plain one, someone\'s for good', async (t) => {
+test('the user\'s word of Nov 17, live: the north-west village (someone\'s on Nov 15 for its one white wall banner, every banner a mark then) is offered for a look only and judged again: its banner ominous, free, nothing touched, the move the next run\'s; a plain one, noted and free all the same (Nov 20)', async (t) => {
   const NW = { at: T0 - HOUR, kind: 'theirs' as const, why: 'what only a player puts down in it or within 16: white_wall_banner x1' };
   const banner = { name: 'white_wall_banner', at: { x: -690, y: 66, z: 2300 } };
   const world = hallWorld({ villages: { sites: [], players: [] } });
@@ -2382,7 +2437,7 @@ test('the user\'s word of Nov 17, live: the north-west village (someone\'s on No
   t.false(rejudge(site));
   t.like(villagersTask.variants(snap(KIT(), { now: land.t + 2 * HOUR }), world)[0], { id: 'village -693,2262', first: true, needMs: moveNeedMs(dist) });
 
-  // a plain white banner there (the bridge read it: not ominous): someone's, for good, never offered again
+  // a plain white banner there (the bridge read it: not ominous): noted, the village free (Nov 20), the move offered next
   const w2 = hallWorld({ villages: { sites: [], players: [] } });
   w2.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
   w2.villages!.sites.push({ x: -693, y: 63, z: 2262, seenAt: T0 - HOUR, judged: { ...NW } });
@@ -2390,11 +2445,11 @@ test('the user\'s word of Nov 17, live: the north-west village (someone\'s on No
   westStable(l2);
   l2.marks.push({ ...banner });
   const t2 = await rung(l2).run(l2.ctx());
-  t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: .*\): someone's, left alone: what only a player puts down in it or within 16: white_wall_banner x1; back home$/);
+  t.regex(t2, /^\[village -693,2262\] judged the village at \(-693, 63, 2262\) again \(was someone's: .*\): free \(.*; noted: a player's marks within 16: white_wall_banner x1\): the move next run; back home$/);
   t.deepEqual(acted(l2), []);
-  t.like(peekVillages(w2).sites[0].judged, { kind: 'theirs', rule: 'banner', v: JUDGE_V });
+  t.like(peekVillages(w2).sites[0].judged, { kind: 'free', v: JUDGE_V });
   t.false(rejudge(peekVillages(w2).sites[0]));
-  t.deepEqual(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2).map(v => v.id), SEARCHES);
+  t.is(villagersTask.variants(snap(KIT(), { now: l2.t + 2 * HOUR }), w2)[0].id, 'village -693,2262');
 });
 
 test('D1 the range is 640: a village known 500 out is offered for a look, but no move sets out from farther than a day holds (the walk out, the look, the boat home by dusk: about 447 by land)', (t) => {
@@ -2598,15 +2653,8 @@ test('D1 fix: a re-look keeps the walk home: no viewpoint walked to that the day
   t.false(peekVillages(w3).sites.some(s => s.judged), 'not judged: looked at next run');
 });
 
-test('D1 fix: a word of someone\'s on what the look could not read whole is not sealed by today\'s judge: the stable\'s read failed (judged again later, after the dry mark\'s wait); banners are for good, whatever the jar says of them', async (t) => {
-  // the judge: sure or not
-  const banner = { ...freeLook().kinds, white_wall_banner: 1 };
-  t.false('sure' in judgeVillage(freeLook({ kinds: banner })), 'an older jar (no word of ominous ones): for good all the same');
-  t.false('sure' in judgeVillage(freeLook({ kinds: banner, ominous: {} })), 'the bridge said: none of them ominous');
-  t.false('sure' in judgeVillage(freeLook({ kinds: { ...banner, oak_sign: 1 } })), 'a sign: for good');
-  t.like(judgeVillage(westLook({ zones: [STABLE({ all: undefined })] })), { kind: 'theirs', rule: 'build', sure: false });
-  t.false('sure' in judgeVillage(westLook({ zones: [STABLE({ all: { chest: 1 } })] })), 'read short, but a chest in it: no village\'s own');
-  t.false('sure' in judgeVillage(westLook({ zones: [STABLE({ all: undefined, z1: 2360, z2: 2380 })] })), 'off its area: someone\'s whatever it holds');
+test('no word rests on what the look could not read whole (Nov 20): the stable\'s read failed on the re-look is another build, noted, the village free; an older jar\'s plain banner, noted, free too', async (t) => {
+  t.like(judgeVillage(westLook({ zones: [STABLE({ all: undefined })] })), { kind: 'free', notes: ['another build 0 from it (x -703..-670, z 2315..2344, hay_block)'] });
   // live: the stable's read fails on the re-look
   const world = hallWorld({ villages: { sites: [], players: [] } });
   world.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
@@ -2618,17 +2666,11 @@ test('D1 fix: a word of someone\'s on what the look could not read whole is not 
   land.call = (m, p = {}) => { if (m === 'foreign.marks' && p.x1 === -703 && p.z1 === 2315) throw new Error('timed out'); return call(m, p); };
   const r = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
   t.is(r.text, 'judged the village at (-693, 63, 2262) again (was someone\'s: another build 0 from it (x -703..-670, z 2315..2344, hay_block)): '
-    + 'someone\'s, left alone: another build 0 from it (x -703..-670, z 2315..2344, hay_block) (not all of it read: judged again later)');
-  t.is(r.mark, undefined);
-  const site = peekVillages(world).sites[0];
-  t.like(site.judged, { kind: 'theirs', rule: 'build', v: undefined });
-  t.true(rejudge(site), 'judged again later');
-  // read whole next time: free, for good
-  land.call = call;
-  const r2 = await villagersTask.run(land.ctx(), 'village -693,2262', MOVE_BUDGET, () => land.t);
-  t.regex(r2.text, /: free \(/);
+    + 'free (5 villagers, 3 unemployed adult(s) to take (2 employed); noted: another build 0 from it (x -703..-670, z 2315..2344, hay_block)): the move next run');
+  t.is(r.mark, 'first');
   t.like(peekVillages(world).sites[0].judged, { kind: 'free', v: JUDGE_V });
-  // an older jar: no ominous field on foreign.marks, a plain white banner by the village: someone's, for good
+  t.false(rejudge(peekVillages(world).sites[0]));
+  // an older jar: no ominous field on foreign.marks, a plain white banner by the village: noted, free
   const w3 = hallWorld({ villages: { sites: [], players: [] } });
   w3.zones!['fence:gate']!.push({ x: -565, y: 63, z: 2183 });
   w3.villages!.sites.push({ x: -693, y: 63, z: 2262, villagers: 11, seenAt: T0 - HOUR,
@@ -2639,6 +2681,6 @@ test('D1 fix: a word of someone\'s on what the look could not read whole is not 
   const call3 = l3.call.bind(l3);
   l3.call = (m, p = {}) => { const out = call3(m, p) as Record<string, unknown>; if (m === 'foreign.marks') delete out.ominous; return out; };
   await villagersTask.run(l3.ctx(), 'village -693,2262', MOVE_BUDGET, () => l3.t);
-  t.like(peekVillages(w3).sites[0].judged, { kind: 'theirs', rule: 'banner', v: JUDGE_V });
-  t.false(rejudge(peekVillages(w3).sites[0]));
+  t.like(peekVillages(w3).sites[0].judged, { kind: 'free', v: JUDGE_V });
+  t.regex(peekVillages(w3).sites[0].judged!.why, /noted: a player's marks within 16: white_wall_banner x1/);
 });

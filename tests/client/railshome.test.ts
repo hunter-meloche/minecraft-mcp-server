@@ -64,7 +64,7 @@ function hallWorld(over: Partial<WorldMemory> = {}): WorldMemory {
   } as WorldMemory;
 }
 
-interface Villager { id: number; name: string; position: Pos; profession: string; level: number; baby: boolean; health?: number; category?: string }
+interface Villager { id: number; name: string; position: Pos; profession: string; level: number; baby: boolean; health?: number; category?: string; named?: boolean }
 /** The village: unemployed adults 101 (by the pickup), 106 and 107; a farmer, a baby, a nitwit, a librarian. */
 const VILLAGERS = (): Villager[] => [
   { id: 101, name: 'villager', position: { x: -553.5, y: 63, z: 2002.5 }, profession: 'none', level: 1, baby: false },
@@ -870,13 +870,24 @@ test('the cart come to rest out on the line with the villager in it: the move gi
   t.like(land.villagers.find(v => v.id === 101)!.position, { x: -555.5, z: 2055.5 });
 });
 
-test('a move not made today (the village not judged free: a player came by) leaves the line whole only when nothing is lost; someone\'s, the line is given up; close up takes a yard stretch left down back, any hour, and puts the post back', async (t) => {
+test('a move not made today (a player in the village, within 32: Nov 20) leaves the line whole, the village free; someone\'s (two villagers named), the line is given up; close up takes a yard stretch left down back, any hour, and puts the post back', async (t) => {
+  {
+    const { world, line } = lineWorld('laying');
+    const land = new Field(world);
+    await laidWhole(land, line);
+    land.players = [{ id: 9, name: 'player', position: { x: -590.5, y: 63, z: 2000.5 } }];
+    const r = await run(land, 'move', 20 * MINUTE);
+    t.regex(r.text, /^the move not made today: a player at \(-591, 63, 2000\), \d+ from the (bot|village): no villager taken this run/);
+    t.is(line.stage, 'whole');
+    t.like(peekVillages(world).sites[0].judged, { kind: 'free' });
+  }
   const { world, line } = lineWorld('laying');
   const land = new Field(world);
   await laidWhole(land, line);
-  land.players = [{ id: 9, name: 'player', position: { x: -590.5, y: 63, z: 2000.5 } }];
+  land.villagers[1].named = true;
+  land.villagers[2].named = true;
   const r = await run(land, 'move', 20 * MINUTE);
-  t.regex(r.text, /^the line given up: the village at \(-572, 63, 2000\) is someone's/);
+  t.regex(r.text, /^the line given up: the village at \(-572, 63, 2000\) is someone's: 2 villagers used by a player/);
   t.is(line.stage, 'taking up');
   // the yard's stretch was down and the post open: close up (any hour, in the yard) has it, before the take-up's run
   land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
