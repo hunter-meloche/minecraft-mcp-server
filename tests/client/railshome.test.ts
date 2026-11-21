@@ -131,6 +131,10 @@ class Field {
   rails = new Map<string, { item: 'rail' | 'powered_rail'; shape: RailShape; powered: boolean }>();
   own = new Set<string>();
   villagers: Villager[] = VILLAGERS();
+  /** the village's bells, beds and job sites (foreign.marks) */
+  marks = MARKS();
+  /** where the bot has stood (each walk's end): the scans see scanSight round each */
+  stood: { x: number; z: number }[] = [];
   players: { id: number; name: string; position: Pos }[] = [];
   zones: Zone[] = [];
   boat?: Vehicle;
@@ -183,6 +187,8 @@ class Field {
     unreadAfterLost?: number;
     /** the next this many boat drives stop half way (a step the ground's model missed) */
     stallDrives?: number;
+    /** the scans see the chunks within this of a place the bot has stood, a square as Foreign.java's (all of every box unless said) */
+    scanSight?: number;
   } = {}) {}
   regionFails = 0;
   /** a frozen cart woken (the bot within the simulation distance): on along the rails down to their end, at rest there */
@@ -226,6 +232,7 @@ class Field {
   private walk(to: { x: number; z: number }, y = 63) {
     this.t += Math.round(horiz(this.me, to) * 250);
     this.me = { x: to.x, y, z: to.z };
+    this.stood.push({ x: to.x, z: to.z });
   }
   /** into reach of a cell, as the tools' careful walk does */
   private near(p: Pos) { if (!this.reach(p)) this.walk({ x: p.x + 0.5 + 1.5, z: p.z + 0.5 }); }
@@ -396,9 +403,16 @@ class Field {
         const inBox = (q: Pos) => q.x >= n('x1') && q.x <= n('x2') && q.z >= n('z1') && q.z <= n('z2');
         const re = p.match ? new RegExp(String(p.match)) : undefined;
         const kinds: Record<string, number> = {};
-        for (const m of MARKS().filter(q => inBox(q.at))) kinds[m.name] = (kinds[m.name] ?? 0) + 1;
-        const of = (Math.floor(n('x2') / 16) - Math.floor(n('x1') / 16) + 1) * (Math.floor(n('z2') / 16) - Math.floor(n('z1') / 16) + 1);
-        return { kinds, ominous: {}, at: re ? MARKS().filter(q => inBox(q.at) && re.test(q.name)).map(q => ({ ...q.at, name: q.name })) : [], chunks: of, of };
+        for (const m of this.marks.filter(q => inBox(q.at))) kinds[m.name] = (kinds[m.name] ?? 0) + 1;
+        const cx1 = Math.floor(n('x1') / 16), cx2 = Math.floor(n('x2') / 16), cz1 = Math.floor(n('z1') / 16), cz2 = Math.floor(n('z2') / 16);
+        const of = (cx2 - cx1 + 1) * (cz2 - cz1 + 1);
+        let chunks = of;
+        const sight = this.opts.scanSight;
+        if (sight !== undefined) {
+          chunks = 0;
+          for (let cx = cx1; cx <= cx2; cx++) for (let cz = cz1; cz <= cz2; cz++) if ([...this.stood, this.me].some(q => cx >= Math.floor((q.x - sight) / 16) && cx <= Math.floor((q.x + sight) / 16) && cz >= Math.floor((q.z - sight) / 16) && cz <= Math.floor((q.z + sight) / 16))) chunks++;
+        }
+        return { kinds, ominous: {}, at: re ? this.marks.filter(q => inBox(q.at) && re.test(q.name)).map(q => ({ ...q.at, name: q.name })) : [], chunks, of };
       }
       case 'goto': {
         const to = { x: n('x') + 0.5, z: n('z') + 0.5 };
@@ -1202,6 +1216,71 @@ test('no villager the judge allows anywhere in the village on a move day is a mi
   line.misses = MISSES;
   t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['take up']);
   t.regex(railsHomeLine(world, land.t), new RegExp(`: to be taken up \\(the move not made on ${MISSES} runs: no unemployed villager .*\\): \\d+ block\\(s\\) down`));
+});
+
+/** A village that reaches 80 west of its bell (beds out there): the scans from the line's end see only part of it. */
+/** A run set out near dusk: at the line's end it has the time for the move, not for a walk round the village. */
+const BUDGET_TIGHT = 6 * MINUTE;
+const wideVillage = (land: Field) => {
+  land.marks.push({ name: 'white_bed', at: { x: -650, y: 63, z: 2040 } }, { name: 'white_bed', at: { x: -650, y: 63, z: 1960 } });
+};
+
+test('the move day looks round the village as relook does (Nov 21: 45 of 132 chunks seen from the line\'s end, a miss): on to its viewpoints, carefully, judged free, back to the pickup, and the move goes on', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { scanSight: 48 });
+  wideVillage(land);
+  await laidWhole(land, line);
+  land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  const said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  const said = land.said.slice(said0);
+  t.true(said.some(l => /looking round the village from \(-?\d+, \d+\): \d+ of \d+ chunks seen/.test(l)), said.join('\n'));
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home/);
+  t.falsy(line.misses);
+  t.falsy(line.stops);
+});
+
+test('a move day whose look waits (not all of the village seen, even from its viewpoints) is not made today: neither a miss nor a stop, nothing put down; a village seen whole with no villager to take is still a miss', async (t) => {
+  {
+    const { world, line } = lineWorld('laying');
+    const land = new Field(world, { scanSight: 8 });
+    wideVillage(land);
+    await laidWhole(land, line);
+    line.misses = 3;
+    const r = await run(land, 'move', 20 * MINUTE);
+    t.regex(r.text, /^the move not made today: the village not judged free today: not all of it seen yet \(\d+ of \d+ chunks\)/);
+    t.like(line, { stage: 'whole', misses: 3 });
+    t.falsy(line.stops);
+    t.is(r.mark, 'same');
+    t.false(land.log.some(l => /^boat down|^cart on/.test(l)));
+    t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['move']);
+  }
+  {
+    // (the live case, Nov 21: set out near dusk, the run's time left at the line's end held the move but no viewpoint)
+    const { world, line } = lineWorld('laying');
+    const land = new Field(world, { scanSight: 48 });
+    wideVillage(land);
+    await laidWhole(land, line);
+    land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+    line.misses = 3;
+    const said0 = land.said.length;
+    const r = await run(land, 'move', BUDGET_TIGHT);
+    t.false(land.said.slice(said0).some(l => /looking round the village from/.test(l)), land.said.slice(said0).join('\n'));
+    t.regex(r.text, /^the move not made today: the village not judged free today: not all of it seen yet/);
+    t.like(line, { stage: 'whole', misses: 3 });
+    t.falsy(line.stops);
+  }
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { scanSight: 48 });
+  wideVillage(land);
+  await laidWhole(land, line);
+  for (const v of land.villagers) if (v.id === 101 || v.id === 106 || v.id === 107) v.profession = 'mason';
+  const said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.true(land.said.slice(said0).some(l => /looking round the village from/.test(l)));
+  t.regex(r.text, /^the move not made: no unemployed villager the judge allows in the village/);
+  t.like(line, { stage: 'whole', misses: 1 });
+  t.falsy(line.stops);
 });
 
 test('a hop that cannot reach the pickup (the boat stopped on the way): driven back to where it came down, the villager let out there in its village, the boat taken up, the line kept whole (a miss)', async (t) => {

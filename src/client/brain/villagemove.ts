@@ -92,7 +92,7 @@ const BAND = 16;
 /** Read round the bot no further than this (the client has the chunks within about 96 loaded). */
 const READ_NEAR = 80;
 /** The longest walk to one of the look's viewpoints (its goto's time out), as the day counts it. */
-const VIEWPOINT_MS = 75_000;
+export const VIEWPOINT_MS = 75_000;
 /** The look round a village: how far round its middle the bells, beds and villagers are looked for. */
 const LOOK = 96;
 /** The most extra places walked to for the scans to see all of a village. */

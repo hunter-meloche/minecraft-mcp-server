@@ -10,7 +10,7 @@ import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
 import { MIN_WORK, inFence, outByGate, type WorkResult, type WorkTask } from './work.js';
 import { clock } from './idlelog.js';
 import {
-  BOAT_ITEM, BOAT_PACE, PLAYER_SIGHT, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, ridingOf, takeBoat, wayZones, wordOn, yieldNow,
+  BOAT_ITEM, BOAT_PACE, PLAYER_SIGHT, VIEWPOINT_MS, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, ridingOf, takeBoat, wayZones, wordOn, yieldNow,
   type Boat, type HallWay
 } from './villagemove.js';
 
@@ -952,8 +952,8 @@ function lostOut(ctx: GoalContext, line: RailLine, why: string): WorkResult {
 
 /**
  * The move not made today, nothing lost: the line stays whole (its yard stretch for close up), counted as a stop unless
- * it was only the day's time (`late`) or no villager to take (`miss`: counted toward MISSES, the dry mark's growing wait
- * before the next try).
+ * it was only the day's time, a player by, or a judge that waits on the village (`late`), or no villager to take from
+ * a village seen whole (`miss`: counted toward MISSES, the dry mark's growing wait before the next try).
  */
 function notToday(ctx: GoalContext, line: RailLine, why: string, late: boolean | 'miss' = false): WorkResult {
   line.stage = 'whole';
@@ -1030,15 +1030,25 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   const site = siteFor(vs.sites, line.site);
   if (!site) { giveUp(ctx, line, `the village at ${fmt(line.site)} is no longer known`); return { gain: 0, text: `the line given up: ${line.why}` }; }
   const home = ctx.s.home ?? ctx.s.position;
-  const enough = (to?: { x: number; z: number }) => clk.left() < moveRest(line, home) + (to ? horiz(to, home) / 3 * 1000 : 0);
-  const look = await lookVillage(ctx, { x: site.x, y: site.y, z: site.z }, clk.now(), enough);
+  const enough = () => clk.left() < moveRest(line, home);
+  // (the look round it as relook and the boat move have it: on to up to VIEWPOINTS places round the village, carefully,
+  // nothing touched, while the walk there, back to the pickup and the move after still fit the run. Nov 21, set out near
+  // dusk, the run had no time for a viewpoint: 45 of 132 chunks of the west village seen from the line's end, a miss)
+  const lookBy = (to?: { x: number; z: number }) => enough() || (!!to && clk.left() < moveRest(line, home) + VIEWPOINT_MS + horiz(to, line.pickup) / 3 * 1000);
+  const look = await lookVillage(ctx, { x: site.x, y: site.y, z: site.z }, clk.now(), lookBy);
   const v = judgeVillage(look);
   const kept = noteVerdict(world, site, look, v, clk.now());
   const word = wordOn(v, kept);
   if (v.kind === 'theirs' || word.kind === 'theirs') { giveUp(ctx, line, `the village at ${fmt(line.site)} is someone's: ${word.why}`); return { gain: 0, text: `the line given up: ${line.why}` }; }
-  // (a bell not seen, chunks not all seen, illagers about: nothing unexpected on the line, no stop; a miss)
+  // (not all of it seen, its bell not seen, too little of it, illagers by it, a read that did not answer: the judge
+  // waits, and so does the move: not made today, neither a miss nor a stop. Only a village seen whole that gives no
+  // villager to take is a miss)
+  if (v.kind === 'wait') return notToday(ctx, line, `the village not judged free today: ${v.why}`, true);
   if (v.kind !== 'free') return notToday(ctx, line, `the village not judged free today: ${v.why}`, 'miss');
   if (enough()) return notToday(ctx, line, 'too little of the run left for the move after the look', true);
+  // (back from the look's viewpoints to the pickup, if it went to any: the hop's look for villagers and the launch are
+  // from there)
+  await walkTo(ctx, line.pickup, 3);
   // out along the whole line with nothing unexpected: the stops before are no longer in a row
   clean(line);
   say(ctx, `the village at ${fmt(line.site)} is free to take from: ${v.why}`);
