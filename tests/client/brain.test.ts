@@ -39,6 +39,35 @@ test('findLandmarks: the bed by its head, the nearest chest first, furnace, tabl
   t.deepEqual(l.farmland, [{ x: 2, y: 64, z: 0 }]);
 });
 
+test('findLandmarks: what an unloaded look (just after a rejoin) cannot see stays as known; what it sees gone goes', (t) => {
+  const box = { x: 0, y: 64, z: 0, width: 3, height: 1, length: 3 };
+  const home = { x: 2, y: 64, z: 2 };
+  const before = findLandmarks(box, [
+    'minecraft:red_bed[facing=north,occupied=false,part=foot]', 'chest[facing=south,type=single,waterlogged=false]', 'farmland[moisture=7]',
+    'minecraft:red_bed[facing=north,occupied=false,part=head]', 'anvil[facing=north]', 'furnace[facing=north,lit=false]',
+    'crafting_table', null, 'barrel[facing=up,open=false]'
+  ], home);
+  // 11-21: the chunks round home not in yet, every cell null: the bed and the chests went, and the bot walled in at home
+  const blind = findLandmarks(box, Array(9).fill(null), home, before);
+  t.deepEqual(blind.bed, { x: 0, y: 64, z: 1 });
+  t.deepEqual(blind.chests, before.chests);
+  t.deepEqual(blind.furnace, before.furnace);
+  t.deepEqual(blind.table, before.table);
+  t.deepEqual(blind.anvil, before.anvil);
+  t.deepEqual(blind.farmland, before.farmland);
+  // half seen: the loaded cells say what is there (the barrel and the furnace gone), the unloaded ones keep theirs
+  const half = findLandmarks(box, [null, null, null, null, null, 'air', 'crafting_table', null, 'air'], home, before);
+  t.deepEqual(half.chests, [{ x: 1, y: 64, z: 0 }]);
+  t.is(half.furnace, undefined);
+  t.deepEqual(half.bed, { x: 0, y: 64, z: 1 });
+  t.deepEqual(half.table, { x: 0, y: 64, z: 2 });
+  // a full look is the truth: no bed seen, no bed
+  const gone = findLandmarks(box, Array(9).fill('air'), home, before);
+  t.is(gone.bed, undefined);
+  t.deepEqual(gone.chests, []);
+  t.is(gone.anvil, undefined);
+});
+
 const snap = (over: Partial<Snapshot> = {}): Snapshot => ({
   now: 1000, timeOfDay: 1000, activity: 'work', health: 20, food: 20, position: { x: 0, y: 64, z: 0 }, dimension: 'overworld',
   sleeping: false, raining: false, thundering: false, process: null, items: [], counts: new Map(), slotsUsed: 0,

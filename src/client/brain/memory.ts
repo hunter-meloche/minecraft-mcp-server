@@ -312,7 +312,41 @@ const id = (b: string | null) => (b ?? '').replace(/^minecraft:/, '').replace(/\
  * Find the landmarks in a box of blocks read with world.region (x fastest, then z, then y). The bed is its head half,
  * chests and furnaces all (the nearest to `home` first).
  */
-export function findLandmarks(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
+export function findLandmarks(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos, before?: Landmarks): Landmarks {
+  const found = findLandmarksIn(box, blocks, home);
+  return before ? keepUnseen(before, found, box, blocks, home) : found;
+}
+
+/**
+ * The landmarks known before that this look could not see (their cell unloaded, null, or out of its box) kept as they
+ * were: an unloaded cell says nothing. A look just after a rejoin, the chunks round home not in yet, read every cell
+ * null and took the bed, the 54 chests and the furnace away ("landmarks: bed none, 0 chest(s)", 11-21, twice in an
+ * evening of disconnects): the shelter walled the bot in on its home cell for the night ("no bed yet"), and the
+ * stash and the smelt could not get out of the box till the morning.
+ */
+export function keepUnseen(before: Landmarks, found: Landmarks, box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
+  const unseen = (p: Pos) => {
+    const x = p.x - box.x, y = p.y - box.y, z = p.z - box.z;
+    if (x < 0 || y < 0 || z < 0 || x >= box.width || y >= box.height || z >= box.length) return true;
+    return blocks[x + z * box.width + y * box.width * box.length] === null;
+  };
+  const key = (p: Pos) => `${p.x},${p.y},${p.z}`;
+  const near = (a: Pos, b: Pos) => Math.hypot(a.x - home.x, a.y - home.y, a.z - home.z) - Math.hypot(b.x - home.x, b.y - home.y, b.z - home.z);
+  const merge = (now: Pos[], was: Pos[] | undefined) => {
+    const have = new Set(now.map(key));
+    return [...now, ...(was ?? []).filter(p => unseen(p) && !have.has(key(p)))].sort(near);
+  };
+  const out: Landmarks = { ...found, chests: merge(found.chests, before.chests), farmland: merge(found.farmland, before.farmland) };
+  const beds = merge(found.beds ?? [], before.beds ?? (before.bed ? [before.bed] : []));
+  if (beds.length) out.beds = beds;
+  for (const k of ['bed', 'furnace', 'table', 'anvil', 'smithing', 'portal', 'fletching', 'brewing'] as const) {
+    const was = before[k];
+    if (!out[k] && was && unseen(was)) out[k] = was;
+  }
+  return out;
+}
+
+function findLandmarksIn(box: Pos & { width: number; height: number; length: number }, blocks: (string | null)[], home: Pos): Landmarks {
   const found: Landmarks = { chests: [], farmland: [] };
   const beds: Pos[] = [], furnaces: Pos[] = [], tables: Pos[] = [], anvils: Pos[] = [], smithings: Pos[] = [], portals: Pos[] = [], fletchings: Pos[] = [], stands: Pos[] = [];
   blocks.forEach((b, i) => {

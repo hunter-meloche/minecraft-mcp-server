@@ -858,7 +858,8 @@ export class Brain {
       : { x: s.home.x - 12, y: s.home.y - 4, z: s.home.z - 12, width: 25, height: 11, length: 25 };
     const blocks = await readBox({ call: (m, p, t) => this.rt.call(m, p, t) }, box);
     const before = JSON.stringify({ ...world.landmarks, foundAt: 0 });
-    world.landmarks = { ...findLandmarks(box, blocks, s.home), foundAt: this.now() };
+    // what it could not see (unloaded, just after a rejoin) stays as it was known (keepUnseen)
+    world.landmarks = { ...findLandmarks(box, blocks, s.home, world.landmarks), foundAt: this.now() };
     // a chest inside one of the LLM's structures is that structure's (a valuables chest in a hut 40 blocks out), not
     // home storage: the kit walked out to it at dusk, and the shelter pulled it back, three times over
     const theirs = this.structureChests(world);
