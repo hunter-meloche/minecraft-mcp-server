@@ -133,6 +133,12 @@ export const BRAKE = 2;
 const BRAKE_CLEAR = 2;
 /** How far from a villager the pickup may be: the boat's hop on land with it (2 a second), straight. */
 export const HOP = 6;
+/**
+ * How far from a villager an extension's new pickup may be (live, Nov 21: the hillside village had no level run of
+ * 7 within HOP of any villager). The boat hop covers the rest: an extension is taken only when a villager can be
+ * boated to its pickup or stands on it (railshome.ts extensionFor).
+ */
+export const EXT_REACH = 16;
 /** Search costs: a rail is 1; a curve, a rail up (a powered rail and a share of a torch), a rail down, a block of the boat's hop (more than a rail: the pickup stays by the villager). */
 const COST = { turn: 0.4, up: 1, down: 0.2, hop: 1.5 } as const;
 /** The work's pace, for the time: a block laid (walked to and put down), one taken back up, a walk, the cart. */
@@ -177,7 +183,7 @@ export interface RailOpts {
 }
 
 /** What the search, the power and the torches go on: the yard's line and an extension's alike. */
-type CoreOpts = Pick<RailOpts, 'candidates' | 'yard' | 'zones' | 'bounds' | 'maxNodes' | 'avoid'>;
+type CoreOpts = Pick<RailOpts, 'candidates' | 'yard' | 'zones' | 'bounds' | 'maxNodes' | 'avoid'> & { reach?: number };
 /** Where the search ends: the goal cell and the way the line goes on from it; the rails after it (the yard's stretch, this plan's own), or the line it joins (an extension's: `tail`). */
 interface CoreEnd { goal: Pos; goalDir: Dir; after: Pos[]; tail?: readonly RailCell[] }
 type Start = { villager: number; from: Pos; pickup: Pos; d: Dir; hop: number; stop: { at: Pos; placed: boolean } };
@@ -287,7 +293,7 @@ export function planExtension(g: RailGround, opts: ExtendOpts): RailExtension | 
   const clear = new Set([key(join.x, join.y, join.z), ...(opts.line.stop.placed ? [key(opts.line.stop.at.x, opts.line.stop.at.y, opts.line.stop.at.z)] : [])]);
   const at = (x: number, y: number, z: number): string | null | undefined => (clear.has(key(x, y, z)) ? 'air' : g.state(x, y, z));
   const goalDir = dirOf(Math.sign(next.x - join.x), Math.sign(next.z - join.z));
-  const core = lineCore(at, opts, { goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1) });
+  const core = lineCore(at, { ...opts, reach: EXT_REACH }, { goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1) });
   if (!core.ok) return core;
   const { start, line, cells, torches } = core;
   let climb = 0, drop = 0;
@@ -304,6 +310,7 @@ export function planExtension(g: RailGround, opts: ExtendOpts): RailExtension | 
  * (`tail`: kept off but at the goal, its first lit rail the boosts' next). `at` reads the ground as the line would find it.
  */
 function lineCore(at: (x: number, y: number, z: number) => string | null | undefined, opts: CoreOpts, to: CoreEnd): CoreResult {
+  const reach = opts.reach ?? HOP;
   // where a rail can go, by cell (cached: the search asks again and again)
   const okCache = new Map<string, boolean>();
   const railAt = (x: number, y: number, z: number): boolean => {
@@ -339,9 +346,9 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   for (const e of opts.candidates.slice(0, 4)) {
     if (!e.position) continue;
     const vx = Math.floor(e.position.x), vz = Math.floor(e.position.z);
-    for (let px = vx - HOP; px <= vx + HOP; px++) for (let pz = vz - HOP; pz <= vz + HOP; pz++) {
+    for (let px = vx - reach; px <= vx + reach; px++) for (let pz = vz - reach; pz <= vz + reach; pz++) {
       const hop = Math.hypot(px + 0.5 - e.position.x, pz + 0.5 - e.position.z);
-      if (hop > HOP || inYard(px, pz) || !inBounds(px, pz)) continue;
+      if (hop > reach || inYard(px, pz) || !inBounds(px, pz)) continue;
       // the boat's hop on the ground as it is, from where the villager stands to the pickup's middle: where it comes to
       // rest is the rail's cell (the boat's bottom on the ground's top; a little under it on mud)
       let level = e.position.y;
@@ -374,7 +381,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
       }
     }
   }
-  if (!starts.length) return { ok: false, why: 'no pickup by a villager to take: no straight, level run of 7 rails on open ground (and a stop and a torch) within 6 of one' };
+  if (!starts.length) return { ok: false, why: `no pickup by a villager to take: no straight, level run of 7 rails on open ground (and a stop and a torch) within ${reach} of one` };
 
   // the search: states (cell, way in, step in, the turn the rail before made, rails since the pickup up to FIRST_BOOST)
   type Node = { x: number; y: number; z: number; d: Dir; dy: number; rot: number; k: number; g: number; prev?: Node; start: Start };
