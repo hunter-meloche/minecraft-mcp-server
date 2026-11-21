@@ -2,7 +2,7 @@ import type { GoalContext, Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { Zone } from './courtesy.js';
 import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
-import { EARTH_MAX, FIRST_BOOST, HEAD, HOP, earthed, planExtension, railBase, railRoom, shapeOf, type EarthEdit, type RailCell, type RailExtension, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
+import { EARTH_MAX, FIRST_BOOST, HEAD, HOP, JOIN_TAIL, earthed, planExtension, railBase, railRoom, shapeOf, type EarthEdit, type RailCell, type RailExtension, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, footprint, planRoute, zoneNear, type BoatAt, type Entry } from './boatroute.js';
 import { HALL_FRESH, HALL_WANTS, JUDGE_V, joinAreas, judgeOnWhole, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type Verdict, type VillageLook, type VillageSite } from './village.js';
 import { prepare } from './project.js';
@@ -1785,11 +1785,14 @@ const EXT_NODES = 150_000;
 
 type FreeVerdict = Extract<Verdict, { kind: 'free' }>;
 
-/** The box an extension is planned in (pure): the hop's (the village's area and the pickup) and the line's far end, EXT_ROOM round it. */
+/** The line's cells an extension may join at (its launch's and the JOIN_TAIL after it, outside the yard's stretch). */
+const joinable = (line: RailLine): RailCell[] => line.cells.slice(0, Math.min(JOIN_TAIL, Math.max(1, goalOf(line) + 1)));
+/** The box an extension is planned in (pure): the hop's (the village's area and the pickup) and the line's far end with the tail it may join at, EXT_ROOM round it. */
 function extendBox(line: RailLine, area?: { x1: number; z1: number; x2: number; z2: number }): { x1: number; z1: number; x2: number; z2: number } {
   const p = line.pickup;
   const h = hopBox(line, area) ?? { x1: p.x - HOP - 4, z1: p.z - HOP - 4, x2: p.x + HOP + 4, z2: p.z + HOP + 4 };
-  const ends = [line.stop.at, line.cells[0]];
+  // (the line's tail an extension may join at, JOIN_TAIL of its cells, and its stop)
+  const ends = [line.stop.at, ...joinable(line)];
   return {
     x1: Math.min(h.x1, ...ends.map(e => e.x - EXT_ROOM)), z1: Math.min(h.z1, ...ends.map(e => e.z - EXT_ROOM)),
     x2: Math.max(h.x2, ...ends.map(e => e.x + EXT_ROOM)), z2: Math.max(h.z2, ...ends.map(e => e.z + EXT_ROOM))
@@ -1798,7 +1801,8 @@ function extendBox(line: RailLine, area?: { x1: number; z1: number; x2: number; 
 
 /** The ground round the village and the line's far end (the hop's and an extension's), its band from the pickup's, the bell's and the candidates' heights. */
 async function villageGround(ctx: GoalContext, line: RailLine, t: HopFrom): Promise<Ground> {
-  const ys = [line.pickup.y, line.site.y, line.cells[0].y, ...t.candidates.filter(e => e.position).map(e => Math.floor(e.position!.y))];
+  // (the band of heights over the head's ground and the tail it may join at alike)
+  const ys = [line.pickup.y, line.site.y, ...joinable(line).map(c => c.y), line.stop.at.y, ...t.candidates.filter(e => e.position).map(e => Math.floor(e.position!.y))];
   const y0 = Math.min(...ys) - MAX_DROP - 4;
   const g = new Ground(y0, Math.min(64, Math.max(...ys) + 8 - y0 + 1));
   const b = extendBox(line, t.area);
@@ -1867,7 +1871,7 @@ export function extensionFor(line: RailLine, g: Ground, t: {
   const zones = [...wayZones(t.look, t.v), ...t.look.zones.filter(z => t.v.own.includes(z) && !meets(z, t.area))];
   const marks = [...t.look.jobs.map(j => j.at), ...t.look.beds, ...t.look.bells];
   const own = t.v.own;
-  const ends = new Set([key(join), key(line.stop.at)]);
+  const ends = new Set([...joinable(line).map(c => key(c)), key(line.stop.at)]);
   const avoid = (x: number, y: number, z: number): boolean => !ends.has(`${x},${y},${z}`)
     && (marks.some(m => Math.abs(m.x - x) <= 1 && Math.abs(m.z - z) <= 1 && Math.abs(m.y - y) <= 2)
       || own.some(o => x >= o.x1 && x <= o.x2 && z >= o.z1 && z <= o.z2 && y >= o.y1 - 2 && y <= o.y2 + 1));
@@ -1889,8 +1893,12 @@ export function extensionFor(line: RailLine, g: Ground, t: {
     }
     return false;
   };
+  // (the line as it stands, its torches, and the bot's own fills under it from an extension before: ground)
+  const lineNow = { cells: line.cells, stop: line.stop, torches: line.torches };
+  const ground = (line.earth ?? []).filter(w => w.op === 'fill' && w.done).map(w => ({ x: w.x, y: w.y, z: w.z }));
+  const joinTail = joinable(line).length;
   const plan = (candidates: { id: number; position?: Pos }[]) => planExtension(g, {
-    candidates, yard: t.yard, zones, bounds, avoid, maxNodes: t.maxNodes ?? EXT_NODES, line: { cells: line.cells, stop: line.stop }
+    candidates, yard: t.yard, zones, bounds, avoid, maxNodes: t.maxNodes ?? EXT_NODES, line: lineNow, ground, joinTail
   });
   const byVillager = plan([...t.noWay].sort((a, b) => horiz(a.position!, join) - horiz(b.position!, join)));
   if (byVillager.ok && reached(byVillager)) return byVillager;
@@ -1914,7 +1922,7 @@ export function extensionFor(line: RailLine, g: Ground, t: {
     && !zoneNear(zones, { x: x + 0.5, y, z: z + 0.5 }, FROM_ZONES);
   const near = [...t.order].sort((a, b) => horiz(a.position!, join) - horiz(b.position!, join));
   const levelled = planExtension(g, {
-    candidates: near, yard: t.yard, zones, bounds, avoid, maxNodes: t.maxNodes ?? EXT_NODES, line: { cells: line.cells, stop: line.stop },
+    candidates: near, yard: t.yard, zones, bounds, avoid, maxNodes: t.maxNodes ?? EXT_NODES * 2, line: lineNow, ground, joinTail,
     earth: { may, max: t.earthMax ?? EARTH_MAX }
   });
   if (levelled.ok && reached(levelled)) return levelled;
@@ -1923,9 +1931,12 @@ export function extensionFor(line: RailLine, g: Ground, t: {
 
 /** The extension written into the line (before anything of it goes down): the new head, the rails to the old launch's cell, the torches, the village's area as judged today. */
 function applyExtension(line: RailLine, r: RailExtension, area: RailLine['area'], now: number): void {
-  const join = line.cells[0];
-  line.cells = [...r.cells.map(c => ({ ...c })), ...line.cells.slice(1)];
-  line.torches = [...line.torches.filter(t => !t.trigger), ...r.torches.map(t => ({ ...t, at: { ...t.at }, lights: { ...t.lights } }))];
+  const join = line.cells[r.skip];
+  // (the line from the join on; the cells before it bypassed, and their torches and the old trigger: no longer the
+  // plan's, the record's strays, taken up before the laying goes on and by the take-up)
+  const kept = line.cells.slice(r.skip + 1);
+  line.cells = [...r.cells.map(c => ({ ...c })), ...kept];
+  line.torches = [...line.torches.filter(t => !t.trigger && kept.some(c => same(c, t.lights))), ...r.torches.map(t => ({ ...t, at: { ...t.at }, lights: { ...t.lights } }))];
   line.stop = { at: { ...r.stop.at }, placed: r.stop.placed };
   line.pickup = { ...r.pickup };
   line.villager = r.villager;
@@ -1981,7 +1992,7 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   await yieldNow();
   const r = extensionFor(line, g, { noWay: reach.noWay, order: reach.order, look, v, area, yard, earth: !!ctx.rails?.cut && !!ctx.rails?.restore });
   if (!r.ok) return notToday(ctx, line, `${hopWhy}; and no extension of the line into the village: ${r.why}`, true);
-  const from = line.cells[0];
+  const from = line.cells[r.skip];
   applyExtension(line, r, area, clk.now());
   // (written before any of it goes down, the old launch's rail and the stop still in the record: a run cut short lays
   // on from here, the strays taken up first)
@@ -1989,6 +2000,7 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   ctx.save?.();
   say(ctx, `${hopWhy}`);
   say(ctx, `the line extended into the village: ${r.cells.length} rails (${r.powered} powered) from ${fmt(from)} to the new pickup ${fmt(r.pickup)}`);
+  if (r.skip) say(ctx, `it joins the line ${r.skip} rails in from its old launch: the ${r.skip} before the join, their torches and the old stop taken up first`);
   say(ctx, `the extension's route ${r.route}; the launch, the stop${r.stop.placed ? ' (a cobblestone)' : ' (the ground)'} and the cart's start at its end, by the villager (${r.villager < 0 ? 'the bell' : r.villager}) at ${fmt(r.from)}`);
   if (r.earth.length) {
     const cuts = r.earth.filter(w => w.op === 'cut'), fills = r.earth.length - cuts.length;

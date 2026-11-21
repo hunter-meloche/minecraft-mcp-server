@@ -234,6 +234,11 @@ export const HOP = 6;
  * boated to its pickup or stands on it (railshome.ts extensionFor).
  */
 export const EXT_REACH = 16;
+/**
+ * Of the line's cells from its launch, how many an extension may join at (live, Nov 21: a head by a villager found, its
+ * way to the line's end blocked 10 short of it): the cells before the join are bypassed and taken up.
+ */
+export const JOIN_TAIL = 40;
 /** Search costs: a rail is 1; a curve, a rail up (a powered rail and a share of a torch), a rail down, a block of the boat's hop (more than a rail: the pickup stays by the villager). */
 const COST = { turn: 0.4, up: 1, down: 0.2, hop: 1.5 } as const;
 /** The work's pace, for the time: a block laid (walked to and put down), one taken back up, a walk, the cart. */
@@ -280,9 +285,18 @@ export interface RailOpts {
 /** What the search, the power and the torches go on: the yard's line and an extension's alike. */
 type CoreOpts = Pick<RailOpts, 'candidates' | 'yard' | 'zones' | 'bounds' | 'maxNodes' | 'avoid'> & { reach?: number; earth?: EarthOpts };
 /** Where the search ends: the goal cell and the way the line goes on from it; the rails after it (the yard's stretch, this plan's own), or the line it joins (an extension's: `tail`). */
-interface CoreEnd { goal: Pos; goalDir: Dir; after: Pos[]; tail?: readonly RailCell[] }
+interface CoreEnd {
+  goal: Pos; goalDir: Dir; after: Pos[]; tail?: readonly RailCell[];
+  /**
+   * an extension's joins: the goal and its cells of the line's tail it may join instead (`skip`: how many of `tail`
+   * are bypassed, taken up, when it joins there; entered by a curve only, the bypassed cells being the old line's), and
+   * the old line's torches (no launch beside one: it would go lit)
+   */
+  joins?: readonly { at: Pos; dir: Dir; skip: number }[];
+  torches?: readonly Pos[];
+}
 type Start = { villager: number; from: Pos; pickup: Pos; d: Dir; hop: number; stop: { at: Pos; placed: boolean }; earth: EarthEdit[] };
-type CoreResult = { ok: true; start: Start; line: Pos[]; cells: RailCell[]; torches: RailTorch[]; earth: EarthEdit[] } | { ok: false; why: string; at?: Pos };
+type CoreResult = { ok: true; start: Start; line: Pos[]; cells: RailCell[]; torches: RailTorch[]; earth: EarthEdit[]; skip: number } | { ok: false; why: string; at?: Pos };
 
 /**
  * The rails' plan (pure): the yard's last stretch (the panel's column, from the fence's post to the brake two short of
@@ -350,8 +364,12 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
 
 /** What an extension is planned on: the candidates and the keep-offs as planRails's, the line as it stands. */
 export interface ExtendOpts extends CoreOpts {
-  /** the line as it stands: its rails from the launch (0) to the brake, and the launch's stop */
-  line: { cells: readonly RailCell[]; stop: { at: Pos; placed: boolean } };
+  /** the line as it stands: its rails from the launch (0) to the brake, the launch's stop, and its torches */
+  line: { cells: readonly RailCell[]; stop: { at: Pos; placed: boolean }; torches?: readonly RailTorch[] };
+  /** of its cells from the launch, how many it may join at (JOIN_TAIL; 1: the launch's cell only) */
+  joinTail?: number;
+  /** the bot's own fills under the line (an extension's before): ground to the planner */
+  ground?: readonly Pos[];
 }
 
 /** An extension of the line into the village: the new head and the way to the line's far end. */
@@ -362,8 +380,10 @@ export interface RailExtension {
   pickup: Pos;
   hop: number;
   stop: { at: Pos; placed: boolean };
-  /** the new rails from the new launch (0) to the old launch's cell, its last (a plain rail now, or a boost) */
+  /** the new rails from the new launch (0) to the cell of the line it joins, its last (a plain rail now, or a boost) */
   cells: RailCell[];
+  /** the line's cells before the join, from its launch (0: it joins at the launch's cell): bypassed, taken up */
+  skip: number;
   /** the new torches, the new trigger among them */
   torches: RailTorch[];
   /** the cuts and fills it makes (none unless `earth` was asked): each made before the block of the line over it goes down */
@@ -387,19 +407,35 @@ export function planExtension(g: RailGround, opts: ExtendOpts): RailExtension | 
   const old = opts.line.cells;
   if (old.length < 2) return { ok: false, why: 'no line to extend' };
   const join = old[0], next = old[1];
-  if (next.y !== join.y) return { ok: false, why: `the line's end at ${fmt(join)} is not level` };
-  // the old launch's cell and the old stop (if it is the bot's cobblestone) read as they will be: taken up
-  const clear = new Set([key(join.x, join.y, join.z), ...(opts.line.stop.placed ? [key(opts.line.stop.at.x, opts.line.stop.at.y, opts.line.stop.at.z)] : [])]);
-  const at = (x: number, y: number, z: number): string | null | undefined => (clear.has(key(x, y, z)) ? 'air' : g.state(x, y, z));
+  // the joins (the user's of Nov 21: live, the way to the line's end was blocked 10 short of it): its launch's cell, or
+  // any of the JOIN_TAIL cells after it that runs level on into the line, outside the yard, not the brake, with plain
+  // rails before it and at it (no lit run of the line cut through: its torch may light the rails past the join)
+  const yd = opts.yard;
+  const n = Math.min(opts.joinTail ?? JOIN_TAIL, old.length - 2);
+  const joins: { at: Pos; dir: Dir; skip: number }[] = [];
+  for (let j = 0; j < n; j++) {
+    const c = old[j], nx = old[j + 1];
+    if (nx.y !== c.y || c.kind === 'brake' || nx.kind === 'brake' || (c.x >= yd.x1 && c.x <= yd.x2 && c.z >= yd.z1 && c.z <= yd.z2)) continue;
+    if (j > 0 && (c.kind !== 'rail' || old[j - 1].kind !== 'rail')) continue;
+    joins.push({ at: { x: c.x, y: c.y, z: c.z }, dir: dirOf(Math.sign(nx.x - c.x), Math.sign(nx.z - c.z)), skip: j });
+  }
+  if (!joins.length) return { ok: false, why: `the line's end at ${fmt(join)} is not level, nor any of its next ${n - 1} cells` };
+  // the line's cells it may bypass and the old stop (if it is the bot's cobblestone) read as they will be: taken up;
+  // the bot's own fills under the line as ground
+  const clear = new Set([...old.slice(0, n).map(c => key(c.x, c.y, c.z)), ...(opts.line.stop.placed ? [key(opts.line.stop.at.x, opts.line.stop.at.y, opts.line.stop.at.z)] : [])]);
+  const fills = new Set((opts.ground ?? []).map(p => key(p.x, p.y, p.z)));
+  const at = (x: number, y: number, z: number): string | null | undefined => (clear.has(key(x, y, z)) ? 'air' : fills.has(key(x, y, z)) ? 'stone' : g.state(x, y, z));
   const goalDir = dirOf(Math.sign(next.x - join.x), Math.sign(next.z - join.z));
-  const core = lineCore(at, { ...opts, reach: opts.earth ? EARTH_NEAR : EXT_REACH }, { goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1) });
+  const core = lineCore(at, { ...opts, reach: opts.earth ? EARTH_NEAR : EXT_REACH }, {
+    goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1), joins, torches: (opts.line.torches ?? []).filter(t => !t.trigger).map(t => t.at)
+  });
   if (!core.ok) return core;
-  const { start, line, cells, torches, earth } = core;
+  const { start, line, cells, torches, earth, skip } = core;
   let climb = 0, drop = 0;
   for (let i = 1; i < line.length; i++) { const d = line[i].y - line[i - 1].y; if (d > 0) climb += d; else drop -= d; }
   return {
     ok: true, villager: start.villager, from: start.from, pickup: start.pickup, hop: Math.round(start.hop * 10) / 10, stop: start.stop,
-    cells, torches, earth, length: line.length, climb, drop, powered: cells.filter(c => c.kind !== 'rail').length, route: routeText(start.stop.at, line)
+    cells, skip, torches, earth, length: line.length, climb, drop, powered: cells.filter(c => c.kind !== 'rail').length, route: routeText(start.stop.at, line)
   };
 }
 
@@ -421,23 +457,31 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
     }
     return v;
   };
-  const { goal, goalDir, after } = to;
+  const { after } = to;
   const yard = opts.yard;
   const zones = opts.zones ?? [];
-  const tail = to.tail ?? [];
+  const tailAll = to.tail ?? [];
+  // (the goals: the line's end, and an extension's joins on the tail)
+  const goals = to.joins?.length ? [...to.joins] : [{ at: to.goal, dir: to.goalDir, skip: 0 }];
+  const goalAt = new Map(goals.map(gl => [key(gl.at.x, gl.at.y, gl.at.z), gl]));
   const inYard = (x: number, z: number) => x >= yard.x1 && x <= yard.x2 && z >= yard.z1 && z <= yard.z2;
   const b = opts.bounds;
   const inBounds = (x: number, z: number) => !b || (x >= b.x1 && x <= b.x2 && z >= b.z1 && z <= b.z2);
   const offZones = (x: number, y: number, z: number) => !zoneNear(zones, { x: x + 0.5, y, z: z + 0.5 }, FROM_ZONES) && !opts.avoid?.(x, y, z);
   // (an extension keeps off the line it joins, but at the goal: rails beside rails join up)
   const tailAt = new Map<string, number[]>();
-  for (const c of tail) tailAt.set(`${c.x},${c.z}`, [...(tailAt.get(`${c.x},${c.z}`) ?? []), c.y]);
-  const isGoal = (x: number, y: number, z: number) => x === goal.x && y === goal.y && z === goal.z;
+  const isGoal = (x: number, y: number, z: number) => goalAt.has(key(x, y, z));
+  // (the join cells aside: the way comes in beside its own; one that would run beside the line kept is refused as it
+  // reaches the join, touching)
+  for (const c of tailAll) if (!isGoal(c.x, c.y, c.z)) tailAt.set(`${c.x},${c.z}`, [...(tailAt.get(`${c.x},${c.z}`) ?? []), c.y]);
   const byTail = (x: number, y: number, z: number): boolean => {
-    if (!tail.length || isGoal(x, y, z)) return false;
+    if (!tailAll.length || isGoal(x, y, z)) return false;
     for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) for (const ty of tailAt.get(`${x + ox},${z + oz}`) ?? []) if (Math.abs(ty - y) <= (ox || oz ? 1 : 2)) return true;
     return false;
   };
+  // (a launch beside the old line's torch, or over one, would be lit before its trigger)
+  const oldTorches = new Set((to.torches ?? []).map(t => key(t.x, t.y, t.z)));
+  const byOldTorch = (l: Pos) => [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]].some(([ox, oy, oz]) => oldTorches.has(key(l.x + ox, l.y + oy, l.z + oz)));
   const torchSpot = (x: number, y: number, z: number) => railRoom(at(x, y, z)) && railBase(at(x, y - 1, z)) && offZones(x, y, z) && !inYard(x, z);
 
   // the starts: a pickup within HOP of a candidate (the boat's hop to it straight and level-or-down), its head behind it
@@ -457,25 +501,25 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
         level = leg.level;
       }
       const py = Math.round(level);
-      if (Math.abs(level - py) > 0.25 || !railAt(px, py, pz) || !offZones(px, py, pz) || (tail.length && (isGoal(px, py, pz) || byTail(px, py, pz)))) continue;
+      if (Math.abs(level - py) > 0.25 || !railAt(px, py, pz) || !offZones(px, py, pz) || (tailAll.length && (isGoal(px, py, pz) || byTail(px, py, pz)))) continue;
       for (const d of [0, 1, 2, 3] as Dir[]) {
         const { dx, dz } = DIRS[d];
         const back = (n: number) => ({ x: px - dx * n, y: py, z: pz - dz * n });
         let fine = true;
         for (let n = 1; n < HEAD.pickup && fine; n++) {
           const c = back(n);
-          fine = railAt(c.x, c.y, c.z) && !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z) && !(tail.length && (isGoal(c.x, c.y, c.z) || byTail(c.x, c.y, c.z)));
+          fine = railAt(c.x, c.y, c.z) && !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z) && !(tailAll.length && (isGoal(c.x, c.y, c.z) || byTail(c.x, c.y, c.z)));
         }
         if (!fine) continue;
         const s = back(HEAD.pickup);
         const there = at(s.x, s.y, s.z);
         const stop = solidGround(there) ? { at: s, placed: false } : railRoom(there) && railBase(at(s.x, s.y - 1, s.z)) && !inYard(s.x, s.z) && offZones(s.x, s.y, s.z) ? { at: s, placed: true } : undefined;
-        if (!stop || (tail.length && (isGoal(s.x, s.y, s.z) || byTail(s.x, s.y, s.z)))) continue;
+        if (!stop || (tailAll.length && (isGoal(s.x, s.y, s.z) || byTail(s.x, s.y, s.z)))) continue;
         // (the boat's hop must not run over the stop's block)
         if (stop.placed && offSegment({ x: e.position.x, z: e.position.z }, { x: px + 0.5, z: pz + 0.5 }, { x: s.x + 0.5, z: s.z + 0.5 }) < 1.5) continue;
         // the launch's torch beside it, at its level (the trigger)
         const l = back(HEAD.pickup - HEAD.launch);
-        if (!sides(l, d).some(t => torchSpot(t.x, t.y, t.z))) continue;
+        if (!sides(l, d).some(t => torchSpot(t.x, t.y, t.z)) || byOldTorch(l)) continue;
         starts.push({ villager: e.id, from: { x: e.position.x, y: e.position.y, z: e.position.z }, pickup: { x: px, y: py, z: pz }, d, hop, stop, earth: [] });
       }
     }
@@ -508,7 +552,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
           let fine = true;
           for (let n = 0; n <= HEAD.pickup && fine; n++) {
             const c = back(n);
-            fine = !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z) && !(tail.length && (isGoal(c.x, c.y, c.z) || byTail(c.x, c.y, c.z)));
+            fine = !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z) && !(tailAll.length && (isGoal(c.x, c.y, c.z) || byTail(c.x, c.y, c.z)));
             const w = fine ? earthAt(c.x, c.y, c.z, n === HEAD.pickup ? 'stop' : 'rail') : undefined;
             if (!w) fine = false; else edits.push(...w);
           }
@@ -518,6 +562,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
           if (stopPlaced && offSegment({ x: e.position.x, z: e.position.z }, { x: px + 0.5, z: pz + 0.5 }, { x: s.x + 0.5, z: s.z + 0.5 }) < 1.5) continue;
           // the launch's torch beside it: the side that needs the fewest cuts and fills
           const l = back(HEAD.pickup - HEAD.launch);
+          if (byOldTorch(l)) continue;
           const torch = sides(l, d).filter(q => offZones(q.x, q.y, q.z) && !inYard(q.x, q.z)).map(q => earthAt(q.x, q.y, q.z, 'torch')).filter((w): w is EarthEdit[] => !!w).sort((a, b) => a.length - b.length)[0];
           if (!torch) continue;
           edits.push(...torch);
@@ -556,10 +601,12 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   // the search: states (cell, way in, step in, the turn the rail before made, rails since the pickup up to FIRST_BOOST)
   type Node = { x: number; y: number; z: number; d: Dir; dy: number; rot: number; k: number; g: number; prev?: Node; start: Start; earth?: EarthEdit[]; e: number };
   const sk = (n: Pick<Node, 'x' | 'y' | 'z' | 'd' | 'dy' | 'rot' | 'k'>) => `${n.x},${n.y},${n.z},${n.d},${n.dy},${n.rot},${n.k}`;
-  const h = (x: number, z: number) => Math.abs(x - goal.x) + Math.abs(z - goal.z);
+  const h = (x: number, z: number) => { let m = Infinity; for (const gl of goals) m = Math.min(m, Math.abs(x - gl.at.x) + Math.abs(z - gl.at.z)); return m; };
+  // (the levelled search goes greedier: its states are many more, every height a cut or a fill may make)
+  const hw = earth ? 1.4 : 1;
   const heap: { f: number; n: Node }[] = [];
   const push = (n: Node) => {
-    heap.push({ f: n.g + h(n.x, n.z), n });
+    heap.push({ f: n.g + hw * h(n.x, n.z), n });
     for (let i = heap.length - 1; i > 0;) { const p = (i - 1) >> 1; if (heap[p].f <= heap[i].f) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; }
   };
   const pop = (): Node | undefined => {
@@ -597,6 +644,15 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
     }
     return false;
   };
+  // (a way to a join that would run beside the line kept from there, or over it: rails side by side join up)
+  const joinTouches = (n: Node, skip: number): boolean => {
+    const p: Pos[] = [];
+    for (let q: Node | undefined = n; q; q = q.prev) p.unshift({ x: q.x, y: q.y, z: q.z });
+    const st = n.start;
+    const hd: Pos[] = [];
+    for (let i = HEAD.pickup - HEAD.launch; i >= 1; i--) hd.push({ x: st.pickup.x - DIRS[st.d].dx * i, y: st.pickup.y, z: st.pickup.z - DIRS[st.d].dz * i });
+    return !!touching([st.stop.at, ...hd, ...p, ...tailAll.slice(skip).map(c => ({ x: c.x, y: c.y, z: c.z }))]);
+  };
   const maxNodes = opts.maxNodes ?? 250_000;
   const closed = new Set<string>();
   let looked = 0, end: Node | undefined, nearest: Node | undefined;
@@ -610,8 +666,13 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
     if (!nearest || h(n.x, n.z) < h(nearest.x, nearest.z)) nearest = n;
     // at the cell outside the fence: on into the yard's stretch, straight, or by a curve there (level, and not a second
     // curve the same way round)
-    if (n.x === goal.x && n.y === goal.y && n.z === goal.z && n.d !== ((goalDir + 2) % 4)
-      && (n.d === goalDir || (n.dy === 0 && (goalDir === (n.d + 1) % 4 ? 1 : -1) !== n.rot))) { end = n; break; }
+    // (a join on the tail: by a curve only, the old line's rails before it bypassed; nothing goes on from a goal's cell)
+    const gl = goalAt.get(key(n.x, n.y, n.z));
+    if (gl) {
+      if (n.d !== ((gl.dir + 2) % 4) && ((n.d === gl.dir && gl.skip === 0) || (n.d !== gl.dir && n.dy === 0 && (gl.dir === (n.d + 1) % 4 ? 1 : -1) !== n.rot))
+        && !(goals.length > 1 && joinTouches(n, gl.skip))) { end = n; break; }
+      continue;
+    }
     for (const d2 of [0, 1, 2, 3] as Dir[]) {
       if (d2 === (n.d + 2) % 4) continue;
       const turn = d2 !== n.d;
@@ -654,13 +715,17 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   if (!end) {
     const near = nearest ? `; it got no nearer than ${h(nearest.x, nearest.z)} (at ${fmt(nearest)})` : '';
     const lim = earth ? ` (at most ${EARTH_DEPTH} cut or filled a column, ${earthMax} in all)` : '';
-    return { ok: false, why: `no rails way to ${tail.length ? 'the line\'s end' : 'the yard\'s fence'} at ${fmt(goal)}${looked >= maxNodes ? ` within ${maxNodes} steps` : ''}${lim}${near}`, ...(nearest ? { at: { x: nearest.x, y: nearest.y, z: nearest.z } } : {}) };
+    const joins = goals.length > 1 ? ` (or any of the ${goals.length - 1} cells on from it)` : '';
+    return { ok: false, why: `no rails way to ${tailAll.length ? 'the line\'s end' : 'the yard\'s fence'} at ${fmt(to.goal)}${joins}${looked >= maxNodes ? ` within ${maxNodes} steps` : ''}${lim}${near}`, ...(nearest ? { at: { x: nearest.x, y: nearest.y, z: nearest.z } } : {}) };
   }
   const path: Pos[] = [];
   const edits: EarthEdit[] = [];
   for (let n: Node | undefined = end; n; n = n.prev) { path.unshift({ x: n.x, y: n.y, z: n.z }); if (n.earth) edits.unshift(...n.earth); }
   const start = end.start;
   edits.unshift(...start.earth);
+  // (the line it joins, from the join on: the cells before it bypassed)
+  const joined = goalAt.get(key(end.x, end.y, end.z))!;
+  const tail = tailAll.slice(joined.skip);
   const head: Pos[] = [];
   for (let n = HEAD.pickup - HEAD.launch; n >= 1; n--) head.push({ x: start.pickup.x - DIRS[start.d].dx * n, y: start.pickup.y, z: start.pickup.z - DIRS[start.d].dz * n });
   // the whole line: the launch and the four plain, the pickup and the way, the yard's stretch (an extension: the way to
@@ -782,7 +847,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   // (the launch's torch side levelled for it but not taken, the other one fit as it stands: left as it is)
   const used = new Set([...line, start.stop.at, ...torches.map(t => t.at)].map(p => `${p.x},${p.z}`));
   const spare = new Set(sides(line[0], start.d).map(p => `${p.x},${p.z}`).filter(c => !used.has(c)));
-  return { ok: true, start, line, cells, torches, earth: edits.filter(w => w.hop || !spare.has(`${w.x},${w.z}`)) };
+  return { ok: true, start, line, cells, torches, earth: edits.filter(w => w.hop || !spare.has(`${w.x},${w.z}`)), skip: joined.skip };
 }
 
 

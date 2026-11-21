@@ -1470,6 +1470,7 @@ test('a villager uphill of the pickup (no boat way climbs to it): the line exten
   uphill(land);
   extKit(land);
   const oldLaunch = { ...line.cells[0] }, oldStop = { ...line.stop.at };
+  const old = line.cells.map(c => ({ ...c }));
   const cells0 = line.cells.length;
   // every lay asked with its block in the record already, and in brain.json as last written
   const unrecorded: string[] = [];
@@ -1485,14 +1486,17 @@ test('a villager uphill of the pickup (no boat way climbs to it): the line exten
   const ext = line.extended!;
   t.truthy(ext);
   t.true(said.some(l => /^rails: no boat way to the pickup at \(-556, 63, 2000\) for a villager to take \(1 tried\): from the villager \(101\) at \(-599, 65, 2000\)/.test(l)), said.join('\n'));
-  t.true(said.includes(`rails: the line extended into the village: ${ext.rails} rails (${ext.powered} powered) from (-556, 63, 1995) to the new pickup (${ext.to.x}, ${ext.to.y}, ${ext.to.z})`), said.join('\n'));
+  // (joined where the fewest new rails reach the line: here 7 in from the old launch, a straight run east)
+  const skip = old.findIndex(c => c.x === ext.from.x && c.y === ext.from.y && c.z === ext.from.z);
+  t.true(skip >= 0 && skip < 40, JSON.stringify(ext.from));
+  t.true(said.includes(`rails: the line extended into the village: ${ext.rails} rails (${ext.powered} powered) from (${ext.from.x}, ${ext.from.y}, ${ext.from.z}) to the new pickup (${ext.to.x}, ${ext.to.y}, ${ext.to.z})`), said.join('\n'));
   t.true(said.some(l => l.startsWith(`rails: the extension into the village is down: ${ext.rails} rails`)), said.join('\n'));
   // the extension: from a new head by the villager up in the basin, over the rim (a climb, lit), down the steps, to the old launch's cell
-  t.is(line.cells.length, cells0 + ext.rails - 1);
+  t.is(line.cells.length, cells0 - skip + ext.rails - 1);
   t.is(ext.to.y, 65);
   t.true(horiz(ext.to, { x: -598.5, z: 2000.5 }) <= 6);
   const extCells = line.cells.slice(0, ext.rails);
-  t.deepEqual(extCells[ext.rails - 1] && { x: extCells[ext.rails - 1].x, y: extCells[ext.rails - 1].y, z: extCells[ext.rails - 1].z }, { x: oldLaunch.x, y: oldLaunch.y, z: oldLaunch.z });
+  t.deepEqual(extCells[ext.rails - 1] && { x: extCells[ext.rails - 1].x, y: extCells[ext.rails - 1].y, z: extCells[ext.rails - 1].z }, { x: old[skip].x, y: old[skip].y, z: old[skip].z });
   t.true(extCells.some(c => c.role === 'climb' && c.kind === 'powered'), 'the rim is climbed on a lit powered rail');
   t.deepEqual(line.cells.filter(c => c.role === 'launch').map(c => k(c)), [k(line.cells[0])], 'one launch: the new head\'s');
   t.not(extCells[ext.rails - 1].role, 'launch');
@@ -1505,7 +1509,7 @@ test('a villager uphill of the pickup (no boat way climbs to it): the line exten
   // the old launch's powered rail and the old stop taken up before the rails went down there
   const upLaunch = did.indexOf(`take up powered_rail ${k(oldLaunch)}`), upStop = did.indexOf(`take up cobblestone ${k(oldStop)}`);
   t.true(upLaunch >= 0 && upStop >= 0, did.join(' | '));
-  t.true(upLaunch < did.indexOf(`lay rail ${k(oldLaunch)}`) || extCells[ext.rails - 1].kind === 'powered');
+  t.true(skip > 0 || upLaunch < did.indexOf(`lay rail ${k(oldLaunch)}`) || extCells[ext.rails - 1].kind === 'powered');
   t.deepEqual(unrecorded, [], 'every block in the record before it went down');
   t.true(did.some(l => l === `cart on ${k(line.cells[0])}`), did.join(' | '));
   t.true(did.some(l => /^cart took villager 101, home to the brake/.test(l)), did.join(' | '));
@@ -1668,6 +1672,87 @@ test('earthworks cut short (a restart after some cuts, before their rails): the 
   t.is(peekLine(saved), undefined);
 });
 
+/** A fence of someone's planks round the line's end (Nov 21: the way to the old end blocked 10 short of it): three high, from z 1990 to 2004. */
+function walledEnd(land: Field) {
+  for (let y = 63; y <= 65; y++) {
+    for (let z = 1990; z <= 2004; z++) { land.blocks.set(k({ x: -558, y, z }), 'oak_planks'); land.blocks.set(k({ x: -554, y, z }), 'oak_planks'); }
+    for (let x = -558; x <= -554; x++) land.blocks.set(k({ x, y, z: 1990 }), 'oak_planks');
+  }
+}
+
+test('a head whose way to the line\'s end is blocked joins the line further on (JOIN_TAIL): the rails before the join, the old stop and trigger in the record as strays and taken up before the extension goes down; the cart\'s way home lit within BOOST_GAP; the move made, all of it taken up', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  hillside(land);
+  uphill(land);
+  extKit(land);
+  walledEnd(land);
+  const old = line.cells.map(c => ({ ...c }));
+  const oldStop = { ...line.stop.at };
+  // (the bypassed rails as strays in the record when they come up: written there, not forgotten)
+  const upAt: string[] = [];
+  const takeUp = async (at: Pos, item?: string) => {
+    const l = world.rails?.line;
+    if (l?.extended && l.laid.some(b => k(b.at) === k(at)) && !l.cells.some(c => k(c) === k(at))) upAt.push(k(at));
+    return land.takeUp(at, item);
+  };
+  const log0 = land.log.length, said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE, { rails: { lay: land.lay, takeUp, placeCart: land.placeCart, cut: land.cut, restore: land.restore } });
+  const said = land.said.slice(said0), did = land.log.slice(log0);
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home \(1 in it now\); everything of the line taken back up/, said.join('\n'));
+  const m = said.map(l => /^rails: it joins the line (\d+) rails in from its old launch/.exec(l)).find(Boolean);
+  t.truthy(m, said.join('\n'));
+  const skip = Number(m![1]);
+  t.true(skip >= 10, `joined ${skip} in (the wall reaches z 2004)`);
+  // the extension ends on the old line's cell at the join, which goes on into the line kept
+  const ext = line.extended!;
+  t.deepEqual({ x: line.cells[ext.rails - 1].x, z: line.cells[ext.rails - 1].z }, { x: old[skip].x, z: old[skip].z });
+  t.deepEqual(line.cells.slice(ext.rails).map(c => k(c)), old.slice(skip + 1).map(c => k(c)));
+  // the bypassed rails and the old stop taken up (as strays) before the first rail of the extension went down
+  const firstLay = did.findIndex(l => /^lay /.test(l) && !/,2119$|,212[0-9]$/.test(l) && line.cells.slice(0, ext.rails - 1).some(c => l.endsWith(k(c))));
+  for (const c of old.slice(0, skip)) {
+    const i = did.indexOf(`take up ${c.kind === 'rail' ? 'rail' : 'powered_rail'} ${k(c)}`);
+    t.true(i >= 0 && i < firstLay, `${k(c)} up first`);
+    t.true(upAt.includes(k(c)), `${k(c)} a stray of the record`);
+  }
+  t.true(did.indexOf(`take up cobblestone ${k(oldStop)}`) < firstLay);
+  // the cart's way home lit: a lit rail at least every BOOST_GAP from the new pickup to the brake
+  const lit = line.cells.map((c, i) => (c.kind === 'powered' && c.role !== 'launch' ? i : -1)).filter(i => i >= 0);
+  for (let j = 1; j < lit.length; j++) t.true(lit[j] - lit[j - 1] <= BOOST_GAP, `${lit[j - 1]} .. ${lit[j]}`);
+  t.true(lit[0] - 5 >= 8, 'no lit rail within 7 of the new pickup');
+  t.deepEqual(line.cells.slice(-2).map(c => c.kind), ['brake', 'brake'], 'the brake as it was');
+  t.true(did.some(l => /^cart took villager 101, home to the brake/.test(l)), did.join(' | '));
+  t.deepEqual(land.standing(line), []);
+  for (const c of old) t.false(/rail/.test(land.block(c.x, c.y, c.z)), k(c));
+  t.is(peekLine(world), undefined);
+});
+
+test('a levelled head joining the line further on: its cuts and fills, the join\'s way among them, counted together in EARTH_MAX', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  bumpy(land);
+  walledEnd(land);
+  uphill(land, { x: -597.5, y: 65, z: 2000.5 });
+  const g = new Ground(55, 29);
+  for (let x = -625; x <= -540; x++) for (let z = 1960; z <= 2060; z++) for (let y = 55; y < 84; y++) g.set(x, y, z, land.block(x, y, z));
+  const v101 = { id: 101, name: 'villager', position: { x: -597.5, y: 65, z: 2000.5 }, profession: 'none' } as Seen;
+  const look = { jobs: [], beds: land.marks.filter(m => /_bed$/.test(m.name)).map(m => m.at), bells: [{ ...BELL }], zones: [], seen: [v101] };
+  const args = { noWay: [v101], order: [v101], look, v: { own: [], outposts: [] }, area: world.villages!.sites[0].area, yard: YARD, earth: true };
+  const r = extensionFor(line, g, args);
+  t.true(r.ok, r.ok ? '' : r.why);
+  if (!r.ok) return;
+  t.true(r.skip >= 10, `joined ${r.skip} in`);
+  t.true(r.earth.length > 0 && r.earth.length <= EARTH_MAX);
+  // one fewer allowed than this way takes: the whole extension's count is what is held to it (another way may be found,
+  // never one over the cap)
+  const less = extensionFor(line, g, { ...args, earthMax: r.earth.length - 1 });
+  if (less.ok) t.true(less.earth.length <= r.earth.length - 1);
+  const none = extensionFor(line, g, { ...args, earthMax: 2 });
+  t.false(none.ok);
+});
+
 test('the earthworks\' limits: no more than EARTH_MAX cuts and fills (a tighter cap finds none), no more than two a column, nothing but natural ground; too many is no extension, the move not made today and no miss', async (t) => {
   const { world, line } = lineWorld('laying');
   const land = new Field(world);
@@ -1810,7 +1895,7 @@ test('an extension that cannot be planned (the villagers in a hollow walled four
   // (nothing laid or taken up out there: the yard's stretch only, close up's)
   t.deepEqual(land.log.slice(log0).filter(l => /^(lay|take up|cut|restore) /.test(l) && Number(l.split(',')[2]) < 2119), []);
   t.is(line.earth, undefined);
-  t.regex(r.text, /levelled by a villager: no rails way to the line's end at \(-556, 63, 1995\) \(at most 2 cut or filled a column, 40 in all\)/);
+  t.regex(r.text, /levelled by a villager: no rails way to the line's end at \(-556, 63, 1995\) \(or any of the \d+ cells on from it\) \(at most 2 cut or filled a column, 40 in all\)/);
   t.is(land.block(-556, 63, 1994), 'cobblestone', 'the stop as it was');
   t.is(line.laid.filter(b => b.at.z < 2119).length, laid0, 'the line out there as it was');
 });
