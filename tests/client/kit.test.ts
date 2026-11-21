@@ -1,5 +1,7 @@
 import test from 'ava';
-import { KIT, better, carriedKit, enchantLevels, kitNeeds, slotsUsed, stashPlan, tier } from '../../src/client/brain/kit.js';
+import fs from 'fs';
+import path from 'path';
+import { KIT, better, carriedKit, enchantLevels, kitNeeds, slotsUsed, spent, stashPlan, tier } from '../../src/client/brain/kit.js';
 import type { InventoryItem } from '../../src/client/tools.js';
 
 /** A full kit: diamond tools, a stone spare pickaxe, iron armour worn, torches and cobblestone. */
@@ -263,4 +265,40 @@ test('the kit and the stash keep the enchanted piece over a plain one of its tie
   t.is(best.pickaxe?.slot, 5);
   t.is(spare?.slot, 0);
   t.deepEqual(kitNeeds(picks, {}).filter(n => n.kind === 'pickaxe'), []);
+});
+
+test('armour the anvil can never mend again is worn out under 20%: the kit takes the chest\'s one, and it is the best carried (Nov 21)', (t) => {
+  // the diamond_chestplate (protection 4, thorns 2, unbreaking 3) at 15% with repairCost 63: every Nether trip refused
+  // under 20% for hours, while the kit saw it sound till 10%
+  const chest = (o: Partial<InventoryItem>): InventoryItem[] => kit().map(i => (i.slot === 38 ? {
+    ...i, name: 'diamond_chestplate', damage: 449, maxDamage: 528,
+    enchantments: [{ name: 'protection', level: 4 }, { name: 'thorns', level: 2 }, { name: 'unbreaking', level: 3 }], ...o
+  } : i));
+  const spentOne = chest({ repairCost: 63 });
+  t.true(spent(spentOne.find(i => i.slot === 38)!));
+  t.deepEqual(kitNeeds(spentOne, { diamond_chestplate: 1 }).filter(n => n.kind === 'chestplate').map(n => [n.why, n.plan]),
+    [['worn', [{ take: 'diamond_chestplate', count: 1 }]]]);
+  // the fire protection one taken is the best now, over the spent one worn (the Guardian's Combat.armorRank wears it)
+  const fp: InventoryItem = { slot: 9, name: 'diamond_chestplate', count: 1, damage: 11, maxDamage: 528, enchantments: [{ name: 'unbreaking', level: 3 }, { name: 'fire_protection', level: 3 }], repairCost: 1 };
+  t.is(carriedKit([...spentOne, fp]).best.chestplate?.slot, 9);
+  t.deepEqual(kitNeeds([...spentOne, fp], {}).filter(n => n.kind === 'chestplate'), []);
+  // still mendable (31 + 4 = 35), with mending, or over 20%: not spent, the kit's 10% stands
+  for (const o of [{ repairCost: 31 }, { repairCost: 63, enchantments: [{ name: 'mending', level: 1 }] }, { repairCost: 63, damage: 400 }]) {
+    const items = chest(o);
+    t.false(spent(items.find(i => i.slot === 38)!), JSON.stringify(o));
+    t.deepEqual(kitNeeds(items, { diamond_chestplate: 1 }).filter(n => n.kind === 'chestplate'), [], JSON.stringify(o));
+  }
+  // a tool is never spent: the Nether's rule is the armour's
+  t.false(spent({ slot: 0, name: 'diamond_pickaxe', count: 1, damage: 1400, maxDamage: 1561, repairCost: 63 }));
+});
+
+test('the Guardian ranks a spent piece last of its tier as the kit does (Combat.java spent, kit.ts spent)', (t) => {
+  const java = fs.readFileSync(path.join(process.cwd(), 'client-mod', 'src', 'claudebridge', 'Combat.java'), 'utf8');
+  t.regex(java, /static final double SPENT_WEAR = 0\.2;/);
+  t.regex(java, /static final int ANVIL_MOST = 39;/);
+  t.regex(java, /return maxDamage > 0 && !mending && repairCost \+ 4 > ANVIL_MOST && maxDamage - damage < SPENT_WEAR \* maxDamage;/);
+  // armorRank(ItemStack) drops it to the bottom of its tier, with mending (REPAIR_WITH_XP) and the repairCost read off it
+  const rank = java.slice(java.indexOf('static int armorRank(ItemStack s)'), java.indexOf('static boolean spent('));
+  t.regex(rank, /REPAIR_WITH_XP/);
+  t.regex(rank, /spent\(s\.getDamageValue\(\), s\.getMaxDamage\(\), s\.getOrDefault\(DataComponents\.REPAIR_COST, 0\), mending\)\) \{\s+return armorRank\(tier, -999\);/);
 });

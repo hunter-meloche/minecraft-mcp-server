@@ -174,7 +174,26 @@ public final class Combat {
         for (var en : s.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY).entrySet()) {
             levels += levelScore(en.getKey().is(EnchantmentTags.CURSE), en.getIntValue());
         }
+        boolean mending = EnchantmentHelper.has(s, EnchantmentEffectComponents.REPAIR_WITH_XP);
+        if (s.isDamageableItem() && spent(s.getDamageValue(), s.getMaxDamage(), s.getOrDefault(DataComponents.REPAIR_COST, 0), mending)) {
+            return armorRank(tier, -999);
+        }
         return armorRank(tier, levels);
+    }
+
+    /** Durability left under which a piece the anvil can never mend again is spent (kit.ts SPENT_WEAR, nether.ts LEAVE_WEAR). */
+    static final double SPENT_WEAR = 0.2;
+    /** The dearest job the anvil takes (the game refuses 40 and up). */
+    static final int ANVIL_MOST = 39;
+
+    /**
+     * A piece the anvil can never mend again (its repairCost and the four diamonds one that worn takes are past 39), with
+     * no mending, under SPENT_WEAR left (pure; kit.ts spent): ranked last of its tier, so a sound piece carried is worn
+     * over it whatever its levels. Nov 21: the diamond_chestplate (protection 4, repairCost 63) at 15%, every Nether trip
+     * refused under 20% for hours; the kit's fresh one carried would have stayed in the pockets, the enchanted one worn.
+     */
+    static boolean spent(int damage, int maxDamage, int repairCost, boolean mending) {
+        return maxDamage > 0 && !mending && repairCost + 4 > ANVIL_MOST && maxDamage - damage < SPENT_WEAR * maxDamage;
     }
 
     /** Wear the best armor carried, piece by piece; returns what was put on. Slots armor.unequip holds are left alone. */

@@ -57,8 +57,29 @@ function left(item: InventoryItem): number {
   return item.maxDamage ? (item.maxDamage - (item.damage ?? 0)) / item.maxDamage : 1;
 }
 
+/**
+ * A spent piece of armour goes at this much left, not WORN: nether.ts LEAVE_WEAR, under which no Nether trip sets out
+ * (tripWorn) and one down there comes home.
+ */
+const SPENT_WEAR = 0.2;
+/** The dearest job the anvil takes (anvil.ts ANVIL_MAX_COST: the game refuses 40 and up). */
+const ANVIL_MOST = 39;
+
+/**
+ * Armour the anvil can never mend again, and without mending: a repair costs its repairCost (63 after six jobs) and a
+ * level a diamond, and one that worn wants all four. Nothing will ever bring it back over the Nether's 20%, so it is
+ * worn out there and then: Nov 21, the diamond_chestplate (repairCost 63) at 20% down to 15% for hours, every Nether
+ * trip refused ("no nether trip until it is mended or replaced") and the brewing stand's blaze rod with them, while
+ * the kit saw a sound piece till 10% and a fresh chestplate sat in the chests.
+ */
+export function spent(item: InventoryItem): boolean {
+  if (!ARMOUR.has(gearKind(item.name) as GearKind) || !item.maxDamage) return false;
+  if (item.enchantments?.some(e => e.name === 'mending')) return false;
+  return (item.repairCost ?? 0) + 4 > ANVIL_MOST && left(item) < SPENT_WEAR;
+}
+
 export function isWorn(item: InventoryItem): boolean {
-  return left(item) < WORN;
+  return left(item) < WORN || spent(item);
 }
 
 /**
