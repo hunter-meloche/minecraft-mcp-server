@@ -172,7 +172,16 @@ export interface RailOpts {
   /** the fence's blocks as they stood before the ground was set to what the boat's openings would leave (the move's read) */
   fence?: readonly { at: Pos; block: string }[];
   maxNodes?: number;
+  /** cells kept clear besides the zones (an extension's: the village's houses, beds, job sites and bells), rails, torches and the stop alike */
+  avoid?: (x: number, y: number, z: number) => boolean;
 }
+
+/** What the search, the power and the torches go on: the yard's line and an extension's alike. */
+type CoreOpts = Pick<RailOpts, 'candidates' | 'yard' | 'zones' | 'bounds' | 'maxNodes' | 'avoid'>;
+/** Where the search ends: the goal cell and the way the line goes on from it; the rails after it (the yard's stretch, this plan's own), or the line it joins (an extension's: `tail`). */
+interface CoreEnd { goal: Pos; goalDir: Dir; after: Pos[]; tail?: readonly RailCell[] }
+type Start = { villager: number; from: Pos; pickup: Pos; d: Dir; hop: number; stop: { at: Pos; placed: boolean } };
+type CoreResult = { ok: true; start: Start; line: Pos[]; cells: RailCell[]; torches: RailTorch[] } | { ok: false; why: string; at?: Pos };
 
 /**
  * The rails' plan (pure): the yard's last stretch (the panel's column, from the fence's post to the brake two short of
@@ -185,8 +194,7 @@ export interface RailOpts {
  * rails join up) is refused, with why.
  */
 export function planRails(g: RailGround, opts: RailOpts): RailResult {
-  const { entry, panel, yard } = opts;
-  const zones = opts.zones ?? [];
+  const { entry, panel } = opts;
   // (in by the fence the boat's way comes in by: straight out from the hall's panel, or by a panel elsewhere)
   const fenceSide = entry.yard?.side ?? entry.side, fenceDir = entry.yard?.dir ?? entry.dir;
   const inward = { dx: -fenceDir[0], dz: -fenceDir[1] };
@@ -214,7 +222,88 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
   }
   const goal = { x: post.x - inward.dx, y: level, z: post.z - inward.dz };
   const goalDir = dirOf(inward.dx, inward.dz);
+  const core = lineCore(at, opts, { goal, goalDir, after: yardCells });
+  if (!core.ok) return core;
+  const { start, line, cells, torches } = core;
 
+  // what it takes, what it opens, how long
+  const n = (kind: RailCell['kind']) => cells.filter(c => c.kind === kind).length;
+  const counts = { rail: n('rail'), powered_rail: n('powered') + n('brake'), redstone_torch: torches.length, minecart: 1, cobblestone: start.stop.placed ? 1 : 0 };
+  const bill = billOf(counts, opts.stores ?? {});
+  const stood = (p: Pos) => opts.fence?.find(o => o.at.x === p.x && o.at.y === p.y && o.at.z === p.z)?.block ?? g.state(p.x, p.y, p.z) ?? '';
+  const opens = [post, { x: post.x, y: post.y + 1, z: post.z }].map(p => ({ at: { ...p }, block: stood(p) })).filter(o => o.block && !/^(minecraft:)?(air|cave_air)(\[|$)/.test(o.block));
+  let climb = 0, drop = 0;
+  for (let i = 1; i < line.length; i++) { const d = line[i].y - line[i - 1].y; if (d > 0) climb += d; else drop -= d; }
+  const placed = cells.length + torches.length + counts.cobblestone;
+  const seconds = {
+    lay: Math.round(placed * PACE.laySec), back: Math.round(line.length / PACE.walk), pickup: PACE.pickupSec,
+    takeUp: Math.round(placed * PACE.takeSec), yard: PACE.yardSec, total: 0
+  };
+  seconds.total = seconds.lay + seconds.back + seconds.pickup + seconds.takeUp + seconds.yard;
+  return {
+    ok: true, villager: start.villager, from: start.from, pickup: start.pickup, hop: Math.round(start.hop * 10) / 10, stop: start.stop,
+    cells, yard: yardCells.length, torches, opens, wall: entry.wall.map(p => ({ ...p })), bill, length: line.length, climb, drop, route: routeText(start.stop.at, line), seconds,
+    fitsDay: seconds.total * 1000 <= daylightLeft(WORK_AT) * MS_PER_TICK
+  };
+}
+
+/** What an extension is planned on: the candidates and the keep-offs as planRails's, the line as it stands. */
+export interface ExtendOpts extends CoreOpts {
+  /** the line as it stands: its rails from the launch (0) to the brake, and the launch's stop */
+  line: { cells: readonly RailCell[]; stop: { at: Pos; placed: boolean } };
+}
+
+/** An extension of the line into the village: the new head and the way to the line's far end. */
+export interface RailExtension {
+  ok: true;
+  villager: number;
+  from: Pos;
+  pickup: Pos;
+  hop: number;
+  stop: { at: Pos; placed: boolean };
+  /** the new rails from the new launch (0) to the old launch's cell, its last (a plain rail now, or a boost) */
+  cells: RailCell[];
+  /** the new torches, the new trigger among them */
+  torches: RailTorch[];
+  length: number; climb: number; drop: number; powered: number;
+  route: string;
+}
+
+/**
+ * An extension of a line into the village (pure; the user's of Nov 21, the villagers uphill of a pickup no boat climbs
+ * to): a new head beside a candidate, and the way from it to the line's far end, by planRails's rules (natural ground
+ * only, nothing dug, a climb a powered rail, FROM_ZONES off the zones, never into the yard, `avoid` kept clear), joined
+ * to the old launch's cell, which goes on into the line: straight through the old stop's cell (the cobblestone stop
+ * taken up first) or by a curve beside it. The old launch's cell is in the extension (a plain rail now, or a boost:
+ * powered rails make no curve), the old trigger is no torch of it any more; the boosts are on BOOST_EVERY into the
+ * line's first lit rail past the join. A way that would run beside the line (rails beside rails join up) is none.
+ */
+export function planExtension(g: RailGround, opts: ExtendOpts): RailExtension | { ok: false; why: string; at?: Pos } {
+  const old = opts.line.cells;
+  if (old.length < 2) return { ok: false, why: 'no line to extend' };
+  const join = old[0], next = old[1];
+  if (next.y !== join.y) return { ok: false, why: `the line's end at ${fmt(join)} is not level` };
+  // the old launch's cell and the old stop (if it is the bot's cobblestone) read as they will be: taken up
+  const clear = new Set([key(join.x, join.y, join.z), ...(opts.line.stop.placed ? [key(opts.line.stop.at.x, opts.line.stop.at.y, opts.line.stop.at.z)] : [])]);
+  const at = (x: number, y: number, z: number): string | null | undefined => (clear.has(key(x, y, z)) ? 'air' : g.state(x, y, z));
+  const goalDir = dirOf(Math.sign(next.x - join.x), Math.sign(next.z - join.z));
+  const core = lineCore(at, opts, { goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1) });
+  if (!core.ok) return core;
+  const { start, line, cells, torches } = core;
+  let climb = 0, drop = 0;
+  for (let i = 1; i < line.length; i++) { const d = line[i].y - line[i - 1].y; if (d > 0) climb += d; else drop -= d; }
+  return {
+    ok: true, villager: start.villager, from: start.from, pickup: start.pickup, hop: Math.round(start.hop * 10) / 10, stop: start.stop,
+    cells, torches, length: line.length, climb, drop, powered: cells.filter(c => c.kind !== 'rail').length, route: routeText(start.stop.at, line)
+  };
+}
+
+/**
+ * The search, the power and the torches of a line (pure, planRails's and planExtension's): from every pickup near a
+ * candidate to `goal`, entered so that it goes on `goalDir`; then the rails after it (`after`), or the line it joins
+ * (`tail`: kept off but at the goal, its first lit rail the boosts' next). `at` reads the ground as the line would find it.
+ */
+function lineCore(at: (x: number, y: number, z: number) => string | null | undefined, opts: CoreOpts, to: CoreEnd): CoreResult {
   // where a rail can go, by cell (cached: the search asks again and again)
   const okCache = new Map<string, boolean>();
   const railAt = (x: number, y: number, z: number): boolean => {
@@ -226,14 +315,26 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
     }
     return v;
   };
+  const { goal, goalDir, after } = to;
+  const yard = opts.yard;
+  const zones = opts.zones ?? [];
+  const tail = to.tail ?? [];
   const inYard = (x: number, z: number) => x >= yard.x1 && x <= yard.x2 && z >= yard.z1 && z <= yard.z2;
   const b = opts.bounds;
   const inBounds = (x: number, z: number) => !b || (x >= b.x1 && x <= b.x2 && z >= b.z1 && z <= b.z2);
-  const offZones = (x: number, y: number, z: number) => !zoneNear(zones, { x: x + 0.5, y, z: z + 0.5 }, FROM_ZONES);
+  const offZones = (x: number, y: number, z: number) => !zoneNear(zones, { x: x + 0.5, y, z: z + 0.5 }, FROM_ZONES) && !opts.avoid?.(x, y, z);
+  // (an extension keeps off the line it joins, but at the goal: rails beside rails join up)
+  const tailAt = new Map<string, number[]>();
+  for (const c of tail) tailAt.set(`${c.x},${c.z}`, [...(tailAt.get(`${c.x},${c.z}`) ?? []), c.y]);
+  const isGoal = (x: number, y: number, z: number) => x === goal.x && y === goal.y && z === goal.z;
+  const byTail = (x: number, y: number, z: number): boolean => {
+    if (!tail.length || isGoal(x, y, z)) return false;
+    for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) for (const ty of tailAt.get(`${x + ox},${z + oz}`) ?? []) if (Math.abs(ty - y) <= (ox || oz ? 1 : 2)) return true;
+    return false;
+  };
   const torchSpot = (x: number, y: number, z: number) => railRoom(at(x, y, z)) && railBase(at(x, y - 1, z)) && offZones(x, y, z) && !inYard(x, z);
 
   // the starts: a pickup within HOP of a candidate (the boat's hop to it straight and level-or-down), its head behind it
-  type Start = { villager: number; from: Pos; pickup: Pos; d: Dir; hop: number; stop: { at: Pos; placed: boolean } };
   const starts: Start[] = [];
   for (const e of opts.candidates.slice(0, 4)) {
     if (!e.position) continue;
@@ -250,20 +351,20 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
         level = leg.level;
       }
       const py = Math.round(level);
-      if (Math.abs(level - py) > 0.25 || !railAt(px, py, pz) || !offZones(px, py, pz)) continue;
+      if (Math.abs(level - py) > 0.25 || !railAt(px, py, pz) || !offZones(px, py, pz) || (tail.length && (isGoal(px, py, pz) || byTail(px, py, pz)))) continue;
       for (const d of [0, 1, 2, 3] as Dir[]) {
         const { dx, dz } = DIRS[d];
         const back = (n: number) => ({ x: px - dx * n, y: py, z: pz - dz * n });
         let fine = true;
         for (let n = 1; n < HEAD.pickup && fine; n++) {
           const c = back(n);
-          fine = railAt(c.x, c.y, c.z) && !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z);
+          fine = railAt(c.x, c.y, c.z) && !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z) && !(tail.length && (isGoal(c.x, c.y, c.z) || byTail(c.x, c.y, c.z)));
         }
         if (!fine) continue;
         const s = back(HEAD.pickup);
         const there = at(s.x, s.y, s.z);
         const stop = solidGround(there) ? { at: s, placed: false } : railRoom(there) && railBase(at(s.x, s.y - 1, s.z)) && !inYard(s.x, s.z) && offZones(s.x, s.y, s.z) ? { at: s, placed: true } : undefined;
-        if (!stop) continue;
+        if (!stop || (tail.length && (isGoal(s.x, s.y, s.z) || byTail(s.x, s.y, s.z)))) continue;
         // (the boat's hop must not run over the stop's block)
         if (stop.placed && offSegment({ x: e.position.x, z: e.position.z }, { x: px + 0.5, z: pz + 0.5 }, { x: s.x + 0.5, z: s.z + 0.5 }) < 1.5) continue;
         // the launch's torch beside it, at its level (the trigger)
@@ -355,7 +456,7 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
         // no lit rail within 7 of the pickup: a climb there is one
         if (dy === 1 && n.k < FIRST_BOOST) continue;
         const y = n.y + dy;
-        if (!railAt(x, y, z) || !offZones(x, y, z) || byHead(n.start, x, y, z)) continue;
+        if (!railAt(x, y, z) || !offZones(x, y, z) || byHead(n.start, x, y, z) || byTail(x, y, z)) continue;
         // a slope rail has two blocks of air over it: the one going up (here), or the one coming down (there)
         if (dy === 1 && !airy(at(n.x, n.y + 2, n.z))) continue;
         if (dy === -1 && !airy(at(x, y + 2, z))) continue;
@@ -369,32 +470,36 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
   }
   if (!end) {
     const near = nearest ? `; it got no nearer than ${h(nearest.x, nearest.z)} (at ${fmt(nearest)})` : '';
-    return { ok: false, why: `no rails way to the yard's fence at ${fmt(goal)}${looked >= maxNodes ? ` within ${maxNodes} steps` : ''}${near}`, ...(nearest ? { at: { x: nearest.x, y: nearest.y, z: nearest.z } } : {}) };
+    return { ok: false, why: `no rails way to ${tail.length ? 'the line\'s end' : 'the yard\'s fence'} at ${fmt(goal)}${looked >= maxNodes ? ` within ${maxNodes} steps` : ''}${near}`, ...(nearest ? { at: { x: nearest.x, y: nearest.y, z: nearest.z } } : {}) };
   }
   const path: Pos[] = [];
   for (let n: Node | undefined = end; n; n = n.prev) path.unshift({ x: n.x, y: n.y, z: n.z });
   const start = end.start;
   const head: Pos[] = [];
   for (let n = HEAD.pickup - HEAD.launch; n >= 1; n--) head.push({ x: start.pickup.x - DIRS[start.d].dx * n, y: start.pickup.y, z: start.pickup.z - DIRS[start.d].dz * n });
-  // the whole line: the launch and the four plain, the pickup and the way, the yard's stretch
-  const line: Pos[] = [...head, ...path, ...yardCells];
-  const touch = touching([start.stop.at, ...line]);
+  // the whole line: the launch and the four plain, the pickup and the way, the yard's stretch (an extension: the way to
+  // the line it joins, and that line on from there, `whole`)
+  const line: Pos[] = [...head, ...path, ...after];
+  const whole: Pos[] = [...line, ...tail.map(c => ({ x: c.x, y: c.y, z: c.z }))];
+  const touch = touching([start.stop.at, ...whole]);
   if (touch) return { ok: false, why: `the line would run beside itself at ${fmt(touch[0])} and ${fmt(touch[1])} (rails side by side join up)`, at: touch[0] };
 
   // the power
   const pickupAt = HEAD.pickup - HEAD.launch;
-  const brakeAt = line.length - BRAKE;
+  // (an extension has no brake of its own: the line it joins ends on its brake; its lit rails run to the join)
+  const brakeAt = tail.length ? line.length : line.length - BRAKE;
+  const litEnd = tail.length ? line.length : brakeAt - BRAKE_CLEAR;
   const kinds: RailCell['kind'][] = line.map(() => 'rail');
   const roles: (RailCell['role'] | undefined)[] = line.map(() => undefined);
   kinds[0] = 'powered'; roles[0] = 'launch';
   for (let i = brakeAt; i < line.length; i++) kinds[i] = 'brake';
   // every rail going up is lit (it sits under the next, higher one)
-  for (let i = pickupAt; i < brakeAt - BRAKE_CLEAR; i++) if (line[i + 1].y > line[i].y) { kinds[i] = 'powered'; roles[i] = 'climb'; }
-  const straightLevel = (i: number) => i > 0 && i < line.length - 1 && line[i - 1].y === line[i].y && line[i + 1].y === line[i].y
-    && line[i + 1].x - line[i].x === line[i].x - line[i - 1].x && line[i + 1].z - line[i].z === line[i].z - line[i - 1].z;
+  for (let i = pickupAt; i < litEnd; i++) if (whole[i + 1].y > whole[i].y) { kinds[i] = 'powered'; roles[i] = 'climb'; }
+  const straightLevel = (i: number) => i > 0 && i < whole.length - 1 && whole[i - 1].y === whole[i].y && whole[i + 1].y === whole[i].y
+    && whole[i + 1].x - whole[i].x === whole[i].x - whole[i - 1].x && whole[i + 1].z - whole[i].z === whole[i].z - whole[i - 1].z;
   // the torches: one for the launch (the trigger), then the runs of lit rails, each rail within TORCH_REACH of one
-  const lineSet = new Set(line.map(p => key(p.x, p.y, p.z)));
-  const brakeSet = new Set(line.slice(brakeAt).map(p => key(p.x, p.y, p.z)));
+  const lineSet = new Set(whole.map(p => key(p.x, p.y, p.z)));
+  const brakeSet = new Set([...line.slice(brakeAt), ...tail.filter(c => c.kind === 'brake')].map(p => key(p.x, p.y, p.z)));
   const launchKey = key(line[0].x, line[0].y, line[0].z);
   const torchOk = (t: Pos, trigger: boolean) => {
     if (!torchSpot(t.x, t.y, t.z) || lineSet.has(key(t.x, t.y, t.z)) || lineSet.has(key(t.x, t.y - 1, t.z)) || lineSet.has(key(t.x, t.y - 2, t.z))) return false;
@@ -406,7 +511,7 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
     }
     return true;
   };
-  const wayOf = (i: number): Dir => (i === 0 ? start.d : dirOf(Math.sign(line[i].x - line[i - 1].x), Math.sign(line[i].z - line[i - 1].z)));
+  const wayOf = (i: number): Dir => (i === 0 ? start.d : dirOf(Math.sign(whole[i].x - whole[i - 1].x), Math.sign(whole[i].z - whole[i - 1].z)));
   const torches: RailTorch[] = [];
   const taken = new Set<string>();
   const placeTorch = (i: number, trigger: boolean): boolean => {
@@ -422,14 +527,28 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
   // the boosts on level track: the first FIRST_BOOST after the pickup, then BOOST_EVERY after the last lit rail (a climb's
   // are lit too), each on the first straight level rail from there with room for a torch beside it
   let lastLit = pickupAt + FIRST_BOOST - BOOST_EVERY;
-  for (let i = pickupAt + FIRST_BOOST; i < brakeAt - BRAKE_CLEAR; i++) {
+  for (let i = pickupAt + FIRST_BOOST; i < litEnd; i++) {
     if (kinds[i] === 'powered') { lastLit = i; continue; }
     const since = i - lastLit;
     if (since < BOOST_EVERY) continue;
     if (straightLevel(i) && sides(line[i], wayOf(i)).some(t => torchOk(t, false))) { kinds[i] = 'powered'; roles[i] = 'boost'; lastLit = i; continue; }
     if (since >= BOOST_GAP) return { ok: false, why: `no straight, level rail with room for a torch beside it within ${BOOST_GAP} of the last lit one, at ${fmt(line[i])}`, at: line[i] };
   }
-  if (brakeAt - BRAKE_CLEAR - lastLit > BOOST_GAP) return { ok: false, why: `no lit rail for the last ${brakeAt - lastLit} before the brake`, at: line[brakeAt] };
+  if (tail.length) {
+    // (an extension: on into the line it joins, whose first lit rail is the next; when that is more than BOOST_EVERY
+    // on, one more boost: the first with room within BOOST_EVERY of it, else the nearest to it there is room for)
+    const first = tail.findIndex(c => c.kind === 'powered');
+    const next = line.length + (first < 0 ? tail.length : first);
+    if (next - lastLit > BOOST_EVERY) {
+      const room = (i: number) => kinds[i] !== 'powered' && straightLevel(i) && sides(line[i], wayOf(i)).some(t => torchOk(t, false));
+      const from = Math.max(lastLit + 1, pickupAt + FIRST_BOOST);
+      let put = -1;
+      for (let i = Math.max(from, next - BOOST_EVERY); i < litEnd && put < 0; i++) if (room(i)) put = i;
+      for (let i = litEnd - 1; i >= from && put < 0; i--) if (room(i)) put = i;
+      if (put >= 0) { kinds[put] = 'powered'; roles[put] = 'boost'; lastLit = put; }
+    }
+    if (next - lastLit > BOOST_GAP) return { ok: false, why: `no lit rail for the ${next - lastLit} from ${fmt(line[Math.max(0, lastLit)])} on into the line`, at: line[Math.max(0, lastLit)] };
+  } else if (brakeAt - BRAKE_CLEAR - lastLit > BOOST_GAP) return { ok: false, why: `no lit rail for the last ${brakeAt - lastLit} before the brake`, at: line[brakeAt] };
   // the runs of lit rails (the launch aside: its torch is the trigger): a torch within TORCH_REACH of every rail
   for (let i = pickupAt; i < brakeAt;) {
     if (kinds[i] !== 'powered') { i++; continue; }
@@ -443,28 +562,10 @@ export function planRails(g: RailGround, opts: RailOpts): RailResult {
     }
     i = j + 1;
   }
-  const cells: RailCell[] = line.map((p, i) => ({ ...p, kind: kinds[i], shape: shapeOf(i === 0 ? start.stop.at : line[i - 1], p, line[i + 1]), ...(roles[i] ? { role: roles[i] } : {}) }));
-
-  // what it takes, what it opens, how long
-  const n = (kind: RailCell['kind']) => cells.filter(c => c.kind === kind).length;
-  const counts = { rail: n('rail'), powered_rail: n('powered') + n('brake'), redstone_torch: torches.length, minecart: 1, cobblestone: start.stop.placed ? 1 : 0 };
-  const bill = billOf(counts, opts.stores ?? {});
-  const stood = (p: Pos) => opts.fence?.find(o => o.at.x === p.x && o.at.y === p.y && o.at.z === p.z)?.block ?? g.state(p.x, p.y, p.z) ?? '';
-  const opens = [post, { x: post.x, y: post.y + 1, z: post.z }].map(p => ({ at: { ...p }, block: stood(p) })).filter(o => o.block && !/^(minecraft:)?(air|cave_air)(\[|$)/.test(o.block));
-  let climb = 0, drop = 0;
-  for (let i = 1; i < line.length; i++) { const d = line[i].y - line[i - 1].y; if (d > 0) climb += d; else drop -= d; }
-  const placed = cells.length + torches.length + counts.cobblestone;
-  const seconds = {
-    lay: Math.round(placed * PACE.laySec), back: Math.round(line.length / PACE.walk), pickup: PACE.pickupSec,
-    takeUp: Math.round(placed * PACE.takeSec), yard: PACE.yardSec, total: 0
-  };
-  seconds.total = seconds.lay + seconds.back + seconds.pickup + seconds.takeUp + seconds.yard;
-  return {
-    ok: true, villager: start.villager, from: start.from, pickup: start.pickup, hop: Math.round(start.hop * 10) / 10, stop: start.stop,
-    cells, yard: yardCells.length, torches, opens, wall: entry.wall.map(p => ({ ...p })), bill, length: line.length, climb, drop, route: routeText(start.stop.at, line), seconds,
-    fitsDay: seconds.total * 1000 <= daylightLeft(WORK_AT) * MS_PER_TICK
-  };
+  const cells: RailCell[] = line.map((p, i) => ({ ...p, kind: kinds[i], shape: shapeOf(i === 0 ? start.stop.at : whole[i - 1], p, whole[i + 1]), ...(roles[i] ? { role: roles[i] } : {}) }));
+  return { ok: true, start, line, cells, torches };
 }
+
 
 /** The cells either side of a rail, across its way, at its level (where a torch beside it stands). */
 function sides(p: Pos, d: Dir): Pos[] {

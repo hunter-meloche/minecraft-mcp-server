@@ -2,7 +2,7 @@ import type { GoalContext, Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { Zone } from './courtesy.js';
 import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
-import { FIRST_BOOST, HEAD, HOP, railBase, railRoom, shapeOf, type RailCell, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
+import { FIRST_BOOST, HEAD, HOP, planExtension, railBase, railRoom, shapeOf, type RailCell, type RailExtension, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, footprint, planRoute, zoneNear, type BoatAt, type Entry } from './boatroute.js';
 import { HALL_FRESH, HALL_WANTS, JUDGE_V, joinAreas, judgeOnWhole, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type Verdict, type VillageLook, type VillageSite } from './village.js';
 import { prepare } from './project.js';
@@ -157,6 +157,11 @@ export interface RailLine {
   moved?: true;
   /** blocks of it that would not come up (said; not the bot's own any more, someone's now): left */
   left?: string[];
+  /**
+   * the line extended into the village (the user's of Nov 21: its villagers uphill of a pickup no boat climbs to): the
+   * last extension's join (the old launch's cell), its new pickup, its rails (the first `rails` of `cells`), and how many
+   */
+  extended?: { at: number; from: Pos; to: Pos; rails: number; powered: number; times: number };
 }
 
 /** Kept per world (world.rails): the job under way, and the last one's end. */
@@ -198,13 +203,28 @@ const aborted = (ctx: GoalContext) => { if (ctx.signal.aborted) throw new Error(
 export const goalOf = (line: Pick<RailLine, 'cells' | 'yard'>): number => line.cells.length - line.yard - 1;
 const itemOf = (c: RailCell): 'rail' | 'powered_rail' => (c.kind === 'rail' ? 'rail' : 'powered_rail');
 const triggerOf = (line: RailLine): RailTorch | undefined => line.torches.find(t => t.trigger);
-/** The rails of the line laid now, by index (the record). */
+/** The rails of the line laid now, by index (the record: a block of the plan's item there; another is a stray). */
 function laidCells(line: RailLine): Set<number> {
-  const keys = new Set(line.laid.map(b => key(b.at)));
+  const keys = new Set(line.laid.filter(b => planItemAt(line, b.at) === b.item).map(b => key(b.at)));
   const out = new Set<number>();
   line.cells.forEach((c, i) => { if (keys.has(key(c))) out.add(i); });
   return out;
 }
+/** What the plan puts at `p` (a rail of the line, a torch, the stop), or undefined: none of it. */
+function planItemAt(line: RailLine, p: Pos): RailItem | undefined {
+  const c = line.cells.find(q => same(q, p));
+  if (c) return itemOf(c);
+  if (line.torches.some(t => same(t.at, p))) return 'redstone_torch';
+  if (line.stop.placed && same(line.stop.at, p)) return 'cobblestone';
+  return undefined;
+}
+/**
+ * Blocks of the record the plan no longer has there (an extension's: the old launch's powered rail where a plain rail
+ * goes now, the old stop's cobblestone, the old trigger): taken up before the laying goes on, and by the take-up.
+ */
+export const straysOf = (line: RailLine): RailLine['laid'] => line.laid.filter(b => planItemAt(line, b.at) !== b.item);
+/** The places of the record that stand as the plan has them (laid and counted). */
+const fitKeys = (line: RailLine, sureOnly = false): Set<string> => new Set(line.laid.filter(b => (!sureOnly || !b.unsure) && planItemAt(line, b.at) === b.item).map(b => key(b.at)));
 const isLaid = (line: RailLine, p: Pos) => line.laid.some(b => same(b.at, p));
 const record = (line: RailLine, at: Pos, item: RailItem) => { if (!isLaid(line, at)) line.laid.push({ at: { x: at.x, y: at.y, z: at.z }, item }); };
 const forget = (line: RailLine, at: Pos) => { line.laid = line.laid.filter(b => !same(b.at, at)); };
@@ -256,12 +276,13 @@ export function layArgs(line: RailLine, i: number, laid: ReadonlySet<number>, ne
   };
 }
 
-/** One thing a run puts down: a rail of the line, a torch beside one, the launch's stop. */
-export type Step = { kind: 'cell'; i: number } | { kind: 'torch'; t: RailTorch } | { kind: 'stop' };
+/** One thing a run puts down: a rail of the line, a torch beside one, the launch's stop; or a stray of the record it takes up. */
+export type Step = { kind: 'cell'; i: number } | { kind: 'torch'; t: RailTorch } | { kind: 'stop' } | { kind: 'stray'; at: Pos; item: RailItem };
 const torchesFor = (line: RailLine, i: number): RailTorch[] => line.torches.filter(t => !t.trigger && same(t.lights, line.cells[i]));
-export const stepAt = (line: RailLine, s: Step): Pos => (s.kind === 'cell' ? line.cells[s.i] : s.kind === 'torch' ? s.t.at : line.stop.at);
-const stepItem = (line: RailLine, s: Step): RailItem => (s.kind === 'cell' ? itemOf(line.cells[s.i]) : s.kind === 'torch' ? 'redstone_torch' : 'cobblestone');
-const stepWord = (line: RailLine, s: Step): string => (s.kind === 'cell' ? `${stepItem(line, s)} ${fmt(line.cells[s.i])}` : s.kind === 'torch' ? `redstone torch ${fmt(s.t.at)}` : `the stop ${fmt(line.stop.at)}`);
+export const stepAt = (line: RailLine, s: Step): Pos => (s.kind === 'cell' ? line.cells[s.i] : s.kind === 'torch' ? s.t.at : s.kind === 'stray' ? s.at : line.stop.at);
+const stepItem = (line: RailLine, s: Step): RailItem => (s.kind === 'cell' ? itemOf(line.cells[s.i]) : s.kind === 'torch' ? 'redstone_torch' : s.kind === 'stray' ? s.item : 'cobblestone');
+const stepWord = (line: RailLine, s: Step): string => (s.kind === 'cell' ? `${stepItem(line, s)} ${fmt(line.cells[s.i])}` : s.kind === 'torch' ? `redstone torch ${fmt(s.t.at)}`
+  : s.kind === 'stray' ? `the ${s.item} ${fmt(s.at)} (no longer the plan's)` : `the stop ${fmt(line.stop.at)}`);
 
 /**
  * What the laying days put down, in their order (pure): from the last rail outside the fence out to the launch, each
@@ -292,7 +313,7 @@ export const laidOf = (line: RailLine): { rails: number; of: number } => ({ rail
 
 /** Where the next day's laying begins (the first step not down yet), or the launch when every one is. */
 function frontier(line: RailLine): Pos {
-  const keys = new Set(line.laid.filter(b => !b.unsure).map(b => key(b.at)));
+  const keys = fitKeys(line, true);
   const s = outwardSteps(line).find(x => !keys.has(key(stepAt(line, x))));
   return s ? stepAt(line, s) : line.cells[0];
 }
@@ -540,14 +561,15 @@ export function railsHomeLine(world: WorldMemory, now: number): string {
     : line.stage === 'moving' ? `the move under way${line.cart ? ` (the cart ${line.cart.uuid})` : ''}`
     : `taking up (${line.why ?? 'given up'}): ${line.laid.length} block(s) still down${line.left?.length ? `, ${line.left.length} that would not come up` : ''}`;
   const wait = !why && !movesOn(world) && line.stage !== 'taking up' ? ' (villager moves off: it waits)' : '';
-  return `${sw}; the line to the village at ${fmt(line.site)}, planned ${age < 120 ? `${age} min` : `${Math.round(age / 60)} h`} ago: ${state}${wait}${lastText}.`;
+  const ext = line.extended && line.stage !== 'taking up' ? `; extended into the village by ${line.extended.rails} rails to the pickup ${fmt(line.extended.to)}` : '';
+  return `${sw}; the line to the village at ${fmt(line.site)}, planned ${age < 120 ? `${age} min` : `${Math.round(age / 60)} h`} ago: ${state}${wait}${ext}${lastText}.`;
 }
 
 // ------------------------------------------------------------------------------------------------ the bill
 
 /** What is still to go down of the whole line, by item (the bill against what the job laid already). */
 export function billLeft(line: RailLine): Record<string, number> {
-  const keys = new Set(line.laid.map(b => key(b.at)));
+  const keys = fitKeys(line);
   // (in one order whatever the line: the rails, the powered ones, the torches, the stop, the cart)
   const bill: Record<string, number> = { rail: 0, powered_rail: 0, redstone_torch: 0, cobblestone: 0, minecart: 0 };
   const add = (item: string, n = 1) => { bill[item] += n; };
@@ -835,9 +857,9 @@ async function downAfterAll(ctx: GoalContext, line: RailLine, s: Step, r: RailPl
 async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkResult> {
   const home = ctx.s.home ?? ctx.s.position;
   // (a block kept unsure, its lay unanswered and unread, is laid again: read first, it may stand there already)
-  const keys = new Set(line.laid.filter(b => !b.unsure).map(b => key(b.at)));
+  const keys = fitKeys(line, true);
   const todo = outwardSteps(line).filter(st => !keys.has(key(stepAt(line, st))));
-  if (!todo.length) { line.stage = 'whole'; return { gain: 0, text: 'the line is whole already: the move next', mark: 'forget' }; }
+  if (!todo.length && !straysOf(line).length) { line.stage = 'whole'; return { gain: 0, text: 'the line is whole already: the move next', mark: 'forget' }; }
   const need: Record<string, number> = {};
   for (const st of todo) need[stepItem(line, st)] = (need[stepItem(line, st)] ?? 0) + 1;
   const short = await carry(ctx, need);
@@ -845,7 +867,7 @@ async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkR
   const zone = await zonesOnLine(ctx, line);
   if (zone === 'unread') return { gain: 0, text: 'not setting out to lay: the builds round the line not read', untried: true };
   if (zone) { giveUp(ctx, line, zone); return { gain: 0, text: `the line given up: ${zone}`, mark: 'forget' }; }
-  const first = stepAt(line, todo[0]);
+  const first = todo.length ? stepAt(line, todo[0]) : straysOf(line)[0].at;
   const { rails, of } = laidOf(line);
   say(ctx, `laying the line, day ${line.runs + 1}: ${rails} of ${of} rails down, on from ${fmt(first)}`);
   const gate = await outByGate(ctx, first);
@@ -857,6 +879,38 @@ async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkR
   if (walked.off) return { gain: 0, text: OFF_NOW };
   if (walked.late) { clean(line); return { gain: 0, text: `${walked.stop}: on the next run`, mark: 'same' }; }
   if (walked.stop) return stopped(ctx, line, walked.stop, 0);
+  // (an extension's strays first: the old launch's powered rail where a plain rail goes now, the old stop, the old trigger)
+  const stray = await upStrays(ctx, line);
+  if (stray) return stopped(ctx, line, stray, 0);
+  const ext = extendedDown(line);
+  const r = await layOn(ctx, line, todo, clk, p => horiz(p, home) / 3 * 1000 + MARGIN);
+  if (ext && r.kind !== 'end') sayExtension(ctx, line, r.put);
+  if (r.kind === 'end') return r.result;
+  const put = r.put;
+  if (r.kind === 'late') {
+    clean(line);
+    const text = `laid ${put} today (${laidOf(line).rails} of ${of} rails down); the day's end: on from ${fmt(r.at)} next morning`;
+    say(ctx, text);
+    return { gain: put, text, ...(put ? {} : { mark: 'same' as const }) };
+  }
+  if (r.kind === 'off') { say(ctx, OFF_NOW); return { gain: put, text: `laid ${put} today; ${OFF_NOW}` }; }
+  if (r.kind === 'short') { clean(line); return { gain: put, text: `laid ${put} today; out of ${r.item}: the rest next run`, ...(put ? {} : { mark: 'same' as const }) }; }
+  clean(line);
+  line.stage = 'whole';
+  const text = `the line is whole: ${of} rails, ${line.torches.length} torches${line.stop.placed ? ', the stop' : ''} (laid ${put} today, in ${line.runs} run(s)); the move next`;
+  say(ctx, text);
+  return { gain: put, text };
+}
+
+/** How a stretch of laying ended: all of it down, the run's time (`at`: where it stopped), out of an item, switched off, or a WorkResult (a stop, a give-up). */
+type LayEnd = { kind: 'done'; put: number } | { kind: 'late'; put: number; at: Pos } | { kind: 'short'; put: number; item: RailItem } | { kind: 'off'; put: number } | { kind: 'end'; put: number; result: WorkResult };
+
+/**
+ * The steps `todo` laid in their order (a laying day's, an extension's on the move day): the ground ahead read before
+ * it (a cell not as planned, a player near: stopped there), each block written into the record before it goes down. It
+ * stops while `keep(p)` (the ms the run must keep from `p` on: the walk home, or the move) still fits.
+ */
+async function layOn(ctx: GoalContext, line: RailLine, todo: readonly Step[], clk: Clk, keep: (p: Pos) => number): Promise<LayEnd> {
   let put = 0;
   let at: ((x: number, y: number, z: number) => string | null | undefined) | undefined;
   let readFrom = -1;
@@ -864,39 +918,34 @@ async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkR
     aborted(ctx);
     const st = todo[k];
     const p = stepAt(line, st);
-    // in time for the walk home from here
-    if (clk.left() < horiz(p, home) / 3 * 1000 + MARGIN) {
-      clean(line);
-      const text = `laid ${put} today (${laidOf(line).rails} of ${of} rails down); the day's end: on from ${fmt(p)} next morning`;
-      say(ctx, text);
-      return { gain: put, text, ...(put ? {} : { mark: 'same' as const }) };
-    }
+    // in time for what the run keeps from here
+    if (clk.left() < keep(p)) return { kind: 'late', put, at: p };
     // (switched off mid-run: the villager-moves tool pauses no run; not a stop, the next pick gives the line up)
-    if (offNow(ctx)) { say(ctx, OFF_NOW); return { gain: put, text: `laid ${put} today; ${OFF_NOW}` }; }
+    if (offNow(ctx)) return { kind: 'off', put };
     if (k - readFrom >= STRETCH || !at) {
       const ahead = todo.slice(k, k + STRETCH);
       // (into reach of the stretch first: the chunks round the bot are what the client holds)
       await walkTo(ctx, stepAt(line, ahead[Math.min(ahead.length - 1, 3)]), 4);
       const pl = await playerNear(ctx);
-      if (pl) return stopped(ctx, line, `a player near at ${fmt(pl)}`, put);
+      if (pl) return { kind: 'end', put, result: stopped(ctx, line, `a player near at ${fmt(pl)}`, put) };
       at = await readAround(ctx, ahead.map(x => stepAt(line, x)));
       readFrom = k;
     }
     // (laid again on the way out since: the mending's)
-    if (isLaid(line, p) && !unsureAt(line, p)) continue;
+    if (fitKeys(line).has(key(p)) && !unsureAt(line, p)) continue;
     let r: RailPlaced;
     const there = unsureAt(line, p) ? at(p.x, p.y, p.z) : undefined;
     if (there && idOf(there) === stepItem(line, st)) {
       // (kept unsure on a run before, and down there all the same: the bot's, read as the lay's own read-back does)
       const down = await downAfterAll(ctx, line, st, { ok: false, placed: false, reason: 'its lay unanswered on a run before' });
-      if (!down || down === 'unread') return stopped(ctx, line, `${stepWord(line, st)}: not read again`, put);
+      if (!down || down === 'unread') return { kind: 'end', put, result: stopped(ctx, line, `${stepWord(line, st)}: not read again`, put) };
       sure(line, p);
       ctx.save?.();
       r = down;
     } else {
       const why = notAsRead(line, st, at);
-      if (why === 'unread') return stopped(ctx, line, `${stepWord(line, st)}: the ground there not read`, put);
-      if (why) return stopped(ctx, line, `${why} (not as read when planned)`, put);
+      if (why === 'unread') return { kind: 'end', put, result: stopped(ctx, line, `${stepWord(line, st)}: the ground there not read`, put) };
+      if (why) return { kind: 'end', put, result: stopped(ctx, line, `${why} (not as read when planned)`, put) };
       const laid = laidCells(line);
       const args: RailLay = st.kind === 'cell' ? layArgs(line, st.i, laid, st.i > 0 ? st.i - 1 : undefined)
         : st.kind === 'torch' ? { at: st.t.at, item: 'redstone_torch', lights: st.t.lights, ...(inVillage(line, st.t.at) ? { inVillage: true } : {}) }
@@ -905,25 +954,42 @@ async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkR
     }
     if (r.newMovement) {
       giveUp(ctx, line, 'the server runs the minecart_improvements experiment: the line was planned on the old minecart rules');
-      return { gain: put + (r.placed ? 1 : 0), text: `the line given up: ${line.why}` };
+      put += r.placed ? 1 : 0;
+      return { kind: 'end', put, result: { gain: put, text: `the line given up: ${line.why}` } };
     }
     if (!r.placed) {
-      if (/^no .* carried$/.test(r.reason ?? '')) { clean(line); return { gain: put, text: `laid ${put} today; out of ${stepItem(line, st)}: the rest next run`, ...(put ? {} : { mark: 'same' as const }) }; }
-      return stopped(ctx, line, `${stepWord(line, st)} not laid: ${r.reason ?? 'no answer'}`, put);
+      if (/^no .* carried$/.test(r.reason ?? '')) return { kind: 'short', put, item: stepItem(line, st) };
+      return { kind: 'end', put, result: stopped(ctx, line, `${stepWord(line, st)} not laid: ${r.reason ?? 'no answer'}`, put) };
     }
     put++;
     ctx.gain(1);
     // down, but not as planned (the port and the server disagree): the lead looks; nothing more is laid on it
     if (!r.ok) {
       giveUp(ctx, line, `${stepWord(line, st)} came out not as planned: ${r.reason ?? 'no answer'}`);
-      return { gain: put, text: `the line given up: ${line.why}` };
+      return { kind: 'end', put, result: { gain: put, text: `the line given up: ${line.why}` } };
     }
   }
-  clean(line);
-  line.stage = 'whole';
-  const text = `the line is whole: ${of} rails, ${line.torches.length} torches${line.stop.placed ? ', the stop' : ''} (laid ${put} today, in ${line.runs} run(s)); the move next`;
-  say(ctx, text);
-  return { gain: put, text };
+  return { kind: 'done', put };
+}
+
+/**
+ * The record's strays (straysOf: what an extension made no longer the plan's) taken up where they stand, each walked to;
+ * one no longer the bot's left, said. Why one did not come up (the laying waits on it: a rail goes where it stands), or undefined.
+ */
+async function upStrays(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
+  for (const b of straysOf(line)) {
+    aborted(ctx);
+    await walkTo(ctx, b.at, 3);
+    const r = await takeUp(ctx, line, b.at);
+    aborted(ctx);
+    if (r.ok) { forget(line, b.at); ctx.save?.(); continue; }
+    const st: Step = { kind: 'stray', at: b.at, item: b.item };
+    if (!notOurs(r.reason)) return `${stepWord(line, st)} not taken up: ${r.reason ?? 'no answer'}`;
+    (line.left ??= []).push(`${stepWord(line, st)}: ${r.reason ?? 'no answer'}`.slice(0, 120));
+    forget(line, b.at);
+    ctx.save?.();
+  }
+  return undefined;
 }
 
 /** A run that ended with nothing unexpected (its day's end, out of an item, the line whole): the stops are no longer in a row. */
@@ -1083,6 +1149,11 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   // the run is left once the cart's start, the way home and the yard are kept)
   const zones = wayZones(look, v);
   const hopRoom = () => clk.left() - (moveRest(line, home) - PICKUP_MS) - CART_MS;
+  const hopFrom: HopFrom = { candidates: v.candidates, jobs: look.jobs, area: v.area, zones, room: hopRoom };
+  // (no villager the judge allows that a boat way reaches the pickup from: the line extended into the village to one,
+  // the user's of Nov 21, and laid as the run allows)
+  const extended = await extendFor(ctx, line, hopFrom, look, v, clk, home);
+  if (extended) return extended;
 
   // the villager onto the pickup, the cart, the trigger
   let took: Seen | undefined;
@@ -1092,7 +1163,7 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
     if (enough()) return notToday(ctx, line, `the run's time ran out at the pickup${missed ? ` (${missed})` : ''}`, true);
     const sky = await ctx.status().catch(() => undefined);
     if (sky?.raining || sky?.thundering) return notToday(ctx, line, 'it began to rain: no villager is moved in the rain', true);
-    const pick = await toPickup(ctx, line, { candidates: v.candidates, jobs: look.jobs, area: v.area, zones, room: hopRoom }, clk.now());
+    const pick = await toPickup(ctx, line, hopFrom, clk.now());
     if ('why' in pick) {
       if (pick.late) return notToday(ctx, line, pick.why, true);
       // (none in the village to bring to the pickup today, or none that a boat way reached it from: a miss, not a stop)
@@ -1325,6 +1396,8 @@ interface HopFrom {
   zones: readonly Zone[];
   /** the ms of the run the hop may take (what is left once the cart's start, the way home and the yard are kept) */
   room: () => number;
+  /** the ground read for it already (the move day's look for an extension), read on where it falls short */
+  ground?: Ground;
 }
 
 /**
@@ -1343,7 +1416,7 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
   const mid = { x: p.x + 0.5, z: p.z + 0.5 };
   const box = hopBox(line, t.area);
   const y0 = Math.min(p.y, line.site.y) - MAX_DROP - 4;
-  const g = new Ground(y0, Math.min(64, Math.max(p.y, line.site.y) + 8 - y0 + 1));
+  const g = t.ground ?? new Ground(y0, Math.min(64, Math.max(p.y, line.site.y) + 8 - y0 + 1));
   await g.read(ctx, (box?.x1 ?? p.x - HOP - 4), (box?.z1 ?? p.z - HOP - 4), (box?.x2 ?? p.x + HOP + 4), (box?.z2 ?? p.z + HOP + 4));
   const bounds = box ?? { x1: p.x - HOP - 4, z1: p.z - HOP - 4, x2: p.x + HOP + 4, z2: p.z + HOP + 4 };
   const inBox = (q: { x: number; z: number }) => q.x >= bounds.x1 && q.x < bounds.x2 + 1 && q.z >= bounds.z1 && q.z < bounds.z2 + 1;
@@ -1476,6 +1549,225 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
   if (!tried && onPath) return { why: `the ${onPath} villager(s) to take stand on a path, farmland or the like: looked at again when they have wandered`, late: true };
   if (noWay) return { why: `no boat way to the pickup at ${fmt(p)} for a villager to take (${tried} tried): ${noWay}` };
   return { why: `no villager could be taken onto the pickup at ${fmt(p)}` };
+}
+
+// ------------------------------------------------------------------------------------------------ the extension
+
+/** At most this many extensions of one line (the villagers wander uphill again: the existing misses then). */
+export const EXTENSIONS = 2;
+/** The extension's search: the box round the village's area and the line's far end, and its size. */
+const EXT_ROOM = 8;
+const EXT_NODES = 150_000;
+
+type FreeVerdict = Extract<Verdict, { kind: 'free' }>;
+
+/** The box an extension is planned in (pure): the hop's (the village's area and the pickup) and the line's far end, EXT_ROOM round it. */
+function extendBox(line: RailLine, area?: { x1: number; z1: number; x2: number; z2: number }): { x1: number; z1: number; x2: number; z2: number } {
+  const p = line.pickup;
+  const h = hopBox(line, area) ?? { x1: p.x - HOP - 4, z1: p.z - HOP - 4, x2: p.x + HOP + 4, z2: p.z + HOP + 4 };
+  const ends = [line.stop.at, line.cells[0]];
+  return {
+    x1: Math.min(h.x1, ...ends.map(e => e.x - EXT_ROOM)), z1: Math.min(h.z1, ...ends.map(e => e.z - EXT_ROOM)),
+    x2: Math.max(h.x2, ...ends.map(e => e.x + EXT_ROOM)), z2: Math.max(h.z2, ...ends.map(e => e.z + EXT_ROOM))
+  };
+}
+
+/** The ground round the village and the line's far end (the hop's and an extension's), its band from the pickup's, the bell's and the candidates' heights. */
+async function villageGround(ctx: GoalContext, line: RailLine, t: HopFrom): Promise<Ground> {
+  const ys = [line.pickup.y, line.site.y, line.cells[0].y, ...t.candidates.filter(e => e.position).map(e => Math.floor(e.position!.y))];
+  const y0 = Math.min(...ys) - MAX_DROP - 4;
+  const g = new Ground(y0, Math.min(64, Math.max(...ys) + 8 - y0 + 1));
+  const b = extendBox(line, t.area);
+  await g.read(ctx, b.x1, b.z1, b.x2, b.z2);
+  return g;
+}
+
+/**
+ * Whether a villager the judge allows can be brought onto the pickup by boat, by toPickup's own checks (its order and
+ * box, a boat's footprint where it stands, a way searched on the ground read), nothing done: `reach` also when there is
+ * none to take, none but on paths, or a player by (toPickup's words then); not, with the villagers no way reached it from.
+ */
+async function hopReach(ctx: GoalContext, line: RailLine, t: HopFrom, g: Ground): Promise<{ reach: true } | { reach: false; noWay: Seen[]; order: Seen[]; why: string }> {
+  const p = line.pickup;
+  const mid = { x: p.x + 0.5, z: p.z + 0.5 };
+  const box = hopBox(line, t.area);
+  const bounds = box ?? { x1: p.x - HOP - 4, z1: p.z - HOP - 4, x2: p.x + HOP + 4, z2: p.z + HOP + 4 };
+  const inBox = (q: { x: number; z: number }) => q.x >= bounds.x1 && q.x < bounds.x2 + 1 && q.z >= bounds.z1 && q.z < bounds.z2 + 1;
+  const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities;
+  if (!round) return { reach: true };
+  if (playerNow(round, await here(ctx), siteFor(villagesOf(ctx.world).sites, line.site)?.area ?? t.area)) return { reach: true };
+  const ids = new Set(t.candidates.map(c => c.id));
+  const order = round.filter(e => e.name === 'villager' && e.position && ids.has(e.id) && !notFree(e, t.jobs) && inBox(e.position))
+    .sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid));
+  const noWay: Seen[] = [];
+  let tried = 0, why = '';
+  for (const e of order) {
+    aborted(ctx);
+    if (horiz(e.position!, mid) <= 0.3) return { reach: true };
+    if (tried >= HOP_TRIES) break;
+    await yieldNow();
+    const at0 = e.position!;
+    if (!footprint(g, at0.x, at0.z, at0.y, false).ok) continue;
+    tried++;
+    const r = planRoute(g, { x: at0.x, z: at0.z, level: at0.y }, mid, { zones: t.zones, bounds, within: 0.5, maxNodes: HOP_NODES });
+    if (r.ok) return { reach: true };
+    noWay.push(e);
+    why ||= `from the villager (${e.id}) at ${fmt(at0)}: ${r.why}`;
+  }
+  return noWay.length ? { reach: false, noWay, order, why } : { reach: true };
+}
+
+/**
+ * The extension planned on the ground read (pure but for the searches): to a pickup by a villager no boat way reached the
+ * pickup from (the nearest to the line's end first), else by the bell (where the villagers gather), and kept only if a
+ * villager the judge allows can be brought to its pickup by boat (or stands on it). Kept clear: the village's own houses
+ * (its zones' boxes), its beds, job sites and bells; FROM_ZONES off every other build (and off those of the village's
+ * own the line's area does not meet: zonesOnLine reads them as someone's), an outpost wider (wayZones); never into the yard.
+ */
+export function extensionFor(line: RailLine, g: Ground, t: {
+  noWay: readonly Seen[]; order: readonly Seen[]; look: Pick<VillageLook, 'jobs' | 'beds' | 'bells' | 'zones'>; v: Pick<FreeVerdict, 'own' | 'outposts'>;
+  area?: { x1: number; z1: number; x2: number; z2: number }; yard: { x1: number; z1: number; x2: number; z2: number }; maxNodes?: number;
+}): RailExtension | { ok: false; why: string } {
+  const join = line.cells[0];
+  const meets = (z: Zone, a?: { x1: number; z1: number; x2: number; z2: number }) => !!a && z.x1 <= a.x2 && z.x2 >= a.x1 && z.z1 <= a.z2 && z.z2 >= a.z1;
+  const zones = [...wayZones(t.look, t.v), ...t.look.zones.filter(z => t.v.own.includes(z) && !meets(z, t.area))];
+  const marks = [...t.look.jobs.map(j => j.at), ...t.look.beds, ...t.look.bells];
+  const own = t.v.own;
+  const ends = new Set([key(join), key(line.stop.at)]);
+  const avoid = (x: number, y: number, z: number): boolean => !ends.has(`${x},${y},${z}`)
+    && (marks.some(m => Math.abs(m.x - x) <= 1 && Math.abs(m.z - z) <= 1 && Math.abs(m.y - y) <= 2)
+      || own.some(o => x >= o.x1 && x <= o.x2 && z >= o.z1 && z <= o.z2 && y >= o.y1 - 2 && y <= o.y2 + 1));
+  const bounds = extendBox(line, t.area);
+  const reached = (r: RailExtension): boolean => {
+    const mid = { x: r.pickup.x + 0.5, z: r.pickup.z + 0.5 };
+    const hb = hopBox({ pickup: r.pickup, area: t.area ?? line.area });
+    const box = hb ?? { x1: r.pickup.x - HOP - 4, z1: r.pickup.z - HOP - 4, x2: r.pickup.x + HOP + 4, z2: r.pickup.z + HOP + 4 };
+    let tried = 0;
+    for (const e of [...t.order].sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid))) {
+      if (horiz(e.position!, mid) <= 0.3) return true;
+      if (tried >= HOP_TRIES) break;
+      if (!footprint(g, e.position!.x, e.position!.z, e.position!.y, false).ok) continue;
+      tried++;
+      if (planRoute(g, { x: e.position!.x, z: e.position!.z, level: e.position!.y }, mid, { zones, bounds: box, within: 0.5, maxNodes: HOP_NODES }).ok) return true;
+    }
+    return false;
+  };
+  const plan = (candidates: { id: number; position?: Pos }[]) => planExtension(g, {
+    candidates, yard: t.yard, zones, bounds, avoid, maxNodes: t.maxNodes ?? EXT_NODES, line: { cells: line.cells, stop: line.stop }
+  });
+  const byVillager = plan([...t.noWay].sort((a, b) => horiz(a.position!, join) - horiz(b.position!, join)));
+  if (byVillager.ok && reached(byVillager)) return byVillager;
+  // (where the villagers gather: the sides of the bell nearest the line's end)
+  const bells = [...t.look.bells].sort((a, b) => horiz(a, join) - horiz(b, join)).slice(0, 1);
+  const sidesOf = bells.flatMap(b => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => ({ id: -1, position: { x: b.x + dx + 0.5, y: b.y, z: b.z + dz + 0.5 } })));
+  const byBell = sidesOf.length ? plan(sidesOf) : undefined;
+  if (byBell?.ok && reached(byBell)) return byBell;
+  const why = !byVillager.ok ? byVillager.why : 'no villager the judge allows could be brought by boat to the pickup it would have';
+  return { ok: false, why: byBell && !byBell.ok && byVillager.ok ? `${why}; by the bell: ${byBell.why}` : why };
+}
+
+/** The extension written into the line (before anything of it goes down): the new head, the rails to the old launch's cell, the torches, the village's area as judged today. */
+function applyExtension(line: RailLine, r: RailExtension, area: RailLine['area'], now: number): void {
+  const join = line.cells[0];
+  line.cells = [...r.cells.map(c => ({ ...c })), ...line.cells.slice(1)];
+  line.torches = [...line.torches.filter(t => !t.trigger), ...r.torches.map(t => ({ ...t, at: { ...t.at }, lights: { ...t.lights } }))];
+  line.stop = { at: { ...r.stop.at }, placed: r.stop.placed };
+  line.pickup = { ...r.pickup };
+  line.villager = r.villager;
+  line.from = { ...r.from };
+  if (area) line.area = { ...area };
+  line.extended = { at: now, from: { x: join.x, y: join.y, z: join.z }, to: { ...r.pickup }, rails: r.cells.length, powered: r.powered, times: (line.extended?.times ?? 0) + 1 };
+  // the line is planned afresh at its far end and its ground read today: its MAX_AGE clock starts again
+  line.at = now;
+}
+
+/** The last extension not all down yet. */
+const extendedDown = (line: RailLine): boolean => {
+  const e = line.extended;
+  if (!e) return false;
+  const fit = laidCells(line);
+  for (let i = 0; i < Math.min(e.rails, line.cells.length); i++) if (!fit.has(i)) return true;
+  return false;
+};
+/** Said after each laying of an extension: how much of it is down. */
+function sayExtension(ctx: GoalContext, line: RailLine, put: number): void {
+  const e = line.extended;
+  if (!e) return;
+  const fit = laidCells(line);
+  let down = 0;
+  for (let i = 0; i < Math.min(e.rails, line.cells.length); i++) if (fit.has(i)) down++;
+  say(ctx, down >= e.rails
+    ? `the extension into the village is down: ${e.rails} rails (${e.powered} powered) to the new pickup ${fmt(e.to)}, ${put} block(s) laid this run`
+    : `the extension into the village: ${down} of ${e.rails} rails down, ${put} block(s) laid this run; the rest on the next run`);
+}
+
+/**
+ * On the move day, after the look and its verdict (the brief's of Nov 21): when no villager the judge allows can be
+ * brought to the pickup by boat (the hill between: "a step up (a boat climbs nothing)"), the line is extended into the
+ * village (extensionFor), written into the record first, the old launch's powered rail, the old stop and the old trigger
+ * taken up (upStrays: a plain rail goes where the launch was), and laid out to its new head while the move after it
+ * still fits the run; then the move goes on from the new pickup (undefined). Not carried, out of time, or stopped: the
+ * rest is laid on the next run (the bill first, if not carried), not a miss. Not to be planned: not made today, not a miss.
+ */
+async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: VillageLook, v: FreeVerdict, clk: Clk, home: { x: number; z: number }): Promise<WorkResult | undefined> {
+  const g = await villageGround(ctx, line, t);
+  t.ground = g;
+  const reach = await hopReach(ctx, line, t, g);
+  if (reach.reach) return undefined;
+  const hopWhy = `no boat way to the pickup at ${fmt(line.pickup)} for a villager to take (${reach.noWay.length} tried): ${reach.why}`;
+  if ((line.extended?.times ?? 0) >= EXTENSIONS) return undefined;
+  const yard = ctx.world.yard;
+  if (!yard) return notToday(ctx, line, `${hopWhy}; the line not extended: no yard known`, true);
+  const area = joinAreas(line.area, v.area);
+  await yieldNow();
+  const r = extensionFor(line, g, { noWay: reach.noWay, order: reach.order, look, v, area, yard });
+  if (!r.ok) return notToday(ctx, line, `${hopWhy}; and no extension of the line into the village: ${r.why}`, true);
+  const from = line.cells[0];
+  applyExtension(line, r, area, clk.now());
+  // (written before any of it goes down, the old launch's rail and the stop still in the record: a run cut short lays
+  // on from here, the strays taken up first)
+  line.stage = 'laying';
+  ctx.save?.();
+  say(ctx, `${hopWhy}`);
+  say(ctx, `the line extended into the village: ${r.cells.length} rails (${r.powered} powered) from ${fmt(from)} to the new pickup ${fmt(r.pickup)}`);
+  say(ctx, `the extension's route ${r.route}; the launch, the stop${r.stop.placed ? ' (a cobblestone)' : ' (the ground)'} and the cart's start at its end, by the villager (${r.villager < 0 ? 'the bell' : r.villager}) at ${fmt(r.from)}`);
+  const stray = await upStrays(ctx, line);
+  if (stray) {
+    const text = `the line extended into the village; ${stray}: the laying on the next run`;
+    say(ctx, text);
+    return { gain: 0, text, mark: 'same' };
+  }
+  // what it takes, carried (the move carried a torch for the trigger: one for the new one besides)
+  const keys = fitKeys(line, true);
+  const todo = outwardSteps(line).filter(st => !keys.has(key(stepAt(line, st))));
+  const need: Record<string, number> = {};
+  for (const st of todo) need[stepItem(line, st)] = (need[stepItem(line, st)] ?? 0) + 1;
+  const trig = triggerOf(line);
+  if (trig && !isLaid(line, trig.at)) need.redstone_torch = (need.redstone_torch ?? 0) + 1;
+  const have = await countsNow(ctx);
+  const short = Object.entries(need).filter(([item, n]) => (have.get(item) ?? 0) < n).map(([item, n]) => `${n - (have.get(item) ?? 0)} ${item}`);
+  if (short.length) {
+    line.stage = 'bill';
+    ctx.save?.();
+    const text = `the line extended into the village (${r.cells.length} rails): short of ${short.join(', ')} out here; the bill on the next run, then the laying`;
+    say(ctx, text);
+    return { gain: 0, text, mark: 'same' };
+  }
+  // laid now while the move after it still fits the run (the hop, the cart, home along the whole line, the yard)
+  const laid = await layOn(ctx, line, todo, clk, () => moveRest(line, home) + MARGIN);
+  sayExtension(ctx, line, laid.put);
+  if (laid.kind === 'end') return laid.result;
+  if (laid.kind === 'off') return { gain: laid.put, text: `the extension: laid ${laid.put}; ${OFF_NOW}` };
+  if (laid.kind !== 'done') {
+    clean(line);
+    const text = `the extension laid ${laid.put} this run (${laid.kind === 'late' ? `the run's time: on from ${fmt(laid.at)}` : `out of ${laid.item}`}); the rest and the move on the next runs`;
+    return { gain: laid.put, text, ...(laid.put ? {} : { mark: 'same' as const }) };
+  }
+  // whole: the move goes on from the new pickup
+  line.stage = 'moving';
+  ctx.save?.();
+  await walkTo(ctx, line.pickup, 3);
+  return undefined;
 }
 
 /** The boat's item back in the pockets once it is broken: its drop stepped by once if not; whether it is. */
@@ -1963,8 +2255,12 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
   taken += yardUp.taken;
   if (yardUp.stop) said.push(yardUp.stop);
   // the line from its far end, walking home
-  const order = [...outwardSteps(line)].reverse().concat(triggerOf(line) ? [{ kind: 'torch', t: triggerOf(line)! } as Step] : [])
-    .filter(st => isLaid(line, stepAt(line, st)));
+  // (and the record's strays the plan has no step at: an extension's old stop or old trigger, a run cut short before
+  // they came up)
+  const steps = [...outwardSteps(line)].reverse().concat(triggerOf(line) ? [{ kind: 'torch', t: triggerOf(line)! } as Step] : []);
+  const stepKeys = new Set([...steps, ...yardSteps(line)].map(st => key(stepAt(line, st))));
+  const order = steps.filter(st => isLaid(line, stepAt(line, st)))
+    .concat(straysOf(line).filter(b => !stepKeys.has(key(b.at))).map(b => ({ kind: 'stray', at: b.at, item: b.item }) as Step));
   // (from the far end in: the trigger and the stop by the launch first)
   order.sort((a, b) => rank(line, a) - rank(line, b));
   if (order.length) {
@@ -2107,6 +2403,8 @@ function unreached(line: RailLine, st: Step, reason: string): string {
 function rank(line: RailLine, s: Step): number {
   if (s.kind === 'cell') return s.i;
   if (s.kind === 'stop') return -0.5;
+  // (a stray by the cell nearest it: an old stop or trigger halfway along an extended line)
+  if (s.kind === 'stray') return nearestCell(line, s.at) - 0.25;
   const i = line.cells.findIndex(c => same(c, s.t.lights));
   return i < 0 ? 0 : i + 0.5;
 }

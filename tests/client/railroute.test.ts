@@ -4,7 +4,7 @@ import type { Zone } from '../../src/client/brain/courtesy.js';
 import { zoneDistance } from '../../src/client/brain/courtesy.js';
 import { Ground, entryOf, type Entry } from '../../src/client/brain/boatroute.js';
 import {
-  BOOST_EVERY, BRAKE, FIRST_BOOST, HEAD, RAIL_RECIPES, TORCH_REACH, billOf, planRails, railBase, railRoom, railsLine, railsText, shapeOf,
+  BOOST_EVERY, BOOST_GAP, BRAKE, FIRST_BOOST, HEAD, RAIL_RECIPES, TORCH_REACH, billOf, planExtension, planRails, railBase, railRoom, railsLine, railsText, shapeOf,
   type RailCell, type RailPlan, type RailResult
 } from '../../src/client/brain/railroute.js';
 
@@ -322,4 +322,46 @@ test('the boat\'s way in across the yard (boatroute.ts yardEntry: its panel of t
   const inYard = (c: Pos) => c.x >= YARD.x1 && c.x <= YARD.x2 && c.z >= YARD.z1 && c.z <= YARD.z2;
   t.deepEqual(p.cells.filter(inYard).map(c => `${c.x},${c.z}`), [-565, -564, -563, -562, -561].map(x => `${x},2125`));
   t.is(p.cells[p.cells.length - p.yard - 1].x, -566, 'the cell outside the fence, last before it');
+});
+
+test('an extension of a line into the village (Nov 21): a new head by a villager the boat could not reach, the way to the old launch\'s cell, joined straight through the old cobblestone stop or by a curve beside a stop of the ground; never beside the line, lit on into its first boost', (t) => {
+  const base = plan(planRails(land(), opts()));
+  const joinAt = base.cells[0];
+  const far = { id: 102, name: 'villager', position: { x: -590.5, y: 63, z: 1975.5 } };
+  const check = (r: ReturnType<typeof planExtension>, stop: { at: Pos; placed: boolean }) => {
+    if (!r.ok) throw new Error(r.why);
+    t.is(r.villager, 102);
+    t.true(Math.hypot(r.pickup.x + 0.5 - far.position.x, r.pickup.z + 0.5 - far.position.z) <= 6);
+    const last = r.cells[r.cells.length - 1];
+    t.deepEqual({ x: last.x, y: last.y, z: last.z }, { x: joinAt.x, y: joinAt.y, z: joinAt.z }, 'it ends on the old launch\'s cell');
+    t.not(last.role, 'launch');
+    t.is(r.cells[0].role, 'launch');
+    t.is(r.torches.filter(x => x.trigger).length, 1);
+    // one line: each rail beside the last, never beside the old one (but at the join), the old stop's cell taken only when it was the bot's cobblestone
+    const whole = [r.stop.at, ...r.cells, ...base.cells.slice(1)];
+    for (let i = 1; i < whole.length; i++) t.is(Math.abs(whole[i].x - whole[i - 1].x) + Math.abs(whole[i].z - whole[i - 1].z), 1, `${i}`);
+    for (let i = 0; i < whole.length; i++) for (let j = i + 2; j < whole.length; j++) {
+      const a = whole[i], b = whole[j], side = Math.abs(a.x - b.x) + Math.abs(a.z - b.z);
+      t.false((side === 1 && Math.abs(a.y - b.y) <= 1) || (side === 0 && Math.abs(a.y - b.y) <= 2), `beside itself: ${at(a)} and ${at(b)}`);
+    }
+    const through = r.cells.some(c => c.x === stop.at.x && c.y === stop.at.y && c.z === stop.at.z);
+    t.is(through, stop.placed && through, 'through the old stop only when it is a cobblestone');
+    // lit on: no gap of more than BOOST_GAP from the new pickup into the old line's first boost
+    const lit = [...r.cells, ...base.cells.slice(1)].map((c, i) => (c.kind === 'powered' && c.role !== 'launch' ? i : -1)).filter(i => i >= 0);
+    t.true(lit[0] >= HEAD.pickup - HEAD.launch + FIRST_BOOST);
+    for (let j = 1; j < lit.length; j++) t.true(lit[j] - lit[j - 1] <= BOOST_GAP);
+    return r;
+  };
+  // the old stop the bot's cobblestone: read as taken up
+  check(planExtension(land(), { candidates: [far], yard: YARD, bounds: { x1: -600, z1: 1960, x2: -510, z2: 2130 }, line: { cells: base.cells, stop: base.stop } }), base.stop);
+  // a stop of the ground (stone standing there): the way comes in beside it, by a curve on the old launch's cell
+  const stone = { [k(base.stop.at.x, base.stop.at.y, base.stop.at.z)]: 'stone' };
+  const side = check(planExtension(land(stone), { candidates: [far], yard: YARD, bounds: { x1: -600, z1: 1960, x2: -510, z2: 2130 }, line: { cells: base.cells, stop: { at: base.stop.at, placed: false } } }), { at: base.stop.at, placed: false });
+  t.false(/north_south|east_west/.test(side.cells[side.cells.length - 1].shape), 'a curve at the join');
+  // walled off from the line (a wall of two across the way): no extension, and why
+  const wall: Record<string, string> = {};
+  for (let x = -600; x <= -510; x++) for (const y of [63, 64]) wall[k(x, y, 1985)] = 'stone';
+  const no = planExtension(land(wall), { candidates: [far], yard: YARD, bounds: { x1: -600, z1: 1960, x2: -510, z2: 2130 }, line: { cells: base.cells, stop: base.stop } });
+  t.false(no.ok);
+  if (!no.ok) t.regex(no.why, /^no rails way to the line's end at \(-556, 63, 1995\)/);
 });

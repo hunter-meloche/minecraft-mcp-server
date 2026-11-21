@@ -4,7 +4,7 @@ import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import type { Zone } from '../../src/client/brain/courtesy.js';
 import type { CartPlaced, InventoryItem, RailLay, RailPlaced, RailTaken } from '../../src/client/tools.js';
 import { Ground, cellOf, entryOf, type Entry } from '../../src/client/brain/boatroute.js';
-import { planRails, shapeOf, type RailCell, type RailShape } from '../../src/client/brain/railroute.js';
+import { BOOST_GAP, planRails, shapeOf, type RailCell, type RailShape } from '../../src/client/brain/railroute.js';
 import { recipeFor } from '../../src/client/brain/progress.js';
 import { activityAt } from '../../src/client/brain/schedule.js';
 import { pick, workTick } from '../../src/client/brain/work.js';
@@ -439,7 +439,7 @@ class Field {
         if (!mob) return { ok: false, reason: 'no such creature' };
         if (this.cart?.rider === mob.id || this.boat?.rider === mob.id) return { ok: false, reason: 'the villager rides a minecart' };
         if (!this.take(String(p.item))) return { ok: false, reason: 'no boat carried' };
-        this.boat = { id: 900, uuid: 'b0a7-0001', pos: { x: mob.position.x + 1.1, y: 63, z: mob.position.z }, rider: mob.id };
+        this.boat = { id: 900, uuid: 'b0a7-0001', pos: { x: mob.position.x + 1.1, y: Math.floor(mob.position.y), z: mob.position.z }, rider: mob.id };
         this.log.push(`boat down, villager ${mob.id} in`);
         return { ok: true, id: 900, uuid: 'b0a7-0001', position: { ...this.boat.pos }, tookIt: true };
       }
@@ -455,12 +455,15 @@ class Field {
         const from = { ...this.boat.pos };
         const d = horiz(from, to);
         let end = { x: to.x, z: to.z }, reason = 'arrived';
+        // (on the ground's top: a step up stops it, it comes down a drop)
+        let ly = Math.floor(from.y + 0.01);
         if (this.opts.stallDrives) { this.opts.stallDrives--; end = { x: from.x + (to.x - from.x) / 2, z: from.z + (to.z - from.z) / 2 }; reason = 'a step up ahead'; }
         else for (let s = 0.25; s <= d; s += 0.25) {
           const q = { x: from.x + (to.x - from.x) * s / d, z: from.z + (to.z - from.z) * s / d };
-          if (cellOf(this.block(Math.floor(q.x), 63, Math.floor(q.z))).kind !== 'open') { reason = 'a step up ahead'; end = { x: from.x + (to.x - from.x) * (s - 0.5) / d, z: from.z + (to.z - from.z) * (s - 0.5) / d }; break; }
+          if (cellOf(this.block(Math.floor(q.x), ly, Math.floor(q.z))).kind !== 'open') { reason = 'a step up ahead'; end = { x: from.x + (to.x - from.x) * (s - 0.5) / d, z: from.z + (to.z - from.z) * (s - 0.5) / d }; break; }
+          while (ly > 55 && cellOf(this.block(Math.floor(q.x), ly - 1, Math.floor(q.z))).kind === 'open') ly--;
         }
-        this.boat.pos = { x: end.x, y: 63, z: end.z };
+        this.boat.pos = { x: end.x, y: ly, z: end.z };
         this.me = { ...this.boat.pos };
         const v = this.villagers.find(q => q.id === this.boat!.rider);
         if (v) v.position = { ...this.boat.pos };
@@ -473,7 +476,7 @@ class Field {
         const t = (p.toward as { x: number; z: number } | undefined) ?? { x: this.boat.pos.x + 1, z: this.boat.pos.z };
         const d = horiz(this.boat.pos, t) || 1;
         this.riding = false;
-        this.me = { x: this.boat.pos.x + (t.x - this.boat.pos.x) / d * 1.27, y: 63, z: this.boat.pos.z + (t.z - this.boat.pos.z) / d * 1.27 };
+        this.me = { x: this.boat.pos.x + (t.x - this.boat.pos.x) / d * 1.27, y: Math.floor(this.boat.pos.y), z: this.boat.pos.z + (t.z - this.boat.pos.z) / d * 1.27 };
         return { ok: true, wasRiding: true };
       }
       case 'vehicle.take': {
@@ -482,7 +485,7 @@ class Field {
         if (this.riding && v === this.boat) return { ok: false, reason: 'riding it' };
         if (horiz(this.me, v.pos) > 4) return { ok: false, reason: 'too far' };
         const rider = this.villagers.find(q => q.id === v.rider);
-        if (rider) rider.position = { x: v.pos.x, y: 63, z: v.pos.z };
+        if (rider) rider.position = { x: v.pos.x, y: Math.floor(v.pos.y), z: v.pos.z };
         const isCart = v === this.cart;
         if (v === this.boat) {
           this.boat = undefined;
@@ -514,7 +517,7 @@ class Field {
         if (!launch?.powered) { this.t += 20_000; return { ok: false, reason: 'timed out', at: { ...c.pos } }; }
         this.launches++;
         const pk = line.pickup;
-        if (this.opts.wander?.includes(this.launches)) for (const v of this.villagers) if (Math.floor(v.position.x) === pk.x && Math.floor(v.position.z) === pk.z) v.position = { x: v.position.x + 1.5, y: 63, z: v.position.z + 1 };
+        if (this.opts.wander?.includes(this.launches)) for (const v of this.villagers) if (Math.floor(v.position.x) === pk.x && Math.floor(v.position.z) === pk.z) v.position = { x: v.position.x + 1.5, y: v.position.y, z: v.position.z + 1 };
         const v = this.opts.takesOther !== undefined ? this.villagers.find(q => q.id === this.opts.takesOther)
           : this.villagers.find(q => Math.floor(q.position.x) === pk.x && Math.floor(q.position.z) === pk.z && this.boat?.rider !== q.id);
         if (!v) {
@@ -1433,6 +1436,151 @@ test('a hop that cannot reach the pickup (the boat stopped on the way): driven b
   t.true(horiz(v.position, { x: -555.5, z: 2000.5 }) > 20);
   // the line kept: the next move day goes again
   t.true(land.standing(line).length > 100);
+});
+
+// ------------------------------------------------------------------------------------------------ the extension
+
+/**
+ * The village's hillside (Nov 21, the west village: villagers up at y 75, the pickup at 69, "a step up (a boat climbs
+ * nothing)"): a basin west of the line, its floor two up (the ground's top at 65), a rim a block higher all round it; on
+ * its east side the ground steps down a block a block to the flat land (65 at x -588, 64 at -587). `wall`: the rim two
+ * high instead, and no steps (nothing climbs out of it, rails or boats).
+ */
+function hillside(land: Field, opts: { wall?: boolean } = {}) {
+  const X1 = -612, X2 = -589, Z1 = 1980, Z2 = 2020;
+  const top = (x: number, z: number, h: number) => { for (let y = 63; y < 63 + h; y++) land.blocks.set(k({ x, y, z }), y === 62 + h ? 'grass_block[snowy=false]' : 'dirt'); };
+  for (let x = X1; x <= X2; x++) for (let z = Z1; z <= Z2; z++) {
+    const rim = x === X1 || x === X2 || z === Z1 || z === Z2;
+    top(x, z, rim ? (opts.wall ? 4 : 3) : 2);
+  }
+  if (!opts.wall) for (let z = Z1; z <= Z2; z++) { top(-588, z, 2); top(-587, z, 1); }
+}
+/** The villager uphill: 101 in the basin (the others to take employed), standing on a cell's middle. */
+const uphill = (land: Field, at: Pos = { x: -598.5, y: 65, z: 2000.5 }) => {
+  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
+  land.villagers.find(v => v.id === 101)!.position = { ...at };
+};
+/** What the extension takes besides what the move carries. */
+const extKit = (land: Field) => land.items.push({ slot: 20, name: 'rail', count: 64 }, { slot: 21, name: 'powered_rail', count: 8 }, { slot: 22, name: 'redstone_torch', count: 8 });
+
+test('a villager uphill of the pickup (no boat way climbs to it): the line extended into the village on the move day, every block in the record before it goes down, laid that run, the launch and the stop at its end; the move then made into the hall, and all of it taken back up', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  hillside(land);
+  uphill(land);
+  extKit(land);
+  const oldLaunch = { ...line.cells[0] }, oldStop = { ...line.stop.at };
+  const cells0 = line.cells.length;
+  // every lay asked with its block in the record already, and in brain.json as last written
+  const unrecorded: string[] = [];
+  const lay = async (a: RailLay) => {
+    const inRecord = (w: WorldMemory | undefined) => !!w?.rails?.line?.laid.some(b => b.at.x === a.at.x && b.at.y === a.at.y && b.at.z === a.at.z);
+    if (!inRecord(world) || !inRecord(JSON.parse(land.saves[0] ?? '{}') as WorldMemory)) unrecorded.push(k(a.at));
+    return land.lay(a);
+  };
+  const log0 = land.log.length, said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE, { rails: { lay, takeUp: land.takeUp, placeCart: land.placeCart } });
+  const said = land.said.slice(said0), did = land.log.slice(log0);
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home \(1 in it now\); everything of the line taken back up/, said.join('\n'));
+  const ext = line.extended!;
+  t.truthy(ext);
+  t.true(said.some(l => /^rails: no boat way to the pickup at \(-556, 63, 2000\) for a villager to take \(1 tried\): from the villager \(101\) at \(-599, 65, 2000\)/.test(l)), said.join('\n'));
+  t.true(said.includes(`rails: the line extended into the village: ${ext.rails} rails (${ext.powered} powered) from (-556, 63, 1995) to the new pickup (${ext.to.x}, ${ext.to.y}, ${ext.to.z})`), said.join('\n'));
+  t.true(said.some(l => l.startsWith(`rails: the extension into the village is down: ${ext.rails} rails`)), said.join('\n'));
+  // the extension: from a new head by the villager up in the basin, over the rim (a climb, lit), down the steps, to the old launch's cell
+  t.is(line.cells.length, cells0 + ext.rails - 1);
+  t.is(ext.to.y, 65);
+  t.true(horiz(ext.to, { x: -598.5, z: 2000.5 }) <= 6);
+  const extCells = line.cells.slice(0, ext.rails);
+  t.deepEqual(extCells[ext.rails - 1] && { x: extCells[ext.rails - 1].x, y: extCells[ext.rails - 1].y, z: extCells[ext.rails - 1].z }, { x: oldLaunch.x, y: oldLaunch.y, z: oldLaunch.z });
+  t.true(extCells.some(c => c.role === 'climb' && c.kind === 'powered'), 'the rim is climbed on a lit powered rail');
+  t.deepEqual(line.cells.filter(c => c.role === 'launch').map(c => k(c)), [k(line.cells[0])], 'one launch: the new head\'s');
+  t.not(extCells[ext.rails - 1].role, 'launch');
+  t.is(line.torches.filter(x => x.trigger).length, 1);
+  t.true(line.torches.find(x => x.trigger)!.lights.x === line.cells[0].x && line.torches.find(x => x.trigger)!.lights.z === line.cells[0].z);
+  // the cart rolls home along the whole of it: a lit rail at least every BOOST_GAP from the pickup to the brake
+  const lit = line.cells.map((c, i) => (c.kind === 'powered' && c.role !== 'launch' ? i : -1)).filter(i => i >= 0);
+  for (let j = 1; j < lit.length; j++) t.true(lit[j] - lit[j - 1] <= BOOST_GAP, `${lit[j - 1]} .. ${lit[j]}`);
+  t.true(lit[0] - 5 >= 8, 'no lit rail within 7 of the new pickup');
+  // the old launch's powered rail and the old stop taken up before the rails went down there
+  const upLaunch = did.indexOf(`take up powered_rail ${k(oldLaunch)}`), upStop = did.indexOf(`take up cobblestone ${k(oldStop)}`);
+  t.true(upLaunch >= 0 && upStop >= 0, did.join(' | '));
+  t.true(upLaunch < did.indexOf(`lay rail ${k(oldLaunch)}`) || extCells[ext.rails - 1].kind === 'powered');
+  t.deepEqual(unrecorded, [], 'every block in the record before it went down');
+  t.true(did.some(l => l === `cart on ${k(line.cells[0])}`), did.join(' | '));
+  t.true(did.some(l => /^cart took villager 101, home to the brake/.test(l)), did.join(' | '));
+  t.falsy(line.misses);
+  t.falsy(line.stops);
+  // everything taken back up: the extension, the old line, the old stop
+  t.deepEqual(land.standing(line), []);
+  for (const c of extCells) t.is(land.block(c.x, c.y, c.z), 'air', k(c));
+  t.is(land.block(oldStop.x, oldStop.y, oldStop.z), 'air');
+  t.is(peekLine(world), undefined);
+  t.is(land.block(-556, 63, 2119), FENCE);
+});
+
+test('the extension cut short as it is laid (a restart): its blocks in the record, the next run lays on; the line given up takes all of it up, the old line and the extension', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  hillside(land);
+  uphill(land);
+  extKit(land);
+  const oldStop = { ...line.stop.at };
+  const abort = new AbortController();
+  // (the yard's stretch is 6 lays, then the extension's)
+  land.opts.abortAtLay = { n: land.lays + 6 + 12, abort };
+  await t.throwsAsync(run(land, 'move', 20 * MINUTE, { signal: abort.signal }));
+  t.is(line.stage, 'laying');
+  t.truthy(line.extended);
+  // the cut one written before it went down: in the record, not in the world; the rest stand as the record has them
+  const standing = new Set(land.standing(line));
+  const notDown = line.laid.filter(b => !standing.has(k(b.at)));
+  t.is(notDown.length, 1, JSON.stringify(notDown));
+  t.is(land.block(oldStop.x, oldStop.y, oldStop.z) === 'cobblestone', false, 'the old stop up');
+  // brain.json read back: the next run (the yard's stretch close up's) lays on to the new head
+  const saved = JSON.parse(JSON.stringify(world)) as WorldMemory;
+  land.world = saved;
+  land.opts.abortAtLay = undefined;
+  const again = peekLine(saved)!;
+  land.line = again;
+  t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), saved).map(v => v.id), ['lay']);
+  const said0 = land.said.length;
+  const r = await run(land, 'lay', 30 * MINUTE);
+  t.regex(r.text, /^the line is whole: \d+ rails/, land.said.slice(said0).join('\n'));
+  t.true(land.said.slice(said0).some(l => l.startsWith(`rails: the extension into the village is down: ${again.extended!.rails} rails`)), land.said.slice(said0).join('\n'));
+  t.deepEqual(land.standing(again).filter(p => !yardSteps(again).some(st => k(stepAt(again, st)) === p)).sort(), again.laid.map(b => k(b.at)).filter(p => !yardSteps(again).some(st => k(stepAt(again, st)) === p)).sort());
+  // given up (the switch off): every block of it taken back up, the extension's too
+  saved.railsHome = false;
+  t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), saved).map(v => v.id), ['take up']);
+  const up = await run(land, 'take up', 30 * MINUTE);
+  t.regex(up.text, /everything of the line taken back up \(the rails switch is off\)/);
+  t.deepEqual(land.standing(again), []);
+  for (const c of again.cells) t.false(/rail/.test(land.block(c.x, c.y, c.z)), k(c));
+  t.is(peekLine(saved), undefined);
+});
+
+test('an extension that cannot be planned (the villagers in a hollow walled two high: neither a boat nor a rail climbs out): the move not made today, not a miss, nothing laid or taken up', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  hillside(land, { wall: true });
+  uphill(land);
+  extKit(land);
+  const cells0 = line.cells.length, laid0 = line.laid.length;
+  const log0 = land.log.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.regex(r.text, /^the move not made today: no boat way to the pickup at \(-556, 63, 2000\) for a villager to take \(1 tried\): .*; and no extension of the line into the village: /);
+  t.like(line, { stage: 'whole' });
+  t.falsy(line.misses);
+  t.falsy(line.stops);
+  t.is(line.extended, undefined);
+  t.is(line.cells.length, cells0);
+  // (nothing laid or taken up out there: the yard's stretch only, close up's)
+  t.deepEqual(land.log.slice(log0).filter(l => /^(lay|take up) /.test(l) && Number(l.split(',')[2]) < 2119), []);
+  t.is(land.block(-556, 63, 1994), 'cobblestone', 'the stop as it was');
+  t.is(line.laid.filter(b => b.at.z < 2119).length, laid0, 'the line out there as it was');
 });
 
 test('a rails run left open by a restart (its end never written) claims no death hours later; one within its time still gives the line up', (t) => {
