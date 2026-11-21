@@ -318,9 +318,20 @@ public final class Portal {
         return s.isFaceSturdy(level, p, Direction.UP) ? Cell.FLOOR : Cell.OTHER;
     }
 
+    /**
+     * The player's box as the server reads it for the blocks it is in: 26.3 Entity.checkInsideBlocks deflates it by
+     * 1e-5, so a face flush with a portal cell is not in it. Undeflated, a box pushed against the obsidian sill from
+     * lower ground (feet a block below the portal's bottom, maxZ exactly on the portal's plane) "touched" the portal
+     * block above the sill: the walk took it for in, stood still, and the server never counted a tick (Nov 20-21: the
+     * way back from nether (-78, 90, 259), "in the portal: yes", timed out 20 s in it, again and again).
+     */
+    static AABB serverBox(LocalPlayer p) {
+        return p.getBoundingBox().deflate(1.0E-5);
+    }
+
     /** Whether the player's box is in a portal block (where the server counts its time in the portal). */
     static boolean inside(LocalPlayer p) {
-        AABB box = p.getBoundingBox();
+        AABB box = serverBox(p);
         for (BlockPos b : BlockPos.betweenClosed(BlockPos.containing(box.minX, box.minY, box.minZ), BlockPos.containing(box.maxX, box.maxY, box.maxZ))) {
             if (p.level().getBlockState(b).is(Blocks.NETHER_PORTAL)) return true;
         }
@@ -328,7 +339,7 @@ public final class Portal {
     }
 
     static boolean insideOf(LocalPlayer p, Shape s) {
-        AABB box = p.getBoundingBox();
+        AABB box = serverBox(p);
         for (BlockPos b : BlockPos.betweenClosed(BlockPos.containing(box.minX, box.minY, box.minZ), BlockPos.containing(box.maxX, box.maxY, box.maxZ))) {
             if (s.contains(b) && p.level().getBlockState(b).is(Blocks.NETHER_PORTAL)) return true;
         }
