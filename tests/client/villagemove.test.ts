@@ -745,6 +745,47 @@ test('the rung\'s gates: no hall, the hall full (as counted under half an hour a
   t.like(pick(villagersTask, snap(KIT(), { timeOfDay: 8500 }), hallWorld()), { decline: { cause: 'late' } });
 });
 
+test('a village the boat found no way from, with the rails switch on: gone to again at once (its no-boat branch keeps the line), unless the rails failed there too or a line is under way (the user, Nov 21)', (t) => {
+  const s = snap(KIT());
+  const ids = (w: WorldMemory) => villagersTask.variants(s, w).map(v => v.id);
+  const noBoat = (over: Partial<WorldMemory> = {}, rails?: VillageSite['rails']) => {
+    const w = hallWorld(over);
+    w.villages!.sites[0].noBoat = { at: T0 - HOUR, why: 'a hill' };
+    if (rails) w.villages!.sites[0].rails = rails;
+    return w;
+  };
+  // rails on: the boat failed an hour ago, the rails not planned (or planned, a dry run with the switch off then): offered
+  t.is(ids(noBoat({ railsHome: true }))[0], 'village -556,1880');
+  t.is(ids(noBoat({ railsHome: true }, { at: T0 - HOUR, ok: true, text: '300 rails' }))[0], 'village -556,1880');
+  // (a failed rails plan of an earlier failure is not this one's)
+  t.is(ids(noBoat({ railsHome: true }, { at: T0 - 30 * HOUR, ok: false, text: 'a wall' }))[0], 'village -556,1880');
+  // the rails plan failed with it, or its line was given up: the day's wait as before
+  t.deepEqual(ids(noBoat({ railsHome: true }, { at: T0 - HOUR, ok: false, text: 'no way round the ridge' })), SEARCHES);
+  t.deepEqual(ids(noBoat({ railsHome: true }, { at: T0 - HOUR, ok: true, text: 'given up and taken up: 300 rails' })), SEARCHES);
+  const later = noBoat({ railsHome: true }, { at: T0 - HOUR, ok: false, text: 'no way round the ridge' });
+  t.is(villagersTask.variants(snap(KIT(), { now: T0 + 23 * HOUR + MINUTE }), later).map(v => v.id)[0], 'village -556,1880', 'a day after the boat\'s failure');
+  // rails off (or the moves off): the day's wait as before
+  t.deepEqual(ids(noBoat()), SEARCHES);
+  t.deepEqual(ids(noBoat({ railsHome: false }, { at: T0 - HOUR, ok: true, text: '300 rails' })), SEARCHES);
+  t.deepEqual(ids(noBoat({ railsHome: true, villagerMoves: undefined })), []);
+  // a line under way: the rails rung owns its village (not offered, even a day on), and no other no-boat village is gone to
+  const line = { at: T0 - HOUR, site: { ...BELL }, villager: 1, from: { ...BELL }, pickup: { ...BELL }, stop: { at: { ...BELL }, placed: false },
+    cells: [0, 1, 2].map(i => ({ x: BELL.x, y: BELL.y, z: BELL.z + i, kind: 'rail' })), torches: [], yard: 1, opens: [], entry: {}, stage: 'bill', laid: [], runs: 0 } as unknown as RailLine;
+  const under = noBoat({ railsHome: true, rails: { line } });
+  t.truthy(peekLine(under));
+  t.deepEqual(ids(under), SEARCHES);
+  under.villages!.sites[0].noBoat!.at = T0 - 25 * HOUR;
+  t.deepEqual(ids(under), SEARCHES, 'the line\'s village not offered a day on');
+  const other = { x: -700, y: 64, z: 2000, seenAt: T0, noBoat: { at: T0 - HOUR, why: 'a hill' } };
+  t.false(siteOpen(other, HOME, T0, { on: true, line: BELL }));
+  t.true(siteOpen(other, HOME, T0, { on: true }));
+  t.true(siteOpen({ ...other, noBoat: undefined }, HOME, T0, { on: true, line: BELL }), 'a village with no boat failure: the boat\'s as ever');
+  // the gates only read
+  const before = JSON.stringify(under);
+  ids(under);
+  t.is(JSON.stringify(under), before);
+});
+
 test('the rung only looks: asked over hours, weathers, switches and memories, the world is left as it was', (t) => {
   for (const w of [hallWorld(), hallWorld({ villagerMoves: undefined }), hallWorld({ villages: undefined }), hallWorld({ zones: {} })]) {
     const before = JSON.stringify(w);
@@ -1198,11 +1239,13 @@ test('no boat way home with the rails switch on and a line under way already (on
   ridge(one);
   await rung(one).run(one.ctx());
   const kept = peekLine(first)!;
-  const world = hallWorld({ railsHome: true, rails: { line: JSON.parse(JSON.stringify(kept)) as RailLine } });
+  // (a line to another village: the line's own village is the rails rung's, never the villagers rung's to go to)
+  const elsewhere = { ...JSON.parse(JSON.stringify(kept)) as RailLine, site: { x: -900, y: 63, z: 1700 } };
+  const world = hallWorld({ railsHome: true, rails: { line: elsewhere } });
   const land = new Land(world);
   ridge(land);
   const text = await rung(land).run(land.ctx());
-  t.regex(text, /; rails home planned only: the line to the village at \(-556, 63, 1880\) is under way \(one at a time\); back home$/);
+  t.regex(text, /; rails home planned only: the line to the village at \(-900, 63, 1700\) is under way \(one at a time\); back home$/);
   t.notRegex(text, /a dry run/);
   t.false(land.said.some(l => /dry run/.test(l)), land.said.join(' | '));
   t.is(peekLine(world)!.at, kept.at, 'the line under way kept as it was');

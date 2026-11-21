@@ -550,14 +550,33 @@ export function siteOf(world: WorldMemory, variant: string): VillageSite | undef
 export const variantOf = (s: { x: number; z: number }) => `village ${s.x},${s.z}`;
 
 /**
- * A site the rung may go to now: within range, not someone's (but for a word of someone's to be judged again, which is
- * gone to for a look: rejudge), no recent failure of the boat's way, not waiting. Pure.
+ * The rails home as the gates read it (railshome.ts, which this file stays out of the imports of): the switch
+ * (world.railsHome) and the village of the line under way, if any (world.rails.line.site).
  */
-export function siteOpen(site: VillageSite, home: { x: number; z: number }, now: number): boolean {
+export interface RailsGate { on: boolean; line?: { x: number; z: number } }
+
+/**
+ * The rails fallback given up on for the boat's last failure there: its plan, made with that failure (at it or after),
+ * found no way, or the line it kept was given up and taken back up. Pure.
+ */
+export const railsFailed = (site: VillageSite): boolean =>
+  !!site.noBoat && !!site.rails && fin(site.rails.at) && site.rails.at >= site.noBoat.at
+  && (site.rails.ok === false || (typeof site.rails.text === 'string' && site.rails.text.startsWith('given up and taken up')));
+
+/**
+ * A site the rung may go to now: within range, not someone's (but for a word of someone's to be judged again, which is
+ * gone to for a look: rejudge), no recent failure of the boat's way, not waiting. With the rails switch on (`rails`), a
+ * recent failure of the boat's way is no wait: the move's no-boat branch keeps the rails line (the user, Nov 21), unless
+ * the rails fallback failed there too (railsFailed) or a line is under way (one at a time). The village of the line
+ * under way is never gone to: the rails rung owns it. Pure.
+ */
+export function siteOpen(site: VillageSite, home: { x: number; z: number }, now: number, rails?: RailsGate): boolean {
   if (horiz(site, home) > VILLAGE_RANGE) return false;
+  if (rails?.line && covers(site, rails.line)) return false;
   if (site.judged?.kind === 'theirs') return rejudge(site);
   if (site.judged?.kind === 'wait' && now - site.judged.at < WAIT_AGAIN) return false;
-  return !(site.noBoat && now - site.noBoat.at < NO_BOAT_WAIT);
+  if (!(site.noBoat && now - site.noBoat.at < NO_BOAT_WAIT)) return true;
+  return !!rails?.on && !rails.line && !railsFailed(site);
 }
 
 // ------------------------------------------------------------------------------------------------ the judge

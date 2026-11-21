@@ -177,7 +177,11 @@ export const villagersTask: WorkTask = {
     if (hallWhy(s, world)) return [];
     const home = s.home ?? s.position;
     const v = peekVillages(world);
-    const sites = v.sites.filter(q => siteOpen(q, home, s.now)).map(q => ({ q, dist: horiz(q, home) }))
+    // (the rails home as the gates read it: a village the boat found no way from is gone to again at once with the rails
+    // switch on, its no-boat branch keeping the line, but none while a line is under way)
+    const line = peekLine(world);
+    const rails = { on: railsOn(world) && movesOn(world), ...(line ? { line: line.site } : {}) };
+    const sites = v.sites.filter(q => siteOpen(q, home, s.now, rails)).map(q => ({ q, dist: horiz(q, home) }))
       .map(x => ({ ...x, need: rejudge(x.q) ? lookNeedMs(x.dist) : moveNeedMs(x.dist) }))
       // (a move that cannot be home with its villager by the day's end is never set out on: not offered at all)
       .filter(x => x.need <= DAY_MS).sort((a, b) => a.dist - b.dist);
