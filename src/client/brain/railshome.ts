@@ -1355,7 +1355,7 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
     .sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid));
   if (!order.length) return { why: `no unemployed villager the judge allows in the village at ${fmt(line.site)} to bring to the pickup at ${fmt(p)}` };
   const along = line.cells[HEAD.pickup - HEAD.launch - 1] ?? line.cells[0];
-  let tried = 0, noWay = '', late = '';
+  let tried = 0, noWay = '', late = '', onPath = 0;
   for (const e0 of order) {
     aborted(ctx);
     // (on the pickup already, its middle: the cart takes it there as it stands)
@@ -1363,7 +1363,13 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
     if (tried >= HOP_TRIES) break;
     await yieldNow();
     const at0 = e0.position!;
-    if (!footprint(g, at0.x, at0.z, at0.y, false).ok) continue;
+    // (one on a path, farmland or the like has no cell a boat can start from: looked at again once it has wandered,
+    // as the boat move does; a day that finds only such is no miss)
+    if (!footprint(g, at0.x, at0.z, at0.y, false).ok) {
+      onPath++;
+      say(ctx, `the villager (${e0.id}) at ${fmt(at0)} stands on a path, farmland or the like: no boat starts there`);
+      continue;
+    }
     tried++;
     const plan0 = route({ x: at0.x, z: at0.z, level: at0.y });
     if (!plan0.ok) { noWay ||= `from the villager (${e0.id}) at ${fmt(at0)}: ${plan0.why}`; continue; }
@@ -1461,6 +1467,7 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
     return { e };
   }
   if (late) return { why: late, late: true };
+  if (!tried && onPath) return { why: `the ${onPath} villager(s) to take stand on a path, farmland or the like: looked at again when they have wandered`, late: true };
   if (noWay) return { why: `no boat way to the pickup at ${fmt(p)} for a villager to take (${tried} tried): ${noWay}` };
   return { why: `no villager could be taken onto the pickup at ${fmt(p)}` };
 }
