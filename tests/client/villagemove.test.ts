@@ -1219,6 +1219,44 @@ test('no boat way and no rails way either (a wall of two across the way): said a
   t.regex(villagersLine(world, land.t), /; rails from \(-556, 1880\) not planned: no rails way to the yard's fence/);
 });
 
+/**
+ * A wall two high right across the way home at z 1950, 50 out of the village (past its area, z 1842..1914), but for a
+ * gap at x -512..-504: past the band the walk out reads (the tiles within 16 and a tile's reach of the line home,
+ * x -608..-513) and within the box the searches keep to (the area's x2 -517, and BAND past it).
+ */
+function wallWithGap(land: Land, gap = { x1: -512, x2: -504 }): void {
+  for (let x = -660; x <= -450; x++) {
+    if (x >= gap.x1 && x <= gap.x2) continue;
+    for (const z of [1950, 1951]) for (const y of [63, 64]) land.blocks.set(`${x},${y},${z}`, 'dirt');
+  }
+}
+
+test('the way home round what blocks the line home by the village, outside its area and the band the walk out read: the ground of the whole box the searches keep to is read round the village, and the boat goes round by the gap (live Nov 19-21: the west village\'s rails shut in its area at (-683, 2204))', async (t) => {
+  const world = hallWorld();
+  const land = new Land(world);
+  wallWithGap(land);
+  const text = await rung(land).run(land.ctx());
+  t.is(text, '[village -556,1880] moved an unemployed villager from the village at (-556, 63, 1880) to the hall (1 in it now); back home');
+  // (round by the gap, never through the wall)
+  const drives = land.log.filter(l => l.startsWith('drive to'));
+  t.true(drives.some(l => { const m = /\((-?[\d.]+), (-?[\d.]+)\)/.exec(l)!; return Number(m[1]) >= -512 && Number(m[1]) <= -503; }), drives.join(' | '));
+  t.false(land.log.some(l => /stuck|step up/.test(l)), land.log.join(' | '));
+});
+
+test('the rails\' dry run round what blocks the line home by the village, outside its area and the band: planned through the gap (the ground read over the whole box the searches keep to)', async (t) => {
+  const world = hallWorld();
+  const land = new Land(world);
+  wallWithGap(land);
+  // (no boat way: a ridge across the way nearer home, which the rails climb)
+  ridge(land);
+  const text = await rung(land).run(land.ctx());
+  t.regex(text, /; rails home planned \(a dry run, nothing laid\): \d+ rails, \d+ iron, \d+ gold, about \d+ min; back home$/);
+  t.deepEqual(acted(land), []);
+  const plan = lastRailPlan(world)!;
+  t.true(plan.cells.some(c => c.z === 1950 && c.x >= -512 && c.x <= -504), 'through the gap');
+  t.false(plan.cells.some(c => land.block(c.x, c.y, c.z) !== 'air' && !/fence|torch/.test(land.block(c.x, c.y, c.z))));
+});
+
 // ------------------------------------------------------------------------------------------------ the bridge's markers
 
 const mod = path.join(process.cwd(), 'client-mod', 'src', 'claudebridge');

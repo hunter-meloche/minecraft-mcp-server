@@ -805,15 +805,20 @@ async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promis
     say(ctx, text);
     return { gain: 0, text };
   }
-  // its ground, for the boat's first legs out of it; the way home keeps off every build but its own
-  await ground.read(ctx, Math.max(v.area.x1, Math.floor(target.x) - READ_NEAR), Math.max(v.area.z1, Math.floor(target.z) - READ_NEAR),
-    Math.min(v.area.x2, Math.floor(target.x) + READ_NEAR), Math.min(v.area.z2, Math.floor(target.z) + READ_NEAR));
-  // (a pillager outpost by it is no one's build, but danger: the way home keeps OUTPOST_CLEAR off it, where FROM_ZONES
-  // keeps 16 off a build of others)
+  // its ground, for the boat's first legs out of it and the ways home (the boat's and the rails' dry run): the whole box
+  // their searches keep within, as far as READ_NEAR round it, not its area alone. The walk out reads only the band
+  // BAND either side of the straight line home; a way round what blocks that band runs by the village, outside its area
+  // (live, the west village (-693, 2262): on Nov 18 its area reached z 2191, a villager wandered north, and the rails
+  // went round a ridge through x -701..-673, z 2196..2207; from Nov 19 its area began at z 2204, that ground was never
+  // read, and the rails' search, shut in the area and the band, got no nearer than (-683, 2204))
+  const bounds = boxOf([entry.out, target, { x: v.area.x1, z: v.area.z1 }, { x: v.area.x2, z: v.area.z2 }], BAND);
+  await ground.read(ctx, Math.max(bounds.x1, Math.floor(target.x) - READ_NEAR), Math.max(bounds.z1, Math.floor(target.z) - READ_NEAR),
+    Math.min(bounds.x2, Math.floor(target.x) + READ_NEAR), Math.min(bounds.z2, Math.floor(target.z) + READ_NEAR));
+  // the way home keeps off every build but its own (a pillager outpost by it is no one's build, but danger: the way home
+  // keeps OUTPOST_CLEAR off it, where FROM_ZONES keeps 16 off a build of others)
   const grow = OUTPOST_CLEAR - FROM_ZONES;
   const zones = look.zones.filter(z => !v.own.includes(z))
     .map(z => (v.outposts.includes(z) ? { ...z, x1: z.x1 - grow, z1: z.z1 - grow, x2: z.x2 + grow, z2: z.z2 + grow, y1: z.y1 - grow, y2: z.y2 + grow } : z));
-  const bounds = boxOf([entry.out, target, { x: v.area.x1, z: v.area.z1 }, { x: v.area.x2, z: v.area.z2 }], BAND);
   const me = await here(ctx);
   const plan = (from: BoatAt) => planRoute(ground, from, entry.out, { zones, bounds, within: 1.5 });
   let chosen: { e: Seen; legs: { x: number; z: number }[] } | undefined;
