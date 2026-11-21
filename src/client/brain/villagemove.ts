@@ -4,7 +4,7 @@ import type { Zone } from './courtesy.js';
 import { brainRun, type Status } from '../tools.js';
 import { MIN_WORK, alongSide, byYard, inFence, outByGate, roundFrom, type HomeSide, type WorkResult, type WorkTask } from './work.js';
 import { prepare } from './project.js';
-import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
+import { CHEST_SPARE, FOOD_TARGET, gatherFood, readyFoodPoints } from './food.js';
 import { FROM_ZONES, Ground, MAX_DROP, checkLeg, entryOf, footprint, keepOff, planRoute, readBand, yardEntry, yardInside, type BoatAt, type Entry } from './boatroute.js';
 import { closeRailsYard, heldByRails, peekLine, railsOn, railsPostWaits, railsYardOpen, startLine } from './railshome.js';
 import type { Bearing } from './nether.js';
@@ -763,6 +763,11 @@ async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promis
   // Nov 15 it cut the deep trips five times in a day ("carrying 15 food points"). From the chests' bread
   const ride = FOOD_TARGET + CHEST_SPARE;
   let fed = readyFoodPoints(await countsNow(ctx));
+  if (fed < ride) {
+    // any ready food the chests hold first (food.ts gatherFood), then bread: none may be stored (Nov 21)
+    await gatherFood(ctx, ride, true, true).catch(() => undefined);
+    fed = readyFoodPoints(await countsNow(ctx));
+  }
   if (fed < ride) {
     const each = readyFoodPoints(new Map([['bread', 1]])) || 5;
     await prepare(ctx, 'bread', ((await countsNow(ctx)).get('bread') ?? 0) + Math.ceil((ride - fed) / each));

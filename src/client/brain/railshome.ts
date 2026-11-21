@@ -6,7 +6,7 @@ import { FIRST_BOOST, HEAD, HOP, railBase, railRoom, shapeOf, type RailCell, typ
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, footprint, planRoute, zoneNear, type BoatAt, type Entry } from './boatroute.js';
 import { HALL_FRESH, HALL_WANTS, JUDGE_V, joinAreas, judgeOnWhole, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type Verdict, type VillageLook, type VillageSite } from './village.js';
 import { prepare } from './project.js';
-import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
+import { CHEST_SPARE, FOOD_TARGET, gatherFood, readyFoodPoints } from './food.js';
 import { MIN_WORK, inFence, outByGate, type WorkResult, type WorkTask } from './work.js';
 import { clock } from './idlelog.js';
 import {
@@ -1014,8 +1014,14 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   const ride = FOOD_TARGET + CHEST_SPARE;
   let fed = readyFoodPoints(await countsNow(ctx));
   if (fed < ride) {
-    await prepare(ctx, 'bread', ((await countsNow(ctx)).get('bread') ?? 0) + Math.ceil((ride - fed) / 5));
+    // any ready food the chests hold, as a trip's top-up (food.ts gatherFood): bread alone was asked for, and with
+    // none stored (Nov 21: only carrots and the like) the move stayed home one food point short
+    await gatherFood(ctx, ride, true, true).catch(() => undefined);
     fed = readyFoodPoints(await countsNow(ctx));
+    if (fed < ride) {
+      await prepare(ctx, 'bread', ((await countsNow(ctx)).get('bread') ?? 0) + Math.ceil((ride - fed) / 5));
+      fed = readyFoodPoints(await countsNow(ctx));
+    }
   }
   if (fed < ride) return { gain: 0, text: `not setting out on the move: short of food (${fed} food points carried, ${ride} wanted)`, untried: true };
   const zone = await zonesOnLine(ctx, line);
