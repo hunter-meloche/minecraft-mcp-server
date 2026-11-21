@@ -485,6 +485,18 @@ export interface ClientRuntime {
     takeUp: (at: Pos, item?: string) => Promise<RailTaken>;
     /** The minecart put on the rail at `at` (cart.place), stepping carefully into reach when too far. */
     placeCart: (at: Pos, opts?: { inVillage?: boolean; newMovement?: boolean }) => Promise<CartPlaced>;
+    /**
+     * One cut of an extension's earthworks (railshome.ts earthDown): the natural block at `at` dug (dig.here), only if
+     * it is still `was`'s kind and of the cuts' natural kinds (grass, dirt, coarse dirt, stone, andesite, diorite,
+     * granite, gravel, sand), never one the bot built, never someone's build, never with the bot standing over it (it
+     * steps aside first, carefully); the drop walked by. Absent from a runtime without it (no earthworks then).
+     */
+    cut?: (at: Pos, was: string) => Promise<RailTaken>;
+    /**
+     * A cut cell filled back by the take-up: `item` (a natural block: dirt, stone, cobblestone...) put into the air or
+     * plant at `at`, the bot stepping aside if it stands there; the world's ground again, not the bot's own.
+     */
+    restore?: (at: Pos, item: string) => Promise<RailPlaced>;
   };
 }
 
@@ -2278,6 +2290,71 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     return { ok: true, dug: true, block: name, pickedUp: got };
   };
 
+  /** The natural ground an extension's earthworks may cut (railroute.ts EARTH_CUT), and what may be put back into a cut. */
+  const EARTH_CUT = /^(grass_block|dirt|coarse_dirt|stone|andesite|diorite|granite|gravel|sand)$/;
+  const EARTH_PUT = /^(dirt|coarse_dirt|stone|cobblestone|andesite|diorite|granite|gravel|sand)$/;
+  /** The bot in the column of `p`, over it (standing on it, or higher): it steps aside first, carefully (never dug from under it). */
+  const offColumn = async (p: Pos): Promise<boolean> => {
+    for (let k = 0; k < 2; k++) {
+      const me = (await status().catch(() => undefined))?.position;
+      if (!me) return false;
+      const over = Math.floor(me.x) === p.x && Math.floor(me.z) === p.z && Math.floor(me.y + 0.01) > p.y - 1;
+      const inside = Math.abs(me.x - (p.x + 0.5)) < 0.8 && Math.abs(me.z - (p.z + 0.5)) < 0.8 && me.y + 0.01 >= p.y;
+      if (!over && !inside) return true;
+      await call('goto', { ...p, away: 2, careful: true, timeoutMs: 10_000 }, 20_000).catch(() => undefined);
+    }
+    return false;
+  };
+  const cutGround = async (at: Pos, was: string): Promise<RailTaken> => {
+    const p = floorPos(at);
+    const dim = await dimension();
+    const st = await stateAt(p);
+    if (!st) return { ok: false, dug: false, reason: 'not loaded' };
+    const name = st.replace(/\[.*$/, '');
+    if (/^(air|cave_air)$/.test(name)) return { ok: true, dug: false, block: name, reason: 'nothing there' };
+    const want = was.replace(/^minecraft:/, '').replace(/\[.*$/, '');
+    if (name !== want || !EARTH_CUT.test(name)) return { ok: false, dug: false, block: name, reason: `not the ground the plan cuts (${want}): ${name} there` };
+    if (protection.has(dim, p)) return { ok: false, dug: false, block: name, reason: `the bot's own ${name}: not ground to cut` };
+    if (!(await offColumn(p))) return { ok: false, dug: false, block: name, reason: 'the bot stands over it' };
+    const dig = () => call<{ dug?: boolean; reason?: string }>('dig.here', { ...p, timeoutMs: 15_000 }, 25_000).catch((e: Error) => ({ dug: false, reason: e.message }));
+    let r = await dig();
+    if (!r.dug && /out of reach|out of sight/.test(r.reason ?? '')) {
+      await carefulNear(p);
+      if (!(await offColumn(p))) return { ok: false, dug: false, block: name, reason: 'the bot stands over it' };
+      r = await dig();
+    }
+    if (!r.dug && r.reason !== 'air') return { ok: false, dug: false, block: name, reason: r.reason ?? 'not dug' };
+    // the drop: by the cell, carefully (never into it: a cut two deep is a hole)
+    await call('goto', { ...p, y: p.y + 1, range: 1, careful: true, timeoutMs: 6000 }, 12_000).catch(() => undefined);
+    return { ok: true, dug: true, block: name };
+  };
+  const restoreGround = async (at: Pos, item: string): Promise<RailPlaced> => {
+    const p = floorPos(at);
+    if (!EARTH_PUT.test(item)) return { ok: false, placed: false, reason: `not a block of the ground: ${item}` };
+    const st = await stateAt(p);
+    if (!st) return { ok: false, placed: false, reason: 'not loaded' };
+    const name = st.replace(/\[.*$/, '');
+    if (!/^(air|cave_air|short_grass|fern|tall_grass|large_fern|dead_bush|bush|short_dry_grass|tall_dry_grass|leaf_litter|vine|glow_lichen|snow)$/.test(name)) {
+      return { ok: false, placed: false, block: name, reason: `${name} there now` };
+    }
+    try { await call('item.select', { name: item }); } catch { return { ok: false, placed: false, reason: `no ${item} carried` }; }
+    await offColumn(p);
+    const place = async () => {
+      const r = await call<{ placed: boolean; block?: string; reason?: string }>('place', { ...p, face: 'down' }).catch((e: Error) => ({ placed: false, reason: e.message, block: undefined }));
+      return { ok: r.placed, placed: r.placed, ...(r.block ? { block: r.block } : {}), ...(r.reason ? { reason: r.reason } : {}) } as RailPlaced;
+    };
+    let r = await place();
+    if (!r.placed) {
+      // (out of reach, or the bot in the cell: into reach, off it, once more)
+      await carefulNear(p);
+      await offColumn(p);
+      r = await place();
+    }
+    // (the world's ground again, never the bot's own: a build scan sees ground, and nothing keeps it from being dug)
+    if (r.placed) protection.remove(await dimension(), p);
+    return r;
+  };
+
   const placeCart = async (at: Pos, opts: { inVillage?: boolean; newMovement?: boolean } = {}): Promise<CartPlaced> => {
     const p = floorPos(at);
     const ask = () => call<CartPlaced>('cart.place', { ...p, ...(opts.inVillage ? { inVillage: true } : {}), ...(opts.newMovement ? { newMovement: true } : {}) }, 15_000)
@@ -2442,7 +2519,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
   );
 
   return {
-    rails: { lay: layRail, takeUp: takeUpRail, placeCart },
+    rails: { lay: layRail, takeUp: takeUpRail, placeCart, cut: cutGround, restore: restoreGround },
     actions: handlers,
     call,
     status,

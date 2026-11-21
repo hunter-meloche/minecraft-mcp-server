@@ -4,14 +4,14 @@ import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import type { Zone } from '../../src/client/brain/courtesy.js';
 import type { CartPlaced, InventoryItem, RailLay, RailPlaced, RailTaken } from '../../src/client/tools.js';
 import { Ground, cellOf, entryOf, type Entry } from '../../src/client/brain/boatroute.js';
-import { BOOST_GAP, planRails, shapeOf, type RailCell, type RailShape } from '../../src/client/brain/railroute.js';
+import { BOOST_GAP, EARTH_MAX, earthCuttable, earthFor, planRails, shapeOf, type RailCell, type RailShape } from '../../src/client/brain/railroute.js';
 import { recipeFor } from '../../src/client/brain/progress.js';
 import { activityAt } from '../../src/client/brain/schedule.js';
 import { pick, workTick } from '../../src/client/brain/work.js';
 import { closeUpGoal } from '../../src/client/brain/villagemove.js';
-import { JUDGE_V, peekVillages } from '../../src/client/brain/village.js';
+import { JUDGE_V, peekVillages, type Seen } from '../../src/client/brain/village.js';
 import {
-  FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, railsTick, railsYardOpen, shapeWith, startLine, stepAt, yardSteps, type RailLine
+  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
 } from '../../src/client/brain/railshome.js';
 
 /**
@@ -339,6 +339,31 @@ class Field {
     this.log.push(`take up ${name} ${k(at)}`);
     return { ok: true, dug: true, block: name, pickedUp: true };
   };
+  /** the earthworks as the runtime's rails tools make them (tools.ts cutGround, restoreGround): never from over the bot */
+  underBot: string[] = [];
+  cut = async (at: Pos, was: string): Promise<RailTaken> => {
+    this.near(at);
+    this.t += 1000;
+    const name = idOf(this.block(at.x, at.y, at.z));
+    if (name === 'air') return { ok: true, dug: false, block: name, reason: 'nothing there' };
+    if (name !== idOf(was) || !/^(grass_block|dirt|coarse_dirt|stone|andesite|diorite|granite|gravel|sand)$/.test(name)) return { ok: false, dug: false, block: name, reason: `not the ground the plan cuts: ${name}` };
+    if (this.own.has(k(at))) return { ok: false, dug: false, block: name, reason: `the bot's own ${name}` };
+    if (Math.floor(this.me.x) === at.x && Math.floor(this.me.z) === at.z && this.me.y > at.y) this.underBot.push(k(at));
+    this.blocks.set(k(at), 'air');
+    this.give(name === 'grass_block' ? 'dirt' : name === 'stone' ? 'cobblestone' : name);
+    this.log.push(`cut ${name} ${k(at)}`);
+    return { ok: true, dug: true, block: name };
+  };
+  restore = async (at: Pos, item: string): Promise<RailPlaced> => {
+    this.near(at);
+    this.t += 1000;
+    const here = idOf(this.block(at.x, at.y, at.z));
+    if (!/^(air|short_grass)$/.test(here)) return { ok: false, placed: false, block: here, reason: `${here} there now` };
+    if (!this.take(item)) return { ok: false, placed: false, reason: `no ${item} carried` };
+    this.blocks.set(k(at), item);
+    this.log.push(`restore ${item} ${k(at)}`);
+    return { ok: true, placed: true, block: item };
+  };
   placeCart = async (at: Pos): Promise<CartPlaced> => {
     this.near(at);
     if (!this.rails.has(k(at))) return { ok: false, reason: 'no rail there' };
@@ -574,7 +599,7 @@ class Field {
       status: (async () => this.status()) as GoalContext['status'],
       progress: (text: string) => { this.said.push(text); },
       gain: () => undefined,
-      rails: { lay: this.lay, takeUp: this.takeUp, placeCart: this.placeCart },
+      rails: { lay: this.lay, takeUp: this.takeUp, placeCart: this.placeCart, cut: this.cut, restore: this.restore },
       save: () => { this.saves.unshift(JSON.stringify(this.world)); },
       ...over
     };
@@ -1412,32 +1437,6 @@ test('a move day whose partial look goes on with the fresh free word, a player w
   t.false(did.some(l => /^boat down|^cart on/.test(l)));
 });
 
-test('a hop that cannot reach the pickup (the boat stopped on the way): driven back to where it came down, the villager let out there in its village, the boat taken up, the line kept whole (a miss)', async (t) => {
-  const { world, line } = lineWorld('laying');
-  const land = new Field(world, { stallDrives: 1 });
-  await laidWhole(land, line);
-  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
-  land.villagers.find(v => v.id === 101)!.position = { x: -585.5, y: 63, z: 2000.5 };
-  const log0 = land.log.length;
-  const r = await run(land, 'move', 20 * MINUTE);
-  t.is(r.text, 'the move not made: the hop to the pickup stopped (a step up ahead at (-570, 63, 2000)): the villager let out at (-585, 63, 2000), the boat taken back up');
-  const did = land.log.slice(log0);
-  t.deepEqual(did.filter(l => /^drive to/.test(l)), ['drive to (-555.5, 2000.5): a step up ahead', 'drive to (-584.4, 2000.5)']);
-  t.true(land.said.includes('rails: the hop to the pickup stopped: a step up ahead at (-570, 63, 2000)'), land.said.join(' | '));
-  t.false(did.some(l => /^cart on /.test(l)), 'no cart for it');
-  t.like(line, { stage: 'whole', misses: 1 });
-  t.falsy(line.stops);
-  t.is(land.boat, undefined);
-  t.is(land.count('oak_boat'), 1);
-  t.is(peekVillages(world).boat, undefined);
-  t.true(world.villagerMoves, 'the moves stay on: the villager never left its village');
-  const v = land.villagers.find(q => q.id === 101)!;
-  t.true(horiz(v.position, { x: -585.5, z: 2000.5 }) < 2, JSON.stringify(v.position));
-  t.true(horiz(v.position, { x: -555.5, z: 2000.5 }) > 20);
-  // the line kept: the next move day goes again
-  t.true(land.standing(line).length > 100);
-});
-
 // ------------------------------------------------------------------------------------------------ the extension
 
 /**
@@ -1446,12 +1445,12 @@ test('a hop that cannot reach the pickup (the boat stopped on the way): driven b
  * its east side the ground steps down a block a block to the flat land (65 at x -588, 64 at -587). `wall`: the rim two
  * high instead, and no steps (nothing climbs out of it, rails or boats).
  */
-function hillside(land: Field, opts: { wall?: boolean } = {}) {
+function hillside(land: Field, opts: { wall?: boolean; wallHigh?: number } = {}) {
   const X1 = -612, X2 = -589, Z1 = 1980, Z2 = 2020;
   const top = (x: number, z: number, h: number) => { for (let y = 63; y < 63 + h; y++) land.blocks.set(k({ x, y, z }), y === 62 + h ? 'grass_block[snowy=false]' : 'dirt'); };
   for (let x = X1; x <= X2; x++) for (let z = Z1; z <= Z2; z++) {
     const rim = x === X1 || x === X2 || z === Z1 || z === Z2;
-    top(x, z, rim ? (opts.wall ? 4 : 3) : 2);
+    top(x, z, rim ? (opts.wall ? 2 + (opts.wallHigh ?? 2) : 3) : 2);
   }
   if (!opts.wall) for (let z = Z1; z <= Z2; z++) { top(-588, z, 2); top(-587, z, 1); }
 }
@@ -1561,11 +1560,242 @@ test('the extension cut short as it is laid (a restart): its blocks in the recor
   t.is(peekLine(saved), undefined);
 });
 
-test('an extension that cannot be planned (the villagers in a hollow walled two high: neither a boat nor a rail climbs out): the move not made today, not a miss, nothing laid or taken up', async (t) => {
+/**
+ * The hillside's basin with a bumpy floor (Nov 21, the west village up its hill: no straight, level run of 7 by any
+ * villager): every other cell of it a block up, a checkerboard, so that no two cells side by side are level; a path of
+ * the village across it (z 2003) and a bed by it, both never to be dug.
+ */
+function bumpy(land: Field) {
+  hillside(land);
+  for (let x = -611; x <= -590; x++) for (let z = 1981; z <= 2019; z++) {
+    if (z === 2003) { land.blocks.set(k({ x, y: 64, z }), 'dirt_path'); continue; }
+    if (((x + z) & 1) === 0) continue;
+    land.blocks.set(k({ x, y: 64, z }), 'dirt');
+    land.blocks.set(k({ x, y: 65, z }), 'grass_block[snowy=false]');
+  }
+  land.marks.push({ name: 'white_bed', at: { x: -594, y: 65, z: 1996 } });
+}
+/** What the extension's earthworks cut and fill, by the world's log: each cut's block, each fill's place. */
+const cutsOf = (land: Field, from = 0) => land.log.slice(from).filter(l => /^cut /.test(l)).map(l => ({ block: l.split(' ')[1], at: l.split(' ')[2] }));
+
+test('a hillside village with no level run by any villager (Nov 21): the head levelled right beside the villager, its cuts and fills in the record before each is made, laid, the move made; the take-up puts the cut ground back and takes the fills up, nothing of the village dug', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  bumpy(land);
+  uphill(land, { x: -597.5, y: 65, z: 2000.5 });
+  extKit(land);
+  const before = new Map<string, string>();
+  const early: string[] = [];
+  const inRecord = (p: Pos, op: 'cut' | 'fill') => [world, JSON.parse(land.saves[0] ?? '{}') as WorldMemory].every(w => !!w?.rails?.line?.earth?.some(e => e.op === op && e.x === p.x && e.y === p.y && e.z === p.z && !e.done));
+  const cut = async (p: Pos, was: string) => { if (!before.has(k(p))) before.set(k(p), land.block(p.x, p.y, p.z)); if (!inRecord(p, 'cut')) early.push(`cut ${k(p)}`); return land.cut(p, was); };
+  const lay = async (a: RailLay) => {
+    if (a.item === 'cobblestone' && world.rails?.line?.earth?.some(e => e.op === 'fill' && e.x === a.at.x && e.y === a.at.y && e.z === a.at.z)) {
+      if (!before.has(k(a.at))) before.set(k(a.at), land.block(a.at.x, a.at.y, a.at.z));
+      if (!inRecord(a.at, 'fill')) early.push(`fill ${k(a.at)}`);
+    }
+    return land.lay(a);
+  };
+  const log0 = land.log.length, said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE, { rails: { lay, takeUp: land.takeUp, placeCart: land.placeCart, cut, restore: land.restore } });
+  const said = land.said.slice(said0), did = land.log.slice(log0);
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home \(1 in it now\); everything of the line taken back up/, said.join('\n'));
+  const ext = line.extended!;
+  t.truthy(ext);
+  // no head stood as the ground is: levelled by the villager, at the level it stands at, within EARTH_NEAR of it
+  t.true(said.some(l => /^rails: the ground levelled for it: \d+ cut\(s\) \((grass_block|dirt)(, (grass_block|dirt))?\), \d+ fill\(s\) of cobblestone/.test(l)), said.join('\n'));
+  t.is(ext.to.y, 65);
+  t.true(Math.max(Math.abs(ext.to.x + 0.5 - -597.5), Math.abs(ext.to.z + 0.5 - 2000.5)) <= 3.5, JSON.stringify(ext.to));
+  const head = line.cells.slice(0, 6);
+  t.true(head.every(c => c.y === 65), 'the head level');
+  t.true(did.some(l => /^cart took villager 101, home to the brake/.test(l)), did.join(' | '));
+  // every cut and fill in the record before it was made; the cuts natural ground only, within the limits
+  t.deepEqual(early, []);
+  const cuts = cutsOf(land, log0);
+  t.true(cuts.length > 0);
+  t.true(before.size <= 40, `${before.size} cuts and fills`);
+  t.true(cuts.every(c => /^(grass_block|dirt)$/.test(c.block)), JSON.stringify(cuts));
+  const cols = new Map<string, number>();
+  for (const p of before.keys()) { const [x, , z] = p.split(','); cols.set(`${x},${z}`, (cols.get(`${x},${z}`) ?? 0) + 1); }
+  t.true([...cols.values()].every(n => n <= 2), 'at most two a column');
+  // nothing of the village: the path, under the villager, by the bed or the bell
+  for (const c of cuts) {
+    const [x, y, z] = c.at.split(',').map(Number);
+    t.not(z, 2003, `the path: ${c.at}`);
+    t.false(Math.abs(x + 0.5 - -597.5) < 0.9 && Math.abs(z + 0.5 - 2000.5) < 0.9, `under the villager: ${c.at}`);
+    t.false(land.marks.some(m => Math.abs(m.at.x - x) <= 1 && Math.abs(m.at.z - z) <= 1 && Math.abs(m.at.y - y) <= 2), `by a bed or a bell: ${c.at}`);
+  }
+  t.false(did.some(l => /^cut dirt_path|^dig dirt_path/.test(l)));
+  for (let x = -611; x <= -590; x++) t.is(land.block(x, 64, 2003), 'dirt_path');
+  t.deepEqual(land.underBot, []);
+  // the take-up: the fills up, the cut ground back as it was (a grass block as dirt)
+  for (const [p, was] of before) {
+    const now = land.block(...(p.split(',').map(Number) as [number, number, number]));
+    t.is(idOf(now), idOf(was) === 'grass_block' ? 'dirt' : idOf(was), `${p}: ${was} -> ${now}`);
+  }
+  t.deepEqual(land.standing(line), []);
+  t.is(peekLine(world), undefined);
+});
+
+test('earthworks cut short (a restart after some cuts, before their rails): the record holds every cut, made or not; given up, the take-up fills the made ones back and finds the rest as they were, nothing left', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  bumpy(land);
+  uphill(land, { x: -597.5, y: 65, z: 2000.5 });
+  extKit(land);
+  const abort = new AbortController();
+  // (the yard's stretch is 6 lays; the extension's first rails go down after their columns' cuts)
+  land.opts.abortAtLay = { n: land.lays + 6 + 47, abort };
+  const log0 = land.log.length;
+  await t.throwsAsync(run(land, 'move', 20 * MINUTE, { signal: abort.signal }));
+  const saved = JSON.parse(land.saves[0]) as WorldMemory;
+  const again = peekLine(saved)!;
+  t.truthy(again.earth?.length);
+  const made = cutsOf(land, log0).map(c => c.at);
+  t.true(made.length > 0);
+  t.true(made.every(p => again.earth!.some(w => w.op === 'cut' && k(w) === p)), 'every cut made is in the record');
+  t.true(again.earth!.some(w => !w.done), 'and the ones not made yet');
+  // given up: all of it taken up, the cut ground back
+  land.world = saved;
+  land.opts.abortAtLay = undefined;
+  land.line = again;
+  saved.railsHome = false;
+  const up = await run(land, 'take up', 30 * MINUTE);
+  t.regex(up.text, /everything of the line taken back up \(the rails switch is off\)/, up.text);
+  for (const p of made) t.is(land.block(...(p.split(',').map(Number) as [number, number, number])), 'dirt', p);
+  t.deepEqual(land.standing(again), []);
+  t.is(peekLine(saved), undefined);
+});
+
+test('the earthworks\' limits: no more than EARTH_MAX cuts and fills (a tighter cap finds none), no more than two a column, nothing but natural ground; too many is no extension, the move not made today and no miss', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  bumpy(land);
+  uphill(land, { x: -597.5, y: 65, z: 2000.5 });
+  const g = new Ground(55, 29);
+  for (let x = -625; x <= -540; x++) for (let z = 1960; z <= 2040; z++) for (let y = 55; y < 84; y++) g.set(x, y, z, land.block(x, y, z));
+  const v101 = { id: 101, name: 'villager', position: { x: -597.5, y: 65, z: 2000.5 }, profession: 'none' } as Seen;
+  const look = { jobs: [], beds: land.marks.filter(m => /_bed$/.test(m.name)).map(m => m.at), bells: [{ ...BELL }], zones: [], seen: [v101] };
+  const args = { noWay: [v101], order: [v101], look, v: { own: [], outposts: [] }, area: world.villages!.sites[0].area, yard: YARD, earth: true };
+  const ok = extensionFor(line, g, args);
+  t.true(ok.ok, ok.ok ? '' : ok.why);
+  if (ok.ok) {
+    t.true(ok.earth.length > 0 && ok.earth.length <= EARTH_MAX);
+    t.true(ok.earth.filter(w => w.op === 'cut').every(w => earthCuttable(w.was)));
+    const per = new Map<string, number>();
+    for (const w of ok.earth) per.set(`${w.x},${w.z}`, (per.get(`${w.x},${w.z}`) ?? 0) + 1);
+    t.true([...per.values()].every(n => n <= 2));
+    const tight = extensionFor(line, g, { ...args, earthMax: 3 });
+    t.false(tight.ok);
+    t.regex(tight.ok ? '' : tight.why, /levelled by a villager: no (pickup by a villager to take: no head of 7 rails .* 3 in all|rails way to the line's end .*3 in all\))/);
+  }
+  // with no earthworks in the runtime, none: as before
+  t.false(extensionFor(line, g, { ...args, earth: false }).ok);
+  // a cut beside water, a cut under gravel, a fill on a path: none
+  const at = (m: Record<string, string>) => (x: number, y: number, z: number) => m[`${x},${y},${z}`] ?? (y < 64 ? 'dirt' : 'air');
+  t.deepEqual(earthFor(at({}), 0, 64, 0, 'rail', () => true), []);
+  t.is(earthFor(at({ '0,64,0': 'dirt', '1,64,0': 'water[level=0]' }), 0, 64, 0, 'rail', () => true), undefined);
+  t.is(earthFor(at({ '0,64,0': 'dirt', '0,65,0': 'gravel', '0,66,0': 'gravel' }), 0, 64, 0, 'rail', () => true), undefined);
+  t.is(earthFor(at({ '0,63,0': 'air', '0,62,0': 'dirt_path' }), 0, 64, 0, 'rail', () => true), undefined);
+  t.is(earthFor(at({ '0,64,0': 'oak_planks' }), 0, 64, 0, 'rail', () => true), undefined);
+  t.is(earthFor(at({ '0,64,0': 'iron_ore' }), 0, 64, 0, 'rail', () => true), undefined);
+  t.is(earthFor(at({ '0,64,0': 'dirt' }), 0, 64, 0, 'rail', () => false), undefined, 'a cell kept off (a villager, a bed, a house)');
+  t.deepEqual(earthFor(at({ '0,63,0': 'air', '0,62,0': 'air' }), 0, 64, 0, 'rail', () => true)?.map(w => `${w.op} ${w.y}`), ['fill 63', 'fill 62']);
+  t.is(earthFor(at({ '0,63,0': 'air', '0,62,0': 'air', '0,61,0': 'air' }), 0, 64, 0, 'rail', () => true), undefined, 'a fill three high');
+  t.deepEqual(earthFor(at({ '0,64,0': 'grass_block', '0,65,0': 'dirt' }), 0, 64, 0, 'rail', () => true)?.map(w => `${w.op} ${w.y}`), ['cut 64', 'cut 65']);
+  t.is(earthFor(at({ '0,64,0': 'dirt', '0,65,0': 'dirt', '0,66,0': 'dirt' }), 0, 64, 0, 'rail', () => true), undefined, 'a cut under ground left hanging');
+  t.is(refillOf('grass_block[snowy=false]', i => (i === 'dirt' ? 3 : 0)), 'dirt');
+  t.is(refillOf('stone', i => (i === 'cobblestone' ? 3 : 0)), 'cobblestone');
+  t.is(refillOf('andesite', i => (i === 'andesite' ? 1 : 0)), 'andesite');
+  t.is(refillOf('sand', () => 0), undefined);
+});
+
+test('a failed real hop (the dry check found a way, the boat stopped on it): the extension planned and laid in the same run, by the villager where it was let out, and the move made from its new pickup; no miss', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { stallDrives: 1 });
+  await laidWhole(land, line);
+  extKit(land);
+  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
+  land.villagers.find(v => v.id === 101)!.position = { x: -585.5, y: 63, z: 2000.5 };
+  const log0 = land.log.length, said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  const said = land.said.slice(said0), did = land.log.slice(log0);
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home/, said.join('\n'));
+  t.true(said.includes('rails: the hop to the pickup stopped: a step up ahead at (-570, 63, 2000)'), said.join('\n'));
+  t.true(said.some(l => /^rails: the boat's hop did not bring a villager to the pickup at \(-556, 63, 2000\): the hop to the pickup stopped/.test(l)), said.join('\n'));
+  t.truthy(line.extended);
+  t.true(horiz(line.extended!.to, { x: -585.5, z: 2000.5 }) <= 16, JSON.stringify(line.extended));
+  t.true(did.some(l => /^cart took villager 101, home to the brake/.test(l)), did.join(' | '));
+  t.falsy(line.misses);
+  t.is(peekLine(world), undefined);
+});
+
+test('a failed real hop with no extension left to try (EXTENSIONS made): the day a miss, as before; the boat back, the villager let out in its village', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { stallDrives: 1 });
+  await laidWhole(land, line);
+  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
+  land.villagers.find(v => v.id === 101)!.position = { x: -585.5, y: 63, z: 2000.5 };
+  line.extended = { at: T0, from: { ...line.cells[0] }, to: { ...line.pickup }, rails: 1, powered: 0, times: EXTENSIONS };
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.is(r.text, 'the move not made: the hop to the pickup stopped (a step up ahead at (-570, 63, 2000)): the villager let out at (-585, 63, 2000), the boat taken back up');
+  t.like(line, { stage: 'whole', misses: 1 });
+  t.is(land.count('oak_boat'), 1);
+  t.true(world.villagerMoves);
+});
+
+test('the villagers in a hollow walled two high (no boat climbs out, no rail over it as the ground is): the way levelled through the wall, a cut two deep, and a fill under the drop outside; every cut and fill in the record before it is made, the move made, and the ground put back as it was by the take-up', async (t) => {
   const { world, line } = lineWorld('laying');
   const land = new Field(world);
   await laidWhole(land, line);
   hillside(land, { wall: true });
+  uphill(land);
+  extKit(land);
+  const before = new Map<string, string>();
+  const at0 = (p: Pos) => { if (!before.has(k(p))) before.set(k(p), land.block(p.x, p.y, p.z)); };
+  const early: string[] = [];
+  const inRecord = (p: Pos, op: 'cut' | 'fill') => [world, JSON.parse(land.saves[0] ?? '{}') as WorldMemory].every(w => !!w?.rails?.line?.earth?.some(e => e.op === op && e.x === p.x && e.y === p.y && e.z === p.z && !e.done));
+  const cut = async (p: Pos, was: string) => { at0(p); if (!inRecord(p, 'cut')) early.push(`cut ${k(p)}`); return land.cut(p, was); };
+  const lay = async (a: RailLay) => {
+    const fill = a.item === 'cobblestone' && !!world.rails?.line?.earth?.some(e => e.op === 'fill' && e.x === a.at.x && e.y === a.at.y && e.z === a.at.z);
+    if (fill) { at0(a.at); if (!inRecord(a.at, 'fill')) early.push(`fill ${k(a.at)}`); }
+    return land.lay(a);
+  };
+  const said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE, { rails: { lay, takeUp: land.takeUp, placeCart: land.placeCart, cut, restore: land.restore } });
+  const said = land.said.slice(said0);
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home \(1 in it now\); everything of the line taken back up/, said.join('\n'));
+  t.true(said.some(l => /^rails: the ground levelled for it: \d+ cut\(s\) \((grass_block|dirt)(, (grass_block|dirt))?\), \d+ fill\(s\) of cobblestone; every one in the record, put back by the take-up$/.test(l)), said.join('\n'));
+  t.deepEqual(early, [], 'every cut and fill in the record before it was made');
+  t.true(before.size > 0);
+  // (through the rim: its two cells over the rail's cut, the top one first; the drop outside filled under the rail, and
+  // in the take-up the cuts filled back from the bottom up)
+  const dug = land.log.filter(l => /^(cut|restore) /.test(l));
+  const rim = dug.filter(l => /^cut /.test(l)).map(l => l.split(' ')[2]);
+  t.is(rim.length, 2, dug.join(' | '));
+  t.is(Number(rim[0].split(',')[1]), Number(rim[1].split(',')[1]) + 1, 'the top one first');
+  const back = dug.filter(l => /^restore /.test(l)).map(l => l.split(' ')[2]);
+  t.deepEqual(back, [rim[1], rim[0]], 'filled back from the bottom up');
+  const fills = [...before].filter(([, was]) => idOf(was) === 'air').map(([p]) => p);
+  t.true(fills.length >= 1);
+  t.true(fills.every(p => line.cells.some(c => k({ x: c.x, y: c.y - 1, z: c.z }) === p)), 'each fill under a rail');
+  // the take-up: the fills gone, the cuts filled back with the kind they were (a grass block as dirt: no silk touch)
+  for (const [p, was] of before) {
+    const now = land.block(...(p.split(',').map(Number) as [number, number, number]));
+    t.is(idOf(now), idOf(was) === 'grass_block' ? 'dirt' : idOf(was), `${p}: ${was} -> ${now}`);
+  }
+  t.deepEqual(land.underBot, []);
+  t.is(peekLine(world), undefined);
+  t.falsy(world.rails?.line);
+});
+
+test('an extension that cannot be planned (the villagers in a hollow walled four high: no boat or rail climbs out, and the earthworks may cut and fill no more than two a column): the move not made today, not a miss, nothing laid, dug or taken up', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  hillside(land, { wall: true, wallHigh: 4 });
   uphill(land);
   extKit(land);
   const cells0 = line.cells.length, laid0 = line.laid.length;
@@ -1578,7 +1808,9 @@ test('an extension that cannot be planned (the villagers in a hollow walled two 
   t.is(line.extended, undefined);
   t.is(line.cells.length, cells0);
   // (nothing laid or taken up out there: the yard's stretch only, close up's)
-  t.deepEqual(land.log.slice(log0).filter(l => /^(lay|take up) /.test(l) && Number(l.split(',')[2]) < 2119), []);
+  t.deepEqual(land.log.slice(log0).filter(l => /^(lay|take up|cut|restore) /.test(l) && Number(l.split(',')[2]) < 2119), []);
+  t.is(line.earth, undefined);
+  t.regex(r.text, /levelled by a villager: no rails way to the line's end at \(-556, 63, 1995\) \(at most 2 cut or filled a column, 40 in all\)/);
   t.is(land.block(-556, 63, 1994), 'cobblestone', 'the stop as it was');
   t.is(line.laid.filter(b => b.at.z < 2119).length, laid0, 'the line out there as it was');
 });

@@ -117,6 +117,101 @@ const airy = (state: string | null | undefined): boolean => !!state && cellOf(st
 /** The stop's block: a natural block of the ground standing at the line's level (the launch pushes off it). */
 const solidGround = (state: string | null | undefined): boolean => railBase(state) && cellOf(state!).kind === 'solid';
 
+// ------------------------------------------------------------------------------------------------ the earthworks
+
+/**
+ * The earthworks an extension may make (the user's of Nov 21, "do whatever is needed to acquire the villager; consider
+ * levelling the terrain": the west village on a hillside, no straight level run of 7 by any villager): natural ground
+ * cut out of the way, cobblestone filled in under a rail, so that a head can lie level right beside a villager and the
+ * way out climbs no more than a block a block. What a cut may take out: these natural blocks only (no village block,
+ * no path, farmland, crop, log, plank or anything of a build, no ore).
+ */
+const EARTH_CUT = /^(grass_block|dirt|coarse_dirt|stone|andesite|diorite|granite|gravel|sand)$/;
+/** The fluids a cut must not open (beside it, over it or under it). */
+const FLUID = /^(water|lava|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/;
+/** At most this many cuts and fills an extension makes (its head, the boat's hop and its way together). */
+export const EARTH_MAX = 40;
+/** Cut no deeper and fill no higher than this in one column. */
+export const EARTH_DEPTH = 2;
+/** A levelled head's pickup this near a villager (the boat's hop then a block or two over ground it levelled itself). */
+export const EARTH_NEAR = 3;
+/** Cuts the boat's hop from the villager to a levelled head's pickup may make (one-block steps only). */
+export const HOP_CUTS = 12;
+/** What a cut or a fill costs the search (a rail is 1): a way round natural ground is taken before ground is changed. */
+const EARTH_COST = 3;
+
+/** One cut or fill: the cell, and the block that stood there before (a cut's is what the take-up puts back). */
+export interface EarthEdit { x: number; y: number; z: number; op: 'cut' | 'fill'; was: string; hop?: true }
+
+/** A block a cut may take out (natural ground of the user's list). Pure. */
+export const earthCuttable = (state: string | null | undefined): boolean => !!state && EARTH_CUT.test(idOf(state));
+const fluid = (state: string | null | undefined): boolean => !!state && (FLUID.test(idOf(state)) || /waterlogged=true/.test(state));
+
+/** What the earthworks are kept off: `may(x, y, z)` false for a cell never cut or filled (a villager's column, a bed's, a house's...). */
+export interface EarthOpts { may: (x: number, y: number, z: number) => boolean; max?: number }
+
+/**
+ * The cuts and fills (pure) that make (x, y, z) a place for a rail (room, natural ground or a fill under it, air over
+ * it), a redstone torch (room and ground) or the launch's stop (natural ground standing there, else room and ground for
+ * a cobblestone): [] when it is one already, undefined when it cannot be made one within the rules: a cut takes out only
+ * EARTH_CUT blocks, at most EARTH_DEPTH of them from the cell up, never with a block over the top one that would fall or
+ * be left hanging (only air or a plant a placed block replaces over it), never beside a fluid; a fill goes only into air
+ * or such a plant, at most EARTH_DEPTH under the cell, on natural ground; never both in one column; every cell `may`'s.
+ */
+export function earthFor(at: (x: number, y: number, z: number) => string | null | undefined, x: number, y: number, z: number, need: 'rail' | 'torch' | 'stop', may: EarthOpts['may']): EarthEdit[] | undefined {
+  const st = (yy: number) => at(x, yy, z);
+  const here = st(y), below = st(y - 1), over = st(y + 1);
+  if (here === undefined || here === null || below === undefined || below === null) return undefined;
+  if (need === 'stop' && solidGround(here)) return [];
+  const edits: EarthEdit[] = [];
+  const cut = (yy: number, was: string) => edits.push({ x, y: yy, z, op: 'cut', was });
+  if (!railRoom(here)) {
+    if (!earthCuttable(here)) return undefined;
+    cut(y, here);
+  }
+  if (need === 'rail') {
+    if (over === undefined || over === null) return undefined;
+    if (!airy(over)) {
+      if (!earthCuttable(over)) return undefined;
+      cut(y + 1, over);
+    }
+  }
+  if (edits.length) {
+    // (a block over the top cut that a cut may take, a torch's or the stop's: taken too, rather than left hanging)
+    let top = Math.max(...edits.map(e => e.y));
+    const above = st(top + 1);
+    if (earthCuttable(above) && edits.length < EARTH_DEPTH && top + 1 === y + edits.length) { cut(top + 1, above!); top++; }
+    if (edits.length > EARTH_DEPTH) return undefined;
+    // nothing over the top cut to fall or be left hanging; no fluid beside, over or under a cut
+    if (!railRoom(st(top + 1))) return undefined;
+    for (const e of edits) {
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+        const n = at(x + dx, e.y + dy, z + dz);
+        if (n === undefined || n === null || fluid(n)) return undefined;
+      }
+    }
+  }
+  if (!railBase(below)) {
+    // (a fill: never in a column that is cut too, never into anything but air or a plant, on natural ground)
+    if (edits.length || !railRoom(below)) return undefined;
+    edits.push({ x, y: y - 1, z, op: 'fill', was: below });
+    const b2 = st(y - 2);
+    if (!railBase(b2)) {
+      if (!railRoom(b2)) return undefined;
+      edits.push({ x, y: y - 2, z, op: 'fill', was: b2! });
+      if (!railBase(st(y - 3))) return undefined;
+    }
+  }
+  return edits.every(e => may(e.x, e.y, e.z)) ? edits : undefined;
+}
+
+/** The ground as it will be once `edits` are made (pure): a cut is air, a fill is ground (natural ground to the planner's rules: the bot's own cobblestone). */
+export function earthed(at: (x: number, y: number, z: number) => string | null | undefined, edits: readonly EarthEdit[]): (x: number, y: number, z: number) => string | null | undefined {
+  if (!edits.length) return at;
+  const m = new Map(edits.map(e => [`${e.x},${e.y},${e.z}`, e.op === 'cut' ? 'air' : 'stone']));
+  return (x, y, z) => m.get(`${x},${y},${z}`) ?? at(x, y, z);
+}
+
 /** Where the line's parts sit, counted from the stop (0): the launch, the four plain rails, the pickup. */
 export const HEAD = { launch: 1, pickup: 6 } as const;
 /** The first lit powered rail after the pickup (an empty cart that missed its villager stops short of it). */
@@ -183,11 +278,11 @@ export interface RailOpts {
 }
 
 /** What the search, the power and the torches go on: the yard's line and an extension's alike. */
-type CoreOpts = Pick<RailOpts, 'candidates' | 'yard' | 'zones' | 'bounds' | 'maxNodes' | 'avoid'> & { reach?: number };
+type CoreOpts = Pick<RailOpts, 'candidates' | 'yard' | 'zones' | 'bounds' | 'maxNodes' | 'avoid'> & { reach?: number; earth?: EarthOpts };
 /** Where the search ends: the goal cell and the way the line goes on from it; the rails after it (the yard's stretch, this plan's own), or the line it joins (an extension's: `tail`). */
 interface CoreEnd { goal: Pos; goalDir: Dir; after: Pos[]; tail?: readonly RailCell[] }
-type Start = { villager: number; from: Pos; pickup: Pos; d: Dir; hop: number; stop: { at: Pos; placed: boolean } };
-type CoreResult = { ok: true; start: Start; line: Pos[]; cells: RailCell[]; torches: RailTorch[] } | { ok: false; why: string; at?: Pos };
+type Start = { villager: number; from: Pos; pickup: Pos; d: Dir; hop: number; stop: { at: Pos; placed: boolean }; earth: EarthEdit[] };
+type CoreResult = { ok: true; start: Start; line: Pos[]; cells: RailCell[]; torches: RailTorch[]; earth: EarthEdit[] } | { ok: false; why: string; at?: Pos };
 
 /**
  * The rails' plan (pure): the yard's last stretch (the panel's column, from the fence's post to the brake two short of
@@ -271,6 +366,8 @@ export interface RailExtension {
   cells: RailCell[];
   /** the new torches, the new trigger among them */
   torches: RailTorch[];
+  /** the cuts and fills it makes (none unless `earth` was asked): each made before the block of the line over it goes down */
+  earth: EarthEdit[];
   length: number; climb: number; drop: number; powered: number;
   route: string;
 }
@@ -278,7 +375,9 @@ export interface RailExtension {
 /**
  * An extension of a line into the village (pure; the user's of Nov 21, the villagers uphill of a pickup no boat climbs
  * to): a new head beside a candidate, and the way from it to the line's far end, by planRails's rules (natural ground
- * only, nothing dug, a climb a powered rail, FROM_ZONES off the zones, never into the yard, `avoid` kept clear), joined
+ * only, nothing dug, a climb a powered rail, FROM_ZONES off the zones, never into the yard, `avoid` kept clear; with
+ * `earth`, the ground levelled where it does not serve as it is: the head within EARTH_NEAR of a villager at its level,
+ * the boat's hop, the way and its torches, by earthFor's rules, EARTH_MAX cuts and fills at most, all in `earth`), joined
  * to the old launch's cell, which goes on into the line: straight through the old stop's cell (the cobblestone stop
  * taken up first) or by a curve beside it. The old launch's cell is in the extension (a plain rail now, or a boost:
  * powered rails make no curve), the old trigger is no torch of it any more; the boosts are on BOOST_EVERY into the
@@ -293,14 +392,14 @@ export function planExtension(g: RailGround, opts: ExtendOpts): RailExtension | 
   const clear = new Set([key(join.x, join.y, join.z), ...(opts.line.stop.placed ? [key(opts.line.stop.at.x, opts.line.stop.at.y, opts.line.stop.at.z)] : [])]);
   const at = (x: number, y: number, z: number): string | null | undefined => (clear.has(key(x, y, z)) ? 'air' : g.state(x, y, z));
   const goalDir = dirOf(Math.sign(next.x - join.x), Math.sign(next.z - join.z));
-  const core = lineCore(at, { ...opts, reach: EXT_REACH }, { goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1) });
+  const core = lineCore(at, { ...opts, reach: opts.earth ? EARTH_NEAR : EXT_REACH }, { goal: { x: join.x, y: join.y, z: join.z }, goalDir, after: [], tail: old.slice(1) });
   if (!core.ok) return core;
-  const { start, line, cells, torches } = core;
+  const { start, line, cells, torches, earth } = core;
   let climb = 0, drop = 0;
   for (let i = 1; i < line.length; i++) { const d = line[i].y - line[i - 1].y; if (d > 0) climb += d; else drop -= d; }
   return {
     ok: true, villager: start.villager, from: start.from, pickup: start.pickup, hop: Math.round(start.hop * 10) / 10, stop: start.stop,
-    cells, torches, length: line.length, climb, drop, powered: cells.filter(c => c.kind !== 'rail').length, route: routeText(start.stop.at, line)
+    cells, torches, earth, length: line.length, climb, drop, powered: cells.filter(c => c.kind !== 'rail').length, route: routeText(start.stop.at, line)
   };
 }
 
@@ -377,14 +476,85 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
         // the launch's torch beside it, at its level (the trigger)
         const l = back(HEAD.pickup - HEAD.launch);
         if (!sides(l, d).some(t => torchSpot(t.x, t.y, t.z))) continue;
-        starts.push({ villager: e.id, from: { x: e.position.x, y: e.position.y, z: e.position.z }, pickup: { x: px, y: py, z: pz }, d, hop, stop });
+        starts.push({ villager: e.id, from: { x: e.position.x, y: e.position.y, z: e.position.z }, pickup: { x: px, y: py, z: pz }, d, hop, stop, earth: [] });
       }
     }
   }
-  if (!starts.length) return { ok: false, why: `no pickup by a villager to take: no straight, level run of 7 rails on open ground (and a stop and a torch) within ${reach} of one` };
+  // (the earthworks: the head levelled right beside a villager, EARTH_NEAR, at the level it stands at; every cut and fill
+  // costed, EARTH_MAX of them at most)
+  const earth = opts.earth;
+  const earthMax = earth?.max ?? EARTH_MAX;
+  const earthCache = new Map<string, EarthEdit[] | null>();
+  const earthAt = (x: number, y: number, z: number, need: 'rail' | 'torch' | 'stop'): EarthEdit[] | undefined => {
+    if (!earth) return undefined;
+    const k = `${need}:${x},${y},${z}`;
+    let v = earthCache.get(k);
+    if (v === undefined) { v = earthFor(at, x, y, z, need, earth.may) ?? null; earthCache.set(k, v); }
+    return v ?? undefined;
+  };
+  if (earth) {
+    starts.length = 0;
+    for (const e of opts.candidates.slice(0, 4)) {
+      if (!e.position) continue;
+      const vx = Math.floor(e.position.x), vz = Math.floor(e.position.z), py = Math.round(e.position.y);
+      if (Math.abs(e.position.y - py) > 0.25) continue;
+      for (let px = vx - reach; px <= vx + reach; px++) for (let pz = vz - reach; pz <= vz + reach; pz++) {
+        const hop = Math.hypot(px + 0.5 - e.position.x, pz + 0.5 - e.position.z);
+        if (hop > reach || inYard(px, pz) || !inBounds(px, pz)) continue;
+        for (const d of [0, 1, 2, 3] as Dir[]) {
+          const { dx, dz } = DIRS[d];
+          const back = (n: number) => ({ x: px - dx * n, y: py, z: pz - dz * n });
+          const edits: EarthEdit[] = [];
+          let fine = true;
+          for (let n = 0; n <= HEAD.pickup && fine; n++) {
+            const c = back(n);
+            fine = !inYard(c.x, c.z) && inBounds(c.x, c.z) && offZones(c.x, c.y, c.z) && !(tail.length && (isGoal(c.x, c.y, c.z) || byTail(c.x, c.y, c.z)));
+            const w = fine ? earthAt(c.x, c.y, c.z, n === HEAD.pickup ? 'stop' : 'rail') : undefined;
+            if (!w) fine = false; else edits.push(...w);
+          }
+          if (!fine) continue;
+          const s = back(HEAD.pickup);
+          const stopPlaced = !solidGround(at(s.x, s.y, s.z)) || edits.some(w => w.x === s.x && w.z === s.z);
+          if (stopPlaced && offSegment({ x: e.position.x, z: e.position.z }, { x: px + 0.5, z: pz + 0.5 }, { x: s.x + 0.5, z: s.z + 0.5 }) < 1.5) continue;
+          // the launch's torch beside it: the side that needs the fewest cuts and fills
+          const l = back(HEAD.pickup - HEAD.launch);
+          const torch = sides(l, d).filter(q => offZones(q.x, q.y, q.z) && !inYard(q.x, q.z)).map(q => earthAt(q.x, q.y, q.z, 'torch')).filter((w): w is EarthEdit[] => !!w).sort((a, b) => a.length - b.length)[0];
+          if (!torch) continue;
+          edits.push(...torch);
+          if (edits.length > earthMax) continue;
+          // the boat's hop on the ground as levelled, from where the villager stands to the pickup's middle: a one-block
+          // step in its way (the box and the slack either side) cut too, HOP_CUTS at most
+          let level = e.position.y;
+          if (hop > 0.5) {
+            let leg: ReturnType<typeof checkLeg> | undefined;
+            for (let tries = 0; tries <= HOP_CUTS; tries++) {
+              const g2 = earthed(at, edits);
+              leg = checkLeg({ cell: (x, y, z) => cellOf(g2(x, y, z)) }, { x: e.position.x, z: e.position.z, level: e.position.y }, { x: px + 0.5, z: pz + 0.5 });
+              if (leg.ok || tries === HOP_CUTS || !/^a step up/.test(leg.why) || leg.at.y !== py) break;
+              const c = leg.at;
+              const st = g2(c.x, c.y, c.z);
+              // (no cut under the villager, in the head's own cells, or with more than air over it)
+              const cutOk = earthCuttable(st) && earth.may(c.x, c.y, c.z) && offZones(c.x, c.y, c.z) && !inYard(c.x, c.z) && railRoom(g2(c.x, c.y + 1, c.z))
+                && airy(g2(c.x, c.y + 2, c.z)) && [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]].every(([ox, oy, oz]) => { const n = at(c.x + ox, c.y + oy, c.z + oz); return n !== undefined && n !== null && !fluid(n); });
+              if (!cutOk || edits.length >= earthMax) break;
+              edits.push({ x: c.x, y: c.y, z: c.z, op: 'cut', was: st!, hop: true });
+            }
+            if (!leg?.ok) continue;
+            level = leg.level;
+          }
+          if (Math.abs(level - py) > 0.25 || edits.length > earthMax) continue;
+          starts.push({ villager: e.id, from: { x: e.position.x, y: e.position.y, z: e.position.z }, pickup: { x: px, y: py, z: pz }, d, hop, stop: { at: s, placed: stopPlaced }, earth: edits });
+        }
+      }
+    }
+  }
+  if (!starts.length) {
+    return { ok: false, why: earth ? `no pickup by a villager to take: no head of 7 rails (and a stop and a torch) to be levelled within ${reach} of one, at most ${EARTH_DEPTH} cut or filled a column and ${earthMax} in all`
+      : `no pickup by a villager to take: no straight, level run of 7 rails on open ground (and a stop and a torch) within ${reach} of one` };
+  }
 
   // the search: states (cell, way in, step in, the turn the rail before made, rails since the pickup up to FIRST_BOOST)
-  type Node = { x: number; y: number; z: number; d: Dir; dy: number; rot: number; k: number; g: number; prev?: Node; start: Start };
+  type Node = { x: number; y: number; z: number; d: Dir; dy: number; rot: number; k: number; g: number; prev?: Node; start: Start; earth?: EarthEdit[]; e: number };
   const sk = (n: Pick<Node, 'x' | 'y' | 'z' | 'd' | 'dy' | 'rot' | 'k'>) => `${n.x},${n.y},${n.z},${n.d},${n.dy},${n.rot},${n.k}`;
   const h = (x: number, z: number) => Math.abs(x - goal.x) + Math.abs(z - goal.z);
   const heap: { f: number; n: Node }[] = [];
@@ -412,7 +582,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   };
   const best = new Map<string, number>();
   for (const s of starts) {
-    const n: Node = { ...s.pickup, d: s.d, dy: 0, rot: 0, k: 0, g: s.hop * COST.hop, start: s };
+    const n: Node = { ...s.pickup, d: s.d, dy: 0, rot: 0, k: 0, g: s.hop * COST.hop + s.earth.length * EARTH_COST, start: s, e: s.earth.length };
     const kk = sk(n);
     if ((best.get(kk) ?? Infinity) <= n.g) continue;
     best.set(kk, n.g);
@@ -463,11 +633,17 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
         // no lit rail within 7 of the pickup: a climb there is one
         if (dy === 1 && n.k < FIRST_BOOST) continue;
         const y = n.y + dy;
-        if (!railAt(x, y, z) || !offZones(x, y, z) || byHead(n.start, x, y, z) || byTail(x, y, z)) continue;
+        if (!offZones(x, y, z) || byHead(n.start, x, y, z) || byTail(x, y, z)) continue;
+        // (the ground as it is, else levelled for it: the cuts and fills costed, EARTH_MAX in all)
+        const w = railAt(x, y, z) ? undefined : earthAt(x, y, z, 'rail');
+        if (!railAt(x, y, z) && (!w || n.e + w.length > earthMax)) continue;
         // a slope rail has two blocks of air over it: the one going up (here), or the one coming down (there)
         if (dy === 1 && !airy(at(n.x, n.y + 2, n.z))) continue;
         if (dy === -1 && !airy(at(x, y + 2, z))) continue;
-        const m: Node = { x, y, z, d: d2, dy, rot, k: Math.min(FIRST_BOOST, n.k + 1), g: n.g + 1 + (turn ? COST.turn : 0) + (dy > 0 ? COST.up : dy < 0 ? COST.down : 0), prev: n, start: n.start };
+        const m: Node = {
+          x, y, z, d: d2, dy, rot, k: Math.min(FIRST_BOOST, n.k + 1), g: n.g + 1 + (turn ? COST.turn : 0) + (dy > 0 ? COST.up : dy < 0 ? COST.down : 0) + (w ? w.length * EARTH_COST : 0),
+          prev: n, start: n.start, e: n.e + (w?.length ?? 0), ...(w?.length ? { earth: w } : {})
+        };
         const mk = sk(m);
         if (closed.has(mk) || (best.get(mk) ?? Infinity) <= m.g) continue;
         best.set(mk, m.g);
@@ -477,11 +653,14 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   }
   if (!end) {
     const near = nearest ? `; it got no nearer than ${h(nearest.x, nearest.z)} (at ${fmt(nearest)})` : '';
-    return { ok: false, why: `no rails way to ${tail.length ? 'the line\'s end' : 'the yard\'s fence'} at ${fmt(goal)}${looked >= maxNodes ? ` within ${maxNodes} steps` : ''}${near}`, ...(nearest ? { at: { x: nearest.x, y: nearest.y, z: nearest.z } } : {}) };
+    const lim = earth ? ` (at most ${EARTH_DEPTH} cut or filled a column, ${earthMax} in all)` : '';
+    return { ok: false, why: `no rails way to ${tail.length ? 'the line\'s end' : 'the yard\'s fence'} at ${fmt(goal)}${looked >= maxNodes ? ` within ${maxNodes} steps` : ''}${lim}${near}`, ...(nearest ? { at: { x: nearest.x, y: nearest.y, z: nearest.z } } : {}) };
   }
   const path: Pos[] = [];
-  for (let n: Node | undefined = end; n; n = n.prev) path.unshift({ x: n.x, y: n.y, z: n.z });
+  const edits: EarthEdit[] = [];
+  for (let n: Node | undefined = end; n; n = n.prev) { path.unshift({ x: n.x, y: n.y, z: n.z }); if (n.earth) edits.unshift(...n.earth); }
   const start = end.start;
+  edits.unshift(...start.earth);
   const head: Pos[] = [];
   for (let n = HEAD.pickup - HEAD.launch; n >= 1; n--) head.push({ x: start.pickup.x - DIRS[start.d].dx * n, y: start.pickup.y, z: start.pickup.z - DIRS[start.d].dz * n });
   // the whole line: the launch and the four plain, the pickup and the way, the yard's stretch (an extension: the way to
@@ -490,6 +669,22 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   const whole: Pos[] = [...line, ...tail.map(c => ({ x: c.x, y: c.y, z: c.z }))];
   const touch = touching([start.stop.at, ...whole]);
   if (touch) return { ok: false, why: `the line would run beside itself at ${fmt(touch[0])} and ${fmt(touch[1])} (rails side by side join up)`, at: touch[0] };
+  // (the cuts and fills: one of a cell each, none of them a cell of the line but a rail's own cut, the torches placed on
+  // the ground as levelled)
+  const editAt = new Set<string>();
+  const cellsAt = new Set(whole.map(p => key(p.x, p.y, p.z)));
+  for (const w of edits) {
+    const kk = key(w.x, w.y, w.z);
+    if (editAt.has(kk) || (cellsAt.has(kk) && w.op !== 'cut')) return { ok: false, why: `the earthworks would meet themselves at ${fmt(w)}`, at: { x: w.x, y: w.y, z: w.z } };
+    editAt.add(kk);
+  }
+  if (edits.length > earthMax) return { ok: false, why: `the way needs ${edits.length} cuts and fills (${earthMax} at most)` };
+  // (the ground as levelled so far: the torches' own cuts and fills join it as they are placed)
+  const editMap = new Map<string, string>();
+  const addEdits = (ws: readonly EarthEdit[]) => { for (const w of ws) { edits.push(w); editMap.set(key(w.x, w.y, w.z), w.op === 'cut' ? 'air' : 'stone'); } };
+  for (const w of edits) editMap.set(key(w.x, w.y, w.z), w.op === 'cut' ? 'air' : 'stone');
+  const lv = (x: number, y: number, z: number) => editMap.get(key(x, y, z)) ?? at(x, y, z);
+  const torchSpotE = (x: number, y: number, z: number) => railRoom(lv(x, y, z)) && railBase(lv(x, y - 1, z)) && offZones(x, y, z) && !inYard(x, z);
 
   // the power
   const pickupAt = HEAD.pickup - HEAD.launch;
@@ -508,8 +703,8 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   const lineSet = new Set(whole.map(p => key(p.x, p.y, p.z)));
   const brakeSet = new Set([...line.slice(brakeAt), ...tail.filter(c => c.kind === 'brake')].map(p => key(p.x, p.y, p.z)));
   const launchKey = key(line[0].x, line[0].y, line[0].z);
-  const torchOk = (t: Pos, trigger: boolean) => {
-    if (!torchSpot(t.x, t.y, t.z) || lineSet.has(key(t.x, t.y, t.z)) || lineSet.has(key(t.x, t.y - 1, t.z)) || lineSet.has(key(t.x, t.y - 2, t.z))) return false;
+  const torchOk = (t: Pos, trigger: boolean, spot = true) => {
+    if ((spot && !torchSpotE(t.x, t.y, t.z)) || lineSet.has(key(t.x, t.y, t.z)) || lineSet.has(key(t.x, t.y - 1, t.z)) || lineSet.has(key(t.x, t.y - 2, t.z))) return false;
     if (t.x === start.stop.at.x && t.y === start.stop.at.y && t.z === start.stop.at.z) return false;
     // what it lights: the cells beside it, and the one over it
     for (const [ox, oy, oz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
@@ -521,12 +716,26 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
   const wayOf = (i: number): Dir => (i === 0 ? start.d : dirOf(Math.sign(whole[i].x - whole[i - 1].x), Math.sign(whole[i].z - whole[i - 1].z)));
   const torches: RailTorch[] = [];
   const taken = new Set<string>();
+  // (with the earthworks, a torch's place levelled when none stands as the ground is: within EARTH_MAX, never in the
+  // line's cells, under one or in a cell levelled already)
+  const torchEarth = (t: Pos, trigger: boolean): EarthEdit[] | undefined => {
+    if (!earth || !offZones(t.x, t.y, t.z) || inYard(t.x, t.z) || !torchOk(t, trigger, false)) return undefined;
+    const w = earthFor(lv, t.x, t.y, t.z, 'torch', earth.may);
+    if (!w?.length || edits.length + w.length > earthMax) return undefined;
+    return w.every(e => !lineSet.has(key(e.x, e.y, e.z)) && !lineSet.has(key(e.x, e.y + 1, e.z)) && !editMap.has(key(e.x, e.y, e.z))) ? w : undefined;
+  };
+  const torchCan = (t: Pos, trigger: boolean) => torchOk(t, trigger) || !!torchEarth(t, trigger);
   const placeTorch = (i: number, trigger: boolean): boolean => {
-    for (const t of sides(line[i], wayOf(i))) {
-      if (taken.has(key(t.x, t.y, t.z)) || !torchOk(t, trigger)) continue;
-      taken.add(key(t.x, t.y, t.z));
-      torches.push({ at: t, lights: { ...line[i] }, ...(trigger ? { trigger: true as const } : {}) });
-      return true;
+    for (const levelled of [false, true]) {
+      for (const t of sides(line[i], wayOf(i))) {
+        if (taken.has(key(t.x, t.y, t.z))) continue;
+        const w = levelled ? torchEarth(t, trigger) : undefined;
+        if (levelled ? !w : !torchOk(t, trigger)) continue;
+        if (w) addEdits(w);
+        taken.add(key(t.x, t.y, t.z));
+        torches.push({ at: t, lights: { ...line[i] }, ...(trigger ? { trigger: true as const } : {}) });
+        return true;
+      }
     }
     return false;
   };
@@ -538,7 +747,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
     if (kinds[i] === 'powered') { lastLit = i; continue; }
     const since = i - lastLit;
     if (since < BOOST_EVERY) continue;
-    if (straightLevel(i) && sides(line[i], wayOf(i)).some(t => torchOk(t, false))) { kinds[i] = 'powered'; roles[i] = 'boost'; lastLit = i; continue; }
+    if (straightLevel(i) && sides(line[i], wayOf(i)).some(t => torchCan(t, false))) { kinds[i] = 'powered'; roles[i] = 'boost'; lastLit = i; continue; }
     if (since >= BOOST_GAP) return { ok: false, why: `no straight, level rail with room for a torch beside it within ${BOOST_GAP} of the last lit one, at ${fmt(line[i])}`, at: line[i] };
   }
   if (tail.length) {
@@ -547,7 +756,7 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
     const first = tail.findIndex(c => c.kind === 'powered');
     const next = line.length + (first < 0 ? tail.length : first);
     if (next - lastLit > BOOST_EVERY) {
-      const room = (i: number) => kinds[i] !== 'powered' && straightLevel(i) && sides(line[i], wayOf(i)).some(t => torchOk(t, false));
+      const room = (i: number) => kinds[i] !== 'powered' && straightLevel(i) && sides(line[i], wayOf(i)).some(t => torchCan(t, false));
       const from = Math.max(lastLit + 1, pickupAt + FIRST_BOOST);
       let put = -1;
       for (let i = Math.max(from, next - BOOST_EVERY); i < litEnd && put < 0; i++) if (room(i)) put = i;
@@ -570,7 +779,10 @@ function lineCore(at: (x: number, y: number, z: number) => string | null | undef
     i = j + 1;
   }
   const cells: RailCell[] = line.map((p, i) => ({ ...p, kind: kinds[i], shape: shapeOf(i === 0 ? start.stop.at : whole[i - 1], p, whole[i + 1]), ...(roles[i] ? { role: roles[i] } : {}) }));
-  return { ok: true, start, line, cells, torches };
+  // (the launch's torch side levelled for it but not taken, the other one fit as it stands: left as it is)
+  const used = new Set([...line, start.stop.at, ...torches.map(t => t.at)].map(p => `${p.x},${p.z}`));
+  const spare = new Set(sides(line[0], start.d).map(p => `${p.x},${p.z}`).filter(c => !used.has(c)));
+  return { ok: true, start, line, cells, torches, earth: edits.filter(w => w.hop || !spare.has(`${w.x},${w.z}`)) };
 }
 
 

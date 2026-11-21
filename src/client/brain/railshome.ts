@@ -2,7 +2,7 @@ import type { GoalContext, Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { Zone } from './courtesy.js';
 import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
-import { FIRST_BOOST, HEAD, HOP, planExtension, railBase, railRoom, shapeOf, type RailCell, type RailExtension, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
+import { EARTH_MAX, FIRST_BOOST, HEAD, HOP, earthed, planExtension, railBase, railRoom, shapeOf, type EarthEdit, type RailCell, type RailExtension, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
 import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, footprint, planRoute, zoneNear, type BoatAt, type Entry } from './boatroute.js';
 import { HALL_FRESH, HALL_WANTS, JUDGE_V, joinAreas, judgeOnWhole, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type Verdict, type VillageLook, type VillageSite } from './village.js';
 import { prepare } from './project.js';
@@ -47,6 +47,9 @@ import {
  *
  * Every block put down is written into `world.rails.line.laid` before it goes down (as villages.open is before a dig),
  * so a run cut short, a restart, or a give-up always takes all of it back up: the take-up walks the record, not the plan.
+ * An extension's earthworks (the user's of Nov 21: the ground levelled by the villager) are written into
+ * `world.rails.line.earth` with it, each cut with the block it takes out, before any is made; the take-up takes the
+ * fills up and puts the cut blocks back.
  */
 
 const MINUTE = 60_000;
@@ -162,6 +165,14 @@ export interface RailLine {
    * last extension's join (the old launch's cell), its new pickup, its rails (the first `rails` of `cells`), and how many
    */
   extended?: { at: number; from: Pos; to: Pos; rails: number; powered: number; times: number };
+  /**
+   * the extensions' earthworks (railroute.ts earthFor: the head levelled by the villager, a step of the boat's hop, a
+   * climb of more than a block a block): every cut with the block it took out, every fill (cobblestone) with what stood
+   * there, written in with the extension before any of it is made; `done` once made. The take-up removes the fills and
+   * puts the cut blocks back (bottom up, the same kind from the pockets or the chests: a grass block comes back as dirt),
+   * walking the record as it does the rails'
+   */
+  earth?: (EarthEdit & { done?: true })[];
 }
 
 /** Kept per world (world.rails): the job under way, and the last one's end. */
@@ -181,7 +192,7 @@ function sound(l: unknown): l is RailLine {
   return fin(x.at) && Array.isArray(x.cells) && x.cells.length > 2 && x.cells.every(isPos) && Array.isArray(x.torches) && x.torches.every(t => isObj(t) && isPos(t.at) && isPos(t.lights))
     && Array.isArray(x.laid) && x.laid.every(b => isObj(b) && isPos(b.at)) && fin(x.yard) && x.yard >= 1 && x.yard < x.cells.length
     && typeof x.stage === 'string' && STAGES.includes(x.stage) && isObj(x.entry) && isObj(x.stop) && isPos(x.stop.at) && isPos(x.site) && isPos(x.pickup)
-    && Array.isArray(x.opens) && fin(x.runs);
+    && Array.isArray(x.opens) && fin(x.runs) && (x.earth === undefined || (Array.isArray(x.earth) && x.earth.every(w => isPos(w) && (w.op === 'cut' || w.op === 'fill') && typeof w.was === 'string')));
 }
 
 /** The line under way, read only (the gates): undefined for none, or one brain.json holds damaged. */
@@ -319,7 +330,7 @@ function frontier(line: RailLine): Pos {
 }
 /** The farthest block of it down from home (the take-up walks out to it). */
 function farthest(line: RailLine, home: { x: number; z: number }): number {
-  return line.laid.reduce((m, b) => Math.max(m, horiz(b.at, home)), 0);
+  return [...line.laid.map(b => b.at), ...(line.earth ?? [])].reduce((m, b) => Math.max(m, horiz(b, home)), 0);
 }
 
 /**
@@ -562,7 +573,8 @@ export function railsHomeLine(world: WorldMemory, now: number): string {
     : `taking up (${line.why ?? 'given up'}): ${line.laid.length} block(s) still down${line.left?.length ? `, ${line.left.length} that would not come up` : ''}`;
   const wait = !why && !movesOn(world) && line.stage !== 'taking up' ? ' (villager moves off: it waits)' : '';
   const ext = line.extended && line.stage !== 'taking up' ? `; extended into the village by ${line.extended.rails} rails to the pickup ${fmt(line.extended.to)}` : '';
-  return `${sw}; the line to the village at ${fmt(line.site)}, planned ${age < 120 ? `${age} min` : `${Math.round(age / 60)} h`} ago: ${state}${wait}${ext}${lastText}.`;
+  const dug = line.earth?.length ? `; ${line.earth.filter(w => w.op === 'cut').length} cut(s) and ${line.earth.filter(w => w.op === 'fill').length} fill(s) of ground in the record (${line.earth.filter(w => w.done).length} made)` : '';
+  return `${sw}; the line to the village at ${fmt(line.site)}, planned ${age < 120 ? `${age} min` : `${Math.round(age / 60)} h`} ago: ${state}${wait}${ext}${dug}${lastText}.`;
 }
 
 // ------------------------------------------------------------------------------------------------ the bill
@@ -576,6 +588,7 @@ export function billLeft(line: RailLine): Record<string, number> {
   line.cells.forEach(c => { if (!keys.has(key(c))) add(itemOf(c)); });
   for (const t of line.torches) if (!keys.has(key(t.at))) add('redstone_torch');
   if (line.stop.placed && !keys.has(key(line.stop.at))) add('cobblestone');
+  add('cobblestone', pendingFills(line));
   if (!line.cart) add('minecart');
   for (const item of Object.keys(bill)) if (!bill[item]) delete bill[item];
   return bill;
@@ -667,10 +680,176 @@ function notAsRead(line: RailLine, s: Step, at: (x: number, y: number, z: number
   const here = at(p.x, p.y, p.z), below = at(p.x, p.y - 1, p.z);
   if (here === undefined || below === undefined || here === null || below === null) return 'unread';
   if (!railRoom(here)) return `${stepWord(line, s)}: ${idOf(here)} there now`;
-  if (!railBase(below)) return `${stepWord(line, s)}: ${idOf(below)} under it now`;
+  // (the bot's own fill under it, made for it: ground to the plan)
+  if (!railBase(below) && !(idOf(below) === 'cobblestone' && isFill(line, { x: p.x, y: p.y - 1, z: p.z }))) return `${stepWord(line, s)}: ${idOf(below)} under it now`;
   const over = s.kind === 'cell' ? overRail(line, s.i, at) : undefined;
   if (over) return `${stepWord(line, s)}: ${over} now`;
   return undefined;
+}
+
+// ------------------------------------------------------------------------------------------------ the earthworks
+
+type EarthRec = NonNullable<RailLine['earth']>[number];
+/** The earthworks of a column (x, z). */
+const earthIn = (line: RailLine, x: number, z: number): EarthRec[] => (line.earth ?? []).filter(w => w.x === x && w.z === z);
+/** The cell is one of the record's fills (the bot's cobblestone, made for a rail over it). */
+const isFill = (line: RailLine, p: Pos) => (line.earth ?? []).some(w => w.op === 'fill' && same(w, p));
+/** The fills not made yet (their cobblestone to carry). */
+const pendingFills = (line: RailLine) => (line.earth ?? []).filter(w => w.op === 'fill' && !w.done).length;
+const pendingEarth = (line: RailLine) => (line.earth ?? []).some(w => !w.done);
+const dropEarth = (line: RailLine, w: EarthRec) => { line.earth = (line.earth ?? []).filter(q => q !== w); if (!line.earth.length) delete line.earth; };
+
+/**
+ * What a cut cell is put back with (pure): the block it was where the pockets hold it (what a cut drops without silk
+ * touch: a grass block's dirt, stone's cobblestone), else the nearest kind carried; dirt or cobblestone at the last.
+ */
+const REFILL: Record<string, string[]> = {
+  grass_block: ['dirt'], dirt: ['dirt'], coarse_dirt: ['coarse_dirt', 'dirt'], stone: ['stone', 'cobblestone'], andesite: ['andesite', 'cobblestone'],
+  diorite: ['diorite', 'cobblestone'], granite: ['granite', 'cobblestone'], gravel: ['gravel', 'sand', 'dirt'], sand: ['sand', 'gravel', 'dirt']
+};
+export function refillOf(was: string, have: (item: string) => number): string | undefined {
+  const id = idOf(was);
+  return [...(REFILL[id] ?? [id]), 'dirt', 'cobblestone'].find(i => have(i) > 0);
+}
+
+/** A villager (or any mob) standing in the column now (world.entities): no cut or fill under it. */
+async function mobInColumn(ctx: GoalContext, x: number, z: number): Promise<Seen | undefined> {
+  const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 16 }).catch(() => undefined))?.entities ?? [];
+  return round.find(e => e.name !== 'player' && e.position && Math.abs(e.position.x - (x + 0.5)) < 0.9 && Math.abs(e.position.z - (z + 0.5)) < 0.9);
+}
+
+/**
+ * The cuts and fills of a column made, before the block of the line over it goes down (each in the record since the
+ * extension was written: applyExtension), in their order: the fills from the bottom up (cobblestone, through the rails
+ * tools: the bot's own once down), the cuts from the top down (the rails tools' cut: only the block the record names,
+ * never from over it). Read first: a cell no longer as planned stops it. `wait`: a mob stands in the column (the next
+ * run goes on there). Why not, or undefined.
+ */
+async function earthDown(ctx: GoalContext, line: RailLine, x: number, z: number): Promise<{ why: string; wait?: true } | undefined> {
+  const todo = earthIn(line, x, z).filter(w => !w.done)
+    .sort((a, b) => (a.op === b.op ? (a.op === 'fill' ? a.y - b.y : b.y - a.y) : a.op === 'fill' ? -1 : 1));
+  if (!todo.length) return undefined;
+  if (!ctx.rails?.cut) return { why: 'no earthworks in this runtime' };
+  await walkTo(ctx, { x, y: todo[0].y, z }, 2);
+  for (let k = 0; ; k++) {
+    const mob = await mobInColumn(ctx, x, z);
+    if (!mob) break;
+    if (k >= 2) return { why: `a ${mob.name ?? 'mob'} (${mob.id}) standing at ${fmt(mob.position!)}: nothing cut or filled under it`, wait: true };
+    await pause(2000);
+  }
+  const at = await readAround(ctx, todo);
+  for (const w of todo) {
+    const st = at(w.x, w.y, w.z);
+    if (st === undefined || st === null) return { why: `the ground at ${fmt(w)} not read` };
+    if (w.op === 'cut' && idOf(st) !== idOf(w.was) && !railRoom(st)) return { why: `${idOf(st)} at ${fmt(w)} where the cut is of ${idOf(w.was)} (not as read when planned)` };
+    if (w.op === 'fill' && !railRoom(st)) return { why: `${idOf(st)} at ${fmt(w)} where the fill goes (not as read when planned)` };
+  }
+  for (const w of todo) {
+    aborted(ctx);
+    const p = { x: w.x, y: w.y, z: w.z };
+    const st = at(w.x, w.y, w.z)!;
+    // (a cut already open, someone's or a run cut short's: made, the take-up puts it back)
+    if (w.op === 'cut' && railRoom(st)) { w.done = true; ctx.save?.(); continue; }
+    if (w.op === 'fill') {
+      const r = await ctx.rails.lay({ at: p, item: 'cobblestone' }).catch((e: Error): RailPlaced => ({ ok: false, placed: false, reason: e.message }));
+      aborted(ctx);
+      if (!r.placed) return { why: `the fill at ${fmt(p)} not made: ${r.reason ?? 'no answer'}` };
+    } else {
+      const r = await ctx.rails.cut(p, w.was).catch((e: Error): RailTaken => ({ ok: false, dug: false, reason: e.message }));
+      aborted(ctx);
+      if (!r.ok) return { why: `the cut of the ${idOf(w.was)} at ${fmt(p)} not made: ${r.reason ?? 'no answer'}` };
+    }
+    w.done = true;
+    ctx.save?.();
+  }
+  return undefined;
+}
+
+/**
+ * The earthworks of a column undone once nothing of the line stands in it any more (the take-up's): the fills taken
+ * up from the top down (only the bot's own cobblestone), then the cut cells filled back from the bottom up with the
+ * block each was (refillOf: a grass block comes back as dirt, stone as stone if any is carried, else as cobblestone).
+ * A cell found as it was is done; one with someone's block in it now is left as found, said. How many blocks it moved.
+ */
+async function earthUp(ctx: GoalContext, line: RailLine, x: number, z: number, said: string[]): Promise<number> {
+  const ws = earthIn(line, x, z);
+  if (!ws.length || line.laid.some(b => b.at.x === x && b.at.z === z) || !ctx.rails) return 0;
+  await walkTo(ctx, { x, y: ws[0].y, z }, 2);
+  let n = 0;
+  for (const w of ws.filter(q => q.op === 'fill').sort((a, b) => b.y - a.y)) {
+    aborted(ctx);
+    const p = { x: w.x, y: w.y, z: w.z };
+    const r = await ctx.rails.takeUp(p, 'cobblestone').catch((e: Error): RailTaken => ({ ok: false, dug: false, reason: e.message }));
+    aborted(ctx);
+    if (r.ok) { dropEarth(line, w); if (r.dug) n++; ctx.save?.(); continue; }
+    if (notOurs(r.reason)) {
+      (line.left ??= []).push(`the fill ${fmt(p)}: ${r.reason ?? 'no answer'}`.slice(0, 120));
+      dropEarth(line, w);
+      ctx.save?.();
+      continue;
+    }
+    said.push(earthUnreached(line, w, r.reason ?? 'no answer'));
+    return n;
+  }
+  const cuts = ws.filter(q => q.op === 'cut').sort((a, b) => a.y - b.y);
+  if (!cuts.length) return n;
+  if (!ctx.rails.restore) { said.push(`the cuts at ${fmt(cuts[0])}: no way to fill them back in this runtime`); return n; }
+  const counts = await countsNow(ctx);
+  const at = await readAround(ctx, cuts);
+  for (const w of cuts) {
+    aborted(ctx);
+    const p = { x: w.x, y: w.y, z: w.z };
+    const st = at(w.x, w.y, w.z);
+    if (st === undefined || st === null) { said.push(earthUnreached(line, w, 'not read')); return n; }
+    // (never cut, or put back already)
+    if (idOf(st) === idOf(w.was)) { dropEarth(line, w); ctx.save?.(); continue; }
+    if (!railRoom(st)) {
+      (line.left ??= []).push(`the cut ${fmt(p)} of ${idOf(w.was)}: ${idOf(st)} there now (left as found)`.slice(0, 120));
+      dropEarth(line, w);
+      ctx.save?.();
+      continue;
+    }
+    const item = refillOf(w.was, i => counts.get(i) ?? 0);
+    if (!item) { said.push(earthUnreached(line, w, `nothing carried to fill it with (${REFILL[idOf(w.was)]?.[0] ?? idOf(w.was)})`)); return n; }
+    const r = await ctx.rails.restore(p, item).catch((e: Error): RailPlaced => ({ ok: false, placed: false, reason: e.message }));
+    aborted(ctx);
+    if (!r.placed) { said.push(earthUnreached(line, w, r.reason ?? 'no answer')); return n; }
+    counts.set(item, (counts.get(item) ?? 1) - 1);
+    if (item !== idOf(w.was) && !(idOf(w.was) === 'grass_block' && item === 'dirt')) (line.left ??= []).push(`the cut ${fmt(p)} of ${idOf(w.was)} put back as ${item}`.slice(0, 120));
+    dropEarth(line, w);
+    n++;
+    ctx.save?.();
+  }
+  return n;
+}
+
+/**
+ * What the take-up puts back into the cuts, carried from the chests (prepare), as far as they give it: each cut's own
+ * kind (a grass block's dirt), stone as stone only if the chests hold some (never smelted for it: cobblestone then).
+ */
+async function carryRefills(ctx: GoalContext, line: RailLine): Promise<void> {
+  const stored = (item: string) => Object.values(ctx.world.chestItems ?? {}).reduce((a, c) => a + (c[item] ?? 0), 0);
+  const need: Record<string, number> = {};
+  for (const w of line.earth ?? []) {
+    if (w.op !== 'cut') continue;
+    let item = (REFILL[idOf(w.was)] ?? [idOf(w.was)])[0];
+    if (item === 'stone' && !stored('stone')) item = 'cobblestone';
+    need[item] = (need[item] ?? 0) + 1;
+  }
+  for (const [item, n] of Object.entries(need)) await prepare(ctx, item, n).catch(() => undefined);
+}
+
+/** An earthwork the take-up did not undo this run: counted, and left (said, off the record) after UP_TRIES runs. */
+function earthUnreached(line: RailLine, w: EarthRec, reason: string): string {
+  const tries = (line.upTries ??= {});
+  const k = `earth:${key(w)}`;
+  tries[k] = (tries[k] ?? 0) + 1;
+  const what = `the ${w.op} ${fmt(w)}${w.op === 'cut' ? ` of ${idOf(w.was)}` : ''}`;
+  if (tries[k] < UP_TRIES) return `${what} not undone: ${reason}; again next run`;
+  delete tries[k];
+  (line.left ??= []).push(`${what}: not undone on ${UP_TRIES} runs (${reason})`.slice(0, 120));
+  dropEarth(line, w);
+  return `${what} left: not undone on ${UP_TRIES} runs (${reason})`;
 }
 
 /** A player near the bot (world.entities): where, or undefined. */
@@ -859,15 +1038,17 @@ async function layRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<WorkR
   // (a block kept unsure, its lay unanswered and unread, is laid again: read first, it may stand there already)
   const keys = fitKeys(line, true);
   const todo = outwardSteps(line).filter(st => !keys.has(key(stepAt(line, st))));
-  if (!todo.length && !straysOf(line).length) { line.stage = 'whole'; return { gain: 0, text: 'the line is whole already: the move next', mark: 'forget' }; }
+  if (!todo.length && !straysOf(line).length && !pendingEarth(line)) { line.stage = 'whole'; return { gain: 0, text: 'the line is whole already: the move next', mark: 'forget' }; }
   const need: Record<string, number> = {};
   for (const st of todo) need[stepItem(line, st)] = (need[stepItem(line, st)] ?? 0) + 1;
+  if (pendingFills(line)) need.cobblestone = (need.cobblestone ?? 0) + pendingFills(line);
   const short = await carry(ctx, need);
   if (short) return { gain: 0, text: `not setting out to lay: short of ${short}`, untried: true };
   const zone = await zonesOnLine(ctx, line);
   if (zone === 'unread') return { gain: 0, text: 'not setting out to lay: the builds round the line not read', untried: true };
   if (zone) { giveUp(ctx, line, zone); return { gain: 0, text: `the line given up: ${zone}`, mark: 'forget' }; }
-  const first = todo.length ? stepAt(line, todo[0]) : straysOf(line)[0].at;
+  const ew0 = (line.earth ?? []).find(w => !w.done);
+  const first = todo.length ? stepAt(line, todo[0]) : straysOf(line).length ? straysOf(line)[0].at : { x: ew0!.x, y: ew0!.y, z: ew0!.z };
   const { rails, of } = laidOf(line);
   say(ctx, `laying the line, day ${line.runs + 1}: ${rails} of ${of} rails down, on from ${fmt(first)}`);
   const gate = await outByGate(ctx, first);
@@ -933,6 +1114,20 @@ async function layOn(ctx: GoalContext, line: RailLine, todo: readonly Step[], cl
     }
     // (laid again on the way out since: the mending's)
     if (fitKeys(line).has(key(p)) && !unsureAt(line, p)) continue;
+    // the column's cuts and fills first (an extension's earthworks), then the stretch read again as they left it
+    if (earthIn(line, p.x, p.z).some(w => !w.done)) {
+      if (offNow(ctx)) return { kind: 'off', put };
+      const pl = await playerNear(ctx);
+      if (pl) return { kind: 'end', put, result: stopped(ctx, line, `a player near at ${fmt(pl)}`, put) };
+      const ew = await earthDown(ctx, line, p.x, p.z);
+      if (ew?.wait) { say(ctx, `${ew.why}: on from there next run`); return { kind: 'late', put, at: p }; }
+      if (ew) {
+        if (/no cobblestone carried/.test(ew.why)) return { kind: 'short', put, item: 'cobblestone' };
+        return { kind: 'end', put, result: stopped(ctx, line, ew.why, put) };
+      }
+      at = await readAround(ctx, todo.slice(k, k + STRETCH).map(x => stepAt(line, x)));
+      readFrom = k;
+    }
     let r: RailPlaced;
     const there = unsureAt(line, p) ? at(p.x, p.y, p.z) : undefined;
     if (there && idOf(there) === stepItem(line, st)) {
@@ -968,6 +1163,17 @@ async function layOn(ctx: GoalContext, line: RailLine, todo: readonly Step[], cl
       giveUp(ctx, line, `${stepWord(line, st)} came out not as planned: ${r.reason ?? 'no answer'}`);
       return { kind: 'end', put, result: { gain: put, text: `the line given up: ${line.why}` } };
     }
+  }
+  // the earthworks left once every step is down: the trigger's column (its torch goes down on the move), the boat's
+  // hop to the pickup
+  for (const w of [...(line.earth ?? [])]) {
+    if (w.done) continue;
+    aborted(ctx);
+    if (clk.left() < keep(w)) return { kind: 'late', put, at: { x: w.x, y: w.y, z: w.z } };
+    if (offNow(ctx)) return { kind: 'off', put };
+    const ew = await earthDown(ctx, line, w.x, w.z);
+    if (ew?.wait) { say(ctx, `${ew.why}: on from there next run`); return { kind: 'late', put, at: { x: w.x, y: w.y, z: w.z } }; }
+    if (ew) return { kind: 'end', put, result: stopped(ctx, line, ew.why, put) };
   }
   return { kind: 'done', put };
 }
@@ -1076,6 +1282,8 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   for (const o of line.opens) { const it = idOf(o.block).replace(/wall_torch$/, 'torch'); need[it] = (need[it] ?? 0) + 1; }
   const short = await carry(ctx, need);
   if (short) return { gain: 0, text: `not setting out on the move: short of ${short}`, untried: true };
+  // (some cobblestone for an extension's fills, if one is left to make: as much as the chests give, never a reason to stay)
+  if ((line.extended?.times ?? 0) < EXTENSIONS && ctx.rails?.cut) await prepare(ctx, 'cobblestone', EARTH_CARRY).catch(() => undefined);
   // fed for the day out (the food goal, survival, would cut the move with the villager in the cart)
   const ride = FOOD_TARGET + CHEST_SPARE;
   let fed = readyFoodPoints(await countsNow(ctx));
@@ -1158,6 +1366,8 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   // the villager onto the pickup, the cart, the trigger
   let took: Seen | undefined;
   let missed = '';
+  let forced = false;
+  const extLeft = () => (line.extended?.times ?? 0) < EXTENSIONS;
   for (let k = 0; k < MOVE_TRIES && !took; k++) {
     aborted(ctx);
     if (enough()) return notToday(ctx, line, `the run's time ran out at the pickup${missed ? ` (${missed})` : ''}`, true);
@@ -1166,8 +1376,20 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
     const pick = await toPickup(ctx, line, hopFrom, clk.now());
     if ('why' in pick) {
       if (pick.late) return notToday(ctx, line, pick.why, true);
-      // (none in the village to bring to the pickup today, or none that a boat way reached it from: a miss, not a stop)
-      if (!missed) return notToday(ctx, line, pick.why, 'miss');
+      if (!missed) {
+        // (the dry check found a way, the real hop did not bring the villager: the extension in this same run while
+        // one is left and the run has the time, the boat back in the pockets; Nov 21, the day counted a miss instead)
+        if (pick.hop && extLeft() && !forced && !enough() && (await countsNow(ctx)).get(BOAT_ITEM)) {
+          forced = true;
+          const ext = await extendFor(ctx, line, hopFrom, look, v, clk, home, pick.why);
+          if (ext) return ext;
+          k--;
+          continue;
+        }
+        // (none in the village to bring to the pickup today: a miss, not a stop; one there that no hop brought is a miss
+        // only once no extension is left to try)
+        return notToday(ctx, line, pick.why, pick.hop && extLeft() ? true : 'miss');
+      }
       break;
     }
     const go = await launch(ctx, line, pick.e);
@@ -1411,7 +1633,7 @@ interface HopFrom {
  * out there (in its village, where it stood), the boat taken back up: no villager is left by the line half way. Looked at
  * again just before the boat goes down: a player by (`late`: no move this run), the rain, what the villager is now.
  */
-async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: number): Promise<{ e: Seen } | { why: string; late?: true }> {
+async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: number): Promise<{ e: Seen } | { why: string; late?: true; hop?: true }> {
   const p = line.pickup;
   const mid = { x: p.x + 0.5, z: p.z + 0.5 };
   const box = hopBox(line, t.area);
@@ -1529,8 +1751,8 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
       const bf = (await boatDrop(ctx, drop)) ? '' : `; its drop not picked up by ${fmt(drop)}`;
       const why = `the hop to the pickup stopped (${stopped})${out.text.replace(/^; /, ': ')}${bf}`;
       say(ctx, why);
-      // (no boat for the way into the hall: no other try today)
-      return { why };
+      // (no other hop today: the extension next, if any is left, with the boat back in the pockets)
+      return { why, ...(bf ? {} : { hop: true as const }) };
     }
     // out to the side of the line (off the cart's way), the boat broken: the villager stands where it sat
     const dx = Math.sign(p.x - along.x), dz = Math.sign(p.z - along.z);
@@ -1547,14 +1769,16 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
   }
   if (late) return { why: late, late: true };
   if (!tried && onPath) return { why: `the ${onPath} villager(s) to take stand on a path, farmland or the like: looked at again when they have wandered`, late: true };
-  if (noWay) return { why: `no boat way to the pickup at ${fmt(p)} for a villager to take (${tried} tried): ${noWay}` };
-  return { why: `no villager could be taken onto the pickup at ${fmt(p)}` };
+  if (noWay) return { why: `no boat way to the pickup at ${fmt(p)} for a villager to take (${tried} tried): ${noWay}`, hop: true };
+  return { why: `no villager could be taken onto the pickup at ${fmt(p)}`, hop: true };
 }
 
 // ------------------------------------------------------------------------------------------------ the extension
 
 /** At most this many extensions of one line (the villagers wander uphill again: the existing misses then). */
 export const EXTENSIONS = 2;
+/** Cobblestone the move takes out for an extension's fills, as the chests give it. */
+const EARTH_CARRY = 24;
 /** The extension's search: the box round the village's area and the line's far end, and its size. */
 const EXT_ROOM = 8;
 const EXT_NODES = 150_000;
@@ -1587,7 +1811,7 @@ async function villageGround(ctx: GoalContext, line: RailLine, t: HopFrom): Prom
  * box, a boat's footprint where it stands, a way searched on the ground read), nothing done: `reach` also when there is
  * none to take, none but on paths, or a player by (toPickup's words then); not, with the villagers no way reached it from.
  */
-async function hopReach(ctx: GoalContext, line: RailLine, t: HopFrom, g: Ground): Promise<{ reach: true } | { reach: false; noWay: Seen[]; order: Seen[]; why: string }> {
+async function hopReach(ctx: GoalContext, line: RailLine, t: HopFrom, g: Ground, force = false): Promise<{ reach: true } | { reach: false; noWay: Seen[]; order: Seen[]; why: string }> {
   const p = line.pickup;
   const mid = { x: p.x + 0.5, z: p.z + 0.5 };
   const box = hopBox(line, t.area);
@@ -1599,7 +1823,11 @@ async function hopReach(ctx: GoalContext, line: RailLine, t: HopFrom, g: Ground)
   const ids = new Set(t.candidates.map(c => c.id));
   const order = round.filter(e => e.name === 'villager' && e.position && ids.has(e.id) && !notFree(e, t.jobs) && inBox(e.position))
     .sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid));
+  // (the real hop failed after this check found a way: every one in sight is one no boat brought, today)
+  if (force) return order.length ? { reach: false, noWay: order, order, why: '' } : { reach: true };
   const noWay: Seen[] = [];
+  // (one with no room for a boat where it stands: on a path, or among steps a levelled head's hop may cut)
+  const stuck: Seen[] = [];
   let tried = 0, why = '';
   for (const e of order) {
     aborted(ctx);
@@ -1607,14 +1835,16 @@ async function hopReach(ctx: GoalContext, line: RailLine, t: HopFrom, g: Ground)
     if (tried >= HOP_TRIES) break;
     await yieldNow();
     const at0 = e.position!;
-    if (!footprint(g, at0.x, at0.z, at0.y, false).ok) continue;
+    const fp = footprint(g, at0.x, at0.z, at0.y, false);
+    if (!fp.ok) { stuck.push(e); why ||= `no room for a boat by the villager (${e.id}) at ${fmt(at0)}: ${fp.why} at ${fmt(fp.at)}`; continue; }
     tried++;
     const r = planRoute(g, { x: at0.x, z: at0.z, level: at0.y }, mid, { zones: t.zones, bounds, within: 0.5, maxNodes: HOP_NODES });
     if (r.ok) return { reach: true };
     noWay.push(e);
     why ||= `from the villager (${e.id}) at ${fmt(at0)}: ${r.why}`;
   }
-  return noWay.length ? { reach: false, noWay, order, why } : { reach: true };
+  // (none a way reached: those with no room for a boat too, for an extension levelled by them)
+  return noWay.length || (stuck.length && ctx.rails?.cut) ? { reach: false, noWay: [...noWay, ...stuck], order, why } : { reach: true };
 }
 
 /**
@@ -1625,8 +1855,12 @@ async function hopReach(ctx: GoalContext, line: RailLine, t: HopFrom, g: Ground)
  * own the line's area does not meet: zonesOnLine reads them as someone's), an outpost wider (wayZones); never into the yard.
  */
 export function extensionFor(line: RailLine, g: Ground, t: {
-  noWay: readonly Seen[]; order: readonly Seen[]; look: Pick<VillageLook, 'jobs' | 'beds' | 'bells' | 'zones'>; v: Pick<FreeVerdict, 'own' | 'outposts'>;
+  noWay: readonly Seen[]; order: readonly Seen[]; look: Pick<VillageLook, 'jobs' | 'beds' | 'bells' | 'zones'> & { seen?: readonly Seen[] }; v: Pick<FreeVerdict, 'own' | 'outposts'>;
   area?: { x1: number; z1: number; x2: number; z2: number }; yard: { x1: number; z1: number; x2: number; z2: number }; maxNodes?: number;
+  /** the earthworks may be made (the runtime has the rails tools' cut and restore): tried when no head stands as the ground is */
+  earth?: boolean;
+  /** at most this many cuts and fills (EARTH_MAX) */
+  earthMax?: number;
 }): RailExtension | { ok: false; why: string } {
   const join = line.cells[0];
   const meets = (z: Zone, a?: { x1: number; z1: number; x2: number; z2: number }) => !!a && z.x1 <= a.x2 && z.x2 >= a.x1 && z.z1 <= a.z2 && z.z2 >= a.z1;
@@ -1639,6 +1873,9 @@ export function extensionFor(line: RailLine, g: Ground, t: {
       || own.some(o => x >= o.x1 && x <= o.x2 && z >= o.z1 && z <= o.z2 && y >= o.y1 - 2 && y <= o.y2 + 1));
   const bounds = extendBox(line, t.area);
   const reached = (r: RailExtension): boolean => {
+    // (on the ground as the extension's cuts and fills leave it)
+    const lv = earthed((x, y, z) => g.state(x, y, z), r.earth);
+    const gg = r.earth.length ? { cell: (x: number, y: number, z: number) => cellOf(lv(x, y, z)) } : g;
     const mid = { x: r.pickup.x + 0.5, z: r.pickup.z + 0.5 };
     const hb = hopBox({ pickup: r.pickup, area: t.area ?? line.area });
     const box = hb ?? { x1: r.pickup.x - HOP - 4, z1: r.pickup.z - HOP - 4, x2: r.pickup.x + HOP + 4, z2: r.pickup.z + HOP + 4 };
@@ -1646,9 +1883,9 @@ export function extensionFor(line: RailLine, g: Ground, t: {
     for (const e of [...t.order].sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid))) {
       if (horiz(e.position!, mid) <= 0.3) return true;
       if (tried >= HOP_TRIES) break;
-      if (!footprint(g, e.position!.x, e.position!.z, e.position!.y, false).ok) continue;
+      if (!footprint(gg, e.position!.x, e.position!.z, e.position!.y, false).ok) continue;
       tried++;
-      if (planRoute(g, { x: e.position!.x, z: e.position!.z, level: e.position!.y }, mid, { zones, bounds: box, within: 0.5, maxNodes: HOP_NODES }).ok) return true;
+      if (planRoute(gg, { x: e.position!.x, z: e.position!.z, level: e.position!.y }, mid, { zones, bounds: box, within: 0.5, maxNodes: HOP_NODES }).ok) return true;
     }
     return false;
   };
@@ -1662,8 +1899,26 @@ export function extensionFor(line: RailLine, g: Ground, t: {
   const sidesOf = bells.flatMap(b => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => ({ id: -1, position: { x: b.x + dx + 0.5, y: b.y, z: b.z + dz + 0.5 } })));
   const byBell = sidesOf.length ? plan(sidesOf) : undefined;
   if (byBell?.ok && reached(byBell)) return byBell;
-  const why = !byVillager.ok ? byVillager.why : 'no villager the judge allows could be brought by boat to the pickup it would have';
-  return { ok: false, why: byBell && !byBell.ok && byVillager.ok ? `${why}; by the bell: ${byBell.why}` : why };
+  const why0 = !byVillager.ok ? byVillager.why : 'no villager the judge allows could be brought by boat to the pickup it would have';
+  const why = byBell && !byBell.ok && byVillager.ok ? `${why0}; by the bell: ${byBell.why}` : why0;
+  if (!t.earth) return { ok: false, why };
+  // the ground levelled (the user's of Nov 21): a head right beside a villager the judge allows (EARTH_NEAR), its
+  // cells, the stop's and the torch's cut or filled level with where it stands, the boat's hop to it and the way's
+  // steps too, within the earthworks' rules; never under a villager, a bed, a job site or a bell, in a house of the
+  // village or by anyone else's build
+  const villagers = [...(t.look.seen ?? []), ...t.order].filter(e => e.name === 'villager' && e.position).map(e => e.position!);
+  const may = (x: number, y: number, z: number): boolean => !ends.has(`${x},${y},${z}`)
+    && !marks.some(m => Math.abs(m.x - x) <= 1 && Math.abs(m.z - z) <= 1 && Math.abs(m.y - y) <= 2)
+    && !own.some(o => x >= o.x1 - 1 && x <= o.x2 + 1 && z >= o.z1 - 1 && z <= o.z2 + 1 && y >= o.y1 - 3 && y <= o.y2 + 1)
+    && !villagers.some(p => Math.abs(p.x - (x + 0.5)) < 0.9 && Math.abs(p.z - (z + 0.5)) < 0.9)
+    && !zoneNear(zones, { x: x + 0.5, y, z: z + 0.5 }, FROM_ZONES);
+  const near = [...t.order].sort((a, b) => horiz(a.position!, join) - horiz(b.position!, join));
+  const levelled = planExtension(g, {
+    candidates: near, yard: t.yard, zones, bounds, avoid, maxNodes: t.maxNodes ?? EXT_NODES, line: { cells: line.cells, stop: line.stop },
+    earth: { may, max: t.earthMax ?? EARTH_MAX }
+  });
+  if (levelled.ok && reached(levelled)) return levelled;
+  return { ok: false, why: `${why}; levelled by a villager: ${levelled.ok ? 'no villager the judge allows could be brought by boat to its pickup' : levelled.why}` };
 }
 
 /** The extension written into the line (before anything of it goes down): the new head, the rails to the old launch's cell, the torches, the village's area as judged today. */
@@ -1677,6 +1932,8 @@ function applyExtension(line: RailLine, r: RailExtension, area: RailLine['area']
   line.from = { ...r.from };
   if (area) line.area = { ...area };
   line.extended = { at: now, from: { x: join.x, y: join.y, z: join.z }, to: { ...r.pickup }, rails: r.cells.length, powered: r.powered, times: (line.extended?.times ?? 0) + 1 };
+  // (its cuts and fills, each with what stood there: in the record before any is made, as the rails are)
+  if (r.earth.length) line.earth = [...(line.earth ?? []), ...r.earth.map(w => ({ ...w }))];
   // the line is planned afresh at its far end and its ground read today: its MAX_AGE clock starts again
   line.at = now;
 }
@@ -1702,25 +1959,27 @@ function sayExtension(ctx: GoalContext, line: RailLine, put: number): void {
 }
 
 /**
- * On the move day, after the look and its verdict (the brief's of Nov 21): when no villager the judge allows can be
+ * On the move day, after the look and its verdict (the brief's of Nov 21; `failed`: the real hop did not bring a
+ * villager where the dry check found a way, the extension tried in the same run): when no villager the judge allows can be
  * brought to the pickup by boat (the hill between: "a step up (a boat climbs nothing)"), the line is extended into the
  * village (extensionFor), written into the record first, the old launch's powered rail, the old stop and the old trigger
  * taken up (upStrays: a plain rail goes where the launch was), and laid out to its new head while the move after it
  * still fits the run; then the move goes on from the new pickup (undefined). Not carried, out of time, or stopped: the
  * rest is laid on the next run (the bill first, if not carried), not a miss. Not to be planned: not made today, not a miss.
  */
-async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: VillageLook, v: FreeVerdict, clk: Clk, home: { x: number; z: number }): Promise<WorkResult | undefined> {
-  const g = await villageGround(ctx, line, t);
+async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: VillageLook, v: FreeVerdict, clk: Clk, home: { x: number; z: number }, failed?: string): Promise<WorkResult | undefined> {
+  const g = t.ground ?? await villageGround(ctx, line, t);
   t.ground = g;
-  const reach = await hopReach(ctx, line, t, g);
-  if (reach.reach) return undefined;
-  const hopWhy = `no boat way to the pickup at ${fmt(line.pickup)} for a villager to take (${reach.noWay.length} tried): ${reach.why}`;
-  if ((line.extended?.times ?? 0) >= EXTENSIONS) return undefined;
+  const reach = await hopReach(ctx, line, t, g, failed !== undefined);
+  if (reach.reach) return failed === undefined ? undefined : notToday(ctx, line, `${failed}; no villager the judge allows in sight to extend the line to`, true);
+  const hopWhy = failed !== undefined ? `the boat's hop did not bring a villager to the pickup at ${fmt(line.pickup)}: ${failed}`
+    : `no boat way to the pickup at ${fmt(line.pickup)} for a villager to take (${reach.noWay.length} tried): ${reach.why}`;
+  if ((line.extended?.times ?? 0) >= EXTENSIONS) return failed === undefined ? undefined : notToday(ctx, line, failed, 'miss');
   const yard = ctx.world.yard;
   if (!yard) return notToday(ctx, line, `${hopWhy}; the line not extended: no yard known`, true);
   const area = joinAreas(line.area, v.area);
   await yieldNow();
-  const r = extensionFor(line, g, { noWay: reach.noWay, order: reach.order, look, v, area, yard });
+  const r = extensionFor(line, g, { noWay: reach.noWay, order: reach.order, look, v, area, yard, earth: !!ctx.rails?.cut && !!ctx.rails?.restore });
   if (!r.ok) return notToday(ctx, line, `${hopWhy}; and no extension of the line into the village: ${r.why}`, true);
   const from = line.cells[0];
   applyExtension(line, r, area, clk.now());
@@ -1731,6 +1990,11 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   say(ctx, `${hopWhy}`);
   say(ctx, `the line extended into the village: ${r.cells.length} rails (${r.powered} powered) from ${fmt(from)} to the new pickup ${fmt(r.pickup)}`);
   say(ctx, `the extension's route ${r.route}; the launch, the stop${r.stop.placed ? ' (a cobblestone)' : ' (the ground)'} and the cart's start at its end, by the villager (${r.villager < 0 ? 'the bell' : r.villager}) at ${fmt(r.from)}`);
+  if (r.earth.length) {
+    const cuts = r.earth.filter(w => w.op === 'cut'), fills = r.earth.length - cuts.length;
+    const kinds = [...new Set(cuts.map(w => idOf(w.was)))].join(', ');
+    say(ctx, `the ground levelled for it: ${cuts.length} cut(s)${kinds ? ` (${kinds})` : ''}, ${fills} fill(s) of cobblestone${r.earth.some(w => w.hop) ? `, ${r.earth.filter(w => w.hop).length} of the cuts in the boat's hop` : ''}; every one in the record, put back by the take-up`);
+  }
   const stray = await upStrays(ctx, line);
   if (stray) {
     const text = `the line extended into the village; ${stray}: the laying on the next run`;
@@ -1744,6 +2008,7 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   for (const st of todo) need[stepItem(line, st)] = (need[stepItem(line, st)] ?? 0) + 1;
   const trig = triggerOf(line);
   if (trig && !isLaid(line, trig.at)) need.redstone_torch = (need.redstone_torch ?? 0) + 1;
+  if (pendingFills(line)) need.cobblestone = (need.cobblestone ?? 0) + pendingFills(line);
   const have = await countsNow(ctx);
   const short = Object.entries(need).filter(([item, n]) => (have.get(item) ?? 0) < n).map(([item, n]) => `${n - (have.get(item) ?? 0)} ${item}`);
   if (short.length) {
@@ -1763,7 +2028,8 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
     const text = `the extension laid ${laid.put} this run (${laid.kind === 'late' ? `the run's time: on from ${fmt(laid.at)}` : `out of ${laid.item}`}); the rest and the move on the next runs`;
     return { gain: laid.put, text, ...(laid.put ? {} : { mark: 'same' as const }) };
   }
-  // whole: the move goes on from the new pickup
+  // whole: the move goes on from the new pickup (the hop's ground as the cuts and fills left it)
+  for (const w of line.earth ?? []) if (w.done) g.set(w.x, w.y, w.z, w.op === 'cut' ? 'air' : 'cobblestone');
   line.stage = 'moving';
   ctx.save?.();
   await walkTo(ctx, line.pickup, 3);
@@ -2263,16 +2529,20 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
     .concat(straysOf(line).filter(b => !stepKeys.has(key(b.at))).map(b => ({ kind: 'stray', at: b.at, item: b.item }) as Step));
   // (from the far end in: the trigger and the stop by the launch first)
   order.sort((a, b) => rank(line, a) - rank(line, b));
-  if (order.length) {
-    const gate = await outByGate(ctx, stepAt(line, order[0]));
+  // (an extension's earthworks: what to put back into its cuts carried, as the chests give it)
+  if (line.earth?.some(w => w.op === 'cut')) await carryRefills(ctx, line);
+  if (order.length || line.earth?.length) {
+    const firstAt = order.length ? stepAt(line, order[0]) : { x: line.earth![0].x, y: line.earth![0].y, z: line.earth![0].z };
+    const gate = await outByGate(ctx, firstAt);
     if (gate.shut) said.push(`not out of the yard: ${gate.shut}`);
     else {
       let to = -1;
       let boatTried = false;
+      let late = false;
       for (const st of order) {
         aborted(ctx);
         const p = stepAt(line, st);
-        if (clk.left() < horiz(p, home) / 3 * 1000 + MARGIN) { said.push(`the day's end at ${fmt(p)}: the rest next run`); break; }
+        if (clk.left() < horiz(p, home) / 3 * 1000 + MARGIN) { said.push(`the day's end at ${fmt(p)}: the rest next run`); late = true; break; }
         if (to < 0 || horiz(await here(ctx), p) > 6) {
           await walkTo(ctx, p, 3);
           to = 0;
@@ -2289,11 +2559,29 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
         }
         const r = await takeUp(ctx, line, p);
         aborted(ctx);
-        if (r.ok) { forget(line, p); if (r.dug) taken++; continue; }
+        if (r.ok) {
+          forget(line, p);
+          if (r.dug) taken++;
+          // (the column's earthworks undone once nothing of the line stands in it: its fills up, its cuts filled back)
+          if (earthIn(line, p.x, p.z).length) taken += await earthUp(ctx, line, p.x, p.z, said);
+          continue;
+        }
         if (!notOurs(r.reason)) { said.push(unreached(line, st, r.reason ?? 'no answer')); continue; }
         (line.left ??= []).push(`${stepWord(line, st)}: ${r.reason ?? 'no answer'}`.slice(0, 120));
         forget(line, p);
         said.push(`${stepWord(line, st)} left: ${r.reason ?? 'no answer'}`);
+        if (earthIn(line, p.x, p.z).length) taken += await earthUp(ctx, line, p.x, p.z, said);
+      }
+      // the earthworks left: the boat's hop's cuts, a column whose blocks came up on a run before, an extension given up
+      // before all of it was laid (each cut read: one never made is as it was)
+      const cols = [...new Set((line.earth ?? []).map(w => `${w.x},${w.z}`))];
+      for (const c of late ? [] : cols) {
+        aborted(ctx);
+        const [x, z] = c.split(',').map(Number);
+        const w = earthIn(line, x, z)[0];
+        if (!w || line.laid.some(b => b.at.x === x && b.at.z === z)) continue;
+        if (clk.left() < horiz(w, home) / 3 * 1000 + MARGIN) { said.push(`the day's end at ${fmt(w)}: the rest next run`); break; }
+        taken += await earthUp(ctx, line, x, z, said);
       }
     }
   }
@@ -2320,7 +2608,7 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
     if (late.stop) said.push(late.stop);
   }
   const openLeft = (villagesOf(ctx.world).open ?? []).some(o => line.opens.some(q => same(q.at, o.at)));
-  if (!line.laid.length && !line.cart && !line.cartAt && !openLeft) {
+  if (!line.laid.length && !line.earth?.length && !line.cart && !line.cartAt && !openLeft) {
     // (a boat the hop left at the pickup, not taken back: said with what was left, kept in villages.boat for the status)
     const boat = villagesOf(ctx.world).boat;
     if (boat && byHop(ctx.world, line, boat.at)) (line.left ??= []).push(`the boat at ${fmt(boat.at)} by the pickup or in the village, perhaps with a villager in it`);
@@ -2334,7 +2622,7 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
     say(ctx, text);
     return { gain: taken, text: `${said.length ? `${said.join('; ')}; ` : ''}${text}` };
   }
-  const text = `took up ${taken} block(s) (${line.why ?? 'given up'}); ${line.laid.length} still down${said.length ? `; ${said.join('; ')}` : ''}`;
+  const text = `took up ${taken} block(s) (${line.why ?? 'given up'}); ${line.laid.length} still down${line.earth?.length ? `, ${line.earth.length} cut(s) or fill(s) not undone` : ''}${said.length ? `; ${said.join('; ')}` : ''}`;
   say(ctx, text);
   return { gain: taken, text, ...(taken ? {} : { mark: 'same' as const }) };
 }
