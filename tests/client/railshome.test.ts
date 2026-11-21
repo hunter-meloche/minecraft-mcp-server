@@ -181,6 +181,8 @@ class Field {
     boatDropLeft?: boolean;
     /** world.region reads that fail right after the lost lay (lostAt): the client dropped */
     unreadAfterLost?: number;
+    /** the next this many boat drives stop half way (a step the ground's model missed) */
+    stallDrives?: number;
   } = {}) {}
   regionFails = 0;
   /** a frozen cart woken (the bot within the simulation distance): on along the rails down to their end, at rest there */
@@ -439,7 +441,8 @@ class Field {
         const from = { ...this.boat.pos };
         const d = horiz(from, to);
         let end = { x: to.x, z: to.z }, reason = 'arrived';
-        for (let s = 0.25; s <= d; s += 0.25) {
+        if (this.opts.stallDrives) { this.opts.stallDrives--; end = { x: from.x + (to.x - from.x) / 2, z: from.z + (to.z - from.z) / 2 }; reason = 'a step up ahead'; }
+        else for (let s = 0.25; s <= d; s += 0.25) {
           const q = { x: from.x + (to.x - from.x) * s / d, z: from.z + (to.z - from.z) * s / d };
           if (cellOf(this.block(Math.floor(q.x), 63, Math.floor(q.z))).kind !== 'open') { reason = 'a step up ahead'; end = { x: from.x + (to.x - from.x) * (s - 0.5) / d, z: from.z + (to.z - from.z) * (s - 0.5) / d }; break; }
         }
@@ -1166,18 +1169,65 @@ test('two stops are given up only in a row: a clean day between (its end in time
   t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['lay']);
 });
 
-test('no villager near the fixed pickup on a move day is a miss, not a stop; after MISSES such runs the line is given up (and brain-status says so before the take-up runs)', async (t) => {
+test('a villager 30 off the fixed pickup (villagers keep round their village): brought to it by boat over the ground read, the boat taken up, then the cart and the hall as ever', async (t) => {
   const { world, line } = lineWorld('laying');
   const land = new Field(world);
   await laidWhole(land, line);
+  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
   land.villagers.find(v => v.id === 101)!.position = { x: -585.5, y: 63, z: 2000.5 };
+  const log0 = land.log.length;
   const r = await run(land, 'move', 20 * MINUTE);
-  t.regex(r.text, /^the move not made: no unemployed villager the judge allows within 8 of the pickup at \(-556, 63, 2000\)$/);
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home \(1 in it now\)/);
+  const did = land.log.slice(log0);
+  t.true(did.includes('boat down, villager 101 in'), did.join(' | '));
+  t.true(did.includes('drive to (-555.5, 2000.5)'), did.join(' | '));
+  t.true(did.some(l => /^cart took villager 101, home to the brake/.test(l)), did.join(' | '));
+  t.true(land.said.includes('rails: in the boat with the villager (101) at (-585, 63, 2000): to the pickup (-556, 63, 2000), 29 blocks in 1 leg(s)'), land.said.join(' | '));
+  t.true(land.said.includes('rails: the villager (101) on the pickup (-556, 63, 2000)'), land.said.join(' | '));
+  t.is(land.boat, undefined);
+  t.is(peekVillages(world).boat, undefined);
+  t.true(world.villagerMoves);
+});
+
+test('no villager the judge allows anywhere in the village on a move day is a miss, not a stop; after MISSES such runs the line is given up (and brain-status says so before the take-up runs)', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  for (const v of land.villagers) if (v.id === 101 || v.id === 106 || v.id === 107) v.profession = 'mason';
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.is(r.text, 'the move not made: no unemployed villager the judge allows in the village at (-572, 63, 2000) to bring to the pickup at (-556, 63, 2000)');
   t.like(line, { stage: 'whole', misses: 1 });
   t.falsy(line.stops);
+  t.false(land.log.some(l => /^boat down/.test(l)));
   line.misses = MISSES;
   t.deepEqual(railsTask.variants(snap(KIT(), { now: land.t }), world).map(v => v.id), ['take up']);
   t.regex(railsHomeLine(world, land.t), new RegExp(`: to be taken up \\(the move not made on ${MISSES} runs: no unemployed villager .*\\): \\d+ block\\(s\\) down`));
+});
+
+test('a hop that cannot reach the pickup (the boat stopped on the way): driven back to where it came down, the villager let out there in its village, the boat taken up, the line kept whole (a miss)', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { stallDrives: 1 });
+  await laidWhole(land, line);
+  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
+  land.villagers.find(v => v.id === 101)!.position = { x: -585.5, y: 63, z: 2000.5 };
+  const log0 = land.log.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.is(r.text, 'the move not made: the hop to the pickup stopped (a step up ahead at (-570, 63, 2000)): the villager let out at (-585, 63, 2000), the boat taken back up');
+  const did = land.log.slice(log0);
+  t.deepEqual(did.filter(l => /^drive to/.test(l)), ['drive to (-555.5, 2000.5): a step up ahead', 'drive to (-584.4, 2000.5)']);
+  t.true(land.said.includes('rails: the hop to the pickup stopped: a step up ahead at (-570, 63, 2000)'), land.said.join(' | '));
+  t.false(did.some(l => /^cart on /.test(l)), 'no cart for it');
+  t.like(line, { stage: 'whole', misses: 1 });
+  t.falsy(line.stops);
+  t.is(land.boat, undefined);
+  t.is(land.count('oak_boat'), 1);
+  t.is(peekVillages(world).boat, undefined);
+  t.true(world.villagerMoves, 'the moves stay on: the villager never left its village');
+  const v = land.villagers.find(q => q.id === 101)!;
+  t.true(horiz(v.position, { x: -585.5, z: 2000.5 }) < 2, JSON.stringify(v.position));
+  t.true(horiz(v.position, { x: -555.5, z: 2000.5 }) > 20);
+  // the line kept: the next move day goes again
+  t.true(land.standing(line).length > 100);
 });
 
 test('a rails run left open by a restart (its end never written) claims no death hours later; one within its time still gives the line up', (t) => {

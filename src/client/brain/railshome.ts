@@ -3,14 +3,15 @@ import type { Pos, WorldMemory } from './memory.js';
 import type { Zone } from './courtesy.js';
 import type { CartPlaced, CartState, CartStatus, CartWatched, RailLay, RailPlaced, RailTaken } from '../tools.js';
 import { FIRST_BOOST, HEAD, HOP, railBase, railRoom, shapeOf, type RailCell, type RailPlan, type RailShape, type RailTorch } from './railroute.js';
-import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, zoneNear, type Entry } from './boatroute.js';
+import { FROM_ZONES, Ground, MAX_DROP, cellOf, checkLeg, footprint, planRoute, zoneNear, type BoatAt, type Entry } from './boatroute.js';
 import { HALL_FRESH, HALL_WANTS, judgeVillage, movesOn, peekVillages, siteFor, villagesOf, type Seen, type VillageSite } from './village.js';
 import { prepare } from './project.js';
 import { CHEST_SPARE, FOOD_TARGET, readyFoodPoints } from './food.js';
 import { MIN_WORK, inFence, outByGate, type WorkResult, type WorkTask } from './work.js';
 import { clock } from './idlelog.js';
 import {
-  BOAT_ITEM, PLAYER_SIGHT, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, takeBoat, wordOn, type Boat, type HallWay
+  BOAT_ITEM, BOAT_PACE, PLAYER_SIGHT, boatIntoHall, closeUp, countHall, digOut, hallWay, letGo, lookVillage, noteVerdict, notFree, playerNow, ridingOf, takeBoat, wayZones, wordOn, yieldNow,
+  type Boat, type HallWay
 } from './villagemove.js';
 
 /**
@@ -33,7 +34,8 @@ import {
  * - the server runs the old minecart rules (the minecart_improvements experiment is a world's at its creation): a
  *   moving empty cart takes the first mob it runs into at 0.1 a tick or more, none still. A player in a still cart barely
  *   moves it, so the launch's torch is the only start: the cart off the stop takes the villager standing on the pickup
- *   (the boat's hop to it, as the plan has it) and rolls home onto the brake;
+ *   (brought to it by boat from wherever it stands in its village: the pickup is fixed where one stood at plan time, and
+ *   villagers keep round their village's middle) and rolls home onto the brake;
  * - the bot goes home on foot along the line behind the cart (not in a second cart: one put on the lit launch leaves
  *   at once, too fast to board, and the bridge places nothing while riding, so the trigger could not be taken up and
  *   put back for it). Behind it the cart is always ahead, and past the server's simulation distance it waits for the bot
@@ -56,8 +58,8 @@ export const STOPS = 2;
 /** Tries at getting the villager into the cart (it wanders off the pickup, the cart misses it). */
 export const MOVE_TRIES = 3;
 /**
- * Move runs that found nothing wrong but no villager to take (none near the fixed pickup, the village not judged free
- * that day): not stops (villagers wander a village 60 across), but the line is given up after this many all the same,
+ * Move runs that found nothing wrong but no villager to take (none in the village, none a boat way reached the fixed
+ * pickup from, the village not judged free that day): not stops, but the line is given up after this many all the same,
  * each of them having opened the fence and walked the line.
  */
 export const MISSES = 4;
@@ -75,6 +77,8 @@ const LEG = 48;
 /** What the look round the village needs, and the pickup's hop and the cart's start. */
 const LOOK_MS = 60_000;
 const PICKUP_MS = 60_000;
+/** Of the move's time at the village, what the cart's start is kept (the hop to the pickup may take the rest of the run). */
+const CART_MS = 30_000;
 /** The boat's part in the yard, and the yard's stretch laid and the post opened before the move goes out. */
 const YARD_MS = 150_000;
 /** How long a cart that took the villager is given to come to rest on the brake once the bot is at the fence. */
@@ -1038,6 +1042,10 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   // out along the whole line with nothing unexpected: the stops before are no longer in a row
   clean(line);
   say(ctx, `the village at ${fmt(line.site)} is free to take from: ${v.why}`);
+  // (the hop's ways keep off every build but the village's own, as the boat's way home does; the hop may take what of
+  // the run is left once the cart's start, the way home and the yard are kept)
+  const zones = wayZones(look, v);
+  const hopRoom = () => clk.left() - (moveRest(line, home) - PICKUP_MS) - CART_MS;
 
   // the villager onto the pickup, the cart, the trigger
   let took: Seen | undefined;
@@ -1047,10 +1055,10 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
     if (enough()) return notToday(ctx, line, `the run's time ran out at the pickup${missed ? ` (${missed})` : ''}`, true);
     const sky = await ctx.status().catch(() => undefined);
     if (sky?.raining || sky?.thundering) return notToday(ctx, line, 'it began to rain: no villager is moved in the rain', true);
-    const pick = await toPickup(ctx, line, v.candidates, look.jobs, clk.now());
+    const pick = await toPickup(ctx, line, { candidates: v.candidates, jobs: look.jobs, area: v.area, zones, room: hopRoom }, clk.now());
     if ('why' in pick) {
-      if (pick.player) return notToday(ctx, line, pick.why, true);
-      // (none near the fixed pickup today: villagers wander a village 60 across; a miss, not a stop)
+      if (pick.late) return notToday(ctx, line, pick.why, true);
+      // (none in the village to bring to the pickup today, or none that a boat way reached it from: a miss, not a stop)
       if (!missed) return notToday(ctx, line, pick.why, 'miss');
       break;
     }
@@ -1160,44 +1168,177 @@ async function fenceAsPlanned(ctx: GoalContext, line: RailLine): Promise<string 
   return undefined;
 }
 
+/** At most this many villagers' boat ways to the pickup searched in a run (each a search of seconds), and its size. */
+const HOP_TRIES = 4;
+const HOP_NODES = 40_000;
+/** Planned again from where the boat is at most this many times on the hop, when the next leg no longer holds. */
+const HOP_REPLANS = 3;
+/** What a hop takes besides its drive: the walk to the villager, the boat down and up, getting in and out. */
+const HOP_FIXED = 20_000;
+
 /**
- * An unemployed villager the judge allows, near the pickup, taken onto it by boat (the plan's hop: straight, on the
- * ground as read now), the bot out and the boat broken back into its item: the villager stands on the pickup's rail.
- * `player`: a player within PLAYER_NOW of the bot or the village (villagemove.ts playerNow): no move this run.
+ * Where a hop to the pickup may drive (pure): the village's area as the judge drew it today (else as when the line was
+ * planned) and the pickup, HOP_ROOM round them. A villager is let out only in there: its own village, or by the pickup
+ * (where one of them stood when the line was planned). Undefined with no area known (the plan's straight hop only).
  */
-async function toPickup(ctx: GoalContext, line: RailLine, candidates: readonly Seen[], jobs: readonly { at: Pos }[], now: number): Promise<{ e: Seen } | { why: string; player?: true }> {
+const HOP_ROOM = 4;
+export function hopBox(line: Pick<RailLine, 'pickup' | 'area'>, area?: { x1: number; z1: number; x2: number; z2: number }): { x1: number; z1: number; x2: number; z2: number } | undefined {
+  const a = area ?? line.area;
+  const p = line.pickup;
+  if (!a) return undefined;
+  return { x1: Math.min(a.x1, p.x) - HOP_ROOM, z1: Math.min(a.z1, p.z) - HOP_ROOM, x2: Math.max(a.x2, p.x) + HOP_ROOM, z2: Math.max(a.z2, p.z) + HOP_ROOM };
+}
+/** A boat a hop left at `at` is the line's: by its pickup, or in the box its hops drive in (by the village's area as last judged, or as planned). */
+function byHop(world: WorldMemory, line: RailLine, at: { x: number; z: number }): boolean {
+  if (horiz(at, { x: line.pickup.x + 0.5, z: line.pickup.z + 0.5 }) <= HOP + 8) return true;
+  const within = (b?: { x1: number; z1: number; x2: number; z2: number }) => !!b && at.x >= b.x1 - 4 && at.x <= b.x2 + 5 && at.z >= b.z1 - 4 && at.z <= b.z2 + 5;
+  return within(hopBox(line, siteFor(peekVillages(world).sites, line.site)?.area)) || within(hopBox(line));
+}
+/** A boat drive's time on land with the villager, and the drive's time-out, for `d` blocks. */
+const hopMs = (d: number) => Math.round(d / BOAT_PACE * 1000 * 1.3);
+const driveMs = (d: number) => Math.max(15_000, Math.round(d / BOAT_PACE * 1500) + 10_000);
+const legsLength = (from: { x: number; z: number }, legs: readonly { x: number; z: number }[]) => {
+  let d = 0, at = from;
+  for (const q of legs) { d += horiz(at, q); at = q; }
+  return d;
+};
+
+/** What the hop to the pickup goes on: the judge's candidates and job sites today, its area, the zones kept off, the time it may take. */
+interface HopFrom {
+  candidates: readonly Seen[];
+  jobs: readonly { at: Pos }[];
+  area?: { x1: number; z1: number; x2: number; z2: number };
+  zones: readonly Zone[];
+  /** the ms of the run the hop may take (what is left once the cart's start, the way home and the yard are kept) */
+  room: () => number;
+}
+
+/**
+ * An unemployed villager the judge allows, anywhere in its village, brought onto the pickup by boat: the nearest first,
+ * its way to the pickup searched on the ground read for it (boatroute.ts planRoute: the boat's footprint and the drive's
+ * slack, a drop of MAX_DROP at most, never a step up; FROM_ZONES off every build but the village's own and the
+ * outposts' wider berth; within the village's area and the pickup, hopBox), nothing dug. The boat down against it, the
+ * bot in front, the drive leg by leg (each leg judged again from where the boat is, the rest planned again when it no
+ * longer holds), out to the side of the line at the pickup and the boat broken back into its item: the villager stands
+ * on the pickup's rail. A drive that stops on the way takes the villager back to where the boat came down, and lets it
+ * out there (in its village, where it stood), the boat taken back up: no villager is left by the line half way. Looked at
+ * again just before the boat goes down: a player by (`late`: no move this run), the rain, what the villager is now.
+ */
+async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: number): Promise<{ e: Seen } | { why: string; late?: true }> {
   const p = line.pickup;
   const mid = { x: p.x + 0.5, z: p.z + 0.5 };
-  const g = new Ground(p.y - MAX_DROP - 3, 12);
-  await g.read(ctx, p.x - HOP - 4, p.z - HOP - 4, p.x + HOP + 4, p.z + HOP + 4);
-  const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities ?? [];
-  // (a player by the bot or the village right now: no move this run, the village still free)
-  const player = playerNow(round, (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position, siteFor(villagesOf(ctx.world).sites, line.site)?.area);
-  if (player) return { why: `${player}: no villager taken this run`, player: true };
-  const ids = new Set(candidates.map(c => c.id));
-  const order = round.filter(e => e.name === 'villager' && e.position && ids.has(e.id) && !notFree(e, jobs) && horiz(e.position, mid) <= HOP + 2)
+  const box = hopBox(line, t.area);
+  const y0 = Math.min(p.y, line.site.y) - MAX_DROP - 4;
+  const g = new Ground(y0, Math.min(64, Math.max(p.y, line.site.y) + 8 - y0 + 1));
+  await g.read(ctx, (box?.x1 ?? p.x - HOP - 4), (box?.z1 ?? p.z - HOP - 4), (box?.x2 ?? p.x + HOP + 4), (box?.z2 ?? p.z + HOP + 4));
+  const bounds = box ?? { x1: p.x - HOP - 4, z1: p.z - HOP - 4, x2: p.x + HOP + 4, z2: p.z + HOP + 4 };
+  const inBox = (q: { x: number; z: number }) => q.x >= bounds.x1 && q.x < bounds.x2 + 1 && q.z >= bounds.z1 && q.z < bounds.z2 + 1;
+  const route = (from: BoatAt, to = mid, within = 0.5) => planRoute(g, from, to, { zones: t.zones, bounds, within, maxNodes: HOP_NODES });
+  const look = async () => {
+    const round = (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities ?? [];
+    // (a player by the bot or the village right now: no move this run, the village still free)
+    const player = playerNow(round, await here(ctx), siteFor(villagesOf(ctx.world).sites, line.site)?.area ?? t.area);
+    return { round, player };
+  };
+  const first = await look();
+  if (first.player) return { why: `${first.player}: no villager taken this run`, late: true };
+  const ids = new Set(t.candidates.map(c => c.id));
+  const order = first.round.filter(e => e.name === 'villager' && e.position && ids.has(e.id) && !notFree(e, t.jobs) && inBox(e.position))
     .sort((a, b) => horiz(a.position!, mid) - horiz(b.position!, mid));
-  if (!order.length) return { why: `no unemployed villager the judge allows within ${HOP + 2} of the pickup at ${fmt(p)}` };
+  if (!order.length) return { why: `no unemployed villager the judge allows in the village at ${fmt(line.site)} to bring to the pickup at ${fmt(p)}` };
   const along = line.cells[HEAD.pickup - HEAD.launch - 1] ?? line.cells[0];
-  for (const e of order) {
+  let tried = 0, noWay = '', late = '';
+  for (const e0 of order) {
     aborted(ctx);
-    const at = e.position!;
     // (on the pickup already, its middle: the cart takes it there as it stands)
-    if (horiz(at, mid) <= 0.3) { say(ctx, `the villager (${e.id}) stands on the pickup ${fmt(p)}`); return { e }; }
-    if (!checkLeg(g, { x: at.x, z: at.z, level: at.y }, mid).ok) continue;
-    await ctx.call('goto', { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z), range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    if (horiz(e0.position!, mid) <= 0.3) { say(ctx, `the villager (${e0.id}) stands on the pickup ${fmt(p)}`); return { e: e0 }; }
+    if (tried >= HOP_TRIES) break;
+    await yieldNow();
+    const at0 = e0.position!;
+    if (!footprint(g, at0.x, at0.z, at0.y, false).ok) continue;
+    tried++;
+    const plan0 = route({ x: at0.x, z: at0.z, level: at0.y });
+    if (!plan0.ok) { noWay ||= `from the villager (${e0.id}) at ${fmt(at0)}: ${plan0.why}`; continue; }
+    const need0 = horiz(await here(ctx), at0) / 3 * 1000 + hopMs(legsLength(at0, plan0.legs)) + HOP_FIXED;
+    if (need0 > t.room()) { late ||= `too little of the run left to bring the villager (${e0.id}) ${Math.round(legsLength(at0, plan0.legs))} to the pickup (need ${Math.round(need0 / 1000)} s, ${Math.max(0, Math.round(t.room() / 1000))} s left)`; continue; }
+    await ctx.call('goto', { x: Math.floor(at0.x), y: Math.floor(at0.y), z: Math.floor(at0.z), range: 2, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    // looked at again just before the boat goes down: a player come by, the rain, where the villager is and what it is now
+    const again = await look();
+    if (again.player) return { why: `${again.player}: no villager taken this run`, late: true };
+    const sky = await ctx.status().catch(() => undefined);
+    if (sky?.raining || sky?.thundering) return { why: 'it began to rain: no villager is moved in the rain', late: true };
+    const e = again.round.find(x => x.id === e0.id && x.name === 'villager');
+    if (!e?.position || !inBox(e.position) || notFree(e, t.jobs)) { say(ctx, `the villager (${e0.id}) ${!e?.position ? 'went out of sight' : !inBox(e.position) ? 'wandered out of the village' : notFree(e, t.jobs)}: not taken`); continue; }
     const r = await ctx.call<{ ok: boolean; reason?: string; id?: number; uuid?: string; position?: Pos; tookIt?: boolean }>('vehicle.place', { item: BOAT_ITEM, for: e.id, inVillage: true }, 20_000)
       .catch((x: Error) => ({ ok: false, reason: x.message } as { ok: boolean; reason?: string; id?: number; uuid?: string; position?: Pos; tookIt?: boolean }));
     if (!r.ok || r.id === undefined || !r.uuid) { say(ctx, `the boat did not go down for the villager (${e.id}): ${r.reason ?? 'no reply'}`); continue; }
     const boat: Boat = { id: r.id, uuid: r.uuid };
-    const bp = r.position ?? at;
-    villagesOf(ctx.world).boat = { uuid: r.uuid, at: { x: Math.floor(bp.x), y: Math.floor(bp.y - 0.01), z: Math.floor(bp.z) }, since: now };
+    const bp = r.position ?? e.position;
+    const kept = villagesOf(ctx.world).boat = { uuid: r.uuid, at: { x: Math.floor(bp.x), y: Math.floor(bp.y - 0.01), z: Math.floor(bp.z) }, since: now };
+    ctx.save?.();
     if (!r.tookIt) { await takeBoat(ctx, boat); continue; }
+    // the way from where the boat came down (it is put beside the villager, not on it)
+    const start: BoatAt = { x: bp.x, z: bp.z, level: bp.y };
+    const plan = route(start);
+    if (!plan.ok) {
+      const why = await takeBoat(ctx, boat);
+      if (why) return { why: `the boat with the villager (${e.id}) could not be taken up: ${why}` };
+      say(ctx, `no boat way to the pickup from where the boat came down at ${fmt(bp)}: ${plan.why}; the villager (${e.id}) let out there, the boat taken back up`);
+      noWay ||= `from where the boat came down at ${fmt(bp)}: ${plan.why}`;
+      continue;
+    }
     const m = await ctx.call<{ ok: boolean; reason?: string; controlling?: boolean }>('vehicle.mount', { id: boat.id, uuid: boat.uuid }, 15_000).catch((x: Error) => ({ ok: false, reason: x.message, controlling: false }));
     if (!m.ok || !m.controlling) { await letGo(ctx, boat); continue; }
-    const d = horiz(bp, mid);
-    const ms = Math.max(15_000, Math.round(d / 2 * 1500) + 10_000);
-    const dr = await ctx.call<{ ok: boolean; reason?: string }>('vehicle.drive', { to: mid, within: 0.5, timeoutMs: ms, maxDrop: MAX_DROP, maxOff: 2 }, ms + 15_000).catch((x: Error) => ({ ok: false, reason: x.message }));
+    // the drive, leg by leg; each leg judged again from where the boat is (it stops within a block or so of a turn)
+    const drive = async (to: { x: number; z: number }, within: number): Promise<string | undefined> => {
+      const at = (await ridingOf(ctx))?.position;
+      const ms = driveMs(at ? horiz(at, to) : HOP);
+      const dr = await ctx.call<{ ok: boolean; reason?: string; at?: Pos }>('vehicle.drive', { to, within, timeoutMs: ms, maxDrop: MAX_DROP, maxOff: 2 }, ms + 15_000)
+        .catch((x: Error) => ({ ok: false, reason: x.message, at: undefined }));
+      if (dr.at && Number.isFinite(dr.at.x) && Number.isFinite(dr.at.y) && Number.isFinite(dr.at.z)) kept.at = { x: Math.floor(dr.at.x), y: Math.floor(dr.at.y - 0.01), z: Math.floor(dr.at.z) };
+      return dr.ok ? undefined : `${dr.reason ?? 'no reply'}${dr.at ? ` at ${fmt(dr.at)}` : ''}`;
+    };
+    const legs = async (first: { x: number; z: number }[], to: { x: number; z: number }, end: number): Promise<string | undefined> => {
+      let rest = first, replans = 0;
+      while (rest.length) {
+        aborted(ctx);
+        const at = (await ridingOf(ctx))?.position;
+        if (!at) return 'no longer in the boat';
+        const from: BoatAt = { x: at.x, z: at.z, level: at.y };
+        if (!checkLeg(g, from, rest[0], t.zones).ok) {
+          if (++replans > HOP_REPLANS) return `the way kept failing from ${fmt(at)}`;
+          await yieldNow();
+          const re = route(from, to, end);
+          if (!re.ok) return `no way on from ${fmt(at)}: ${re.why}`;
+          rest = re.legs;
+          continue;
+        }
+        const stop = await drive(rest[0], rest.length === 1 ? end : 1.2);
+        if (stop) return stop;
+        rest = rest.slice(1);
+      }
+      return undefined;
+    };
+    if (plan.legs.length > 1 || horiz(bp, mid) > HOP) say(ctx, `in the boat with the villager (${e.id}) at ${fmt(bp)}: to the pickup ${fmt(p)}, ${Math.round(legsLength(bp, plan.legs))} blocks in ${plan.legs.length} leg(s)`);
+    const stopped = await legs(plan.legs, mid, 0.5);
+    if (stopped) {
+      // back to where the boat came down (where the villager stood, in its village), as far as it goes; let out there
+      say(ctx, `the hop to the pickup stopped: ${stopped}`);
+      const at = (await ridingOf(ctx))?.position;
+      if (at && horiz(at, start) > 2) {
+        const back = route({ x: at.x, z: at.z, level: at.y }, start, 1);
+        const why = back.ok ? await legs(back.legs, start, 1) : back.why;
+        if (why) say(ctx, `the way back to where the boat came down did not hold: ${why}`);
+      }
+      const out = await letGo(ctx, boat);
+      if (!out.taken) return { why: `the hop to the pickup stopped (${stopped})${out.text}` };
+      const drop = { ...kept.at, y: kept.at.y + 1 };
+      const bf = (await boatDrop(ctx, drop)) ? '' : `; its drop not picked up by ${fmt(drop)}`;
+      const why = `the hop to the pickup stopped (${stopped})${out.text.replace(/^; /, ': ')}${bf}`;
+      say(ctx, why);
+      // (no boat for the way into the hall: no other try today)
+      return { why };
+    }
     // out to the side of the line (off the cart's way), the boat broken: the villager stands where it sat
     const dx = Math.sign(p.x - along.x), dz = Math.sign(p.z - along.z);
     await ctx.call('vehicle.dismount', { toward: { x: mid.x - dz * 3, z: mid.z + dx * 3 } }, 15_000).catch(() => undefined);
@@ -1206,17 +1347,22 @@ async function toPickup(ctx: GoalContext, line: RailLine, candidates: readonly S
     if (why) return { why: `the boat with the villager could not be taken up: ${why}` };
     // (broken, but its drop not picked up: stepped by it once; still none, no cart goes for the villager, whose way into
     // the hall at the brake is that boat)
-    if (!(await countsNow(ctx)).get(BOAT_ITEM)) {
-      const bf = { x: Math.floor(bp.x), y: Math.floor(bp.y), z: Math.floor(bp.z) };
-      await ctx.call('goto', { ...bf, range: 1, careful: true, timeoutMs: 10_000 }, 20_000).catch(() => undefined);
-      await pause(600);
-      if (!(await countsNow(ctx)).get(BOAT_ITEM)) return { why: `the boat broken at the pickup did not come back into the pockets (its drop by ${fmt(bf)}): no boat for the way into the hall` };
-    }
-    if (!dr.ok) { say(ctx, `the hop to the pickup stopped: ${dr.reason ?? 'no reply'}`); continue; }
+    const drop = { ...kept.at, y: kept.at.y + 1 };
+    if (!(await boatDrop(ctx, drop))) return { why: `the boat broken at the pickup did not come back into the pockets (its drop by ${fmt(drop)}): no boat for the way into the hall` };
     say(ctx, `the villager (${e.id}) on the pickup ${fmt(p)}`);
     return { e };
   }
+  if (late) return { why: late, late: true };
+  if (noWay) return { why: `no boat way to the pickup at ${fmt(p)} for a villager to take (${tried} tried): ${noWay}` };
   return { why: `no villager could be taken onto the pickup at ${fmt(p)}` };
+}
+
+/** The boat's item back in the pockets once it is broken: its drop stepped by once if not; whether it is. */
+async function boatDrop(ctx: GoalContext, at: Pos): Promise<boolean> {
+  if ((await countsNow(ctx)).get(BOAT_ITEM)) return true;
+  await ctx.call('goto', { ...at, range: 1, careful: true, timeoutMs: 10_000 }, 20_000).catch(() => undefined);
+  await pause(600);
+  return !!(await countsNow(ctx)).get(BOAT_ITEM);
 }
 
 /**
@@ -1230,13 +1376,15 @@ async function boatAtPickup(ctx: GoalContext, line: RailLine): Promise<string | 
   const v = villagesOf(ctx.world);
   const kept = v.boat;
   const mid = { x: line.pickup.x + 0.5, z: line.pickup.z + 0.5 };
-  if (!kept || horiz(kept.at, mid) > HOP + 8) return undefined;
+  if (!kept || !byHop(ctx.world, line, kept.at)) return undefined;
+  // (one a hop left out in the village, away from the pickup: looked for where it was left)
+  if (horiz(await here(ctx), kept.at) > 16) await walkTo(ctx, { ...kept.at, y: kept.at.y + 1 }, 3);
   const round = (await ctx.call<{ entities?: (Seen & { uuid?: string })[] }>('world.entities', { maxDistance: 64 }).catch(() => undefined))?.entities;
   if (!round) return `the boat left at ${fmt(kept.at)} not looked for (nothing read)`;
-  const boats = round.filter(x => /boat$/.test(x.name) && x.position && (x.uuid === kept.uuid || horiz(x.position, mid) <= HOP + 6))
-    .sort((a, b) => (a.uuid === kept.uuid ? -1 : 0) - (b.uuid === kept.uuid ? -1 : 0) || horiz(a.position!, mid) - horiz(b.position!, mid));
+  const boats = round.filter(x => /boat$/.test(x.name) && x.position && (x.uuid === kept.uuid || horiz(x.position, mid) <= HOP + 6 || horiz(x.position, kept.at) <= 6))
+    .sort((a, b) => (a.uuid === kept.uuid ? -1 : 0) - (b.uuid === kept.uuid ? -1 : 0) || horiz(a.position!, kept.at) - horiz(b.position!, kept.at));
   if (!boats.length) {
-    if (horiz(await here(ctx), mid) > 24) return `the boat left at ${fmt(kept.at)} not in sight`;
+    if (horiz(await here(ctx), kept.at) > 24) return `the boat left at ${fmt(kept.at)} not in sight`;
     delete v.boat;
     ctx.save?.();
     say(ctx, `the boat once left at ${fmt(kept.at)} is not there any more: forgotten`);
@@ -1712,7 +1860,7 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
           await walkTo(ctx, p, 3);
           to = 0;
           // (a boat a hop cut short left at the pickup: broken back as the walk comes by it, the villager out in its village)
-          if (!boatTried && villagesOf(ctx.world).boat && horiz(await here(ctx), line.pickup) <= 24) {
+          if (!boatTried && villagesOf(ctx.world).boat && horiz(await here(ctx), line.pickup) <= 24 && byHop(ctx.world, line, villagesOf(ctx.world).boat!.at)) {
             boatTried = true;
             const b = await boatAtPickup(ctx, line);
             if (b) said.push(b);
@@ -1758,7 +1906,7 @@ async function takeUpRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Wo
   if (!line.laid.length && !line.cart && !line.cartAt && !openLeft) {
     // (a boat the hop left at the pickup, not taken back: said with what was left, kept in villages.boat for the status)
     const boat = villagesOf(ctx.world).boat;
-    if (boat && horiz(boat.at, line.pickup) <= HOP + 8) (line.left ??= []).push(`the boat at ${fmt(boat.at)} by the pickup, perhaps with a villager in it`);
+    if (boat && byHop(ctx.world, line, boat.at)) (line.left ??= []).push(`the boat at ${fmt(boat.at)} by the pickup or in the village, perhaps with a villager in it`);
     const left = line.left?.length ? `; left: ${line.left.slice(0, 3).join(', ')}` : '';
     const text = `everything of the line taken back up (${line.why ?? 'given up'})${left}`;
     const w = ctx.world.rails ??= {};

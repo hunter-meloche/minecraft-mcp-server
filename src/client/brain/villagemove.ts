@@ -126,7 +126,7 @@ const fmt = (p: { x: number; y?: number; z: number }) => `(${Math.floor(p.x)}, $
 const idOf = (state: string) => state.replace(/^minecraft:/, '').replace(/\[.*$/, '');
 const pause = (ms: number) => new Promise<void>(res => setTimeout(res, ms));
 /** A turn for everything else waiting (the brain's ticks, the bridge's replies) between searches of whole seconds. */
-const yieldNow = () => new Promise<void>(res => setImmediate(res));
+export const yieldNow = () => new Promise<void>(res => setImmediate(res));
 
 /**
  * How long the boat takes home from `from` along `legs` (pure): at the boat's pace on land, a third more for its turns
@@ -820,9 +820,7 @@ async function moveFrom(ctx: GoalContext, site: VillageSite, clk: Clock): Promis
     Math.min(bounds.x2, Math.floor(target.x) + READ_NEAR), Math.min(bounds.z2, Math.floor(target.z) + READ_NEAR));
   // the way home keeps off every build but its own (a pillager outpost by it is no one's build, but danger: the way home
   // keeps OUTPOST_CLEAR off it, where FROM_ZONES keeps 16 off a build of others)
-  const grow = OUTPOST_CLEAR - FROM_ZONES;
-  const zones = look.zones.filter(z => !v.own.includes(z))
-    .map(z => (v.outposts.includes(z) ? { ...z, x1: z.x1 - grow, z1: z.z1 - grow, x2: z.x2 + grow, z2: z.z2 + grow, y1: z.y1 - grow, y2: z.y2 + grow } : z));
+  const zones = wayZones(look, v);
   const me = await here(ctx);
   const plan = (from: BoatAt) => planRoute(ground, from, entry.out, { zones, bounds, within: 1.5 });
   let chosen: { e: Seen; legs: { x: number; z: number }[] } | undefined;
@@ -979,6 +977,17 @@ function boxOf(ps: { x: number; z: number }[], by: number) {
     x1: Math.floor(Math.min(...ps.map(p => p.x))) - by, z1: Math.floor(Math.min(...ps.map(p => p.z))) - by,
     x2: Math.floor(Math.max(...ps.map(p => p.x))) + by, z2: Math.floor(Math.max(...ps.map(p => p.z))) + by
   };
+}
+
+/**
+ * The zones a boat way out of a village keeps FROM_ZONES off (pure): every build round it but the village's own, a
+ * pillager outpost by it grown so the way keeps OUTPOST_CLEAR off it (no one's build, but danger). The way home's and
+ * the rails' hop to their pickup.
+ */
+export function wayZones(look: Pick<VillageLook, 'zones'>, v: { own: readonly Zone[]; outposts: readonly Zone[] }): Zone[] {
+  const grow = OUTPOST_CLEAR - FROM_ZONES;
+  return look.zones.filter(z => !v.own.includes(z))
+    .map(z => (v.outposts.includes(z) ? { ...z, x1: z.x1 - grow, z1: z.z1 - grow, x2: z.x2 + grow, z2: z.z2 + grow, y1: z.y1 - grow, y2: z.y2 + grow } : z));
 }
 
 interface Trip {
