@@ -339,7 +339,9 @@ function farthest(line: RailLine, home: { x: number; z: number }): number {
  */
 export function railMoveNeedMs(line: RailLine, home: { x: number; z: number }): number {
   const out = Math.max(horiz(line.cells[0], home), (line.cells.length - line.yard) * 0.8);
-  return Math.round(2 * out / 3 * 1000) + LOOK_MS + PICKUP_MS + YARD_MS;
+  // (out at a walk, the look, then what the run itself asks to have left at the village, moveRest: live, Nov 22, a
+  // 351-rail line set out on this estimate's old sum and turned back at the village, "too little of the run left")
+  return Math.round(out / 3 * 1000) + LOOK_MS + moveRest(line, home) + MARGIN;
 }
 
 /**

@@ -11,7 +11,7 @@ import { pick, workTick } from '../../src/client/brain/work.js';
 import { closeUpGoal } from '../../src/client/brain/villagemove.js';
 import { JUDGE_V, peekVillages, type Seen } from '../../src/client/brain/village.js';
 import {
-  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, goalOf, layArgs, outwardSteps, peekLine, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
+  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, goalOf, layArgs, outwardSteps, peekLine, railMoveNeedMs, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
 } from '../../src/client/brain/railshome.js';
 
 /**
@@ -2470,4 +2470,10 @@ test('the move day, an extension left to make, carries an extension\'s rails (EX
   t.true(land.log.some(l => /^craft rail x/.test(l)), land.log.join('\n'));
   t.regex(r.text, /^moved an unemployed villager .* to the hall by the rails home/, land.said.join('\n'));
   t.truthy(line.extended);
+});
+
+test('the move\'s day need (railMoveNeedMs) covers what the run asks to have left at the village (Nov 22: a 351-rail line set out on the old estimate and turned back after a 113 s walk and look, "too little of the run left": 355 s wanted)', t => {
+  const cells = Array.from({ length: 351 }, (_, i) => ({ x: -743 + Math.round(i * 0.55), y: 70, z: 2265 - Math.round(i * 0.25), kind: 'rail' }));
+  const need = railMoveNeedMs({ cells, yard: 5 } as unknown as RailLine, HOME);
+  t.true(need >= 113_000 + 355_000, String(need));
 });
