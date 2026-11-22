@@ -1,7 +1,7 @@
 import { brainRun, type ChestStack, type InventoryItem, type ItemEnchantment } from '../tools.js';
 import { fromGate, no, onHomeLevel, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
-import { better, carriedKit, gearKind, tier, type GearKind } from './kit.js';
+import { better, carriedKit, gearKind, isWorn, tier, type GearKind } from './kit.js';
 import { freeChestTotals, key, kindChests, peekChest, sameStack, storeStackAt, storedStacks, takeFromChests, takeSlot } from './chests.js';
 import { NETHER_HELMET_WANTED, isNetherPiece, netherHelmetPiece, storedNetherHelmets } from './netherset.js';
 // (enchant.ts takes bookOfUse from here: each uses the other's exports inside functions only)
@@ -503,8 +503,14 @@ export function anvilPlan(items: InventoryItem[], stored: { chest: Pos; stack: C
   if (!(cap >= 1)) return undefined;
   const tried = opts.tried ?? {};
   const now = opts.now ?? 0;
+  // the most worn piece's repair comes first, and while the levels are short of it they are kept for it: no other job
+  // spends them meanwhile, but on a piece the kit counts worn out (about to break). Nov 22: the diamond_boots at 15%
+  // (repairCost 31: 35 to mend) refused every Nether trip and the brewing stand's blaze rod, while five repairs of the
+  // fortune pickaxe at 22-28% (cost 4 to 18, first by ANVIL_ORDER) took the bot from level 33 to 4 overnight
+  const waits = repairWaits(items, 0)?.piece;
   const job = (j: Omit<AnvilPlan, 'cap' | 'key'>): AnvilPlan | undefined => {
     const k = pairKey(j.piece, j.add);
+    if (waits && j.piece !== waits && !isWorn(j.piece)) return undefined;
     if (j.cost > cap || leftAlone(tried, k, cap, now) || slotsFor(j) > (opts.free ?? Infinity)) return undefined;
     return { ...j, cap, key: k };
   };

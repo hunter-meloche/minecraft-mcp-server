@@ -566,6 +566,25 @@ test('anvilPlan: the diamonds of a repair from a carried stack with enough, else
   t.is(anvilPlan([{ ...pick, enchanted: false, enchantments: undefined }, { slot: 20, name: 'diamond', count: 64 }], [], 52), undefined);
 });
 
+test('anvilPlan: the most worn piece is mended first, and the levels it is short of are kept for it: no other job spends them, but on a piece about to break', (t) => {
+  // the live kit of Nov 22: the boots at 15% (repairCost 31: four diamonds cost 35), the fortune pickaxe at 25% (3 + 15),
+  // the helmet at 23% (4 + 3), the bot at level 23
+  const boots: InventoryItem = { slot: 36, name: 'diamond_boots', count: 1, enchanted: true, enchantments: en('unbreaking 3, depth_strider 3, protection 4'), damage: 366, maxDamage: 429, repairCost: 31 };
+  const pick: InventoryItem = { slot: 33, name: 'diamond_pickaxe', count: 1, enchanted: true, enchantments: en('fortune 3'), damage: 1170, maxDamage: 1561, repairCost: 15 };
+  const helmet: InventoryItem = { slot: 39, name: 'diamond_helmet', count: 1, enchanted: true, enchantments: en('protection 2'), damage: 278, maxDamage: 363, repairCost: 3 };
+  const gems: InventoryItem = { slot: 20, name: 'diamond', count: 64 };
+  t.is(anvilPlan([boots, pick, helmet, gems], [], 23), undefined);
+  t.is(anvilPlan([boots, pick, helmet, gems], inStore([book(3, 'mending 1')]), 23), undefined, 'nor a book onto another piece');
+  // the boots and the helmet sound: the pickaxe
+  t.like(anvilPlan([{ ...boots, damage: 100 }, pick, { ...helmet, damage: 100 }, gems], [], 23), { job: 'repair', piece: { name: 'diamond_pickaxe' }, cost: 18 });
+  // at 35 the boots themselves, before the pickaxe (first by ANVIL_ORDER) leaves them short again
+  t.like(anvilPlan([boots, pick, helmet, gems], [], 35), { job: 'repair', piece: { name: 'diamond_boots' }, cost: 35 });
+  // a piece about to break (under the kit's 10%) still gets its repair
+  t.like(anvilPlan([boots, { ...pick, damage: 1450 }, helmet, gems], [], 23), { job: 'repair', piece: { name: 'diamond_pickaxe' }, cost: 19 });
+  // the helmet more worn than the pickaxe: the helmet first though the pickaxe comes first by kind
+  t.like(anvilPlan([{ ...boots, damage: 100 }, pick, { ...helmet, damage: 330 }, gems], [], 23), { job: 'repair', piece: { name: 'diamond_helmet' }, cost: 7 });
+});
+
 test('anvilPlan: a pair that gave nothing is left alone a week; one over the cap is tried again once the cap comes up to its cost', (t) => {
   const b = book(3, 'protection 4');
   const k = pairKey(CHESTPLATE, b);
