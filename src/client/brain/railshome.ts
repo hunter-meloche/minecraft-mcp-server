@@ -68,9 +68,12 @@ export const MOVE_TRIES = 3;
 export const MISSES = 4;
 /**
  * A free word on the village seen whole this recently holds on a move day whose look saw only part of it (freshFree):
- * the move day's run has the time for one or two viewpoints at most once out along the line.
+ * the move day's run has the time for one or two viewpoints at most once out along the line. A day (live, Nov 22: at 6 h
+ * the look-only days and the move days took turns, a look seeing 114 of 121 chunks a wait, and the move slipped a
+ * run each time; the user's of Nov 20, "the bot doesn't need to be this careful"); the partial look still stops the
+ * move for a player by or a villager named.
  */
-export const FRESH_FREE = 6 * 60 * 60_000;
+export const FRESH_FREE = 24 * 60 * 60_000;
 /** Runs a block of the line would not be reached for the take-up (not loaded, out of reach) before it is left, said. */
 export const UP_TRIES = 3;
 
