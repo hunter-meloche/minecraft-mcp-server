@@ -55,7 +55,7 @@ import {
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 /** The job's whole budget: a line older than this (planned a real day ago, laid or not) is given up and taken up. */
-export const MAX_AGE = 24 * HOUR;
+export const MAX_AGE = 72 * HOUR;
 /** Runs in a row stopped by something unexpected on the line (a cell not as read, a player near) before it is given up. */
 export const STOPS = 2;
 /** Tries at getting the villager into the cart (it wanders off the pickup, the cart misses it). */
