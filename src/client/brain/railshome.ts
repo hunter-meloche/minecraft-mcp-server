@@ -87,7 +87,9 @@ const WALK_EVERY = 24;
 const LEG = 48;
 /** What the look round the village needs, and the pickup's hop and the cart's start. */
 const LOOK_MS = 60_000;
-const PICKUP_MS = 60_000;
+// (90 s: live, Nov 22, a villager 42 off the pickup needed a 62 s hop, 58 s left; the move day's look is made in
+// passing on the way out, so its LOOK_MS is not in the move's day need: the time is the hop's)
+const PICKUP_MS = 90_000;
 /** Of the move's time at the village, what the cart's start is kept (the hop to the pickup may take the rest of the run). */
 const CART_MS = 30_000;
 /** The boat's part in the yard, and the yard's stretch laid and the post opened before the move goes out. */
@@ -344,7 +346,7 @@ export function railMoveNeedMs(line: RailLine, home: { x: number; z: number }): 
   const out = Math.max(horiz(line.cells[0], home), (line.cells.length - line.yard) * 0.8);
   // (out at a walk, the look, then what the run itself asks to have left at the village, moveRest: live, Nov 22, a
   // 351-rail line set out on this estimate's old sum and turned back at the village, "too little of the run left")
-  return Math.round(out / 3 * 1000) + LOOK_MS + moveRest(line, home) + MARGIN;
+  return Math.round(out / 3 * 1000) + moveRest(line, home) + MARGIN;
 }
 
 /**

@@ -1248,7 +1248,7 @@ test('no villager the judge allows anywhere in the village on a move day is a mi
 
 /** A village that reaches 80 west of its bell (beds out there): the scans from the line's end see only part of it. */
 /** A run set out near dusk: at the line's end it has the time for the move, not for a walk round the village. */
-const BUDGET_TIGHT = 6 * MINUTE;
+const BUDGET_TIGHT = 6.5 * MINUTE;
 const wideVillage = (land: Field) => {
   land.marks.push({ name: 'white_bed', at: { x: -650, y: 63, z: 2040 } }, { name: 'white_bed', at: { x: -650, y: 63, z: 1960 } });
 };
@@ -2491,4 +2491,10 @@ test('the move day carries no extension\'s rails into the last free slots (Nov 2
   for (let slot = 0; slot < 36 && land.items.filter(i => i.slot < 36).length < 31; slot++) if (!used.has(slot)) land.items.push({ slot, name: 'diorite', count: 1 });
   await run(land, 'move', 20 * MINUTE);
   t.false(land.log.some(l => /^craft rail x/.test(l)), land.log.join('\n'));
+});
+
+test('the move\'s day need of a 375-rail line still fits one game day\'s daylight (600 s), with 90 s for the hop (Nov 22: a 62 s hop, 58 s left)', t => {
+  const cells = Array.from({ length: 375 }, (_, i) => ({ x: -743 + Math.round(i * 0.55), y: 70, z: 2253 - Math.round(i * 0.2), kind: 'rail' }));
+  const need = railMoveNeedMs({ cells, yard: 5 } as unknown as RailLine, HOME);
+  t.true(need < 560_000, String(need));
 });
