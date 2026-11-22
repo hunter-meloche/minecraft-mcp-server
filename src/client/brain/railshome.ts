@@ -1788,8 +1788,13 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
 
 // ------------------------------------------------------------------------------------------------ the extension
 
-/** At most this many extensions of one line (the villagers wander uphill again: the existing misses then). */
-export const EXTENSIONS = 2;
+/**
+ * At most this many extensions of one line (the villagers wander uphill again: the existing misses then). Live, Nov 22:
+ * the west village's villagers wandered off from each of two extensions' pickups by the move day; with an extension's
+ * rails carried on the move day (EXT_CARRY), each further one is laid to a villager where it stands and the move made
+ * in the same run.
+ */
+export const EXTENSIONS = 5;
 /** Cobblestone the move takes out for an extension's fills, as the chests give it. */
 const EARTH_CARRY = 24;
 /** An extension's rails the move carries while one is left to make (most of a 64-rail extension; the rest from the bill). */
