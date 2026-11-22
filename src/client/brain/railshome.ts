@@ -1284,6 +1284,10 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   if (short) return { gain: 0, text: `not setting out on the move: short of ${short}`, untried: true };
   // (some cobblestone for an extension's fills, if one is left to make: as much as the chests give, never a reason to stay)
   if ((line.extended?.times ?? 0) < EXTENSIONS && ctx.rails?.cut) await prepare(ctx, 'cobblestone', EARTH_CARRY).catch(() => undefined);
+  // (and an extension's rails, as far as the chests and the crafting give them, never a reason to stay: live, Nov 22,
+  // the extension planned on the move day was laid on the next run, and by the move day after the villager it was laid
+  // to had wandered off; carried, it is laid and the move made in the one run, the villager still where it stood)
+  if ((line.extended?.times ?? 0) < EXTENSIONS) for (const [item, n] of Object.entries(EXT_CARRY)) await prepare(ctx, item, n).catch(() => undefined);
   // fed for the day out (the food goal, survival, would cut the move with the villager in the cart)
   const ride = FOOD_TARGET + CHEST_SPARE;
   let fed = readyFoodPoints(await countsNow(ctx));
@@ -1779,6 +1783,8 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
 export const EXTENSIONS = 2;
 /** Cobblestone the move takes out for an extension's fills, as the chests give it. */
 const EARTH_CARRY = 24;
+/** An extension's rails the move carries while one is left to make (most of a 64-rail extension; the rest from the bill). */
+export const EXT_CARRY: Readonly<Record<string, number>> = { rail: 64, powered_rail: 8, redstone_torch: 8 };
 /** The extension's search: the box round the village's area and the line's far end, and its size. */
 const EXT_ROOM = 8;
 const EXT_NODES = 150_000;

@@ -2458,3 +2458,16 @@ test('a cart put down whose reply timed out and that shows only after the first 
   t.is(land.cart, undefined);
   t.is(peekLine(world), undefined);
 });
+
+test('the move day, an extension left to make, carries an extension\'s rails (EXT_CARRY, made from the iron and gold carried): the extension it plans is laid and the move made in that one run (Nov 22: laid a run later, the villager had wandered off)', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  hillside(land);
+  uphill(land);
+  land.items.push({ slot: 20, name: 'iron_ingot', count: 64 }, { slot: 21, name: 'gold_ingot', count: 64 }, { slot: 22, name: 'redstone', count: 64 }, { slot: 23, name: 'stick', count: 64 });
+  const r = await run(land, 'move', 20 * MINUTE);
+  t.true(land.log.some(l => /^craft rail x/.test(l)), land.log.join('\n'));
+  t.regex(r.text, /^moved an unemployed villager .* to the hall by the rails home/, land.said.join('\n'));
+  t.truthy(line.extended);
+});
