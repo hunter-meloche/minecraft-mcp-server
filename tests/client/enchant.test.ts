@@ -329,6 +329,24 @@ test('enchant: no book while a worn piece\'s repair waits on more levels than th
   t.like(bookFor(at45(sound, { xpLevel: 33 }), world), { from: 'made' });
 });
 
+test('enchant: no plain piece at the table while a worn piece\'s repair waits, at its level too (the anvil\'s first)', (t) => {
+  const world = booksWorld();
+  // the live kit of Nov 22: the diamond_boots at 5% (repairCost 31: four diamonds cost 35), the plain spare pair the
+  // kit took for them carried, and a plain pickaxe; the table took the pickaxe at 30 and would have taken the spare
+  const worn = allDone().map(i => (i.slot === 36 ? { ...i, damage: 409, maxDamage: 429, repairCost: 31 } : i));
+  const kit = [...worn, { slot: 26, name: 'diamond_boots', count: 1 }, { slot: 5, name: 'diamond_pickaxe', count: 1, damage: 900, maxDamage: 1561 }];
+  t.is(repairWaits(kit, 30)?.cost, 35);
+  t.is(enchantGoal.wants(at45(kit, { xpLevel: 30 }), world), null);
+  // at 35 the anvil can pay it, and the table still keeps off: first in the brain's list, its 3 would set it back
+  t.is(enchantGoal.wants(at45(kit, { xpLevel: 35 }), world), null);
+  // mended, the table has the pickaxe again (and the spare pair is the chests', beside a sound enchanted one)
+  const mended = kit.map(i => (i.slot === 36 ? { ...i, damage: 0, repairCost: 63 } : i));
+  t.is(enchantGoal.wants(at45(mended, { xpLevel: 30 }), world), 'level 30: enchant the diamond_pickaxe');
+  // a repair past the anvil's 39 waits on nothing: the table goes on
+  const dear = kit.map(i => (i.slot === 36 ? { ...i, repairCost: 63 } : i));
+  t.regex(enchantGoal.wants(at45(dear, { xpLevel: 30 }), world) ?? '', /enchant the diamond_pickaxe/);
+});
+
 test('enchant: books are kept to 6 the anvil has a use for, and 24 in all; one whose stack memory lost counts as of use', (t) => {
   const useful = ['protection 4', 'mending 1', 'efficiency 5', 'sharpness 5', 'feather_falling 4', 'respiration 3'].map((e, i) => book(i, e));
   t.like(booksStored(at45(allDone()), booksWorld(bookChests({ misc: useful }))), { all: 6, ofUse: 6 });

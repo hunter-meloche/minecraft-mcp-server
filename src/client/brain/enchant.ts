@@ -110,10 +110,18 @@ export function enchantPick(items: InventoryItem[], free: number): InventoryItem
  */
 const freeFor = (s: Snapshot) => 36 - s.slotsUsed - ((s.counts.get('lapis_lazuli') ?? 0) < 3 ? 1 : 0) - ROOM.yard;
 
-/** The next piece, where the pockets leave room for it (freeFor). */
+/**
+ * The next piece, where the pockets leave room for it (freeFor); none while a worn piece's diamond repair waits
+ * (anvil.ts repairWaits at level 0: due, dear or cheap), as the books wait for it (bookFor): its levels come first. The
+ * table's 3 a piece set it back every time, and at the repair's level the table, first in the brain's list at 31,
+ * would take them before the anvil did. Nov 22: the diamond_boots (protection 4, repairCost 31) at 7% waited on 35
+ * levels, every Nether trip and the brewing stand's blaze rod with them, while the table enchanted a plain pickaxe at
+ * 30, and the plain spare boots the kit took for the worn pair were next (outranked by the worn pair's 10 levels: the
+ * Guardian would never have worn them).
+ */
 const pickFor = (s: Snapshot) => {
   const free = freeFor(s);
-  return free < 0 ? undefined : enchantPick(s.items, free);
+  return free < 0 || repairWaits(s.items, 0) ? undefined : enchantPick(s.items, free);
 };
 
 /**
@@ -140,7 +148,7 @@ export const enchantGoal: Goal = {
     const piece = pickFor(s);
     if (piece) return `level ${s.xpLevel}: enchant the ${piece.name}${wornSlot(piece) ? ' (worn)' : ''}`;
     // the Nether helmet before any book: the user's "prioritize getting fire resistance gear for nether"
-    const nether = netherTableJob(s, world);
+    const nether = repairWaits(s.items, 0) ? undefined : netherTableJob(s, world);
     if (nether) return `level ${s.xpLevel}: enchant the nether ${nether.name} (fire protection)`;
     const book = bookFor(s, world);
     return book ? `level ${s.xpLevel}: enchant a book (${book.ofUse} of use in store, keeps ${BOOK_STOCK})` : null;
@@ -154,7 +162,7 @@ export const enchantGoal: Goal = {
     const piece = pickFor(ctx.s);
     // every piece done: the Nether helmet, else a book for the anvil (anvil.ts), if one is wanted
     if (!piece) {
-      const nether = netherTableJob(ctx.s, ctx.world);
+      const nether = repairWaits(ctx.s.items, 0) ? undefined : netherTableJob(ctx.s, ctx.world);
       return nether ? enchantNetherPiece(ctx, table, nether) : enchantBook(ctx, table);
     }
     if ((ctx.s.counts.get('lapis_lazuli') ?? 0) < 3) await takeFromChests(ctx, 'lapis_lazuli', 16);
