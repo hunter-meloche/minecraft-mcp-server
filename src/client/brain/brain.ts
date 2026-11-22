@@ -19,7 +19,7 @@ import { signsGoal } from './signs.js';
 import { driftGoal, structureGoal } from '../structures/job.js';
 import { StructureStore } from '../structures/store.js';
 import { compile } from '../structures/format.js';
-import { structureSiteBoxes } from '../structures/site.js';
+import { builtColumns, structureSiteBoxes } from '../structures/site.js';
 import { LoopWatch, sameResult, type Outcome, type Run } from './loops.js';
 import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally, tallyRoll, todayLine, type IdleCause } from './idlelog.js';
 
@@ -639,7 +639,7 @@ export class Brain {
     if (!world.id) return [];
     const id = world.id;
     return structureSiteBoxes(this.structures.listStructures(id).map(n => { try { return this.structures.loadStructure(id, n); } catch { return undefined; } }),
-      s => compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0).box);
+      s => { const c = compile(this.structures.designOf(s), s.anchor, s.rotation ?? 0); return { ...c.box, cols: builtColumns(c.cells) }; });
   }
 
 

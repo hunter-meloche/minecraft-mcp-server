@@ -2,7 +2,7 @@ import test from 'ava';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { columns, keptSites, rankSites, siteMap, structureSiteBoxes } from '../../src/client/structures/site.js';
+import { builtColumns, columns, keptSites, rankSites, siteMap, structureSiteBoxes } from '../../src/client/structures/site.js';
 import { StructureStore } from '../../src/client/structures/store.js';
 import { driftGoal } from '../../src/client/structures/job.js';
 import type { Design } from '../../src/client/structures/format.js';
@@ -125,4 +125,28 @@ test('structureSiteBoxes: a storage house that is home storage keeps its box; on
   t.deepEqual(structureSiteBoxes(all, s => s.b), [{ x: -563, z: 2189, width: 11, length: 9 }, { x: -542, z: 2175, width: 5, length: 5 }]);
   // a lone storage house (no other build in the world yet) keeps its box too
   t.deepEqual(structureSiteBoxes([all[1]], s => s.b), [{ x: -563, z: 2189, width: 11, length: 9 }]);
+});
+
+test('structureSiteBoxes: a sparse build (a path, a lamp walk) keeps its columns, not its box', (t) => {
+  // 2026-11-22: paths-north's box (23x95, 7% built) and lamp-walk's (31x17, 11%) took nearly the whole yard, and
+  // structure-site found no spot inside it even for a 5x5
+  const path = { name: 'paths-north', homeStorage: false, b: { x: 0, z: 0, width: 20, length: 20 }, cells: [] as { at: { x: number; y: number; z: number }; want: string }[] };
+  for (let z = 0; z < 20; z++) path.cells.push({ at: { x: 10, y: 62, z }, want: 'cobblestone' }, { at: { x: 10, y: 63, z }, want: 'air' });
+  path.cells.push({ at: { x: 10, y: 63, z: 5 }, want: 'oak_fence' }, { at: { x: 3, y: 63, z: 3 }, want: 'air' });
+  const hut = { name: 'hut', homeStorage: false, b: { x: 30, z: 0, width: 3, length: 3 }, cells: [] as typeof path.cells };
+  for (let z = 0; z < 3; z++) for (let x = 0; x < 3; x++) hut.cells.push({ at: { x: 30 + x, y: 62, z }, want: x === 1 && z === 1 ? 'air' : 'oak_planks' });
+  const boxes = structureSiteBoxes([path, hut], s => ({ ...s.b, cols: builtColumns(s.cells) }));
+  // the path: its 20 cells (the fence post's column once, no air column); the hut (8 of 9 built) its box
+  t.is(boxes.length, 21);
+  t.deepEqual(boxes.slice(0, 20), Array.from({ length: 20 }, (_, z) => ({ x: 10, z, width: 1, length: 1 })));
+  t.deepEqual(boxes[20], { x: 30, z: 0, width: 3, length: 3 });
+  // a 5x5 by the path is now found: its whole box no longer kept off
+  const area = { x: 0, y: 61, z: 0, width: 20, height: 3, length: 20 };
+  const b: string[] = new Array(20 * 3 * 20).fill('air');
+  for (let z = 0; z < 20; z++) for (let x = 0; x < 20; x++) b[x + z * 20] = 'stone';
+  for (let z = 0; z < 20; z++) for (let x = 0; x < 20; x++) b[x + z * 20 + 400] = x === 10 ? 'cobblestone' : 'grass_block';
+  const picks = rankSites(area, b, 5, 5, { avoid: boxes, clearance: 1 });
+  t.true(picks.length > 0);
+  t.true(picks.every(p => p.anchor.x + 5 + 1 <= 10 || p.anchor.x - 1 > 10));
+  t.is(rankSites(area, b, 5, 5, { avoid: [path.b], clearance: 1 }).length, 0);
 });

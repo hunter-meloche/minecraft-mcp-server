@@ -60,18 +60,37 @@ export function keptSites(mem?: {
  * keeps its own box. A whole homestead is a homeStorage record whose box holds another build's whole box: homeStorage
  * alone is not enough, as a storage house is home storage too (storehouse2, 2026-11-16), and skipped, later builds
  * could be sited on top of it. A structure that won't compile has no box.
+ *
+ * A sparse build (its built columns, when `boxOf` gives them, under SPARSE of its box) keeps its columns, not its box:
+ * a path or a lamp walk lies across the yard. On 2026-11-22 paths-north's box (23x95, 7% of it built) and lamp-walk's
+ * (31x17, 11%) took nearly the whole yard, and structure-site found no spot inside it for a 5x5; the smithy was sited
+ * by hand. The column check sees the paths' own cobblestone as built ground too.
  */
-export function structureSiteBoxes<S extends { homeStorage?: boolean }>(structures: (S | null | undefined)[], boxOf: (s: S) => Rect): Rect[] {
-  const boxes: { s: S; b: Rect }[] = [];
+export function structureSiteBoxes<S extends { homeStorage?: boolean }>(structures: (S | null | undefined)[], boxOf: (s: S) => Rect & { cols?: { x: number; z: number }[] }): Rect[] {
+  const boxes: { s: S; b: Rect; cols?: { x: number; z: number }[] }[] = [];
   for (const s of structures) {
     if (!s) continue;
     try {
       const b = boxOf(s);
-      boxes.push({ s, b: { x: b.x, z: b.z, width: b.width, length: b.length } });
+      boxes.push({ s, b: { x: b.x, z: b.z, width: b.width, length: b.length }, cols: b.cols });
     } catch { /* no box */ }
   }
   const holds = (a: Rect, b: Rect) => a !== b && b.x >= a.x && b.z >= a.z && b.x + b.width <= a.x + a.width && b.z + b.length <= a.z + a.length;
-  return boxes.filter(({ s, b }) => !(s.homeStorage && boxes.some(o => !o.s.homeStorage && holds(b, o.b)))).map(({ b }) => b);
+  return boxes.filter(({ s, b }) => !(s.homeStorage && boxes.some(o => !o.s.homeStorage && holds(b, o.b))))
+    .flatMap(({ b, cols }) => {
+      if (!cols || cols.length >= SPARSE * b.width * b.length) return [b];
+      return cols.map(c => ({ x: c.x, z: c.z, width: 1, length: 1 }));
+    });
+}
+
+/** Under this share of its box's columns built, a build is sparse (a path, a lamp walk): its columns keep the site search off, not its box. */
+export const SPARSE = 0.2;
+
+/** The built columns of a compiled structure (its cells but air), each once, for structureSiteBoxes. */
+export function builtColumns(cells: { at: { x: number; z: number }; want: string }[]): { x: number; z: number }[] {
+  const seen = new Map<string, { x: number; z: number }>();
+  for (const c of cells) if (!/(^|:)(cave_|void_)?air(\[|$)/.test(c.want)) seen.set(`${c.at.x},${c.at.z}`, { x: c.at.x, z: c.at.z });
+  return [...seen.values()];
 }
 
 const name = (s: string | null | undefined) => (s ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');

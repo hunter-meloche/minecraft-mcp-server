@@ -13,7 +13,7 @@ import { StructureStore } from './store.js';
 import { jobsOf, jobText, queueJob } from './job.js';
 import { importChanges, importDesign } from './importer.js';
 import { readBox } from '../brain/milestones.js';
-import { keptSites, rankSites, siteMap, structureSiteBoxes } from './site.js';
+import { builtColumns, keptSites, rankSites, siteMap, structureSiteBoxes } from './site.js';
 import { tidyBox } from './tidy.js';
 import { Voxels } from './terraslicer/world.js';
 import { slice, type Toolpath } from './terraslicer/slicer.js';
@@ -389,7 +389,10 @@ export function registerStructureTools(factory: ToolFactory, rt: ClientRuntime, 
         const blocks = await readBox(rt, area);
         const w = await world();
         const avoid = [
-          ...structureSiteBoxes(store.listStructures(w).map(n => store.loadStructure(w, n)), s => compile(designOf(s.design), s.anchor, s.rotation ?? 0).box),
+          ...structureSiteBoxes(store.listStructures(w).map(n => store.loadStructure(w, n)), s => {
+            const c = compile(designOf(s.design), s.anchor, s.rotation ?? 0);
+            return { ...c.box, cols: builtColumns(c.cells) };
+          }),
           ...keptSites(mem)
         ];
         const picks = rankSites(area, blocks, c0.box.width, c0.box.length, { near: centre, yard: mem?.yard, where, avoid, count });
