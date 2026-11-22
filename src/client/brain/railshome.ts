@@ -603,6 +603,13 @@ export function billLeft(line: RailLine): Record<string, number> {
   return bill;
 }
 
+/** The pocket slots in use now (of 36). */
+const slotsNow = async (ctx: GoalContext): Promise<number> => {
+  const inv = await ctx.call<{ items?: { name: string; count: number; slot?: number }[] }>('inventory').catch(() => undefined);
+  return (inv?.items ?? ctx.s.items).filter(it => (it.slot ?? 0) < 36).length;
+};
+/** The pocket slots the move day keeps free as it carries an extension's rails (the stash cuts any run short at 36). */
+const EXT_FREE = 6;
 const countsNow = async (ctx: GoalContext): Promise<Map<string, number>> => {
   const inv = await ctx.call<{ items?: { name: string; count: number; slot?: number }[] }>('inventory').catch(() => undefined);
   const m = new Map<string, number>();
@@ -1296,7 +1303,14 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   // (and an extension's rails, as far as the chests and the crafting give them, never a reason to stay: live, Nov 22,
   // the extension planned on the move day was laid on the next run, and by the move day after the villager it was laid
   // to had wandered off; carried, it is laid and the move made in the one run, the villager still where it stood)
-  if ((line.extended?.times ?? 0) < EXTENSIONS) for (const [item, n] of Object.entries(EXT_CARRY)) await prepare(ctx, item, n).catch(() => undefined);
+  // (only while the pockets keep EXT_FREE slots free, the crafting's leftovers counted: live, Nov 22, the carry filled
+  // all 36 and the stash cut the move short three times running, putting the rails away each time)
+  if ((line.extended?.times ?? 0) < EXTENSIONS) {
+    for (const [item, n] of Object.entries(EXT_CARRY)) {
+      if (await slotsNow(ctx) > 36 - EXT_FREE) break;
+      await prepare(ctx, item, n).catch(() => undefined);
+    }
+  }
   // fed for the day out (the food goal, survival, would cut the move with the villager in the cart)
   const ride = FOOD_TARGET + CHEST_SPARE;
   let fed = readyFoodPoints(await countsNow(ctx));

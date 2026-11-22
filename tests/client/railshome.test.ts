@@ -2481,3 +2481,14 @@ test('the move\'s day need (railMoveNeedMs) covers what the run asks to have lef
 test('the rails rung brings itself home (backPace): its day budget is not cut by a walk back besides (Nov 22: the 351-rail move turned back at the village twice, 72 s short)', t => {
   t.is(railsTask.backPace, 3);
 });
+
+test('the move day carries no extension\'s rails into the last free slots (Nov 22: the carry filled all 36, the stash cut the move short three times)', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  land.items.push({ slot: 20, name: 'iron_ingot', count: 64 }, { slot: 21, name: 'gold_ingot', count: 64 }, { slot: 22, name: 'redstone', count: 64 }, { slot: 23, name: 'stick', count: 64 });
+  const used = new Set(land.items.map(i => i.slot));
+  for (let slot = 0; slot < 36 && land.items.filter(i => i.slot < 36).length < 31; slot++) if (!used.has(slot)) land.items.push({ slot, name: 'diorite', count: 1 });
+  await run(land, 'move', 20 * MINUTE);
+  t.false(land.log.some(l => /^craft rail x/.test(l)), land.log.join('\n'));
+});
