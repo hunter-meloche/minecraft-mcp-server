@@ -396,6 +396,10 @@ export const railsTask: WorkTask = {
   reach: 'far',
   room: 'trip',
   budgetMs: 12 * MINUTE,
+  // (every run keeps its own way home in its clock, the move's home behind the cart (moveRest), the laying's keep(p):
+  // the day's budget is not cut by a walk back besides. Live, Nov 22: the 351-rail move turned back at the village
+  // twice, 72 s short, the walk home counted twice)
+  backPace: 3,
   variants: (s, world) => {
     const line = peekLine(world);
     if (!line) return [];

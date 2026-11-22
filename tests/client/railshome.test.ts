@@ -2477,3 +2477,7 @@ test('the move\'s day need (railMoveNeedMs) covers what the run asks to have lef
   const need = railMoveNeedMs({ cells, yard: 5 } as unknown as RailLine, HOME);
   t.true(need >= 113_000 + 355_000, String(need));
 });
+
+test('the rails rung brings itself home (backPace): its day budget is not cut by a walk back besides (Nov 22: the 351-rail move turned back at the village twice, 72 s short)', t => {
+  t.is(railsTask.backPace, 3);
+});
