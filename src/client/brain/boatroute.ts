@@ -158,6 +158,16 @@ export class Ground {
     const col = this.cols.get(this.key(x, z));
     return col && y >= this.y0 && y < this.y0 + this.height ? col[y - this.y0] : undefined;
   }
+  /** Every column read, for a debug record (railshome.ts: a failed extension's ground, replayed offline by fromDump). */
+  dump(): { y0: number; height: number; cols: Record<string, (string | null)[]> } {
+    return { y0: this.y0, height: this.height, cols: Object.fromEntries(this.cols) };
+  }
+  /** The ground of a debug record (dump). */
+  static fromDump(d: { y0: number; height: number; cols: Record<string, (string | null)[]> }): Ground {
+    const g = new Ground(d.y0, d.height);
+    for (const [k, col] of Object.entries(d.cols)) g.cols.set(k, col);
+    return g;
+  }
   /** A column read whole (no unloaded block in it). */
   has(x: number, z: number): boolean {
     const col = this.cols.get(this.key(x, z));

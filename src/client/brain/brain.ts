@@ -927,7 +927,18 @@ export class Brain {
       builds: () => this.structureBoxes(world),
       rails: this.rt.rails,
       // (a restart mid-run never reaches the run's save: what a run must keep through one it saves at once)
-      save: () => this.measure('save', () => this.memory.save())
+      save: () => this.measure('save', () => this.memory.save()),
+      dump: (name, data) => {
+        if (!this.opts.logFile) return;
+        try {
+          const dir = path.join(path.dirname(this.opts.logFile), 'rails-debug');
+          fs.mkdirSync(dir, { recursive: true });
+          // (the last few kept: one a failed move day)
+          const old = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
+          for (const f of old.slice(0, Math.max(0, old.length - 5))) fs.rmSync(path.join(dir, f), { force: true });
+          fs.writeFileSync(path.join(dir, `${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}-${name}.json`), JSON.stringify(data));
+        } catch { /* a debug record only */ }
+      }
     };
     this.note(`start ${goal.name}: ${reason}`);
     // a rung of the work queue: why each rung above it did not run instead, from the answers this choice was made by

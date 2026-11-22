@@ -1990,7 +1990,10 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   if (!yard) return notToday(ctx, line, `${hopWhy}; the line not extended: no yard known`, true);
   const area = joinAreas(line.area, v.area);
   await yieldNow();
-  const r = extensionFor(line, g, { noWay: reach.noWay, order: reach.order, look, v, area, yard, earth: !!ctx.rails?.cut && !!ctx.rails?.restore });
+  const ext = { noWay: reach.noWay, order: reach.order, look, v, area, yard, earth: !!ctx.rails?.cut && !!ctx.rails?.restore };
+  const r = extensionFor(line, g, ext);
+  // (a failed plan's inputs and ground kept beside brain.log, for a replay offline)
+  if (!r.ok) ctx.dump?.('extension', { why: r.why, line, ext, ground: g.dump() });
   if (!r.ok) return notToday(ctx, line, `${hopWhy}; and no extension of the line into the village: ${r.why}`, true);
   const from = line.cells[r.skip];
   applyExtension(line, r, area, clk.now());

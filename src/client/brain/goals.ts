@@ -83,6 +83,8 @@ export interface GoalContext {
    * through a restart mid-run, as the rails home's of every block it puts down (railshome.ts); none in a test
    */
   save?: () => void;
+  /** A debug record written beside brain.log (rails-debug/<name>.json): a failed plan's inputs, for a replay offline; none in a test. */
+  dump?: (name: string, data: unknown) => void;
 }
 
 /**

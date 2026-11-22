@@ -365,3 +365,14 @@ test('an extension of a line into the village (Nov 21): a new head by a villager
   t.false(no.ok);
   if (!no.ok) t.regex(no.why, /^no rails way to the line's end at \(-556, 63, 1995\)/);
 });
+
+test('a Ground dumped for a debug record reads back the same', t => {
+  const g = new Ground(60, 10);
+  g.set(1, 62, 2, 'minecraft:stone');
+  g.set(1, 63, 2, 'minecraft:air');
+  const back = Ground.fromDump(JSON.parse(JSON.stringify(g.dump())) as ReturnType<Ground['dump']>);
+  t.is(back.state(1, 62, 2), 'minecraft:stone');
+  t.is(back.state(1, 63, 2), 'minecraft:air');
+  t.is(back.state(1, 61, 2), null);
+  t.is(back.state(5, 62, 5), undefined);
+});
