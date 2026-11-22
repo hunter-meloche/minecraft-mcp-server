@@ -585,6 +585,25 @@ test('anvilPlan: the most worn piece is mended first, and the levels it is short
   t.like(anvilPlan([{ ...boots, damage: 100 }, pick, { ...helmet, damage: 330 }, gems], [], 23), { job: 'repair', piece: { name: 'diamond_helmet' }, cost: 7 });
 });
 
+test('anvilPlan: the worn boots under the kit\'s 10% are still the ones mended, with a plain spare pair carried; the table\'s hold gives way to their repair', (t) => {
+  // the live kit of Nov 22 17:30: the enchanted boots worn at 9% (repairCost 31: 35 to mend), a plain pair the kit took
+  // from the chests in a pocket (the kit's best boots now, sound), the bot at level 27
+  const boots: InventoryItem = { slot: 36, name: 'diamond_boots', count: 1, enchanted: true, enchantments: en('unbreaking 3, protection 4, depth_strider 3'), damage: 389, maxDamage: 429, repairCost: 31 };
+  const spare: InventoryItem = { slot: 26, name: 'diamond_boots', count: 1, damage: 0, maxDamage: 429 };
+  const pick: InventoryItem = { slot: 33, name: 'diamond_pickaxe', count: 1, enchanted: true, enchantments: en('fortune 3'), damage: 1170, maxDamage: 1561, repairCost: 15 };
+  const gems: InventoryItem = { slot: 20, name: 'diamond', count: 64 };
+  const kit = [boots, spare, pick, gems];
+  // the levels are kept for the boots: nothing for the pickaxe at 27
+  t.is(anvilPlan(kit, [], 27), undefined);
+  // at 35 the boots, though the plain pair waits for the table (its hold would cap the anvil at 35 - 30)
+  t.is(costCap(kit, 35), 35);
+  t.like(anvilPlan(kit, [], 35), { job: 'repair', piece: { slot: 36, name: 'diamond_boots' }, cost: 35 });
+  // once they are mended the plain pair is a spare for the chests, not the table's: no hold either
+  t.is(costCap([{ ...boots, damage: 0 }, spare, gems], 35), 35);
+  // a spent pair worn (repairCost 63) is no subject: the spare is the kit's, and the hold stands
+  t.is(costCap([{ ...boots, repairCost: 63 }, spare, gems], 35), 5);
+});
+
 test('anvilPlan: a pair that gave nothing is left alone a week; one over the cap is tried again once the cap comes up to its cost', (t) => {
   const b = book(3, 'protection 4');
   const k = pairKey(CHESTPLATE, b);

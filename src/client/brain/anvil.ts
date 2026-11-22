@@ -1,7 +1,7 @@
 import { brainRun, type ChestStack, type InventoryItem, type ItemEnchantment } from '../tools.js';
 import { fromGate, no, onHomeLevel, outsideBy, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
-import { better, carriedKit, gearKind, isWorn, tier, type GearKind } from './kit.js';
+import { better, carriedKit, gearKind, isWorn, spent, tier, type GearKind } from './kit.js';
 import { freeChestTotals, key, kindChests, peekChest, sameStack, storeStackAt, storedStacks, takeFromChests, takeSlot } from './chests.js';
 import { NETHER_HELMET_WANTED, isNetherPiece, netherHelmetPiece, storedNetherHelmets } from './netherset.js';
 // (enchant.ts takes bookOfUse from here: each uses the other's exports inside functions only)
@@ -293,7 +293,10 @@ export const TABLE_LEVEL = 30;
  * dearest offer wants: the table puts three or four enchantments on for 3 levels, more than any one book does.
  */
 export function costCap(items: InventoryItem[], xpLevel: number): number {
-  return Math.min(ANVIL_MAX_COST, xpLevel, plainLeft(items) ? xpLevel - TABLE_LEVEL : Infinity);
+  // but never while a worn piece's repair waits (repairWaits): the plain one is most often the kit's spare for it, and
+  // held the levels the repair wanted (Nov 22: the boots under 10% brought a plain pair from the chests, and the cap
+  // fell to level - 30, 5 at the 35 their repair costs)
+  return Math.min(ANVIL_MAX_COST, xpLevel, plainLeft(items) && !repairWaits(items, 0) ? xpLevel - TABLE_LEVEL : Infinity);
 }
 
 const kindOf = (name: string): AnvilKind | undefined => {
@@ -314,8 +317,16 @@ function workable(i: InventoryItem): AnvilKind | undefined {
   return kind;
 }
 
-/** The piece of a kind in use (the kit's best of it, carried or worn), where the anvil may work on it. */
+/**
+ * The piece of a kind in use, where the anvil may work on it: the armour worn (the Guardian's Combat.armorRank wears
+ * the enchanted one over a plain spare, however worn, till it is spent), else the kit's best of it, carried or worn.
+ * Nov 22: the diamond_boots (protection 4, repairCost 31) went under the kit's 10%, the kit took a plain pair from the
+ * chests, and that pair, sound, was the kit's best: the anvil saw plain boots, kept no levels for the worn ones (still
+ * worn, every Nether trip refused for them) and would never have mended them.
+ */
 function inUse(items: InventoryItem[], kind: AnvilKind): InventoryItem | undefined {
+  const worn = items.find(i => gearKind(i.name) === kind && wornSlot(i) && !spent(i));
+  if (worn && workable(worn)) return worn;
   const best = carriedKit(items).best[kind];
   return best && workable(best) ? best : undefined;
 }
