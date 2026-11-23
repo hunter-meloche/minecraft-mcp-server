@@ -91,6 +91,8 @@ const LOOK_MS = 60_000;
 // (90 s: live, Nov 22, a villager 42 off the pickup needed a 62 s hop, 58 s left; the move day's look is made in
 // passing on the way out, so its LOOK_MS is not in the move's day need: the time is the hop's)
 const PICKUP_MS = 90_000;
+/** The yard's stretch laid and the fence's post opened, before the move's walk out. */
+const YARD_OPEN_MS = 40_000;
 /** Of the move's time at the village, what the cart's start is kept (the hop to the pickup may take the rest of the run). */
 const CART_MS = 30_000;
 /** The boat's part in the yard, and the yard's stretch laid and the post opened before the move goes out. */
@@ -347,7 +349,8 @@ export function railMoveNeedMs(line: RailLine, home: { x: number; z: number }): 
   const out = Math.max(horiz(line.cells[0], home), (line.cells.length - line.yard) * 0.8);
   // (out at a walk, the look, then what the run itself asks to have left at the village, moveRest: live, Nov 22, a
   // 351-rail line set out on this estimate's old sum and turned back at the village, "too little of the run left")
-  return Math.round(out / 3 * 1000) + moveRest(line, home) + MARGIN;
+  // (and the yard's stretch laid and the fence opened before the walk out: 33 s on Nov 23)
+  return Math.round(out / 3 * 1000) + YARD_OPEN_MS + moveRest(line, home) + MARGIN;
 }
 
 /**
@@ -1531,7 +1534,10 @@ function freshFree(site: VillageSite, now: number): { judged: NonNullable<Villag
 }
 
 /** What of the run the move still needs once at the village: the hop and the start, home along the line, the yard. */
-const moveRest = (line: RailLine, home: { x: number; z: number }) => PICKUP_MS + Math.max(horiz(line.cells[0], home), line.cells.length - line.yard) / 3 * 1000 + BRAKE_WAIT + YARD_MS;
+// (home behind the cart on foot the straight way, a fifth more for the turns: live, Nov 22-23, the walk home from the
+// west village's line took 50 s for 205 blocks, every run, where the line's 370 cells at a walk reckoned 123 s)
+// (never more than the walk along the line itself)
+const moveRest = (line: RailLine, home: { x: number; z: number }) => PICKUP_MS + Math.min(horiz(line.cells[0], home) * 1.2, Math.max(horiz(line.cells[0], home), line.cells.length - line.yard)) / 3 * 1000 + BRAKE_WAIT + YARD_MS;
 
 /** A failure with the cart on the line but the villager not in it: the line is given up (the take-up takes the cart). */
 function lostIfOut(ctx: GoalContext, line: RailLine, why: string): WorkResult {
