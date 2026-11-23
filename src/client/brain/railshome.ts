@@ -1367,10 +1367,13 @@ async function moveRun(ctx: GoalContext, line: RailLine, clk: Clk): Promise<Work
   // (the look round it as relook and the boat move have it: on to up to VIEWPOINTS places round the village, carefully,
   // nothing touched, while the walk there, back to the pickup and the move after still fit the run. Nov 21, set out near
   // dusk, the run had no time for a viewpoint: 45 of 132 chunks of the west village seen from the line's end, a miss)
-  const lookBy = (to?: { x: number; z: number }) => enough() || (!!to && clk.left() < moveRest(line, home) + VIEWPOINT_MS + horiz(to, line.pickup) / 3 * 1000);
   // (the village's free word as it stood before this look: seen whole a few hours ago, it holds where today's look saw
   // only part of it)
   const before = freshFree(site, clk.now());
+  // (with that word to go on, no viewpoint walks: the look judges what it sees from the line's end, and the run's time
+  // is the hop's and an extension's. Live, Nov 23: two viewpoints took 45 s, and the extension planned after them was
+  // not carried or laid that run)
+  const lookBy = (to?: { x: number; z: number }) => enough() || (!!to && (!!before || clk.left() < moveRest(line, home) + VIEWPOINT_MS + horiz(to, line.pickup) / 3 * 1000));
   const { look, today, kept } = await judgeAgain(ctx, site, clk, lookBy);
   const v = before && today.kind === 'wait' && today.unseen ? judgeOnWhole(look, before.area) : today;
   if (v !== today && kept?.judged?.kind === 'free') say(ctx, `the village as judged free at ${clock(before!.judged.at)}Z (seen whole); today's look saw ${look.looked.chunks} of ${look.looked.of} chunks`);
@@ -1825,10 +1828,10 @@ const VILLAGE_BUILT = /(planks|stairs|slab|fence|door|glass|_bed$|wool|carpet|ha
  * rails carried on the move day (EXT_CARRY), each further one is laid to a villager where it stands and the move made
  * in the same run.
  */
-export const EXTENSIONS = 5;
+export const EXTENSIONS = 8;
 /** Cobblestone the move takes out for an extension's fills, as the chests give it. */
 const EARTH_CARRY = 24;
-/** An extension's rails the move carries while one is left to make (most of a 64-rail extension; the rest from the bill). */
+/** An extension's rails the move carries while one is left to make (the extensions by the west village were 20-28 rails; the rest from the bill). */
 export const EXT_CARRY: Readonly<Record<string, number>> = { rail: 64, powered_rail: 8, redstone_torch: 8 };
 /** The extension's search: the box round the village's area and the line's far end, and its size. */
 const EXT_ROOM = 8;

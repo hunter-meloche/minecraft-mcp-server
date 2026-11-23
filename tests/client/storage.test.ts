@@ -1,5 +1,5 @@
 import test from 'ava';
-import { CATEGORIES, assignChests, giveChests, type ChestContents, categoryOf, depositPlan, misplaced, stackSize } from '../../src/client/brain/storage.js';
+import { CATEGORIES, assignChests, giveChests, type ChestContents, categoryOf, depositPlan, misplaced, stackSize, withPacked } from '../../src/client/brain/storage.js';
 
 const P = (x: number) => ({ x, y: 64, z: 0 });
 const K = (x: number) => `${x},64,0`;
@@ -170,4 +170,11 @@ test('the Nether\'s things (P3a: the barter\'s and the quartz) have chests of th
     potion: 'gear', soul_sand: 'stone', obsidian: 'stone', crying_obsidian: 'stone', fire_charge: 'gear', spectral_arrow: 'mobdrops', nether_brick: 'stone',
     ender_pearl: 'mobdrops', quartz: 'ores', blackstone: 'stone'
   });
+});
+
+test('withPacked: the iron family counts its ingot blocks and its raw blocks nine an item, so no deep trip mines again what was packed', (t) => {
+  const have: Record<string, number> = { raw_iron: 640, iron_ingot: 700, iron_block: 10, raw_iron_block: 64 };
+  t.is(withPacked(['raw_iron', 'iron_ingot'], n => have[n] ?? 0), 640 + 700 + 90 + 576);
+  t.is(categoryOf('raw_iron_block'), 'ores');
+  t.is(categoryOf('raw_gold_block'), 'ores');
 });

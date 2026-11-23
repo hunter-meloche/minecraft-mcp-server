@@ -1556,6 +1556,11 @@ test('pack: a lot of 64 blocks a kind over the keep of 640 loose; under 128 loos
   t.deepEqual(packPlan({ diamond: 90, diamond_block: 300 }, 14), [{ item: 'diamond', block: 'diamond_block', blocks: 26, unpack: true }]);
   t.deepEqual(packPlan({ diamond: 90, diamond_block: 5 }, 14), [{ item: 'diamond', block: 'diamond_block', blocks: 5, unpack: true }]);
   t.deepEqual(packPlan({ diamond: 200, diamond_block: 300 }, 14), []);
+  // the raw ores the smelt leaves raw (Nov 23: 7584 raw iron, 3050 raw gold loose) pack too, and come back for it
+  t.deepEqual(packPlan({ raw_iron: 7584, raw_gold: 3050, raw_copper: 227 }, 14), [
+    { item: 'raw_iron', block: 'raw_iron_block', blocks: 64 }, { item: 'raw_gold', block: 'raw_gold_block', blocks: 64 }
+  ]);
+  t.deepEqual(packPlan({ raw_iron: 40, raw_iron_block: 3 }, 14), [{ item: 'raw_iron', block: 'raw_iron_block', blocks: 3, unpack: true }]);
 });
 
 test('pack: takes nine stacks, crafts 64 blocks at the table, and puts back only what the crafting made and left', async (t) => {

@@ -1265,6 +1265,8 @@ test('the move day looks round the village as relook does (Nov 21: 45 of 132 chu
   wideVillage(land);
   await laidWhole(land, line);
   land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  // (no free word seen whole within FRESH_FREE: the viewpoints are walked; with one, Nov 23, they are not)
+  judgedAgo(world, land, FRESH_FREE + HOUR);
   const said0 = land.said.length;
   const r = await run(land, 'move', 20 * MINUTE);
   const said = land.said.slice(said0);
@@ -1312,6 +1314,7 @@ test('a move day whose look waits (not all of the village seen, even from its vi
   wideVillage(land);
   await laidWhole(land, line);
   for (const v of land.villagers) if (v.id === 101 || v.id === 106 || v.id === 107) v.profession = 'mason';
+  judgedAgo(world, land, FRESH_FREE + HOUR);
   const said0 = land.said.length;
   const r = await run(land, 'move', 20 * MINUTE);
   t.true(land.said.slice(said0).some(l => /looking round the village from/.test(l)));
@@ -2537,4 +2540,18 @@ test('the move may run its yard part into the evening (duskMs, up to night): pic
   const at = (shortMs: number) => snap(KIT(), { timeOfDay: 11_000 - Math.ceil((v.needMs! - shortMs) / 50) });
   t.like(pick(railsTask, at(60_000), world), { variant: 'move' });
   t.like(pick(railsTask, at(90_000), world), { decline: { cause: 'late' } });
+});
+
+test('a move day with a free word seen whole within FRESH_FREE walks no viewpoints: the partial look from the line\'s end, then the hop and the cart (Nov 23: two viewpoints took 45 s of the extension\'s time)', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world, { scanSight: 48 });
+  wideVillage(land);
+  await laidWhole(land, line);
+  land.me = { x: HOME.x + 0.5, y: 63, z: HOME.z + 0.5 };
+  judgedAgo(world, land, 2 * HOUR);
+  const said0 = land.said.length;
+  const r = await run(land, 'move', 20 * MINUTE);
+  const said = land.said.slice(said0);
+  t.false(said.some(l => /looking round the village from/.test(l)), said.join('\n'));
+  t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home/, said.join('\n'));
 });

@@ -17,9 +17,12 @@ export const CATEGORIES: readonly Category[] = ['food', 'gear', 'ores', 'stone',
  * The ores the chests keep packed nine to a storage block (chores.ts packOres), item -> block. The deep trips bring
  * some 100 lots a day: the storage house was full again in under two days after each new one (storehouse2 on Nov 16,
  * storehouse3 on Nov 18, with 9400 redstone, 6606 lapis, 6249 iron ingots and 3078 diamonds loose in 17 chests).
+ * The raw iron and gold too: the smelt cooks only what the ingots' keep wants, so the rest of every iron and gold trip
+ * stayed raw, 7584 raw iron and 3050 raw gold loose on Nov 23 (some 166 chest slots, near three double chests).
  */
 export const PACKS: Readonly<Record<string, string>> = {
-  redstone: 'redstone_block', lapis_lazuli: 'lapis_block', iron_ingot: 'iron_block', gold_ingot: 'gold_block', diamond: 'diamond_block'
+  redstone: 'redstone_block', lapis_lazuli: 'lapis_block', iron_ingot: 'iron_block', gold_ingot: 'gold_block', diamond: 'diamond_block',
+  raw_iron: 'raw_iron_block', raw_gold: 'raw_gold_block'
 };
 /** Items a storage block is crafted from, and comes back as. */
 export const PER_BLOCK = 9;
