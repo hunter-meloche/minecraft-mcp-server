@@ -421,7 +421,9 @@ export const railsTask: WorkTask = {
     }
     // (no free word seen whole within FRESH_FREE: a look-only day first, early in the day: it needs the whole look round)
     if (!freeToMove(world, line, s.now)) return [{ id: 'look', dist: Math.round(horiz(line.cells[0], home)), needMs: railLookNeedMs(line, home) }];
-    return [{ id: 'move', dist: Math.round(horiz(line.cells[0], home)), needMs: railMoveNeedMs(line, home) }];
+    // (the move's yard part, at home inside the fence, may run into the evening: YARD_MS of it, up to night, work.ts
+    // DUSK_MAX. Live, Nov 23: the 375-rail move needed 8.5 min of the workday's 9.6, and no morning gave it that)
+    return [{ id: 'move', dist: Math.round(horiz(line.cells[0], home)), needMs: railMoveNeedMs(line, home), duskMs: YARD_MS }];
   },
   none: (s, world) => (!peekLine(world) ? { cause: 'unneeded', text: 'rails: no line to lay' }
     : { cause: 'unneeded', text: 'rails: villager moves are off: the line waits' }),

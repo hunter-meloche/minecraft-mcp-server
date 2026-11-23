@@ -2525,3 +2525,16 @@ test('a village scanned as one box round all of it (Nov 22: 87 by 68, every vill
     for (const w of moved.earth) t.false(planks.some(p => Math.abs(p.x - w.x) <= 1 && Math.abs(p.z - w.z) <= 1 && Math.abs(p.y - w.y) <= 2), `${w.op} ${k(w)}`);
   }
 });
+
+test('the move may run its yard part into the evening (duskMs, up to night): picked with up to 75 s less daylight than its need, not with more short (Nov 23: 8.5 min needed of the workday\'s 9.6)', t => {
+  const { world, line } = lineWorld('laying');
+  line.stage = 'whole';
+  for (let i = 0; i < line.cells.length; i++) line.laid.push({ at: { x: line.cells[i].x, y: line.cells[i].y, z: line.cells[i].z }, item: 'rail' });
+  const v = railsTask.variants(snap(KIT()), world).find(x => x.id === 'move');
+  t.truthy(v);
+  if (!v?.needMs) return;
+  t.is(v.duskMs, 150_000);
+  const at = (shortMs: number) => snap(KIT(), { timeOfDay: 11_000 - Math.ceil((v.needMs! - shortMs) / 50) });
+  t.like(pick(railsTask, at(60_000), world), { variant: 'move' });
+  t.like(pick(railsTask, at(90_000), world), { decline: { cause: 'late' } });
+});

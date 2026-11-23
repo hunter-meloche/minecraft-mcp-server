@@ -12,7 +12,7 @@
 import { fromGate, nearHome, nearHomeAt, no, onHomeLevel, outsideBy, YARD_EDGE, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { NEAR_HOME, TRIP_STASH_RANGE, inYardOrNear, look, makeRoom, noRoom, out, room, type RoomKind } from './pockets.js';
-import { WORK_AT, daylightLeft } from './schedule.js';
+import { REST_AT, RETURN_AT, WORK_AT, daylightLeft } from './schedule.js';
 import { DEEP_WALK_BACK, DEEP_WORTH, deepTripKit, tripBudgetMs } from './mine.js';
 import { tripCheck } from './deep.js';
 import { clock } from './idlelog.js';
@@ -91,7 +91,7 @@ export interface WorkTask {
    * and back, at `backPace` when given) is not it: the villagers rung's searches walk home at a walk, and its moves
    * from out to 640 need the look round the village too (villagemove.ts)
    */
-  variants(s: Snapshot, world: WorldMemory): { id: string; dist: number; first?: true; needMs?: number }[];
+  variants(s: Snapshot, world: WorldMemory): { id: string; dist: number; first?: true; needMs?: number; duskMs?: number }[];
   /** null = ready; sync, reads only, no calls */
   ready(s: Snapshot, world: WorldMemory, variant: string): Decline | null;
   /** what it says with no variant at all (default: `unneeded`, nothing to do) */
@@ -485,7 +485,7 @@ export async function alongSide<T>(ctx: GoalContext, side: HomeSide | Bearing, w
  * What `pick` answers for a task: the variant to run (its place in the task's turn, its distance, why; `first`: one
  * tried ahead of the turn, whose run leaves the turn where it is), or the one reason the task does not ask to run.
  */
-export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean; first?: true; needMs?: number } | { decline: Decline };
+export type Choice = { variant: string; index: number; dist: number; why: string; demoted: boolean; first?: true; needMs?: number; duskMs?: number } | { decline: Decline };
 
 const isTrip = (task: WorkTask) => task.reach === 'far' || task.reach === 'deep' || task.reach === 'nether';
 /** A trip whose budget is the day's clock, not its own: down the mine, or to the Nether. */
@@ -551,14 +551,20 @@ function common(task: WorkTask, s: Snapshot, world: WorldMemory): Decline | null
  * return home. A Nether trip that could not be home by dusk does not set out (nether.ts netherBudgetMs: until the
  * leave nether goal's own hour, less the way through the portals).
  */
-function lateFor(task: WorkTask, dist: number, s: Snapshot, need?: number): Decline | null {
+/** At most this much of a run past the head-home hour: done by night (REST_AT), 75 s. */
+const DUSK_MAX = ticksToMs(REST_AT - RETURN_AT);
+/**
+ * (`dusk`: what of a variant's need may come after the day's head-home hour, RETURN_AT, the run being at home inside
+ * the yard by then, where the evening's shelter leaves it be, and done by night: the rails move's yard part)
+ */
+function lateFor(task: WorkTask, dist: number, s: Snapshot, need?: number, dusk = 0): Decline | null {
   if (task.reach === 'nether') {
     // (a work's own least with the kit before it, worktasks.ts NETHER_KIT_MS, where it needs more than the day's least)
     const least = Math.max(NETHER_WORTH_MS, need ?? 0);
     const left = netherBudgetMs(s.timeOfDay);
     return left < least ? { cause: 'late', text: `${task.name} needs ${least / MINUTE} min down there and home by dusk, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
   }
-  if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(need ?? needMs(dist, task.reach, task.backPace)));
+  if (task.reach !== 'deep') return no.late(s, task.name, msToTicks(Math.max(0, (need ?? needMs(dist, task.reach, task.backPace)) - Math.min(dusk, DUSK_MAX))));
   const left = tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
   // (rounded down, as deep.ts does: a tick too late is "2.9 left", not "3.0")
   return left < DEEP_WORTH ? { cause: 'late', text: `${task.name} needs ${DEEP_WORTH / MINUTE} min, ${(Math.floor(left / (MINUTE / 10)) / 10).toFixed(1)} left` } : null;
@@ -572,10 +578,10 @@ function lateFor(task: WorkTask, dist: number, s: Snapshot, need?: number): Decl
  * Counted as a walk, a fetch from 200 out could set out at tod 7140 with 111 s to bring home a cow 133 s off on the
  * lead: let go on the way.
  */
-function budgetFor(task: WorkTask, dist: number, s: Snapshot, need?: number): number {
+function budgetFor(task: WorkTask, dist: number, s: Snapshot, need?: number, dusk = 0): number {
   if (task.reach === 'deep') return tripBudgetMs(s.timeOfDay, DEEP_WALK_BACK);
   if (task.reach === 'nether') return netherBudgetMs(s.timeOfDay);
-  const day = ticksToMs(daylightLeft(s.timeOfDay));
+  const day = ticksToMs(daylightLeft(s.timeOfDay)) + Math.min(dusk, DUSK_MAX);
   if (task.backPace) return Math.max(0, Math.min(Math.max(task.budgetMs, need ?? needMs(dist, task.reach, task.backPace)), day - 15_000));
   return Math.max(0, Math.min(task.budgetMs, day - dist / 3 * 1000 - 15_000));
 }
@@ -626,14 +632,14 @@ function choose(task: WorkTask, s: Snapshot, world: WorldMemory): Choice {
     const until = mark && !mark.early ? mark.at + dryWait(mark.n, task.terrain) : 0;
     if (until > s.now) { dry.push({ id: v.id, until }); continue; }
     // the hour is asked last: it is the reason only for a variant nothing else stands in the way of
-    const l = lateFor(task, v.dist, s, v.needMs);
+    const l = lateFor(task, v.dist, s, v.needMs, v.duskMs);
     if (l) { if (!late || v.dist < late.dist) late = { dist: v.dist, d: l }; continue; }
     const where = task.reach === 'yard' ? 'in the yard' : task.reach === 'deep' ? 'under ground' : task.reach === 'nether' ? 'in the nether' : `${Math.round(v.dist)} blocks out`;
     const tried = mark?.early ? `, let go early after ${mark.n} dry` : mark ? `, ${mark.n} dry before` : '';
     const below = demotedBy(task, mark, w, world);
     return {
       variant: v.id, index, dist: v.dist, demoted: !!below, why: `${where}${tried}${below ? ` (${below})` : ''}`, ...(v.first ? { first: true as const } : {}),
-      ...(v.needMs !== undefined ? { needMs: v.needMs } : {})
+      ...(v.needMs !== undefined ? { needMs: v.needMs } : {}), ...(v.duskMs ? { duskMs: v.duskMs } : {})
     };
   }
   // one answer for the task: that of the variant that got furthest
@@ -767,14 +773,14 @@ async function runTask(task: WorkTask, ctx: GoalContext, lastDeath: () => Death 
   try {
     const c = pick(task, ctx.s, ctx.world);
     if ('decline' in c) return `nothing to do after all (${c.decline.cause}: ${c.decline.text})`;
-    const { variant, dist, needMs: need } = c;
+    const { variant, dist, needMs: need, duskMs: dusk } = c;
     trip.variant = variant;
     const key = `${task.name}:${variant}`;
     // the put-away may have taken minutes and changed what is carried: from here on it is the fresh look that counts
     const s = await makeRoom(ctx, task.room);
-    const off = (s !== ctx.s ? task.ready(s, ctx.world, variant) : null) ?? lateFor(task, dist, s, need);
+    const off = (s !== ctx.s ? task.ready(s, ctx.world, variant) : null) ?? lateFor(task, dist, s, need, dusk);
     if (off) return `[${variant}] not setting out: ${off.text}`;
-    let budgetMs = budgetFor(task, dist, s, need);
+    let budgetMs = budgetFor(task, dist, s, need, dusk);
     if (task.reach !== 'deep' && task.reach !== 'nether') {
       // the brain stops the run at its timeout, counted from its start: a put-away of a minute or two and the full
       // budget after it ran past that while still mining, and what it had mined was never told (a deep trip's
@@ -1100,7 +1106,7 @@ export function releaseOldestDry(world: WorldMemory, now: number, s: Snapshot, t
       const key = `${task.name}:${v.id}`;
       const m = marks[key];
       if (!m || m.early || m.freed || m.at + dryWait(m.n) <= now) continue;
-      if (task.ready(s, world, v.id) || lateFor(task, v.dist, s, v.needMs)) continue;
+      if (task.ready(s, world, v.id) || lateFor(task, v.dist, s, v.needMs, v.duskMs)) continue;
       if (!oldest || m.at < oldest.at) oldest = { key, at: m.at };
     }
   }
