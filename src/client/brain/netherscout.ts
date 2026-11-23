@@ -52,8 +52,8 @@ import { BACK_MS, KNOCK_GAP, LAVA_GAP, backThroughOwn, barterDanger, ghastAbout,
 import { LAKE_MIN, LOOK_RADIUS } from './netherlook.js';
 import { DEBRIS, DEBRIS_DEPTH, DEBRIS_KEPT, DEBRIS_RADIUS, exposedDebrisIn } from './netherdebris.js';
 import {
-  FROM_BUILDS, GONE, SETUP_HEALTH, SETUP_WAITS, blockAt, boxGap, boxOf, fetchSetupKit, footing, inNether, pathOf, readGround, setupShort, walkAlong,
-  walkFrom, zoneBox, type Box, type Grid, type NetherZone
+  FROM_BUILDS, GONE, SETUP_HEALTH, SETUP_WAITS, blockAt, boxGap, boxOf, fetchSetupKit, footing, inNether, pathOf, readGround, setupShort, stepsFrom,
+  walkAlong, walkFrom, zoneBox, type Box, type Grid, type NetherZone
 } from './nethersetup.js';
 
 const MINUTE = 60_000;
@@ -161,6 +161,49 @@ export function scoutGround(g: Grid, f: ScoutFrame, zones: Box[]): (p: Pos) => b
     return ok;
   };
 }
+
+/**
+ * Why the way on closed, pure: of the steps from the cells a walk reached (`reach`) to a cell further out along the
+ * bearing that it may not walk, how many each rule refused (the first rule a cell fails): past the leg's corridor, within
+ * FROM_BUILDS of a zone (the nearest such zone's middle named), unread ground by it (a chunk not loaded yet: lavaBy
+ * counts it as lava), lava or fire within LAVA_GAP, a drop's edge. Empty where no step leads further out (rock or a
+ * drop past MAX_DROP all round). Nov 22-23: from 23:28 every leg of four bearings closed 0 or 2 out where it had walked
+ * 5 to 21 out on the same ground for four days, and nothing in the lines told which rule had shut it.
+ */
+export function closedWhy(g: Grid, f: ScoutFrame, zones: Box[], reach: Map<string, unknown>): string {
+  const counts = new Map<string, number>();
+  let build: { at: Pos; gap: number } | undefined;
+  const seen = new Set<string>();
+  for (const k of reach.keys()) {
+    const p = parse(k);
+    for (const q of stepsFrom(g, p)) {
+      const qk = cellKey(q);
+      if (reach.has(qk) || seen.has(qk) || outAlong(f, q) <= outAlong(f, p)) continue;
+      seen.add(qk);
+      const out = outAlong(f, q);
+      let why: string;
+      const near = zones.map(z => ({ z, gap: boxGap(z, cellBox(q)) })).filter(x => x.gap < FROM_BUILDS).sort((a, b) => a.gap - b.gap)[0];
+      if (out < -SCOUT_BEHIND || out > SCOUT_REACH || offLine(f, q) > CORRIDOR) why = 'past its corridor';
+      else if (near) {
+        why = `within ${FROM_BUILDS} of a build`;
+        if (!build || near.gap < build.gap) build = { at: middle(near.z), gap: near.gap };
+      } else if (unreadBy(g, q)) why = 'by unread ground';
+      else if (lavaBy(g, q)) why = 'by lava or fire';
+      else if (overDrop(g, q)) why = "at a drop's edge";
+      else continue;
+      counts.set(why, (counts.get(why) ?? 0) + 1);
+    }
+  }
+  return [...counts].sort((a, b) => b[1] - a[1])
+    .map(([why, n]) => `${n} ${why}${why.startsWith('within') && build ? ` (nether ${fmt(build.at)})` : ''}`).join(', ');
+}
+/** Unread ground (a cell the read has none for) in the box lavaBy looks over round a cell. */
+const unreadBy = (g: Grid, p: Pos): boolean => {
+  for (let dy = -LAVA_GAP - 1; dy <= 1; dy++) for (let dx = -LAVA_GAP; dx <= LAVA_GAP; dx++) for (let dz = -LAVA_GAP; dz <= LAVA_GAP; dz++) {
+    if (blockAt(g, { x: p.x + dx, y: p.y + dy, z: p.z + dz }) === null) return true;
+  }
+  return false;
+};
 
 /**
  * Where a walk goes next on a leg, pure: of the cells a walk reaches (`reach`), the one furthest out along the bearing
@@ -472,7 +515,11 @@ export async function scoutRun(ctx: GoalContext, budgetMs: number, now: () => nu
       const plain = walkFrom(g, [here], may);
       const on = furthest(f, plain);
       // (no cell a walk reaches 2 further out than where it stands: the ground goes on no further that way)
-      if (!on || on.out < from + 2) { end = `the way on closed ${outHere} out`; break; }
+      if (!on || on.out < from + 2) {
+        const why = closedWhy(g, f, zones, plain);
+        end = `the way on closed ${outHere} out${why ? ` (the steps on refused: ${why})` : ''}`;
+        break;
+      }
       if (watched) { stop = `${ghastAbout(ents)}: the way on only by a drop's edge, ${outHere} out`; danger = true; break; }
       reach = plain;
       next = on;

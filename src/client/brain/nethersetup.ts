@@ -164,7 +164,7 @@ export function standable(g: Grid, p: Pos): boolean {
 const SIDES: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
 /** The cells one walking step from a standing cell: level, a block up (head room for the jump), or a drop of up to 3. */
-function stepsFrom(g: Grid, p: Pos): Pos[] {
+export function stepsFrom(g: Grid, p: Pos): Pos[] {
   const out: Pos[] = [];
   for (const [dx, dz] of SIDES) {
     const q = add(p, dx, 0, dz);

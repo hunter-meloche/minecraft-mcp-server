@@ -3,7 +3,7 @@ import type { GoalContext } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   CORRIDOR, LEG_LEAST, SCOUT_AGAIN_MS, SCOUT_BEHIND, SCOUT_REACH, WAY_EVERY, aheadBox, bearingOf, frameOf, furthest, lakesBy, offLine, outAlong, scoutBearing,
-  scoutGround, scoutOpen, scoutReady, scoutRun, waypoints
+  closedWhy, scoutGround, scoutOpen, scoutReady, scoutRun, waypoints
 } from '../../src/client/brain/netherscout.js';
 import { BARTER_WAITS, KNOCK_GAP, LAVA_GAP, overDrop } from '../../src/client/brain/netherbarter.js';
 import { FROM_BUILDS, SETUP_WAITS, boxGap, boxOf, footing, walkFrom, zoneBox, type Box, type NetherZone } from '../../src/client/brain/nethersetup.js';
@@ -153,7 +153,7 @@ test.serial('a zone come in on the way (the bridge\'s scan follows the bot) is k
     return call(m, p);
   }) as GoalContext['call'];
   const r = await scoutRun(f.ctx, HOUR, () => later);
-  t.is(r.text, 'scouted 45 to the north: 1 build of others (the nearest at nether (-75, 73, 201)); the way on closed 45 out; back at overworld (-562, 65, 2191)');
+  t.is(r.text, 'scouted 45 to the north: 1 build of others (the nearest at nether (-75, 73, 201)); the way on closed 45 out (the steps on refused: 10 within 16 of a build (nether (-75, 73, 201))); back at overworld (-562, 65, 2191)');
   t.like(r, { gain: 1, worked: true, cameBack: true });
   walkedKindly(t, f, 'north', [ROOM_ZONE, theirs]);
   t.like(peekNether(w).sites[0], { kind: 'build', x: -75, y: 73, z: 201, leg: 'north' });
@@ -229,9 +229,9 @@ test.serial('a bearing whose ground goes no further (the south: the cliff west, 
   const { w, later, f } = await afterSetup();
   walkedLegs(w, ['north', 'north-east', 'east', 'south-east'], later);
   const text = await rung(later).run(f.ctx);
-  t.is(text, '[scout] no leg walked to the south; the way on closed 1 out; back at overworld (-562, 65, 2191); back home');
+  t.is(text, '[scout] no leg walked to the south; the way on closed 1 out (the steps on refused: 10 within 16 of a build (nether (-56, 72, 285))); back at overworld (-562, 65, 2191); back home');
   const n = peekNether(w);
-  t.like(n.legs?.[0], { bearing: 'south', reach: 1, end: 'the way on closed 1 out', way: [at(-77, 70, 267)] });
+  t.like(n.legs?.[0], { bearing: 'south', reach: 1, end: 'the way on closed 1 out (the steps on refused: 10 within 16 of a build (nether (-56, 72, 285)))', way: [at(-77, 70, 267)] });
   t.like(n, { stageTrips: 4, lastTrip: { end: 'turned back' } });
   t.is(n.tripsToday, undefined);
   t.like(w.work!.dry['nether:scout'], { n: 1, at: later });
@@ -448,6 +448,31 @@ test('the leg\'s ground: within 12 of the bearing\'s line through its portal, 8 
   const next = furthest(f, reach)!;
   t.is(next.at.z, 234);
   t.is(next.at.x, -76);
+});
+
+test('a closed way says which rule refused the steps on: a build within 16 (named), ground not read yet; nothing where the walk goes on', (t) => {
+  const f = frameOf(OWN_BOX, 'north');
+  const box = aheadBox(f, -SCOUT_BEHIND, 32, 70);
+  const base = netherGround();
+  const start = at(-76, 70, 266);
+  // someone's build come up 8 north of its hut's door: every step on is within 16 of it (Nov 22-23's legs closed 0 out
+  // and said no more)
+  const g = gridOf(base, box);
+  const build: Box = { x1: -77, y1: 70, z1: 256, x2: -75, y2: 72, z2: 258 };
+  const shut = walkFrom(g, [start], scoutGround(g, f, [build]));
+  t.true(furthest(f, shut)!.out < outAlong(f, start) + 2);
+  t.regex(closedWhy(g, f, [build], shut), /^\d+ within 16 of a build \(nether \(-76, 71, 257\)\)$/);
+  // the chunk north of z 263 not loaded yet (the read has nothing there): unread ground, not lava
+  const blind = gridOf(base, box);
+  const blocks = blind.blocks as (string | null)[];
+  for (let i = 0; i < blocks.length; i++) {
+    const z = blind.z + Math.floor(i / blind.width) % blind.length;
+    if (z <= 262) blocks[i] = null;
+  }
+  const short = walkFrom(blind, [start], scoutGround(blind, f, []));
+  t.true(furthest(f, short)!.out < outAlong(f, start) + 2);
+  t.regex(closedWhy(blind, f, [], short), /by unread ground/);
+  t.notRegex(closedWhy(blind, f, [], short), /lava/);
 });
 
 test('the way kept: its hut\'s cell first, a waypoint every 8 cells walked, the last; never more than 16 (further apart on a long way); the lakes of a leg\'s reads, one where two reads saw it, those past the look\'s 24 only when asked', (t) => {
