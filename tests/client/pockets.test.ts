@@ -1011,6 +1011,10 @@ test('food put away does not come straight back: with 64 of a kind carried nothi
 
   // raw meat used to come out whole whenever ready food was short: now only up to the stack the stash leaves carried
   const few = live(snap([...tools(), { slot: 6, name: 'beef', count: 10 }], night), larderless({ beef: 200 }));
+  // (from the chests only, nothing is cooked after: raw meat stays in the chest, Nov 22)
+  const only = live(snap([...tools()], night), larderless({ beef: 200, wheat: 60 }));
+  await t.throwsAsync(gatherFood(only.ctx, 20, true, true), { message: /^no ready food taken from the chests/ });
+  t.deepEqual(takes(only.m), []);
   t.is(await gatherFood(few.ctx, 20, true), 'took 54 beef; now carrying 0 food points');
   t.deepEqual(takes(few.m), ['take-from-chest beef 54']);
   t.is(few.m.count('beef'), 64);

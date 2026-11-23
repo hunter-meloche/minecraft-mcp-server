@@ -193,7 +193,9 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
     if (enough()) break;
     const inside = await peekChest(ctx, chest).catch(() => ({} as Record<string, number>));
     const edible = Object.entries(inside)
-      .filter(([n]) => foods[n] && !AVOID_UNLESS_ASKED.has(n))
+      // (chests only, nothing is cooked after: no raw food out for a cook that never comes. Live, Nov 22: the rails
+      // move's top-up took salmon, chicken, mutton and potatoes, a slot each, filled all 36, and the stash cut it short)
+      .filter(([n]) => foods[n] && !AVOID_UNLESS_ASKED.has(n) && !(chestsOnly && COOKS_TO[n]))
       .sort(([a], [b]) => (COOKS_TO[a] ? 1 : 0) - (COOKS_TO[b] ? 1 : 0) || foods[b].foodPoints - foods[a].foodPoints);
     for (const [name, n] of edible) {
       if (filled()) break;
@@ -212,7 +214,7 @@ export async function gatherFood(ctx: GoalContext, target: number, useChests: bo
     }
     // (the wheat beyond the pens' stock only: the round takes that out of the chests to breed from)
     const wheat = Math.min(27, inside.wheat ?? 0, wheatSpare(ctx.world, starve));
-    if (wheat > 0 && !enough()) {
+    if (wheat > 0 && !enough() && !chestsOnly) {
       const r = await ctx.act('take-from-chest', { ...chest, item: 'wheat', count: wheat });
       rememberReply(ctx.world, chest, r.text);
       if (r.ok) say('took wheat');
