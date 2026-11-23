@@ -116,11 +116,16 @@ export function stashKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
   // ore, after every batch (Nov 15); it stops nothing now (it loads the furnace and goes), and a stash run to its end
   // would put the ore in the chests, where nothing smelts it again but the gear's few raw iron
   const coal = () => { const stored = freeChestTotals(world); return (stored.coal ?? 0) + (stored.charcoal ?? 0) > 0; };
-  if (!away && world.landmarks.furnace && (world.furnaceLoad || coal())) for (const o of Object.keys(ORES)) keep.add(o);
+  const cap: Record<string, number> = {};
+  // ... two loads of it at most (ORE_CARRY): a pack run cut short by the stash just after it took nine stacks of raw
+  // iron out of the chests left 576 carried, and all of it stayed in the pockets for the furnace's 64 a load, 34/36
+  // slots for an hour and a half (Nov 23, 11:48Z)
+  if (!away && world.landmarks.furnace && (world.furnaceLoad || coal())) {
+    for (const o of Object.keys(ORES)) if (!keep.has(o)) { keep.add(o); cap[o] = ORE_CARRY; }
+  }
   // (a Nether trip while a build job builds: what any trip keeps then, and its kit)
   if (kind === 'nether') for (const n of netherKit()) keep.add(n);
   // food a bill carries is material, not provisions: it keeps the bill's own cap, or none
-  const cap: Record<string, number> = {};
   for (const f of foods()) if (!keep.has(f)) cap[f] = FOOD_CARRY;
   // a build job's carry is its own: only the project's capped (what its bill could still use, billCarryCap)
   if (!away) Object.assign(cap, projectCap(world), castingAhead(world) ? { bucket: CAST_EMPTY_BUCKETS } : {});
@@ -751,6 +756,8 @@ const FUELS = ['coal', 'charcoal', 'oak_log', 'birch_log', 'spruce_log', 'dark_o
 const COOK_MS = 10_500;
 /** What the furnace's input slot holds. */
 const INPUT_STACK = 64;
+/** The raw ore the stash leaves carried for the smelt's next loads (stashKeep): two of the furnace's input stacks. */
+const ORE_CARRY = 2 * INPUT_STACK;
 /** Logs burnt into charcoal at a time. */
 const CHARCOAL_LOAD = 8;
 

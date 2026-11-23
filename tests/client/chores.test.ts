@@ -46,6 +46,16 @@ test('stash: the casting keeps its lava and water buckets, and 5 empty ones at m
   t.deepEqual(stashPlan(items, stashKeep(world())).deposit.filter(d => d.name === 'bucket'), [{ name: 'bucket', count: 8 }]);
 });
 
+test('stash: the ore for the furnace stays carried two loads at most: the 576 raw iron a cut pack run left went to the chests but 128 (Nov 23, 34/36 slots for the furnace)', (t) => {
+  const ore = Array.from({ length: 9 }, (_, i): InventoryItem => ({ slot: 13 + i, name: 'raw_iron', count: 64 }));
+  const items = [...gear(), ...ore, { slot: 22, name: 'raw_gold', count: 79 - 64 }, { slot: 23, name: 'raw_gold', count: 64 }];
+  const w = world({ furnaceLoad: { item: 'raw_copper', count: 4, at: 0 } });
+  const plan = stashPlan(items, stashKeep(w)).deposit;
+  t.deepEqual(plan.filter(d => d.name === 'raw_iron'), [{ name: 'raw_iron', count: 576 - 128 }]);
+  // a deep trip's lot (79 raw gold) all waits carried for the furnace, as before
+  t.deepEqual(plan.filter(d => d.name === 'raw_gold'), []);
+});
+
 test('stash: past the enchanting room\'s obsidian step (or with it built) the casting\'s buckets go in the chest, one kept', (t) => {
   const empties = Array.from({ length: 5 }, (_, i): InventoryItem => ({ slot: 13 + i, name: 'bucket', count: 1 }));
   const items = [...gear(), ...empties];
