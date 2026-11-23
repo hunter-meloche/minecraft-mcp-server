@@ -2592,3 +2592,32 @@ test('no boat way to the pickup, a villager penned in by walls 5 from it: the bo
     setPickupWait(0);
   }
 });
+
+test('a laid rail turned toward a rail no longer there (an extension\'s join after its bypassed stretch was taken up) is taken up and laid again on the walk along the line, not a stop; one turned toward a rail that stands still stops it (Nov 23: two stops, the line given up)', async (t) => {
+  const mid = (line: RailLine) => line.cells.findIndex((c, i) => i > 20 && c.kind === 'rail' && c.shape === 'north_south' && line.cells[i - 1].x === c.x && line.cells[i + 1].x === c.x);
+  {
+    const { world, line } = lineWorld('laying');
+    const land = new Field(world);
+    await laidWhole(land, line);
+    const i = mid(line);
+    t.true(i > 0);
+    const c = line.cells[i];
+    land.rails.get(k(c))!.shape = 'north_east';
+    t.is(land.block(c.x + 1, c.y, c.z).startsWith('rail'), false);
+    const said0 = land.said.length;
+    const r = await run(land, 'move', 20 * MINUTE);
+    const said = land.said.slice(said0);
+    t.true(said.some(l => l === `rails: the rail at (${c.x}, ${c.y}, ${c.z}) was north_east, toward a rail no longer there: laid again`), said.join('\n'));
+    t.regex(r.text, /^moved an unemployed villager/, said.join('\n'));
+  }
+  {
+    const { world, line } = lineWorld('laying');
+    const land = new Field(world);
+    await laidWhole(land, line);
+    const c = line.cells[mid(line)];
+    land.rails.get(k(c))!.shape = 'north_east';
+    land.rails.set(k({ x: c.x + 1, y: c.y, z: c.z }), { item: 'rail', shape: 'east_west', powered: false });
+    const r = await run(land, 'move', 20 * MINUTE);
+    t.regex(r.text, new RegExp(`the rail at \\(${c.x}, ${c.y}, ${c.z}\\) is north_east now, not north_south`), r.text);
+  }
+});

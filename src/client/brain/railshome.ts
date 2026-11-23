@@ -677,6 +677,21 @@ async function readAround(ctx: GoalContext, ps: readonly Pos[]): Promise<(x: num
   };
 }
 
+/** Where a rail of each shape points (dx, dz), its two ends. */
+const SHAPE_ENDS: Record<string, [number, number][]> = {
+  north_south: [[0, -1], [0, 1]], east_west: [[1, 0], [-1, 0]],
+  ascending_north: [[0, -1], [0, 1]], ascending_south: [[0, 1], [0, -1]], ascending_east: [[1, 0], [-1, 0]], ascending_west: [[-1, 0], [1, 0]],
+  north_east: [[0, -1], [1, 0]], north_west: [[0, -1], [-1, 0]], south_east: [[0, 1], [1, 0]], south_west: [[0, 1], [-1, 0]]
+};
+/** Whether a rail of `shape` at `c` points at a cell where no rail stands (a block up, level or down), read now. */
+async function staleShape(ctx: GoalContext, c: Pos, shape: string): Promise<boolean> {
+  const ends = SHAPE_ENDS[shape];
+  if (!ends) return false;
+  const ps = ends.map(([dx, dz]) => ({ x: c.x + dx, y: c.y, z: c.z + dz }));
+  const at = await readAround(ctx, ps);
+  return ps.some(p => [p.y - 1, p.y, p.y + 1].every(y => { const st = at(p.x, y, p.z); return st !== undefined && st !== null && !/rail$/.test(idOf(st)); }));
+}
+
 /** A rail's shape as world.region writes its state ("rail[shape=north_south,...]"). */
 const shapeIn = (state: string) => /shape=([a-z_]+)/.exec(state)?.[1];
 const airy = (state: string | null | undefined) => !!state && cellOf(state).kind === 'open';
@@ -934,6 +949,7 @@ const here = async (ctx: GoalContext): Promise<Pos> => (await ctx.status().catch
 async function alongLine(ctx: GoalContext, line: RailLine, from: number, to: number, clk: Clk): Promise<{ stop?: string; late?: true; off?: true; mended: number }> {
   const step = from <= to ? 1 : -1;
   let mended = 0;
+  const relaid = new Set<number>();
   const laid = laidCells(line);
   const idx: number[] = [];
   for (let i = from; step > 0 ? i <= to : i >= to; i += step) if (laid.has(i)) idx.push(i);
@@ -958,7 +974,24 @@ async function alongLine(ctx: GoalContext, line: RailLine, from: number, to: num
         if (over) return { stop: `${over} at ${fmt(c)}: over the line now`, mended };
         if (idOf(st) === itemOf(c)) {
           const want = shapeWith(line, i, x => now.has(x));
-          if (want && shapeIn(st) && shapeIn(st) !== want) return { stop: `the ${itemOf(c)} at ${fmt(c)} is ${shapeIn(st)} now, not ${want}`, mended };
+          const has = shapeIn(st);
+          if (want && has && has !== want) {
+            // (turned toward a rail no longer there, a stray an extension's join took up: the game turns no rail at a
+            // take-up. Live, Nov 23: the join south_west to the bypassed stretch, two runs stopped and the line given
+            // up. Taken up and laid again, once, between the rails beside it now)
+            if (!relaid.has(i) && await staleShape(ctx, c, has)) {
+              relaid.add(i);
+              const up = await takeUp(ctx, line, c);
+              if (!up.ok) return { stop: `the ${itemOf(c)} at ${fmt(c)} is ${has} now, not ${want}, and did not come up to be laid again: ${up.reason ?? 'no answer'}`, mended };
+              now.delete(i);
+              const r = await lay(ctx, line, { kind: 'cell', i }, layArgs(line, i, now));
+              if (!r.ok) return { stop: `the ${itemOf(c)} at ${fmt(c)} taken up to be laid again could not be: ${r.reason ?? 'no answer'}`, mended };
+              say(ctx, `the ${itemOf(c)} at ${fmt(c)} was ${has}, toward a rail no longer there: laid again`);
+              mended++;
+              continue;
+            }
+            return { stop: `the ${itemOf(c)} at ${fmt(c)} is ${has} now, not ${want}`, mended };
+          }
           continue;
         }
         if (!/^(air|cave_air)$/.test(idOf(st))) return { stop: `${idOf(st)} where the line's ${itemOf(c)} was, at ${fmt(c)}`, mended };
