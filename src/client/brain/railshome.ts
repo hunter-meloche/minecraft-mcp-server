@@ -1206,8 +1206,12 @@ async function layOn(ctx: GoalContext, line: RailLine, todo: readonly Step[], cl
  * The record's strays (straysOf: what an extension made no longer the plan's) taken up where they stand, each walked to;
  * one no longer the bot's left, said. Why one did not come up (the laying waits on it: a rail goes where it stands), or undefined.
  */
-async function upStrays(ctx: GoalContext, line: RailLine): Promise<string | undefined> {
-  for (const b of straysOf(line)) {
+async function upStrays(ctx: GoalContext, line: RailLine, onlyNear = false): Promise<string | undefined> {
+  // (`onlyNear`, the move day's: only those within 2 of the line as planned now, a rail that would join it or a torch
+  // that would light it; the rest stay in the record for the next laying or the take-up. Live, Nov 23: 33 strays up
+  // first took the minute the extension's 24 rails and the move needed)
+  const near = (at: Pos) => line.cells.some(c => Math.abs(c.x - at.x) <= 2 && Math.abs(c.z - at.z) <= 2 && Math.abs(c.y - at.y) <= 2);
+  for (const b of straysOf(line).filter(x => !onlyNear || near(x.at))) {
     aborted(ctx);
     await walkTo(ctx, b.at, 3);
     const r = await takeUp(ctx, line, b.at);
@@ -2118,14 +2122,14 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   ctx.save?.();
   say(ctx, `${hopWhy}`);
   say(ctx, `the line extended into the village: ${r.cells.length} rails (${r.powered} powered) from ${fmt(from)} to the new pickup ${fmt(r.pickup)}`);
-  if (r.skip) say(ctx, `it joins the line ${r.skip} rails in from its old launch: the ${r.skip} before the join, their torches and the old stop taken up first`);
+  if (r.skip) say(ctx, `it joins the line ${r.skip} rails in from its old launch: the ${r.skip} before the join, their torches and the old stop taken up (those by the line now first, the rest by the next laying or the take-up)`);
   say(ctx, `the extension's route ${r.route}; the launch, the stop${r.stop.placed ? ' (a cobblestone)' : ' (the ground)'} and the cart's start at its end, by the villager (${r.villager < 0 ? 'the bell' : r.villager}) at ${fmt(r.from)}`);
   if (r.earth.length) {
     const cuts = r.earth.filter(w => w.op === 'cut'), fills = r.earth.length - cuts.length;
     const kinds = [...new Set(cuts.map(w => idOf(w.was)))].join(', ');
     say(ctx, `the ground levelled for it: ${cuts.length} cut(s)${kinds ? ` (${kinds})` : ''}, ${fills} fill(s) of cobblestone${r.earth.some(w => w.hop) ? `, ${r.earth.filter(w => w.hop).length} of the cuts in the boat's hop` : ''}; every one in the record, put back by the take-up`);
   }
-  const stray = await upStrays(ctx, line);
+  const stray = await upStrays(ctx, line, true);
   if (stray) {
     const text = `the line extended into the village; ${stray}: the laying on the next run`;
     say(ctx, text);

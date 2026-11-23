@@ -11,7 +11,7 @@ import { pick, workTick } from '../../src/client/brain/work.js';
 import { closeUpGoal } from '../../src/client/brain/villagemove.js';
 import { JUDGE_V, peekVillages, type Seen } from '../../src/client/brain/village.js';
 import {
-  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, setPickupWait, goalOf, layArgs, outwardSteps, peekLine, railMoveNeedMs, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
+  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, setPickupWait, straysOf, goalOf, layArgs, outwardSteps, peekLine, railMoveNeedMs, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
 } from '../../src/client/brain/railshome.js';
 
 /**
@@ -1544,9 +1544,11 @@ test('the extension cut short as it is laid (a restart): its blocks in the recor
   t.truthy(line.extended);
   // the cut one written before it went down: in the record, not in the world; the rest stand as the record has them
   const standing = new Set(land.standing(line));
-  const notDown = line.laid.filter(b => !standing.has(k(b.at)));
+  // (the strays away from the line as planned now are left for the next laying, Nov 23: still in the record)
+  const strays = new Set(straysOf(line).map(b => k(b.at)));
+  const notDown = line.laid.filter(b => !standing.has(k(b.at)) && !strays.has(k(b.at)));
   t.is(notDown.length, 1, JSON.stringify(notDown));
-  t.is(land.block(oldStop.x, oldStop.y, oldStop.z) === 'cobblestone', false, 'the old stop up');
+  t.true(land.block(oldStop.x, oldStop.y, oldStop.z) !== 'cobblestone' || strays.has(k(oldStop)), 'the old stop up, or a stray of the record');
   // brain.json read back: the next run (the yard's stretch close up's) lays on to the new head
   const saved = JSON.parse(JSON.stringify(world)) as WorldMemory;
   land.world = saved;
@@ -1558,6 +1560,8 @@ test('the extension cut short as it is laid (a restart): its blocks in the recor
   const r = await run(land, 'lay', 30 * MINUTE);
   t.regex(r.text, /^the line is whole: \d+ rails/, land.said.slice(said0).join('\n'));
   t.true(land.said.slice(said0).some(l => l.startsWith(`rails: the extension into the village is down: ${again.extended!.rails} rails`)), land.said.slice(said0).join('\n'));
+  t.deepEqual(straysOf(again), [], 'the strays left by the move day taken up by the laying');
+  t.not(land.block(oldStop.x, oldStop.y, oldStop.z), 'cobblestone', 'the old stop up');
   t.deepEqual(land.standing(again).filter(p => !yardSteps(again).some(st => k(stepAt(again, st)) === p)).sort(), again.laid.map(b => k(b.at)).filter(p => !yardSteps(again).some(st => k(stepAt(again, st)) === p)).sort());
   // given up (the switch off): every block of it taken back up, the extension's too
   saved.railsHome = false;
@@ -1716,12 +1720,15 @@ test('a head whose way to the line\'s end is blocked joins the line further on (
   t.deepEqual(line.cells.slice(ext.rails).map(c => k(c)), old.slice(skip + 1).map(c => k(c)));
   // the bypassed rails and the old stop taken up (as strays) before the first rail of the extension went down
   const firstLay = did.findIndex(l => /^lay /.test(l) && !/,2119$|,212[0-9]$/.test(l) && line.cells.slice(0, ext.rails - 1).some(c => l.endsWith(k(c))));
+  // (those within 2 of the line as planned now first, Nov 23; the rest by the take-up after the move)
+  const byLine = (p: Pos) => line.cells.some(c => Math.abs(c.x - p.x) <= 2 && Math.abs(c.z - p.z) <= 2 && Math.abs(c.y - p.y) <= 2);
   for (const c of old.slice(0, skip)) {
     const i = did.indexOf(`take up ${c.kind === 'rail' ? 'rail' : 'powered_rail'} ${k(c)}`);
-    t.true(i >= 0 && i < firstLay, `${k(c)} up first`);
+    t.true(i >= 0 && (!byLine(c) || i < firstLay), `${k(c)} up${byLine(c) ? ' first' : ''}`);
     t.true(upAt.includes(k(c)), `${k(c)} a stray of the record`);
   }
-  t.true(did.indexOf(`take up cobblestone ${k(oldStop)}`) < firstLay);
+  const stopUp = did.indexOf(`take up cobblestone ${k(oldStop)}`);
+  t.true(stopUp >= 0 && (!byLine(oldStop) || stopUp < firstLay));
   // the cart's way home lit: a lit rail at least every BOOST_GAP from the new pickup to the brake
   const lit = line.cells.map((c, i) => (c.kind === 'powered' && c.role !== 'launch' ? i : -1)).filter(i => i >= 0);
   for (let j = 1; j < lit.length; j++) t.true(lit[j] - lit[j - 1] <= BOOST_GAP, `${lit[j - 1]} .. ${lit[j]}`);
