@@ -5,12 +5,14 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.HashMap;
@@ -72,6 +74,28 @@ public final class Gates {
                 if (!gateOrDoor(ls) || open(ls)) continue;
                 Vec3 c = Vec3.atCenterOf(lower);
                 mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND, new BlockHitResult(c, Direction.UP, lower, false));
+                opened.put(lower.asLong(), Ticker.ticks());
+                break;
+            }
+            // a closed door right next to it that its look can't click: Baritone opens a door by a right click on the
+            // crosshair, aimed at the door's centre, and something in the bot's way with an outline but no collision
+            // (a wall torch hung on the door's side of its head cell) takes the click. Nov 10, 12 and 23: a torch at
+            // -549,64,2185 held the bot inside the storage house's south door for hours ("Could not reach ...: timed
+            // out after 60s. Stopped at (-549, 63, 2185)" for shelter, smelt and every round). Click the door itself.
+            for (Direction d : Direction.Plane.HORIZONTAL) {
+                BlockPos lower = me.relative(d);
+                BlockState ls = mc.level.getBlockState(lower);
+                if (!(ls.getBlock() instanceof DoorBlock) || !gateOrDoor(ls) || open(ls)) continue;
+                boolean clickable = false;
+                for (BlockPos half : new BlockPos[]{lower, lower.above()}) {
+                    BlockHitResult ray = mc.level.clip(new ClipContext(eye, Vec3.atCenterOf(half), ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, p));
+                    if (ray.getType() == HitResult.Type.MISS || ray.getBlockPos().equals(lower) || ray.getBlockPos().equals(lower.above())) clickable = true;
+                }
+                if (clickable) continue;
+                Direction face = d.getOpposite();
+                Vec3 hit = Vec3.atCenterOf(lower).add(face.getStepX() * 0.5, 0, face.getStepZ() * 0.5);
+                System.out.println("[claudebridge] gates: the closed door at " + lower.toShortString() + " is out of the look's click (something in the way): opened it");
+                mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND, new BlockHitResult(hit, face, lower, false));
                 opened.put(lower.asLong(), Ticker.ticks());
                 break;
             }
