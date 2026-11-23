@@ -342,9 +342,10 @@ test('enchant: no plain piece at the table while a worn piece\'s repair waits, a
   // mended, the table has the pickaxe again (and the spare pair is the chests', beside a sound enchanted one)
   const mended = kit.map(i => (i.slot === 36 ? { ...i, damage: 0, repairCost: 63 } : i));
   t.is(enchantGoal.wants(at45(mended, { xpLevel: 30 }), world), 'level 30: enchant the diamond_pickaxe');
-  // a repair past the anvil's 39 waits on nothing: the table goes on
+  // a repair past the anvil's 39 waits on nothing: the table goes on, with the plain pair that replaces the worn one
+  // before the spare pickaxe (an enchanted one carried): the fire gear's protection 4 waits on it (Nov 23)
   const dear = kit.map(i => (i.slot === 36 ? { ...i, repairCost: 63 } : i));
-  t.regex(enchantGoal.wants(at45(dear, { xpLevel: 30 }), world) ?? '', /enchant the diamond_pickaxe/);
+  t.is(enchantGoal.wants(at45(dear, { xpLevel: 30 }), world), 'level 30: enchant the diamond_boots');
 });
 
 test('enchant: books are kept to 6 the anvil has a use for, and 24 in all; one whose stack memory lost counts as of use', (t) => {
@@ -554,4 +555,23 @@ test('bookChests: the gear chests first (books go with the gear), the emptier of
     chestStacks: { '0,63,0': stacks(27), '1,63,0': stacks(54), '2,63,0': stacks(15), '3,63,0': stacks(5), '4,63,0': stacks(7) }
   } as unknown as WorldMemory;
   t.deepEqual(bookChestOrder(w).map(c => c.x), [3, 2, 4, 0, 1]);
+});
+
+test('enchant: a plain spare tool waits behind the plain armour; with every tool of its kind plain the order is as ever', (t) => {
+  // Nov 23 live: two enchanted pickaxes and a plain spare carried, the worn boots plain (the fire gear's EPF 18 of 20)
+  const items: InventoryItem[] = [
+    { slot: 0, name: 'diamond_pickaxe', count: 1, enchantments: [{ name: 'efficiency', level: 4 }, { name: 'unbreaking', level: 3 }] },
+    { slot: 1, name: 'diamond_sword', count: 1, enchantments: [{ name: 'sharpness', level: 5 }] },
+    { slot: 2, name: 'diamond_pickaxe', count: 1 },
+    { slot: 36, name: 'diamond_boots', count: 1 },
+    { slot: 37, name: 'diamond_leggings', count: 1, enchantments: [{ name: 'protection', level: 4 }] }
+  ];
+  t.is(enchantPick(items, 10)?.name, 'diamond_boots');
+  // no pocket slot to take the boots off into: the spare pickaxe after all
+  t.is(enchantPick(items, 0)?.slot, 2);
+  // the only pickaxe plain, or the enchanted one worn out: not a spare, first as ever
+  t.is(enchantPick(items.filter(i => i.slot !== 0), 10)?.slot, 2);
+  t.is(enchantPick(items.map(i => (i.slot === 0 ? { ...i, damage: 1560, maxDamage: 1561 } : i)), 10)?.slot, 2);
+  // an enchanted iron pickaxe makes no diamond one a spare
+  t.is(enchantPick(items.map(i => (i.slot === 0 ? { ...i, name: 'iron_pickaxe' } : i)), 10)?.slot, 2);
 });

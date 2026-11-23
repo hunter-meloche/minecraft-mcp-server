@@ -92,14 +92,25 @@ function tableTakes(i: InventoryItem, items: InventoryItem[]): boolean {
  * at level 59.
  */
 export function enchantPick(items: InventoryItem[], free: number): InventoryItem | undefined {
-  for (const kind of ENCHANT_ORDER) {
-    const ofKind = items
-      .filter(i => gearKind(i.name) === kind && tableTakes(i, items))
-      .filter(i => i.slot < 36 || (wornSlot(i) !== undefined && free > 0))
-      .sort((a, b) => tier(b.name) - tier(a.name) || Number(a.slot >= 36) - Number(b.slot >= 36));
-    if (ofKind[0]) return ofKind[0];
+  // a spare tool after the armour: Nov 23 the table spent its level 30 on a plain spare pickaxe (two enchanted ones
+  // carried) while the worn boots were plain, the Nether's fire EPF 18 of 20 for want of their protection 4, and the
+  // fortress trip, the blaze rod and the brewing stand with it, waited the 8 h to the next level 30
+  for (const spareLast of [true, false]) {
+    for (const kind of ENCHANT_ORDER) {
+      if (spareLast && spareTool(kind, items)) continue;
+      const ofKind = items
+        .filter(i => gearKind(i.name) === kind && tableTakes(i, items))
+        .filter(i => i.slot < 36 || (wornSlot(i) !== undefined && free > 0))
+        .sort((a, b) => tier(b.name) - tier(a.name) || Number(a.slot >= 36) - Number(b.slot >= 36));
+      if (ofKind[0]) return ofKind[0];
+    }
   }
   return undefined;
+}
+
+/** A tool kind whose plain pieces are spares (pure): an enchanted one of diamond or better is carried, and sound (kit.ts isWorn). */
+function spareTool(kind: string, items: InventoryItem[]): boolean {
+  return !ARMOUR.has(kind) && items.some(i => i.slot >= 0 && i.slot < 36 && gearKind(i.name) === kind && !plain(i) && tier(i.name) >= tier(`diamond_${kind}`) && !isWorn(i));
 }
 
 /**
