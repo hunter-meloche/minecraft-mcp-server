@@ -1663,6 +1663,47 @@ interface HopFrom {
   ground?: Ground;
 }
 
+/** How near the pickup a villager the judge allows must be for the move to wait on it wandering onto the pickup. */
+const WAIT_NEAR = 8;
+/** The longest such wait, and how often it looks (ms); the tests set them (setPickupWait). */
+let WAIT_MS = 60_000, WAIT_POLL = 400;
+export function setPickupWait(ms: number, poll = WAIT_POLL): void { WAIT_MS = ms; WAIT_POLL = poll; }
+
+/**
+ * No boat way to the pickup from any villager, but one the judge allows is near it (WAIT_NEAR): the bot stands off to
+ * the side of the head and watches, as long as the run's room allows (WAIT_MS at most), for one to wander onto the
+ * pickup's middle, where the cart takes it as it stands (toPickup). Live, Nov 23: the villager the fifth extension
+ * was laid to stood on its pickup at the look and 4 blocks off it a moment later, a wall beside it, no boat way.
+ * The villager seen there, or undefined.
+ */
+async function waitOnPickup(ctx: GoalContext, line: RailLine, t: HopFrom): Promise<Seen | undefined> {
+  if (WAIT_MS <= 0) return undefined;
+  const p = line.pickup, mid = { x: p.x + 0.5, z: p.z + 0.5 };
+  const ids = new Set(t.candidates.map(c => c.id));
+  const near = (round: readonly Seen[], d: number) => round.find(e => e.name === 'villager' && e.position && ids.has(e.id) && !notFree(e, t.jobs) && Math.abs(e.position.y - p.y) < 1.5 && horiz(e.position, mid) <= d);
+  const look = async () => (await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: PLAYER_SIGHT }).catch(() => undefined))?.entities ?? [];
+  const first = await look();
+  if (!near(first, WAIT_NEAR)) return undefined;
+  // (off to the side of the head, out of the villager's way and the cart's)
+  const along = line.cells[HEAD.pickup - HEAD.launch - 1] ?? line.cells[0];
+  const dx = Math.sign(p.x - along.x), dz = Math.sign(p.z - along.z);
+  await ctx.call('goto', { x: Math.floor(mid.x - dz * 3), y: p.y, z: Math.floor(mid.z + dx * 3), range: 1, careful: true, timeoutMs: 15_000 }, 20_000).catch(() => undefined);
+  say(ctx, `no boat way to the pickup ${fmt(p)}: waiting by it for a villager to wander onto it`);
+  const polls = Math.ceil(WAIT_MS / WAIT_POLL);
+  for (let i = 0; i < polls; i++) {
+    aborted(ctx);
+    if (t.room() < WAIT_POLL) break;
+    const round = await look();
+    if (playerNow(round, await here(ctx), siteFor(villagesOf(ctx.world).sites, line.site)?.area ?? t.area)) return undefined;
+    const on = near(round, 0.3);
+    if (on) { say(ctx, `the villager (${on.id}) wandered onto the pickup ${fmt(p)}`); return on; }
+    if (!near(round, WAIT_NEAR + 4)) break;
+    await pause(WAIT_POLL);
+  }
+  say(ctx, `no villager wandered onto the pickup ${fmt(p)}`);
+  return undefined;
+}
+
 /**
  * An unemployed villager the judge allows, anywhere in its village, brought onto the pickup by boat: the nearest first,
  * its way to the pickup searched on the ground read for it (boatroute.ts planRoute: the boat's footprint and the drive's
@@ -1807,6 +1848,10 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
     if (!(await boatDrop(ctx, drop))) return { why: `the boat broken at the pickup did not come back into the pockets (its drop by ${fmt(drop)}): no boat for the way into the hall` };
     say(ctx, `the villager (${e.id}) on the pickup ${fmt(p)}`);
     return { e };
+  }
+  if (!late) {
+    const w = await waitOnPickup(ctx, line, t);
+    if (w) return { e: w };
   }
   if (late) return { why: late, late: true };
   if (!tried && onPath) return { why: `the ${onPath} villager(s) to take stand on a path, farmland or the like: looked at again when they have wandered`, late: true };
@@ -2062,6 +2107,8 @@ async function extendFor(ctx: GoalContext, line: RailLine, t: HopFrom, look: Vil
   const r = extensionFor(line, g, ext);
   // (a failed plan's inputs and ground kept beside brain.log, for a replay offline)
   if (!r.ok) ctx.dump?.('extension', { why: r.why, line, ext, ground: g.dump() });
+  // (none to be planned: a villager near the pickup may yet wander onto it; the move goes on to toPickup, which looks)
+  if (!r.ok && failed === undefined && await waitOnPickup(ctx, line, t)) return undefined;
   if (!r.ok) return notToday(ctx, line, `${hopWhy}; and no extension of the line into the village: ${r.why}`, true);
   const from = line.cells[r.skip];
   applyExtension(line, r, area, clk.now());

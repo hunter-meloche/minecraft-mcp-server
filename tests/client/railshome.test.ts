@@ -11,7 +11,7 @@ import { pick, workTick } from '../../src/client/brain/work.js';
 import { closeUpGoal } from '../../src/client/brain/villagemove.js';
 import { JUDGE_V, peekVillages, type Seen } from '../../src/client/brain/village.js';
 import {
-  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, goalOf, layArgs, outwardSteps, peekLine, railMoveNeedMs, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
+  EXTENSIONS, FRESH_FREE, MAX_AGE, MISSES, MOVE_TRIES, STOPS, UP_TRIES, extensionFor, setPickupWait, goalOf, layArgs, outwardSteps, peekLine, railMoveNeedMs, railsHomeLine, railsTask, railsTick, railsYardOpen, refillOf, shapeWith, startLine, stepAt, yardSteps, type RailLine
 } from '../../src/client/brain/railshome.js';
 
 /**
@@ -31,6 +31,8 @@ import {
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const T0 = Date.UTC(2026, 10, 18, 14, 0, 0);
+// (the wait on a villager wandering onto the pickup is off but in its own test: it watches for up to a minute)
+setPickupWait(0);
 const HOME: Pos = { x: -549, y: 63, z: 2183 };
 const YARD = { x1: -565, z1: 2119, x2: -533, z2: 2215, y: 62 };
 const HALL = { x: -561, y: 62, z: 2126, width: 11, length: 9 };
@@ -2554,4 +2556,32 @@ test('a move day with a free word seen whole within FRESH_FREE walks no viewpoin
   const said = land.said.slice(said0);
   t.false(said.some(l => /looking round the village from/.test(l)), said.join('\n'));
   t.regex(r.text, /^moved an unemployed villager from the village at \(-572, 63, 2000\) to the hall by the rails home/, said.join('\n'));
+});
+
+test('no boat way to the pickup, a villager penned in by walls 5 from it: the bot waits by the head, and the villager that wanders onto the pickup is taken by the cart as it stands (Nov 23: on the pickup at the look, 4 off it a moment later, a wall beside it)', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  for (const v of land.villagers) if (v.id === 106 || v.id === 107) v.profession = 'mason';
+  const v101 = land.villagers.find(v => v.id === 101)!;
+  v101.position = { x: -553.5, y: 63, z: 2005.5 };
+  for (let x = -554; x <= -552; x++) for (let z = 2004; z <= 2006; z++) if (x !== -553 || z !== 2005) for (const y of [63, 64]) land.blocks.set(k({ x, y, z }), 'stone');
+  line.extended = { at: T0, from: { ...line.cells[0] }, to: { ...line.pickup }, rails: 1, powered: 0, times: EXTENSIONS };
+  let waiting = false, looks = 0;
+  const call = (async (m: string, p?: Record<string, unknown>) => {
+    if (m === 'world.entities' && waiting && ++looks === 3) v101.position = { x: line.pickup.x + 0.5, y: 63, z: line.pickup.z + 0.5 };
+    return land.call(m, p);
+  }) as GoalContext['call'];
+  const progress = (text: string) => { if (/waiting by it for a villager/.test(text)) waiting = true; land.said.push(text); };
+  setPickupWait(5000, 1);
+  try {
+    const said0 = land.said.length;
+    const r = await run(land, 'move', 20 * MINUTE, { call, progress });
+    const said = land.said.slice(said0);
+    t.true(said.some(l => /waiting by it for a villager to wander onto it/.test(l)), said.join('\n'));
+    t.true(said.some(l => /the villager \(101\) wandered onto the pickup/.test(l)), said.join('\n'));
+    t.regex(r.text, /^moved an unemployed villager/, said.join('\n'));
+  } finally {
+    setPickupWait(0);
+  }
 });
