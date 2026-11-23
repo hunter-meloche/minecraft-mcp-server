@@ -71,9 +71,10 @@ export const MISSES = 4;
  * the move day's run has the time for one or two viewpoints at most once out along the line. A day (live, Nov 22: at 6 h
  * the look-only days and the move days took turns, a look seeing 114 of 121 chunks a wait, and the move slipped a
  * run each time; the user's of Nov 20, "the bot doesn't need to be this careful"); the partial look still stops the
- * move for a player by or a villager named.
+ * move for a player by or a villager named. Three days since Nov 23 (MAX_AGE, the line's own life): past a day the
+ * rung wanted a look-only day again, 9.3 min of the workday's 9.6, and no morning gave it that.
  */
-export const FRESH_FREE = 24 * 60 * 60_000;
+export const FRESH_FREE = 72 * 60 * 60_000;
 /** Runs a block of the line would not be reached for the take-up (not loaded, out of reach) before it is left, said. */
 export const UP_TRIES = 3;
 
