@@ -2498,3 +2498,30 @@ test('the move\'s day need of a 375-rail line still fits one game day\'s dayligh
   const need = railMoveNeedMs({ cells, yard: 5 } as unknown as RailLine, HOME);
   t.true(need < 560_000, String(need));
 });
+
+test('a village scanned as one box round all of it (Nov 22: 87 by 68, every villager inside): the extension keeps clear of its built blocks, not of the whole box, and lies by the villager; a built block put by that head moves it off', async (t) => {
+  const { world, line } = lineWorld('laying');
+  const land = new Field(world);
+  await laidWhole(land, line);
+  bumpy(land);
+  walledEnd(land);
+  uphill(land, { x: -597.5, y: 65, z: 2000.5 });
+  const g = new Ground(55, 29);
+  for (let x = -625; x <= -540; x++) for (let z = 1960; z <= 2060; z++) for (let y = 55; y < 84; y++) g.set(x, y, z, land.block(x, y, z));
+  const v101 = { id: 101, name: 'villager', position: { x: -597.5, y: 65, z: 2000.5 }, profession: 'none' } as Seen;
+  const village: Zone = { x1: -620, y1: 60, z1: 1970, x2: -575, y2: 80, z2: 2040, markers: 400, surface: true, sample: 'oak_planks', kinds: ['oak_planks x200'] } as Zone;
+  const look = { jobs: [], beds: land.marks.filter(m => /_bed$/.test(m.name)).map(m => m.at), bells: [{ ...BELL }], zones: [village], seen: [v101] };
+  const args = { noWay: [v101], order: [v101], look, v: { own: [village], outposts: [] }, area: world.villages!.sites[0].area, yard: YARD, earth: true };
+  const r = extensionFor(line, g, args);
+  t.true(r.ok, r.ok ? '' : r.why);
+  if (!r.ok) return;
+  t.true(horiz(r.pickup, { x: -597.5, z: 2000.5 }) <= 6, JSON.stringify(r.pickup));
+  // planks along the head's side: no rail goes in a plank's column, no cut or fill within one of a plank
+  const planks: Pos[] = r.cells.slice(0, 4).map(cell => ({ x: cell.x, y: cell.y, z: cell.z + 1 }));
+  for (const p of planks) g.set(p.x, p.y, p.z, 'minecraft:oak_planks');
+  const moved = extensionFor(line, g, args);
+  if (moved.ok) {
+    for (const cell of moved.cells) t.false(planks.some(p => p.x === cell.x && p.z === cell.z && Math.abs(p.y - cell.y) <= 2), k(cell));
+    for (const w of moved.earth) t.false(planks.some(p => Math.abs(p.x - w.x) <= 1 && Math.abs(p.z - w.z) <= 1 && Math.abs(p.y - w.y) <= 2), `${w.op} ${k(w)}`);
+  }
+});

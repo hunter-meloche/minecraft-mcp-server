@@ -1805,6 +1805,12 @@ async function toPickup(ctx: GoalContext, line: RailLine, t: HopFrom, now: numbe
 // ------------------------------------------------------------------------------------------------ the extension
 
 /**
+ * A village's built block (what an extension keeps clear of inside the village's own boxes): its houses, fences, farms,
+ * paths, lamps and job sites; not natural ground, plants, trees or water.
+ */
+const VILLAGE_BUILT = /(planks|stairs|slab|fence|door|glass|_bed$|wool|carpet|hay_block|farmland|^wheat$|^carrots$|^potatoes$|^beetroots$|torch|lantern|composter|bell|lectern|barrel|smoker|blast_furnace|cartography_table|fletching_table|smithing_table|stonecutter|loom|grindstone|cauldron|brewing_stand|stripped_|_wall$|bookshelf|terracotta|cobblestone|chest|crafting_table|dirt_path|ladder|sign|flower_pot|concrete|bricks)/;
+
+/**
  * At most this many extensions of one line (the villagers wander uphill again: the existing misses then). Live, Nov 22:
  * the west village's villagers wandered off from each of two extensions' pickups by the move day; with an extension's
  * rails carried on the move day (EXT_CARRY), each further one is laid to a villager where it stands and the move made
@@ -1908,9 +1914,23 @@ export function extensionFor(line: RailLine, g: Ground, t: {
   const marks = [...t.look.jobs.map(j => j.at), ...t.look.beds, ...t.look.bells];
   const own = t.v.own;
   const ends = new Set([...joinable(line).map(c => key(c)), key(line.stop.at)]);
+  // (the village's own builds kept clear block by block, not box by box: live, Nov 22, the west village's scan gave one
+  // box of 87 by 68 round all of it, every villager inside, and no head could lie by any of them. A cell inside a box
+  // of the village's own is kept clear when a built block of it stands within `pad` of it, a block or two up or down;
+  // the line's own rails, torches and stop are none)
+  const ours = new Set([...line.laid.map(b => key(b.at)), key(line.stop.at)]);
+  const builtAt = (x: number, y: number, z: number): boolean => {
+    const st = g.state(x, y, z);
+    return !!st && !ours.has(`${x},${y},${z}`) && VILLAGE_BUILT.test(idOf(st));
+  };
+  const inOwn = (x: number, y: number, z: number, pad: number) => own.some(o => x >= o.x1 - pad && x <= o.x2 + pad && z >= o.z1 - pad && z <= o.z2 + pad && y >= o.y1 - 3 && y <= o.y2 + 1);
+  const byBuilt = (x: number, y: number, z: number, pad: number): boolean => {
+    if (!inOwn(x, y, z, pad)) return false;
+    for (let dx = -pad; dx <= pad; dx++) for (let dz = -pad; dz <= pad; dz++) for (let dy = -2; dy <= 2; dy++) if (builtAt(x + dx, y + dy, z + dz)) return true;
+    return false;
+  };
   const avoid = (x: number, y: number, z: number): boolean => !ends.has(`${x},${y},${z}`)
-    && (marks.some(m => Math.abs(m.x - x) <= 1 && Math.abs(m.z - z) <= 1 && Math.abs(m.y - y) <= 2)
-      || own.some(o => x >= o.x1 && x <= o.x2 && z >= o.z1 && z <= o.z2 && y >= o.y1 - 2 && y <= o.y2 + 1));
+    && (marks.some(m => Math.abs(m.x - x) <= 1 && Math.abs(m.z - z) <= 1 && Math.abs(m.y - y) <= 2) || byBuilt(x, y, z, 0));
   const bounds = extendBox(line, t.area);
   const reached = (r: RailExtension): boolean => {
     // (on the ground as the extension's cuts and fills leave it)
@@ -1953,7 +1973,7 @@ export function extensionFor(line: RailLine, g: Ground, t: {
   const villagers = [...(t.look.seen ?? []), ...t.order].filter(e => e.name === 'villager' && e.position).map(e => e.position!);
   const may = (x: number, y: number, z: number): boolean => !ends.has(`${x},${y},${z}`)
     && !marks.some(m => Math.abs(m.x - x) <= 1 && Math.abs(m.z - z) <= 1 && Math.abs(m.y - y) <= 2)
-    && !own.some(o => x >= o.x1 - 1 && x <= o.x2 + 1 && z >= o.z1 - 1 && z <= o.z2 + 1 && y >= o.y1 - 3 && y <= o.y2 + 1)
+    && !byBuilt(x, y, z, 1)
     && !villagers.some(p => Math.abs(p.x - (x + 0.5)) < 0.9 && Math.abs(p.z - (z + 0.5)) < 0.9)
     && !zoneNear(zones, { x: x + 0.5, y, z: z + 0.5 }, FROM_ZONES);
   const near = [...t.order].sort((a, b) => horiz(a.position!, join) - horiz(b.position!, join));
