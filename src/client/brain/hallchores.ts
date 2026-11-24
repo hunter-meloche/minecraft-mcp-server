@@ -141,9 +141,10 @@ export interface HallChoresMemory {
   };
   /**
    * the fletcher: its stick trade seen or not and its price then (sticks a trade: 32, more with demand after it sold out),
-   * level and xp at the last read, sticks sold, a sold-out trade, its rerolls
+   * level and xp at the last read, sticks sold, a sold-out trade, its rerolls; `siteOut`: when a reroll took the
+   * fletching table up and did not get it down again (put back first, whoever is the fletcher then)
    */
-  fletcher?: { id?: number; sticks?: boolean; price?: number; level?: number; xp?: number; sold: number; outAt?: number; rolls: number; day: number; today: number };
+  fletcher?: { id?: number; sticks?: boolean; price?: number; level?: number; xp?: number; sold: number; outAt?: number; rolls: number; day: number; today: number; siteOut?: number };
   /** when each chore last failed (ms): passed over for CHORE_FAIL_WAIT, so one that keeps failing holds up none of the rest */
   failed?: Partial<Record<Chore, number>>;
 }
@@ -373,6 +374,7 @@ const todayOf = (c: { day: number; today: number } | undefined, day: number) => 
 
 /**
  * The next chore, pure, from the census (hallChores.census) and what there is: the first of
+ * 0. fletcher: the fletching table a reroll took up and did not put back (`siteOut`), whatever the hall holds now;
  * 1. beds: fewer than HALL_BEDS_WANTED beds in the hall and room for more (moreBedCells), the beds' makings there;
  * 2. breed: two adults or more, under HALL_ADULTS with the babies, a bed free for the baby, BREAD_PER_BABY bread there,
  *    and no feed waiting on its baby (BREED_WAIT; after BREED_FAILS feeds in a row with none, BREED_BACKOFF);
@@ -402,6 +404,10 @@ export function chorePlan(s: Pick<Snapshot, 'now' | 'items'>, world: WorldMemory
     return { chore, want };
   };
   let p: ChorePlan | undefined;
+  // 0. the fletching table back in its cell. Nov 24: a reroll took it up, the villager kept its job a while and the
+  // table did not go down again; the chores knew of no table out (7 rerolls only a fletcher, and one that lost its job
+  // with the table gone is none), and the hall would have stayed without one for good
+  if (fin(m.fletcher?.siteOut) && world.zones?.['hall:fletching']?.length && (p = offer('fletcher', 'the fletching table taken up by a reroll: put it back'))) return p;
   // 1. beds
   if (beds < HALL_BEDS_WANTED) {
     const cells = moreBedCells(world, HALL_BEDS_WANTED - beds);
@@ -726,6 +732,7 @@ const toFront = (ctx: GoalContext, cell: Pos) =>
  * times over, "the bot is standing there"), the block made first where none is carried.
  */
 async function placeSite(ctx: GoalContext, cell: Pos, item: string): Promise<void> {
+  let why = '';
   if (carried(await inventory(ctx), item) < 1) {
     const short = await prepare(ctx, item, 1);
     if (Object.keys(short).length) throw new Error(`a ${item} for the hall: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`);
@@ -737,11 +744,13 @@ async function placeSite(ctx: GoalContext, cell: Pos, item: string): Promise<voi
     const r = await ctx.act('place-block', { ...cell, item, faceDirection: 'down' });
     if (r.ok && /^Placed/.test(r.text)) return;
     if (await blockAt(ctx, cell) === item) return;
+    why = r.text;
     // (the bot in the cell or under it after all: out onto the front first)
     if (/where you're standing/.test(r.text)) await toFront(ctx, cell);
     await pause(HALL_WAITS.pollMs);
   }
-  throw new Error(`the ${item} did not go down at ${fmt(cell)}`);
+  // (the place-block's answer kept: Nov 24's fletching table "did not go down" four times and nothing said why)
+  throw new Error(`the ${item} did not go down at ${fmt(cell)}${why ? ` (${why})` : ''}`);
 }
 
 /**
@@ -1007,13 +1016,22 @@ async function sticksChore(ctx: GoalContext, v: HallVillager): Promise<string> {
  * The fletcher without the stick trade, never traded with: its fletching table broken and put back as the librarian's
  * lectern is, its new offers read (a look only), until the stick trade shows (FLETCHER_ROLLS_A_DAY a day).
  */
-async function fletcherChore(ctx: GoalContext, v: HallVillager): Promise<string> {
+async function fletcherChore(ctx: GoalContext, v: HallVillager | undefined): Promise<string> {
   const m = hallChoresOf(ctx.world);
   const cell = ctx.world.zones?.['hall:fletching']?.[0];
   if (!cell) return 'the hall keeps no fletching table cell';
   const day = gameDay(ctx.world);
   const f = (m.fletcher ??= { sold: 0, rolls: 0, day, today: 0 });
   await enterHall(ctx);
+  // a table a reroll left out of its cell: put back, and nothing more this run (the next plan reads what took it)
+  if (fin(f.siteOut)) {
+    await placeSite(ctx, cell, 'fletching_table');
+    delete f.siteOut;
+    delete f.sticks;
+    ctx.save?.();
+    return `put the fletching table back at ${fmt(cell)}`;
+  }
+  if (!v) return 'no fletcher in the hall';
   // (another fletcher than the one read, or new ids after a restart: its own offers first, a look only)
   if (f.id !== v.id) {
     const st = await readTrades(ctx, v);
@@ -1027,9 +1045,12 @@ async function fletcherChore(ctx: GoalContext, v: HallVillager): Promise<string>
   await breakSite(ctx, cell, 'fletching_table');
   countRoll(f, day);
   f.rolls += 1;
+  f.siteOut = ctx.s.now;
   ctx.save?.();
   if (!await jobGone(ctx, v.id)) say(ctx, `fletcher: the villager (${v.id}) kept its job with the table gone`);
   await placeSite(ctx, cell, 'fletching_table');
+  delete f.siteOut;
+  ctx.save?.();
   const inside = ctx.world.zones?.['hall:inside']?.[0];
   if (inside) await ctx.call('goto', { ...block(inside), range: 1, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
   const w = await jobTaken(ctx, 'fletcher');
@@ -1078,7 +1099,7 @@ export const hallChoresGoal: Goal = {
         case 'roll': text = n.librarian ? await rollChore(ctx, n.librarian) : 'no librarian in the hall'; break;
         case 'buy': text = n.librarian ? await buyChore(ctx, n.librarian) : 'no librarian in the hall'; break;
         case 'sticks': text = n.fletcher ? await sticksChore(ctx, n.fletcher) : 'no fletcher in the hall'; break;
-        case 'fletcher': text = n.fletcher ? await fletcherChore(ctx, n.fletcher) : 'no fletcher in the hall'; break;
+        case 'fletcher': text = n.fletcher || fin(m.fletcher?.siteOut) ? await fletcherChore(ctx, n.fletcher) : 'no fletcher in the hall'; break;
       }
       if (m.failed) delete m.failed[plan.chore];
     } catch (e) {
@@ -1112,7 +1133,7 @@ export function hallChoresText(world: WorldMemory, now: number, carried = 0): st
         : lib.state === 'locked' ? 'traded with before Mending showed: kept as it is'
           : `${!n.librarian ? 'none now (the lectern waits for an unemployed adult); ' : ''}${todayOf(lib, day)} rerolls today (${lib.rolls} offers read in all), no Mending yet${lib.books ? ` (last: ${lib.books})` : ''}`;
   const f = m.fletcher;
-  const fText = !n.fletcher ? 'none' : f?.sticks === false ? 'no stick trade' : f?.sticks ? `sticks for emeralds (${f.sold} sold)` : 'not read yet';
+  const fText = fin(f?.siteOut) ? 'its table taken up by a reroll: to put back' : !n.fletcher ? 'none' : f?.sticks === false ? 'no stick trade' : f?.sticks ? `sticks for emeralds (${f.sold} sold)` : 'not read yet';
   const emeralds = (freeChestTotals(world).emerald ?? 0) + carried;
   const b = m.breed;
   return `; in the hall ${n.adults} adult${n.adults === 1 ? '' : 's'}, ${n.babies} bab${n.babies === 1 ? 'y' : 'ies'}, ${hallBeds(world).length} beds ` +

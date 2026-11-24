@@ -86,8 +86,9 @@ const flint = (index: number): TradeOffer => ({ index, costA: { name: 'gravel', 
  * and Baritone do it: a dug block's drop lies in its cell until the bot stands there (dig.here answers before the
  * server's drop, which waits out its pickup delay), a goto already within its range stays put (GoalNear; range 0 is the
  * cell itself), and place-block refuses the bot's own cell and the one over its head (Interact.java, tools.ts).
+ * `refuse`: that many place-blocks the server does not take (a villager in the cell), before the rest go down.
  */
-function hallAt(world: WorldMemory, villagers: V[], items: InventoryItem[], opts: { librarians?: TradeOffer[][]; fletchers?: TradeOffer[][]; keepsJob?: boolean; strict?: boolean } = {}) {
+function hallAt(world: WorldMemory, villagers: V[], items: InventoryItem[], opts: { librarians?: TradeOffer[][]; fletchers?: TradeOffer[][]; keepsJob?: boolean; strict?: boolean; refuse?: number } = {}) {
   const calls: string[] = [];
   const lines: string[] = [];
   const blocks = new Map<string, string>([[k(FLETCHING), 'fletching_table'], [k(GATE), 'oak_fence_gate[facing=south,open=false]']]);
@@ -202,6 +203,7 @@ function hallAt(world: WorldMemory, villagers: V[], items: InventoryItem[], opts
           calls.push('place-block refused: standing there');
           return { ok: true, text: 'You can\'t place a block where you\'re standing or one block above' };
         }
+        if (opts.refuse && opts.refuse-- > 0) return { ok: true, text: `Failed to place block at (${p.x}, ${p.y}, ${p.z}): the server did not accept it` };
         take(String(p.item), 1);
         blocks.set(k(p as unknown as Pos), String(p.item));
         return { ok: true, text: `Placed minecraft:${String(p.item)} at (${p.x}, ${p.y}, ${p.z})` };
@@ -589,6 +591,38 @@ test('the fletcher\'s sticks: 32 a trade for an emerald, up to the emeralds kept
   hallChoresOf(w2).fletcher = { sticks: false, xp: 0, level: 1, sold: 0, rolls: 12, day: 7, today: FLETCHER_ROLLS_A_DAY };
   t.regex(JSON.stringify(chorePlan(snap([{ slot: 1, name: 'stick', count: 64 }]), w2)), /the fletcher rerolled 10 times today/);
   t.deepEqual([...NO_HIT(h.calls), ...NO_HIT(h2.calls), ...NO_HIT(h3.calls)], []);
+});
+
+test('a fletching table a reroll took up and could not put down is put back first, by the next run, though the fletcher lost its job with it gone (Nov 24)', async (t) => {
+  const world = fiveBeds();
+  const f = villager(1, 'fletcher', { x: -552.5, y: 63, z: 2129.5 }, { offers: [arrows(0), flint(1)] });
+  noteHall(world, [f].map(seenOf), T0);
+  hallChoresOf(world).fletcher = { id: 1, sticks: false, xp: 0, level: 1, sold: 0, rolls: 0, day: 0, today: 0 };
+  const items: InventoryItem[] = [{ slot: 1, name: 'stick', count: 64 }];
+  // the reroll: the table taken up, and the server takes none of the four places
+  const h = hallAt(world, [f], items, { fletchers: [[flint(0), sticks(1)]], refuse: 4 });
+  t.like(chorePlan(snap(items), world), { chore: 'fletcher' });
+  const e = await t.throwsAsync(hallChoresGoal.run(h.ctx));
+  t.regex(e!.message, /^the fletching_table did not go down at \(-552, 63, 2127\) \(Failed to place block at .*: the server did not accept it\)$/);
+  t.is(h.blocks.get(k(FLETCHING)), undefined);
+  t.is(items.find(i => i.name === 'fletching_table')?.count, 1);
+  t.truthy(hallChoresOf(world).fletcher!.siteOut);
+  t.regex(hallChoresText(world, T0), /fletcher: its table taken up by a reroll: to put back/);
+  // the villager let its job go with the table gone: no fletcher now, yet the table is the next chore (once the fail
+  // wait is over), before the beds, the breeding or a lectern for the unemployed villager
+  const h2 = hallAt(world, [f], items, { fletchers: [[flint(0), sticks(1)]] });
+  h2.ctx.s = snap(items, { now: T0 + CHORE_FAIL_WAIT });
+  t.is(f.profession, 'none');
+  t.regex(JSON.stringify(chorePlan(snap(items, { now: T0 + 60_000 }), world)), /put it back: failed 1 min ago, tried again later; .*no fletcher/);
+  t.like(chorePlan(snap(items, { now: T0 + CHORE_FAIL_WAIT }), world), { chore: 'fletcher', want: 'the fletching table taken up by a reroll: put it back' });
+  t.is(await hallChoresGoal.run(h2.ctx), 'put the fletching table back at (-552, 63, 2127)');
+  t.is(h2.blocks.get(k(FLETCHING)), 'fletching_table');
+  t.is(hallChoresOf(world).fletcher!.siteOut, undefined);
+  t.is(hallChoresOf(world).fletcher!.sticks, undefined);
+  t.deepEqual(h2.calls.filter(c => c.startsWith('dig.here')), []);
+  // and nothing more of it: the plan goes on as before (a fletcher again takes the table)
+  t.notRegex(JSON.stringify(chorePlan(snap(items, { now: T0 + CHORE_FAIL_WAIT }), world)), /put it back/);
+  t.deepEqual([...NO_HIT(h.calls), ...NO_HIT(h2.calls)], []);
 });
 
 // ------------------------------------------------------------------------------------------------ the offers read, and the status
