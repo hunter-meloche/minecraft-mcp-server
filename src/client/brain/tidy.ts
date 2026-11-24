@@ -93,9 +93,10 @@ export function yardFence(built: Pos[], at: (p: Pos) => string, ring: FenceRing)
  * round puts back under its posts) shelter none; any other built block still keeps the cluster, and so does a cell
  * something stands on, hangs from or is hung on (a torch, a lantern, a sign: someone's lamp post, not scaffold). A
  * cell in the fence's own line at post height or below is never dug: it stands where a post is missing, and digging
- * it would open the fence (the post is the repair round's to put back).
+ * it would open the fence (the post is the repair round's to put back). By any other build of the bot's, only the cells
+ * in its `doorways` (doorwayCells) go, unless something stands on or hangs from them.
  */
-export function strayCells(clusters: Cluster[], groundY: number, built: Set<string>, yard?: YardFence): (Pos & { fence?: true })[] {
+export function strayCells(clusters: Cluster[], groundY: number, built: Set<string>, yard?: YardFence, doorways?: Set<string>): (Pos & { fence?: true })[] {
   const by = (p: Pos, hit: (q: Pos) => boolean) => {
     for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
       if (hit({ x: p.x + dx, y: p.y + dy, z: p.z + dz })) return true;
@@ -124,13 +125,30 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
       const r = fence.ring;
       dig = cells.filter(p => !(onEdge(r, p) && p.y <= r.y + 1));
     } else {
-      if (c.blocks > MAX_CLUSTER || cells.some(p => by(p, q => built.has(key(q))))) continue;
-      dig = cells;
+      if (c.blocks > MAX_CLUSTER) continue;
+      if (cells.some(p => by(p, q => built.has(key(q))))) {
+        // (by a build of the bot's: only what stands in one of its doorways goes, the rest of the cluster stays)
+        const mine = new Set(c.cells.map(key));
+        dig = doorways ? cells.filter(p => doorways.has(key(p)) && !(yard && holds(p, yard.at, mine))) : [];
+        if (!dig.length) continue;
+      } else dig = cells;
     }
     // top down, so nothing is left hanging and the bot never digs the block it stands on first
     out.push(...dig.sort((a, b) => b.y - a.y).map(({ x, y, z }) => ({ x, y, z, ...(fence ? { fence: true as const } : {}) })));
   }
   return out;
+}
+
+/**
+ * The doorways of the bot's builds: the cell over each fence gate of its own record that stands (a player's head as it
+ * walks through; the blueprints leave it open). A stray there shuts the gate to the careful walks, and the round left it
+ * be for the walls either side, built blocks of the bot's. Live on Nov 24 a cobblestone over the villager hall's gate
+ * (-556, 64, 2134), of no record: every hall chore came back "no way on foot into the villager hall" (8 in 7 hours,
+ * the beds and the fletcher's trade never done). The yard fence's own gates are none of these (`rings`): scaffold by
+ * the fence is strayCells' fence rule's, and while the fence is being moved out its old side comes down.
+ */
+export function doorwayCells(built: Pos[], at: (p: Pos) => string, rings: FenceRing[] = []): Set<string> {
+  return new Set(built.filter(p => /_fence_gate$/.test(idOf(at(p))) && !rings.some(r => onEdge(r, p))).map(p => key({ ...p, y: p.y + 1 })));
 }
 
 /** Against the yard fence: a cell of the cluster by a post, a gate or their torch, and all within FENCE_OUTSIDE of the ring. */
@@ -466,7 +484,7 @@ export function tidyGoal(rt: ClientRuntime): Goal {
       const region = regionOf(blocks, box);
       const at = (p: Pos) => region.at(p) ?? '';
       const fence = ring && { ring, fence: yardFence(builtList.map(b => b.at), at, ring), at };
-      const cells = strayCells(r.placed, yard.y, built, fence).slice(0, 40);
+      const cells = strayCells(r.placed, yard.y, built, fence, doorwayCells(builtList.map(b => b.at), at, [yard, ...(ring ? [ring] : []), ...(ctx.world.fenceMove ? [ctx.world.fenceMove.old] : [])])).slice(0, 40);
       // (with stray fluid still on it the lawn is not clear: its blocks are)
       if (!cells.length) return said(fluids.stays ? 'no stray blocks' : 'the lawn is clear');
       const tries = (ctx.world.tidyTries ??= {});

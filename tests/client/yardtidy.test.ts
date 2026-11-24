@@ -1,5 +1,5 @@
 import test from 'ava';
-import { strayCells, tidyGoal, yardFence, type YardFence } from '../../src/client/brain/tidy.js';
+import { doorwayCells, strayCells, tidyGoal, yardFence, type YardFence } from '../../src/client/brain/tidy.js';
 import type { GoalContext } from '../../src/client/brain/goals.js';
 import type { Pos } from '../../src/client/brain/memory.js';
 import type { ClientRuntime } from '../../src/client/tools.js';
@@ -250,4 +250,44 @@ test('strayCells: a lone gravel or grass block on the lawn inside the ring is a 
   // still not by a build of the bot's
   built.add('-561,63,2169');
   t.deepEqual(strayCells([one(-562, 63, 2169, 'gravel')], 62, built, look), []);
+});
+
+// the villager hall's south wall (Nov 24): planks either side of its gate (-556, 63, 2134), a plank over the cobblestone
+const HALL_GATE = '-556,63,2134';
+function hallWall(): { built: Set<string>; stand: Map<string, string> } {
+  const stand = new Map<string, string>();
+  for (let x = -561; x <= -551; x++) for (let y = 63; y <= 65; y++) stand.set(`${x},${y},2134`, 'oak_planks');
+  stand.set(HALL_GATE, 'oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]');
+  const built = new Set(stand.keys());
+  built.delete('-556,64,2134');
+  stand.set('-556,64,2134', 'cobblestone');
+  return { built, stand };
+}
+
+test('doorwayCells: the cell over each of the bot\'s gates that stands; a gate gone, or a post, makes none', t => {
+  const { built, stand } = hallWall();
+  stand.set('-540,63,2119', 'air'); built.add('-540,63,2119');
+  stand.set('-541,63,2119', POST); built.add('-541,63,2119');
+  const pos = [...built].map(k => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });
+  stand.set(GATE, 'oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]'); built.add(GATE);
+  pos.push({ x: -549, y: 63, z: 2119 });
+  const look = (p: Pos) => stand.get(key(p)) ?? 'air';
+  t.deepEqual([...doorwayCells(pos, look, [RING])], ['-556,64,2134'], 'the yard fence\'s gate is the fence rule\'s');
+  t.deepEqual([...doorwayCells(pos, look)].sort(), ['-549,64,2119', '-556,64,2134']);
+});
+
+test('strayCells: the cobblestone over the hall\'s gate goes for all the walls beside it; one by the wall elsewhere stays, and so does one holding a torch', t => {
+  const { built, stand } = hallWall();
+  const pos = [...built].map(k => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });
+  const at = (p: Pos) => stand.get(key(p)) ?? 'air';
+  const doors = doorwayCells(pos, at);
+  const look = lookOf(stand, built);
+  t.deepEqual(strayCells([cluster(cobble([[-556, 64, 2134]]))], 62, built, look, doors).map(key), ['-556,64,2134']);
+  t.deepEqual(strayCells([cluster(cobble([[-556, 64, 2134]]))], 62, built), [], 'without the doorways, left be as before');
+  // a cluster over the gate and on along the wall's face: only the doorway's cell goes
+  t.deepEqual(strayCells([cluster(cobble([[-556, 64, 2134], [-555, 64, 2135]]))], 62, built, look, doors).map(key), ['-556,64,2134']);
+  t.deepEqual(strayCells([cluster(cobble([[-553, 64, 2135]]))], 62, built, look, doors), []);
+  // something standing on it (a torch: someone's lamp) keeps it
+  const lit = { ...look, at: (p: Pos) => (key(p) === '-556,65,2134' ? 'torch' : at(p)) };
+  t.deepEqual(strayCells([cluster(cobble([[-556, 64, 2134]]))], 62, built, lit, doors), []);
 });
