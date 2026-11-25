@@ -10,7 +10,7 @@ import { takeFromChests } from './chests.js';
 import { someones, type Creature } from './courtesy.js';
 import { makeRoom, noRoom, out as afield, room } from './pockets.js';
 import { addSite, alongSide, byYard, CLEAR, dropSite, gatesBetween, inFence, notePen, outByGate, sitesOf, type Bound, type HomeSide, type WorkResult } from './work.js';
-import { penGateWay, throughPenGate, type PenWay } from './yardgates.js';
+import { openGate, penGateWay, shutGate, shutNow, throughPenGate, type PenWay } from './yardgates.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -241,11 +241,15 @@ const depthIn = (way: Way, e: { x: number; z: number }) => -((e.x - (way.gate.x 
 /** In, and clear of the gateway: the bot can walk out past it and shut the gate behind with it inside. */
 const wellIn = (p: Pen, way: Way, e: { x: number; z: number }) => within(p, e) && depthIn(way, e) >= 1.5;
 
-async function gateOpen(ctx: GoalContext, g: { x: number; y: number; z: number }): Promise<boolean> {
-  const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...g, width: 1, height: 1, length: 1 });
-  return /open=true/.test(blocks[0] ?? '');
-}
-const toggle = (ctx: GoalContext, g: Pos) => ctx.act('use-item-on-block', { ...g, face: 'up', toggle: true });
+/**
+ * The client's gate closer is switched off (gates.auto) for the walk in with an animal and for a stay in a pen: for
+ * `forMs` at a time, asked again every `renewMs` while the walk or the stay lasts. The bridge ends an "off" by itself
+ * after its time (two minutes at most, its own cap): before, a brain killed with the closer off left it off, and with
+ * it off the bot's own walk left the yard's west gate open the night a villager got out of the yard (Nov 24). A cull
+ * and its drops, or a fetch from the yard's gate to the pen, run past two minutes: without the asking again the closer
+ * came back on in the middle and shut the gate on the animal's nose. A test sets renewMs.
+ */
+export const CLOSER_OFF = { forMs: 120_000, renewMs: 45_000 };
 
 const carried = async (ctx: GoalContext, name: string) =>
   (await ctx.call<{ items: { name: string; count: number; slot: number }[] }>('inventory')).items.filter(i => i.slot < 36 && i.name === name).reduce((n, i) => n + i.count, 0);
@@ -254,7 +258,8 @@ const here = async (ctx: GoalContext): Promise<Pos> => (await ctx.status().catch
 /**
  * Calls that put the client back as the walk found it (sprint, the gates, a lead let go), made for a run the brain
  * has given up as well: from then on that run's own calls fail at once, and an aborted lure left the gates for good
- * open behind the bot (gates.auto off) and its sprint off.
+ * open behind the bot (gates.auto off) and its sprint off. A gate is shut there by yardgates.ts shutNow (the bridge's
+ * own shut-if-open, within reach or not at all: it walks nowhere).
  */
 const tidyUp = (fn: () => Promise<unknown>) => brainRun.exit(() => fn()).catch(() => undefined);
 
@@ -772,34 +777,25 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
   const bound = fetchBound(ctx.world, kind);
   /** the animals a lead went on (shown by the client or not): however the run ends, each is seen off it */
   const used = new Set<number>();
-  /** the client's closer was turned off (put back on however the walk ends), and is off now */
+  /** the client's closer was turned off (put back on however the walk ends), is off now, and when it was last asked to be (real ms) */
   let gatesOff = false;
   let closerOff = false;
+  let offAt = 0;
   /** the yard's gate the way in goes through, once the closer is off for it; and whether the pen's was opened */
   let yardGate: Pos | undefined;
   let penOpened = false;
-  const gatesAuto = async (on: boolean) => {
-    if (closerOff === !on) return;
-    closerOff = !on;
-    if (!on) gatesOff = true;
-    await ctx.call('gates.auto', { enabled: on }).catch(() => undefined);
-  };
   /**
-   * Shut a gate the walk opened: a careful walk up to it first when it is out of reach (use-item-on-block's own walk
-   * there is a plain one, which may place and break blocks by the fence, with the animal on the lead), to 2 from it
-   * on the bot's own side (a walk to the gate itself goes through it, and the next leg opens it again), then a click.
+   * The closer off or on. Off is for CLOSER_OFF.forMs at a time (the bridge puts it back on by itself after that),
+   * so while it is to stay off it is asked again once the last asking is renewMs old: at every leg of the walk.
    */
-  const shut = async (g: Pos) => {
-    if (!(await gateOpen(ctx, g).catch(() => false))) return;
-    const me = await here(ctx);
-    const c = mid(g), d = horiz(me, c);
-    // (out of the click's reach, eye to the gate's top face, with a margin: from 4 in on its line the bot clicks)
-    if (Math.hypot(d, me.y + 1.62 - (g.y + 1)) > 4.4) {
-      const near = { x: Math.floor(c.x + (me.x - c.x) * 2 / d), y: g.y, z: Math.floor(c.z + (me.z - c.z) * 2 / d) };
-      await ctx.call('goto', { ...near, range: 1, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
-    }
-    await toggle(ctx, g).catch(() => undefined);
+  const gatesAuto = async (on: boolean) => {
+    if (closerOff === !on && (on || Date.now() - offAt < CLOSER_OFF.renewMs)) return;
+    closerOff = !on;
+    if (!on) { gatesOff = true; offAt = Date.now(); }
+    await ctx.call('gates.auto', on ? { enabled: on } : { enabled: on, forMs: CLOSER_OFF.forMs }).catch(() => undefined);
   };
+  /** (a gate the walk opened shut and read shut, after a careful walk up to it where it is out of reach: yardgates.ts shutGate) */
+  const shut = (g: Pos) => shutGate(ctx, g);
   await ctx.call('sprint.set', { allowed: false }).catch(() => undefined);
   try {
     const r = await reach(ctx, first.id, o.home, bound, food);
@@ -954,6 +950,8 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
       const legs = Math.ceil(horiz(await here(ctx), mid(w.at)) / (lead ? LEAD_LEG : LEG)) + (w.xz ? 2 : 10);
       for (let leg = 0; leg < legs; leg++) {
         if (ctx.signal.aborted) throw new Error('aborted');
+        // (off for the walk, it stays off while the walk lasts)
+        if (closerOff) await gatesAuto(false);
         const me = await here(ctx);
         if (horiz(me, mid(w.at)) < (w.exact || w.pass ? 0.75 : 1.5)) break;
         if (o.enough()) return leave(`the run's time ran out ${await fromGate()} from the gate`);
@@ -1028,10 +1026,11 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
     await gatesAuto(false);
     // in at the gate and across the pen, the animals after the bot
     penOpened = true;
-    if (!(await gateOpen(ctx, way.gate))) await toggle(ctx, way.gate);
+    await openGate(ctx, way.gate);
     if (food) await ctx.call('item.select', { name: food });
     for (const c of [way.inside, way.deep]) {
       await ctx.call('goto', { ...c, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+      await gatesAuto(false);
       // on a lead, each let come through the gateway behind the bot from the cell 2 in before it walks on: from the
       // far row the lead pulled one that lagged across the gate's post. One round of looks: in the pen there is no
       // cell to step back to, and the gate stands open behind the bot with the herd inside
@@ -1053,8 +1052,9 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
       if (weapon) await ctx.call('item.select', { name: weapon });
       await pause(1500);
     }
+    await gatesAuto(false);
     await ctx.call('goto', { ...way.outside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
-    if (await gateOpen(ctx, way.gate)) await toggle(ctx, way.gate);
+    await shut(way.gate);
     const all = await entities(ctx);
     const ends = ids.map(id => all.find(e => e.id === id));
     const isIn = (k: number) => !!ends[k] && within(p, ends[k]!.position);
@@ -1082,7 +1082,7 @@ async function bringIn(ctx: GoalContext, kind: PenKind, p: Pen, way: Way, first:
     // sweep. A run given up only clicks one within reach (the bridge's own click: it walks nowhere)
     for (const g of [yardGate, penOpened ? way.gate : undefined]) {
       if (!g) continue;
-      if (ctx.signal.aborted) await tidyUp(async () => { if (await gateOpen(ctx, g)) await ctx.call('useOn', { ...g, face: 'up', toggle: true }); });
+      if (ctx.signal.aborted) await tidyUp(() => shutNow(ctx, g));
       else await shut(g);
     }
     await tidyUp(() => ctx.call('sprint.set', { allowed: true }));
@@ -1115,50 +1115,62 @@ function sighted(world: WorldMemory, kind: PenKind, seen: Ent[]): void {
  * In the pen to feed, cull or shear, and out again, the gate shut behind the bot both ways: a careful walk to the cell
  * outside the gate, a sword in hand (the herd follows wheat out of an open gate), the gate opened, in to 2 inside, the
  * gate shut; out the same way, the wheat put away first. The client's closer is off meanwhile: the bot opens and
- * shuts the gate itself, as the walk in with a stray does. Before, each feed and each cull went in on Baritone's own
- * way (a plain walk in the yard, which may place and break blocks by the fence, through the gate it opened and left
- * to the closer), and the bot left with the wheat in hand. `enter` says whether the bot got in: a walk to the gate
- * that ended out of reach of it goes no further (the click would walk there on Baritone's own way).
+ * shuts the gate itself, as the walk in with a stray does (every click the bridge's own, each read back: yardgates.ts
+ * openGate, shutGate). Off for the whole stay: asked again (CLOSER_OFF) each time the round goes on to its next thing
+ * in the pen, and before the walk out. Before, each feed and each cull went in on Baritone's own way (a plain walk in
+ * the yard, which may place and break blocks by the fence, through the gate it opened and left to the closer), and the
+ * bot left with the wheat in hand. `enter` says whether the bot got in: a walk to the gate that ended out of reach of
+ * it goes no further (no click reaches it from there, and none walks there on Baritone's own way).
  */
 function penVisit(ctx: GoalContext, p: Pen, way: Way) {
   let inside = false;
   let gatesOff = false;
+  let offAt = 0;
   const sword = async () => {
     const weapon = ctx.s.items.find(i => /_sword$/.test(i.name))?.name;
     if (weapon) await ctx.call('item.select', { name: weapon }).catch(() => undefined);
   };
-  const shutGate = async () => { if (await gateOpen(ctx, way.gate).catch(() => false)) await toggle(ctx, way.gate).catch(() => undefined); };
+  /** the closer off for the stay: asked once, and again when that is renewMs old (it comes back on by itself after forMs) */
+  const closerOff = async () => {
+    if (gatesOff && Date.now() - offAt < CLOSER_OFF.renewMs) return;
+    gatesOff = true;
+    offAt = Date.now();
+    await ctx.call('gates.auto', { enabled: false, forMs: CLOSER_OFF.forMs }).catch(() => undefined);
+  };
   return {
     enter: async (): Promise<boolean> => {
-      if (inside) return true;
+      if (inside) { await closerOff(); return true; }
       await ctx.call('goto', { ...way.outside, range: 1, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
       if (horiz(await here(ctx), mid(way.gate)) > 4) return false;
       await sword();
-      gatesOff = true;
-      await ctx.call('gates.auto', { enabled: false }).catch(() => undefined);
-      if (!(await gateOpen(ctx, way.gate))) await toggle(ctx, way.gate);
+      await closerOff();
+      await openGate(ctx, way.gate);
       await ctx.call('goto', { ...way.inside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
       inside = within(p, await here(ctx));
-      await shutGate();
+      await shutGate(ctx, way.gate);
       return inside;
     },
     /**
      * Out, the gate shut behind: back to the cell inside the gate first (a cull or a feed in the far corner leaves the
-     * gate out of the click's reach, and the click would walk there on Baritone's own way). A round given up walks
-     * nowhere. However it ends (given up on the way out, a call that failed), the gate is clicked shut from where the
-     * bot stands, the wheat put away, and the client's closer is on again: the closer never takes a gate that opened
-     * while it was off, and with it left off every gate and door Baritone opened after stood open until the next round.
+     * gate out of the click's reach). A round given up walks nowhere. However it ends (given up on the way out, a call
+     * that failed), the gate is shut from where the bot stands (shutNow: the bridge's shut-if-open, which cannot open
+     * a gate the closer, back on by itself in the middle of a long stay, has shut meanwhile, as a read and a toggle
+     * could), the wheat put away, and the client's closer is on again: the closer never takes a gate that opened while
+     * it was off, and with it left off every gate and door Baritone opened after stood open until the next round.
      */
     leave: async (): Promise<void> => {
       try {
         // (the way out every walk that sets out from inside a pen takes: yardgates.ts)
-        if (inside && !ctx.signal.aborted) await throughPenGate(ctx, way);
+        if (inside && !ctx.signal.aborted) {
+          await closerOff();
+          await throughPenGate(ctx, way);
+        }
       } finally {
         inside = false;
         if (gatesOff) {
           await tidyUp(async () => {
             await sword();
-            if (await gateOpen(ctx, way.gate)) await ctx.call('useOn', { ...way.gate, face: 'up', toggle: true });
+            await shutNow(ctx, way.gate);
           });
           gatesOff = false;
           await tidyUp(() => ctx.call('gates.auto', { enabled: true }));

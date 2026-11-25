@@ -9,7 +9,11 @@ import { castObsidian } from './cast.js';
 import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 import { netherLine } from './nether.js';
 import { villagersLine } from './village.js';
-import { hallChoresText } from './hallchores.js';
+import { hallChoresText, hallSites, SITE_PROFESSION } from './hallchores.js';
+import { shellsText } from './hallshells.js';
+import { gatesRead } from './yardgates.js';
+import type { Snapshot } from './goals.js';
+import type { Pos, WorldMemory } from './memory.js';
 import { lastRailPlan } from './villagemove.js';
 import { railsHomeLine } from './railshome.js';
 import { railsText } from './railroute.js';
@@ -24,7 +28,9 @@ export function registerBrainTools(factory: ToolFactory, brain: Brain, rt: Clien
       leash: z.coerce.number().int().min(16).max(1000).optional().describe('How far from home its own trips may go (default: 96)')
     },
     async ({ enabled, leash }: { enabled: boolean; leash?: number }) => {
-      brain.setEnabled(enabled);
+      // (off: the answer waits for what ran to wind down, its exit handler first: the caller's next call never runs beside it)
+      if (enabled) brain.setEnabled(true);
+      else await brain.turnOff();
       if (leash !== undefined) {
         try { brain.setLeash(leash); } catch (e) { return factory.createErrorResponse(`Autonomy ${enabled ? 'on' : 'off'}, but the leash was not set: ${(e as Error).message}`); }
       }
@@ -168,6 +174,39 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
   );
 
   factory.registerTool(
+    'villager-plan',
+    "The villager fetch's home side, read now (nothing is walked to, nothing changed in the world): the lock in front of the villager hall's gate and the fence round the Nether portal, where each stands or would go (and whether that ground is free, each way round), and every fault of each; every gate a villager must never find open, as its block reads and as the bridge keeps it; every job block in the hall with the villager that holds it (by the villagers seen by it at work), and how many of each kind stand free; the hall's beds and villagers. Read in the overworld only.",
+    {},
+    async () => {
+      const world = brain.worldMemory();
+      if (!world) return factory.createErrorResponse('Not in a world yet');
+      const st = await rt.status();
+      const dim = st.dimension ?? 'overworld';
+      if (dim !== 'overworld') return factory.createResponse(`Not read: the bot is in ${dim} (the lock, the ring and the hall are read from the overworld).`);
+      const at = st.position ?? st.block ?? { x: 0, y: 0, z: 0 };
+      const s = { now: Date.now(), timeOfDay: st.timeOfDay ?? 0, position: at, dimension: dim, home: rt.home(st) } as unknown as Snapshot;
+      const ctx = { call: rt.call, world, s };
+      const lines = [await shellsText(ctx), ...await gateLines(ctx, world), ...await hallLines(rt, world)];
+      brain.saveMemory();
+      return factory.createResponse(lines.join('\n'));
+    }
+  );
+
+  factory.registerTool(
+    'fetch-safe',
+    "Whether the bot may be restarted (or taken over) now without leaving a villager in harm's way: 'safe', or 'not safe' with why (a villager is being led, the bot is in a step only flight may cut short such as a gate held open for a villager, or it stands in the villager hall or its lock). Read only. With stop: the bot's autopilot is switched off in this process first, whatever it was doing stopped and waited for (its exit handler shuts what it held open), and its memory saved: what the harness's /stop does before it closes. scripts/safe-restart.sh waits for 'safe' before it restarts the bot.",
+    { stop: z.boolean().optional().describe('Switch the autopilot off, stop and wait out what runs, and save (for a restart)') },
+    async ({ stop }: { stop?: boolean }) => {
+      const st = await rt.status().catch(() => undefined);
+      const v = brain.safeNow(st?.position ?? st?.block, st?.dimension ?? undefined);
+      const verdict = v.safe ? 'safe: no villager is being led, nothing a villager depends on is under way, and the bot is not in the villager hall or its lock' : `not safe: ${v.why}`;
+      if (!stop) return factory.createResponse(verdict);
+      const was = await brain.stopForRestart();
+      return factory.createResponse(`stopped: the autopilot is off in this process${was ? `, ${was} stopped (its exit handler ran)` : ''}, its memory saved. Before the stop it was ${verdict}`);
+    }
+  );
+
+  factory.registerTool(
     'cast-obsidian',
     "Cast obsidian at home now, as the enchanting room's step does: with lava buckets and a water bucket carried, at the cast site in the yard (a sealed 2-deep pit in plain lawn, the bot beside it throughout), each lava bucket turned to obsidian and mined (with a diamond pickaxe; without one the obsidian is left in the pit). Needs lava-casting on.",
     {},
@@ -296,6 +335,52 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
 }
 
 type P = { x: number; y: number; z: number };
+
+const at = (p: P) => `(${p.x}, ${p.y}, ${p.z})`;
+
+/** villager-plan's gates: every strict gate as its block reads (yardgates.ts gatesRead), then what the bridge keeps of them. */
+async function gateLines(ctx: { call: ClientRuntime['call'] }, world: WorldMemory): Promise<string[]> {
+  const gates = await gatesRead(ctx, world);
+  const lines = [gates.length ? 'The gates no villager may find open:' : 'No gate a villager may never find open is known yet (no yard fence, no hall).',
+    ...gates.map(g => `  - ${g.name} at ${at(g.at)}: ${g.open === undefined ? 'not read' : g.open ? 'OPEN' : 'shut'}`)];
+  type Row = P & { open?: boolean; loaded?: boolean; leftOpen?: boolean; heldMs?: number };
+  const st = await ctx.call<{ count?: number; strict?: Row[]; enabled?: boolean; clicks?: { hold?: number; pair?: number; guard?: number } }>('gates.status', {}).catch(() => undefined);
+  if (!st || !Array.isArray(st.strict)) lines.push('The bridge keeps no strict gates (an older jar, or its client is not up).');
+  else {
+    const left = st.strict.filter(r => r.leftOpen), held = st.strict.filter(r => (r.heldMs ?? 0) > 0);
+    const c = st.clicks ?? {};
+    lines.push(`The bridge keeps ${st.count ?? st.strict.length} of them strict (of ${gates.length})${st.enabled === false ? ', its closer off for now' : ''}: ${left.length ? `left open ${left.map(at).join(', ')}` : 'none left open'}` +
+      `${held.length ? `; held ${held.map(at).join(', ')}` : ''}; its own shut clicks since the client started: hold ${c.hold ?? 0}, pair ${c.pair ?? 0}, guard ${c.guard ?? 0}.`);
+  }
+  return lines;
+}
+
+/**
+ * villager-plan's hall: every job block in its box (a scan of the blocks: one the lead put down by hand is in no
+ * record) with its holder by the evidence of the villagers seen by it at work (hallchores.ts hallSites), the free count
+ * by kind, then the hall's beds and villagers as the chores last counted them.
+ */
+async function hallLines(rt: ClientRuntime, world: WorldMemory): Promise<string[]> {
+  const h = world.zones?.hall?.[0];
+  if (!h || !Number.isFinite(h.width) || !Number.isFinite(h.length)) return ['No villager hall.'];
+  const box = { x: h.x, y: h.y + 1, z: h.z, width: h.width!, height: 2, length: h.length! };
+  const r = await rt.call<{ blocks?: (string | null)[] }>('world.region', box).catch(() => undefined);
+  if (!Array.isArray(r?.blocks)) return ['The hall\'s job blocks: not read.'];
+  const blocks: { at: Pos; name: string }[] = [];
+  r.blocks.forEach((b, i) => {
+    const name = (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
+    if (name in SITE_PROFESSION) blocks.push({ at: { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length }, name });
+  });
+  const unread = r.blocks.filter(b => b === null || b === undefined).length;
+  const { sites, free } = hallSites(world, blocks);
+  const ago = (t: number) => { const m = Math.round((Date.now() - t) / 60_000); return m < 1 ? 'just now' : `${m} min ago`; };
+  const lines = [sites.length ? `The hall's job blocks${unread ? ` (${unread} cell(s) of it not read)` : ''}:` : `No job block in the hall${unread ? ` (${unread} cell(s) of it not read)` : ''}.`,
+    ...sites.map(x => `  - ${x.block} at ${at(x.at)} (${x.profession}): ${x.holder ? `held by ${x.holder.key.slice(0, 8)} (seen by it at work ${x.holder.looks} time(s), the last ${ago(x.holder.last)})` : 'no holder seen'}`)];
+  if (sites.length) lines.push(`  Free by kind: ${Object.entries(free).map(([k, n]) => `${k} ${n}`).join(', ')}.`);
+  const hall = hallChoresText(world, Date.now()).replace(/^; /, '');
+  lines.push(hall ? `The hall: ${hall}.` : 'The hall: not looked into yet.');
+  return lines;
+}
 
 /**
  * The chest meant by a point someone read off their screen: the point itself when a chest is there, else the chest

@@ -15,9 +15,10 @@ import { takeFromChests } from './chests.js';
  * pillar it climbed. Only what survey-area calls placed-looking, only above the yard's ground (a filled hole is meant
  * to stay), only the scaffold kinds (dirt and cobblestone: never planks or anything else someone may have built
  * with), never next to a built block, and only small clusters. Scaffold against the yard fence is the one exception
- * to the last two (strayCells). Dug by hand, from a spot it walks to without breaking or placing anything: Baritone's
- * own dig lifts the protection on everything but furniture while it walks into reach, and reaching a stray up by the
- * watchtower it cut logs and cobblestone out of the tower, every day. A stray it can't get at twice is left be.
+ * to the last two (strayCells), and against the fence round the yard's Nether portal (portalFence) the same. Dug by
+ * hand, from a spot it walks to without breaking or placing anything: Baritone's own dig lifts the protection on
+ * everything but furniture while it walks into reach, and reaching a stray up by the watchtower it cut logs and
+ * cobblestone out of the tower, every day. A stray it can't get at twice is left be.
  *
  * Before the blocks, stray fluid (strayFluids): a water or lava source on the lawn that nothing of the bot's keeps, a
  * pour that went astray. A block is placed into it (a placement is a click on a face, which the server takes where the
@@ -56,9 +57,9 @@ const key = (p: Pos) => `${p.x},${p.y},${p.z}`;
 
 const done = (world: WorldMemory, chore: string, now: number) => { world.lastDone ??= {}; world.lastDone[chore] = now; };
 
-/** The yard fence as the round sees it: what strayCells needs to let scaffold against it go. */
+/** The yard fence as the round sees it: what strayCells needs to let scaffold against it go. The portal's ring the same way. */
 export interface YardFence {
-  /** the yard's ring (zones.fence) */
+  /** the yard's ring (zones.fence), or the ring round the portal (zones.ring: portalFence) */
   ring: FenceRing;
   /** its posts, gates and the torches on them, of the bot's own record, as they stand (yardFence) */
   fence: Set<string>;
@@ -79,6 +80,20 @@ export function yardFence(built: Pos[], at: (p: Pos) => string, ring: FenceRing)
 }
 
 /**
+ * The fence round the yard's Nether portal as a ring (the zone `ring`: its footprint, which hallshells.ts writes when
+ * its build begins), for the round to know as it knows the yard's: a second fence inside the yard. Baritone builds
+ * over a fence when the gate is the longer way, and this one's gate is on one side of a 10 x 5 ring: what it leaves by
+ * it is a way over it, for a villager led across the yard into the portal (the second one brought home was lost in
+ * it, Nov 24, before the ring) and for what comes out of the portal into the yard. Its posts and gate as they stand
+ * are yardFence's to say, by the block read: a ring reserved and not built yet has none, and nothing changes for it.
+ */
+export function portalFence(world: WorldMemory): FenceRing | undefined {
+  const z = world.zones?.ring?.at(-1);
+  if (!z || !z.width || !z.length || z.width < 2 || z.length < 2) return undefined;
+  return { x1: z.x, z1: z.z, x2: z.x + z.width - 1, z2: z.z + z.length - 1, y: z.y };
+}
+
+/**
  * The cells of the clusters to clear: small, scaffold kinds only, above `groundY`, and clear of built blocks.
  *
  * Against the yard fence (`yard`: a cell within one of its posts, gates or their torches, and none further than one
@@ -95,16 +110,26 @@ export function yardFence(built: Pos[], at: (p: Pos) => string, ring: FenceRing)
  * cell in the fence's own line at post height or below is never dug: it stands where a post is missing, and digging
  * it would open the fence (the post is the repair round's to put back). By any other build of the bot's, only the cells
  * in its `doorways` (doorwayCells) go, unless something stands on or hangs from them.
+ *
+ * `inner`: the fences that stand inside the yard and are to be kept as the yard's is (the ring round the Nether
+ * portal, portalFence), each as a YardFence. A cluster against one goes by the same rule (marked `ring`), with two
+ * differences: it may lie either side of that fence, both being the yard's own lawn, as long as it keeps to the yard as
+ * above; and what the ring stands round shelters none of it (the portal's frame is two cells from the ring's long
+ * sides: every step over them is "by a build of the bot's", and would be left for good). The cells of every fence
+ * known here are fence to each other: the portal ring's west side runs right beside the yard's west fence.
  */
-export function strayCells(clusters: Cluster[], groundY: number, built: Set<string>, yard?: YardFence, doorways?: Set<string>): (Pos & { fence?: true })[] {
+export function strayCells(clusters: Cluster[], groundY: number, built: Set<string>, yard?: YardFence, doorways?: Set<string>,
+  inner: YardFence[] = []): (Pos & { fence?: true; ring?: true })[] {
   const by = (p: Pos, hit: (q: Pos) => boolean) => {
     for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
       if (hit({ x: p.x + dx, y: p.y + dy, z: p.z + dz })) return true;
     }
     return false;
   };
-  const out: (Pos & { fence?: true })[] = [];
+  const out: (Pos & { fence?: true; ring?: true })[] = [];
   const inRing = (p: Pos) => !!yard && p.x > yard.ring.x1 && p.x < yard.ring.x2 && p.z > yard.ring.z1 && p.z < yard.ring.z2;
+  const fences = [...(yard ? [yard] : []), ...inner];
+  const ofAFence = (q: Pos) => fences.some(f => f.fence.has(key(q)));
   for (const c0 of clusters) {
     const own = c0.cells.filter(b => !LAWN_STRAY.test(b.block) || inRing(b));
     if (!own.length) continue;
@@ -113,17 +138,19 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
     const cells = c.cells.filter(b => b.y > groundY);
     if (!cells.length) continue;
     let dig: Pos[];
-    const fence = yard && againstFence(cells, yard, by) ? yard : undefined;
+    const fence = fences.find(f => againstFence(cells, f, by, yard?.ring));
     if (fence) {
       const mine = new Set(c.cells.map(key));
       // (a cluster in a gate's way: the bot's torches in that way or beside it, the gate's lamps, shelter none of it)
       const way = gateWay(fence);
       const shuts = cells.some(p => way.has(key(p)));
       const lamp = (q: Pos) => shuts && LIGHT.test(idOf(fence.at(q))) && by(q, w => way.has(key(w)));
-      const shelters = (q: Pos) => built.has(key(q)) && !fence.fence.has(key(q)) && q.y > groundY && !GONE.test(idOf(fence.at(q))) && !lamp(q);
-      if (c.blocks > FENCE_CLUSTER || cells.some(p => by(p, shelters) || holds(p, fence.at, mine))) continue;
+      // (inside an inner ring: what it stands round, the portal's frame)
       const r = fence.ring;
-      dig = cells.filter(p => !(onEdge(r, p) && p.y <= r.y + 1));
+      const ringed = (q: Pos) => fence !== yard && q.x > r.x1 && q.x < r.x2 && q.z > r.z1 && q.z < r.z2;
+      const shelters = (q: Pos) => built.has(key(q)) && !ofAFence(q) && q.y > groundY && !GONE.test(idOf(fence.at(q))) && !lamp(q) && !ringed(q);
+      if (c.blocks > FENCE_CLUSTER || cells.some(p => by(p, shelters) || holds(p, fence.at, mine))) continue;
+      dig = cells.filter(p => !fences.some(f => onEdge(f.ring, p) && p.y <= f.ring.y + 1));
     } else {
       if (c.blocks > MAX_CLUSTER) continue;
       if (cells.some(p => by(p, q => built.has(key(q))))) {
@@ -134,7 +161,8 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
       } else dig = cells;
     }
     // top down, so nothing is left hanging and the bot never digs the block it stands on first
-    out.push(...dig.sort((a, b) => b.y - a.y).map(({ x, y, z }) => ({ x, y, z, ...(fence ? { fence: true as const } : {}) })));
+    const mark = !fence ? {} : fence === yard ? { fence: true as const } : { ring: true as const };
+    out.push(...dig.sort((a, b) => b.y - a.y).map(({ x, y, z }) => ({ x, y, z, ...mark })));
   }
   return out;
 }
@@ -144,18 +172,22 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
  * walks through; the blueprints leave it open). A stray there shuts the gate to the careful walks, and the round left it
  * be for the walls either side, built blocks of the bot's. Live on Nov 24 a cobblestone over the villager hall's gate
  * (-556, 64, 2134), of no record: every hall chore came back "no way on foot into the villager hall" (8 in 7 hours,
- * the beds and the fletcher's trade never done). The yard fence's own gates are none of these (`rings`): scaffold by
- * the fence is strayCells' fence rule's, and while the fence is being moved out its old side comes down.
+ * the beds and the fletcher's trade never done). The yard fence's own gates are none of these (`rings`), nor the gate
+ * of the portal's ring: scaffold by a fence is strayCells' fence rule's, and while the yard's is being moved out its
+ * old side comes down.
  */
 export function doorwayCells(built: Pos[], at: (p: Pos) => string, rings: FenceRing[] = []): Set<string> {
   return new Set(built.filter(p => /_fence_gate$/.test(idOf(at(p))) && !rings.some(r => onEdge(r, p))).map(p => key({ ...p, y: p.y + 1 })));
 }
 
-/** Against the yard fence: a cell of the cluster by a post, a gate or their torch, and all within FENCE_OUTSIDE of the ring. */
-function againstFence(cells: Pos[], yard: YardFence, by: (p: Pos, hit: (q: Pos) => boolean) => boolean): boolean {
-  const r = yard.ring, o = FENCE_OUTSIDE;
-  if (!cells.every(p => p.x >= r.x1 - o && p.x <= r.x2 + o && p.z >= r.z1 - o && p.z <= r.z2 + o)) return false;
-  return cells.some(p => by(p, q => yard.fence.has(key(q))));
+/**
+ * Against a fence: a cell of the cluster by a post, a gate or their torch, and all within FENCE_OUTSIDE of the yard's
+ * ring (`yard`: none known, as while the fence is moved out, and a fence inside the yard is asked for its posts alone).
+ */
+function againstFence(cells: Pos[], fence: YardFence, by: (p: Pos, hit: (q: Pos) => boolean) => boolean, yard?: FenceRing): boolean {
+  const r = yard, o = FENCE_OUTSIDE;
+  if (r && !cells.every(p => p.x >= r.x1 - o && p.x <= r.x2 + o && p.z >= r.z1 - o && p.z <= r.z2 + o)) return false;
+  return cells.some(p => by(p, q => fence.fence.has(key(q))));
 }
 
 /**
@@ -484,24 +516,29 @@ export function tidyGoal(rt: ClientRuntime): Goal {
       const region = regionOf(blocks, box);
       const at = (p: Pos) => region.at(p) ?? '';
       const fence = ring && { ring, fence: yardFence(builtList.map(b => b.at), at, ring), at };
-      const cells = strayCells(r.placed, yard.y, built, fence, doorwayCells(builtList.map(b => b.at), at, [yard, ...(ring ? [ring] : []), ...(ctx.world.fenceMove ? [ctx.world.fenceMove.old] : [])])).slice(0, 40);
+      // the portal's own ring: scaffold against it is a way over it as against the yard's, and its gate is no doorway
+      const portal = portalFence(ctx.world);
+      const inner = portal ? [{ ring: portal, fence: yardFence(builtList.map(b => b.at), at, portal), at }] : [];
+      const rings = [yard, ...(ring ? [ring] : []), ...(portal ? [portal] : []), ...(ctx.world.fenceMove ? [ctx.world.fenceMove.old] : [])];
+      const cells = strayCells(r.placed, yard.y, built, fence, doorwayCells(builtList.map(b => b.at), at, rings), inner).slice(0, 40);
       // (with stray fluid still on it the lawn is not clear: its blocks are)
       if (!cells.length) return said(fluids.stays ? 'no stray blocks' : 'the lawn is clear');
       const tries = (ctx.world.tidyTries ??= {});
       const todo = cells.filter(c => (tries[key(c)] ?? 0) < TRIES);
       if (!todo.length) return said(`${cells.length} stray block(s) out of reach on foot: left be`);
       const gone = new Set<string>();
-      let dug = 0, byFence = 0;
+      let dug = 0, byFence = 0, byRing = 0;
       for (const c of todo) {
         if (ctx.signal.aborted) break;
         const k = key(c);
         // only the cell's place: digByHand hands what it is given on to the bridge
         const why = await digByHand(ctx, blocks, box, { x: c.x, y: c.y, z: c.z }, here, gone);
-        if (!why) { dug++; if (c.fence) byFence++; gone.add(k); delete tries[k]; } else tries[k] = (tries[k] ?? 0) + 1;
+        if (!why) { dug++; if (c.fence) byFence++; if (c.ring) byRing++; gone.add(k); delete tries[k]; } else tries[k] = (tries[k] ?? 0) + 1;
       }
       // forget strays that are gone (dug, or taken down by someone else); the fluid's are the sweep's own
       for (const k of Object.keys(tries)) if (!k.startsWith('fluid:') && !cells.some(c => key(c) === k)) delete tries[k];
-      return said(`cleared ${dug} of ${todo.length} stray block(s)${byFence ? ` (${byFence} against the yard fence)` : ''}${todo.length < cells.length ? ` (${cells.length - todo.length} out of reach, left be)` : ''}`);
+      const by = [byFence ? `${byFence} against the yard fence` : '', byRing ? `${byRing} against the portal's ring` : ''].filter(Boolean).join(', ');
+      return said(`cleared ${dug} of ${todo.length} stray block(s)${by ? ` (${by})` : ''}${todo.length < cells.length ? ` (${cells.length - todo.length} out of reach, left be)` : ''}`);
     }
   };
 }

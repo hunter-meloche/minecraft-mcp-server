@@ -7,6 +7,11 @@ import type { IdleCause } from './idlelog.js';
 import { underNow } from './underyard.js';
 // (homeward.ts takes BELOW_HOME from here too, and the walk home is used inside the runs only)
 import { walkHome } from './homeward.js';
+// (the dusk sweep's gates: yardgates.ts takes this module's exports inside functions only, as it does through
+// homeward.ts already; villagerwalk.ts and fetch.ts use nothing of their imports at their top level)
+import { shutGate, strictGates } from './yardgates.js';
+import { inLock, lockOf, type Lock } from './villagerwalk.js';
+import { dropEntry, fetchOf } from './fetch.js';
 
 /** What the brain knows at one moment: read fresh each tick. */
 export interface Snapshot {
@@ -516,13 +521,40 @@ export function shelterGoal(): Goal {
 /**
  * Shut the doors around home that stand open with nothing holding them open (a pressure plate keeps them powered:
  * those close by themselves). Monsters walk in through an open door; the bot once died to a zombie in its own cabin.
+ *
+ * The gates no villager may find open (the yard's, the villager hall's, the gate of the lock in front of it, the
+ * portal ring's: yardgates.ts strictGates) are shut by the bridge's own click after a careful walk into reach and read
+ * back (shutGate), never by the tool, whose walk into reach is a plain one (on Nov 24 a gate "shut" by one click and not
+ * read stood open the night a villager got out of the yard). The lock's gate is swept by its zone's name like every
+ * `:gate`; the hall's gate is left open while a villager stands in the lock (it opened for one shut in there, or for a
+ * ward that goes in when it will: with the lock's gate shut nothing in there reaches the yard), and shut like any
+ * other once the lock is empty, its journal entry dropped with it (the care goal's row 5, done at dusk).
  */
 export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
   const box = { x: home.x - 8, y: home.y - 2, z: home.z - 8, width: 17, height: 6, length: 17 };
   const { blocks } = await ctx.call<{ blocks: (string | null)[] }>('world.region', box);
   // a door still powered by the plate the bot just stepped off shuts by itself when the plate lets go
   const me = (await ctx.status()).block;
-  // toggle only: shut with a water bucket in hand (and the shield on), the click poured the water outside the door
+  const strict = ctx.world ? strictGates(ctx.world).map(g => g.at) : [];
+  const isStrict = (p: Pos) => strict.some(g => g.x === p.x && g.y === p.y && g.z === p.z);
+  const lock = ctx.world ? lockOf(ctx.world) : undefined;
+  // (looked into once, when the hall's gate is found open; a look that fails is a villager there: the hall's gate stays
+  // open behind the lock's shut one, which holds it)
+  let inLockNow: boolean | undefined;
+  /** one gate or door shut: a strict gate by the bridge's click, read back; anything else by the tool's toggle */
+  const shutOne = async (at: Pos): Promise<boolean> => {
+    if (lock && at.x === lock.h.x && at.y === lock.h.y && at.z === lock.h.z) {
+      inLockNow ??= await villagerInLock(ctx, lock);
+      if (inLockNow) return false;
+      const shut = await shutGate(ctx, at);
+      if (shut && ctx.world?.fetch) for (const e of fetchOf(ctx.world).journal.filter(x => x.k === 'gate' && x.which === 'hall' && x.at.x === at.x && x.at.y === at.y && x.at.z === at.z)) dropEntry(ctx, e);
+      return shut;
+    }
+    if (isStrict(at)) return shutGate(ctx, at);
+    // toggle only: shut with a water bucket in hand (and the shield on), the click poured the water outside the door
+    const r = await ctx.act('use-item-on-block', { ...at, face: 'up', toggle: true });
+    return r.ok && /open=false|closed/.test(r.text);
+  };
   let shut = 0;
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i] ?? '';
@@ -531,8 +563,7 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
     if (!(door || /_fence_gate\[/.test(b)) || !/open=true/.test(b) || /powered=true/.test(b)) continue;
     const at = { x: box.x + i % box.width, y: box.y + Math.floor(i / (box.width * box.length)), z: box.z + Math.floor(i / box.width) % box.length };
     if (me && me.x === at.x && me.z === at.z && Math.abs(me.y - at.y) <= 1) continue; // standing in it
-    const r = await ctx.act('use-item-on-block', { ...at, face: 'up', toggle: true });
-    if (r.ok && /open=false|closed/.test(r.text)) shut++;
+    if (await shutOne(at)) shut++;
   }
   // the gates in the fence and the doors of the other buildings, further out: the fishing trip left a gate open
   const inBox = (p: Pos) => p.x >= box.x && p.x < box.x + box.width && p.z >= box.z && p.z < box.z + box.length && p.y >= box.y && p.y < box.y + box.height;
@@ -541,10 +572,16 @@ export async function closeDoors(ctx: GoalContext, home: Pos): Promise<number> {
     if (ctx.signal.aborted) break;
     const { blocks: [b] } = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...at, width: 1, height: 1, length: 1 });
     if (!b || !/open=true/.test(b) || /powered=true/.test(b) || /half=upper/.test(b)) continue;
-    const r = await ctx.act('use-item-on-block', { ...at, face: 'up', toggle: true });
-    if (r.ok && /open=false|closed/.test(r.text)) shut++;
+    if (await shutOne({ x: at.x, y: at.y, z: at.z })) shut++;
   }
   return shut;
+}
+
+/** Whether a villager (or a wandering trader: what the bridge's guard counts) stands in the lock's six cells; a look that fails says yes. */
+async function villagerInLock(ctx: GoalContext, lock: Lock): Promise<boolean> {
+  const r = await ctx.call<{ entities?: { name: string; position?: Pos }[] }>('world.entities', { maxDistance: 128 }).catch(() => undefined);
+  if (!Array.isArray(r?.entities)) return true;
+  return r.entities.some(e => /^(villager|wandering_trader)$/.test(e?.name ?? '') && !!e.position && inLock(lock, e.position));
 }
 
 /** How far a point is outside a yard box (0 inside), in the larger of the two directions. */

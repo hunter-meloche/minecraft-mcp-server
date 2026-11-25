@@ -2,7 +2,7 @@
 // (and people) can drive a bot that stays online between calls.
 // usage: node scripts/lab/mcp-http.mjs <username> [httpPort]   (extra server flags in MCP_EXTRA_ARGS, e.g. "--backend client")
 //   curl -s 127.0.0.1:7777/call -d '{"name":"get-status","args":{}}'
-//   curl -s 127.0.0.1:7777/stop
+//   curl -s 127.0.0.1:7777/stop     (the brain's exit handler first: fetch-safe {stop}, 15 s at most; then the session closes)
 import http from 'http';
 import { createRequire } from 'module';
 const repo = new URL('../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
@@ -23,8 +23,18 @@ const client = new Client({ name: 'live-test', version: '0' });
 await client.connect(transport);
 const text = r => r.content.map(c => c.text).join('\n');
 
+/**
+ * Before the session closes (the unit's stop, a restart): the brain stops what it runs and waits for it, so a run that
+ * holds a gate open for a villager shuts it (its exit handler) and brain.json is saved, before the game client dies
+ * with the brain and the bridge's hold with it. 15 s at most; a backend without the tool answers an error at once.
+ */
+async function stopBrain() {
+  const asked = client.callTool({ name: 'fetch-safe', arguments: { stop: true } }, undefined, { timeout: 15000 }).then(r => text(r)).catch(e => `no answer (${e?.message ?? e})`);
+  return Promise.race([asked, new Promise(r => setTimeout(() => r('no answer in 15 s'), 15000))]);
+}
+
 http.createServer(async (req, res) => {
-  if (req.url === '/stop') { res.end('bye\n'); await client.close(); process.exit(0); }
+  if (req.url === '/stop') { const said = await stopBrain(); res.end(`bye (${String(said).split('\n')[0]})\n`); await client.close(); process.exit(0); }
   let body = '';
   for await (const chunk of req) body += chunk;
   try {

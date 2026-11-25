@@ -14,21 +14,32 @@
  *
  * The pens' fences the same way (outOfPen): a walk that sets out from inside a pen leaves by the pen's gate first.
  *
+ * And every gate the bot clicks is clicked here (shutGate, openGate, shutNow): read first, clicked from within the
+ * click's own reach after a careful walk there, and read again. Live on Nov 24 the yard's west gate stood open behind
+ * the bot's own walk the night a villager got out of the yard: a passage through a gate now ends with that gate read
+ * shut, whatever the client's closer did or did not do. The gates a villager must never find open (the yard's, the
+ * lock's, the hall's, the portal ring's) are listed here for the bridge and for whoever reads them (strictGates,
+ * strictSet, gatesRead).
+ *
  * (Here, not in work.ts: homeward.ts's walk home comes in by a gate, and work.ts imports homeward.ts. Nothing from
  * goals.ts is used at this module's top level: goals.ts imports homeward.ts, which imports this. Nor is pens.ts
- * imported: it imports this, through work.ts, and builds its goal at its top level.)
+ * imported: it imports this, through work.ts, and builds its goal at its top level. villagerwalk.ts imports CLEAR
+ * from here and is imported here, for the lock's cells: neither uses the other at its top level.)
  */
 import { brainRun } from '../tools.js';
 import { BELOW_HOME, outsideBy, YARD_EDGE, type GoalContext } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
+import { inHallOrLock } from './fetch.js';
+import { lockOf, ringPlanOf, type Lock } from './villagerwalk.js';
 
 /** A side of home, and its step on the map. */
 export type HomeSide = 'north' | 'east' | 'south' | 'west';
 export const SIDE_STEP: Record<HomeSide, [number, number]> = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
 
 /**
- * What the walks through a gate use of a goal's context (a trip's helpers are handed no more than this): `act` for
- * the click on a pen's gate (outOfPen).
+ * What the walks through a gate use of a goal's context (a trip's helpers are handed no more than this). `act` was
+ * for the click on a pen's gate; every click on a gate is the bridge's own call now (shutGate, openGate), and none
+ * of the walks here uses a tool.
  */
 export type WalkContext = Pick<GoalContext, 's' | 'world' | 'signal' | 'call' | 'status' | 'progress' | 'act'>;
 
@@ -114,8 +125,9 @@ async function floorAt(ctx: WalkContext, cell: Pos): Promise<Pos> {
  * cave far below answers, and one a bot on a dirt path (its block is the path's own, under the cell) or in a plant
  * floorAt took for a floor (pink petals, a sapling, a carpet) gets to; to the block itself it "did not arrive".
  * From inside one of the bot's pens it goes out by the pen's gate first, the gate shut behind (outOfPen), whatever
- * comes after. `{}`: nothing to do (the bot not inside the fence, `to` not outside it, or no gate known); `shut`: no
- * gate let it out (one gone or blocked: the next is tried), or none on those sides; `gate` and `at` once out.
+ * comes after. Each gate tried is read shut before the walk goes on (shutGate). `{}`: nothing to do (the bot not
+ * inside the fence, `to` not outside it, or no gate known); `shut`: no gate let it out (one gone or blocked: the next
+ * is tried), or none on those sides; `gate` and `at` once out.
  */
 export async function outByGate(ctx: WalkContext, toward: { x: number; z: number } | HomeSide | undefined, sides?: HomeSide[]): Promise<{ gate?: Pos; at?: Pos; shut?: string }> {
   // out of a pen by its gate first, where a round given up left the bot (outOfPen): the yard's gate is then the one
@@ -141,6 +153,10 @@ export async function outByGate(ctx: WalkContext, toward: { x: number; z: number
       if (ctx.signal.aborted) throw new Error('aborted');
       if (r?.arrived === false) { arrived = false; break; }
     }
+    // the gate behind the bot (or before it, where the walk ended short) read shut before anything goes on: the
+    // closer shuts one once the bot is 2.2 clear of it, and the cell 2 outside is not
+    await shutGate(ctx, g.gate);
+    if (ctx.signal.aborted) throw new Error('aborted');
     const now = (await ctx.status().catch(() => undefined))?.position;
     // out: within the walk's 1 of the cell outside, or at it or past it however the walk ended; never in the gateway
     // itself (the fence line is not inside, but a walk to "any height" from there is the one this way keeps from)
@@ -220,9 +236,9 @@ function clearOfYard(yard: NonNullable<WorldMemory['yard']>, a: { x: number; z: 
  * the yard). A gate it does not get in by (shut, blocked, a hill outside it), and the next is tried, GATE_TRIES in
  * all, while `budgetMs` lasts. Not from deep down (more than BELOW_HOME under home's level): the walk to a gate would
  * be a climb to the surface, and walkHome climbs out first where it may, and leaves it to go-home's own walk where it
- * may not (at night, in water, under lava or someone's build). `{}`: nothing to do (no yard or gate known, home not
- * inside the fence, the bot inside it already, deep down or in another dimension); `shut`: no gate let it in; `gate`
- * and `at` once in.
+ * may not (at night, in water, under lava or someone's build). The gate it walked through is read shut before go-home
+ * walks on (shutGate). `{}`: nothing to do (no yard or gate known, home not inside the fence, the bot inside it
+ * already, deep down or in another dimension); `shut`: no gate let it in; `gate` and `at` once in.
  */
 export async function inByGate(ctx: WalkContext, budgetMs: number): Promise<{ gate?: Pos; at?: Pos; shut?: string }> {
   const { world } = ctx;
@@ -270,10 +286,165 @@ export async function inByGate(ctx: WalkContext, budgetMs: number): Promise<{ ga
       if (!await walk({ ...await floorAt(ctx, g.outer), range: 1, ...(careful ? { careful: true } : {}) }, Math.min(careful ? 90_000 : 120_000, Math.max(left(), 10_000)))) continue;
     }
     const through = await walk({ ...await floorAt(ctx, g.inner), range: 1, careful: true }, Math.min(90_000, Math.max(left(), 10_000)));
+    // (the gate read shut behind the bot, or before it where the walk through ended short: shutGate)
+    await shutGate(ctx, g.gate);
+    stopped();
     const now = (await look())?.position;
     if (now ? inFence(world, now) : through) return { gate: g.gate, at: now ?? g.inner };
   }
   return tried.length ? { shut: `no way into the yard by ${tried.join(' or ')}` } : {};
+}
+
+// ------------------------------------------------------------------------------------------------ a gate read, clicked, read again
+
+const same = (a: Pos, b: Pos) => a.x === b.x && a.y === b.y && a.z === b.z;
+/**
+ * Eye over feet, and from how far the bot clicks a gate without a walk up to it first: its eye to the gate's top
+ * face, with a margin under the raw click's own 4.5 (from 4 in on a gate's line the bot clicks).
+ */
+const EYE = 1.62;
+const CLICK_REACH = 4.4;
+/** A gate is read, clicked and read again this often before it is given up as one that will not move. */
+const CLICK_TRIES = 3;
+
+/** How a gate or a door reads now: open, shut (or no gate there), or undefined where the look fails or the cell is not loaded. It never throws. */
+export async function gateRead(ctx: Pick<WalkContext, 'call'>, g: Pos): Promise<boolean | undefined> {
+  const r = await ctx.call<{ blocks?: (string | null)[] }>('world.region', { ...g, width: 1, height: 1, length: 1 }).catch(() => undefined);
+  const b = r?.blocks?.[0];
+  return b === null || b === undefined ? undefined : /open=true/.test(b);
+}
+
+/** Whether a gate or a door reads open now (it throws where the look does not answer; a cell not loaded reads shut). */
+export const gateIsOpen = async (ctx: Pick<WalkContext, 'call'>, g: Pos): Promise<boolean> =>
+  /open=true/.test((await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...g, width: 1, height: 1, length: 1 })).blocks[0] ?? '');
+
+/**
+ * One shut click from where the bot stands, walking nowhere: for a run the brain has given up (inside brainRun.exit:
+ * its own calls fail from then on) and as shutGate's click. The bridge's own shut-if-open first (gates.release
+ * {shut}): it reads the gate on the tick it clicks, so it never opens one, and a gate it cannot click yet (the bot in
+ * its cell, a screen open, an item in use) it goes on trying by itself. Where the bridge has no such call (a jar from
+ * before the gate holds) or answers that the gate still stands open, the raw useOn on a gate read open just before:
+ * within 4.5 of the eye or not at all. Never the tool use-item-on-block: its own walk into reach is a plain one,
+ * which breaks and places by the fence.
+ *
+ * Why not the raw click alone: useOn toggles the gate as it stands when the click lands, two ticks after the call
+ * (Interact.java), not as it was read. One the closer, the lock's pair rule or its guard shut in between is opened
+ * again by it. shutGate's read back catches that; the bridge's own click cannot do it at all.
+ */
+export async function shutNow(ctx: Pick<WalkContext, 'call'>, gate: Pos): Promise<void> {
+  const r = await ctx.call<{ open?: boolean }>('gates.release', { x: gate.x, y: gate.y, z: gate.z, shut: true }).catch(() => undefined);
+  if (r?.open === false) return;
+  // (an answer that reads it open may be a click the bridge still owes, the bot busy in its cell: the toggle can then
+  // open it again after that click. The read-back of shutGate catches that, and for the exit's one call the bridge's
+  // closer shuts a strict gate it finds open)
+  if (await gateIsOpen(ctx, gate)) await ctx.call('useOn', { ...gate, face: 'up', toggle: true });
+}
+
+/**
+ * Where the bot stands to click one of the lock's two gates (the hall's own, and the lock's in front of it), where a
+ * lock stands: a walk "up to the gate" from the yard would end inside the lock, through its other gate. From outside
+ * the hall and the lock: the lock's post, from which both gates are in reach (3.4 and 3.8 from the eye). From inside
+ * the hall, for the lock's gate: the cell before the hall's gate (4.2). `null`: no walk (in the lock every cell
+ * reaches both); undefined: no gate of a lock, the walk is the ordinary one.
+ */
+function lockStand(world: WorldMemory, gate: Pos, me: Pos): { x: number; y: number; z: number; range: number } | null | undefined {
+  const lock = lockOf(world);
+  if (!lock || !(same(gate, lock.p) || same(gate, lock.h))) return undefined;
+  if (!inHallOrLock(world, me)) return { ...lock.post, range: 0 };
+  const out = { x: Math.sign(lock.p.x - lock.h.x), z: Math.sign(lock.p.z - lock.h.z) };
+  // (how far out from the hall's gate the bot stands: behind it, in the hall; else between the two gates)
+  if ((Math.floor(me.x) - lock.h.x) * out.x + (Math.floor(me.z) - lock.h.z) * out.z > 0) return null;
+  return same(gate, lock.h) ? undefined : { x: lock.h.x - out.x, y: lock.h.y, z: lock.h.z - out.z, range: 0 };
+}
+
+/**
+ * A gate (or a door: its lower half) shut and read shut. Read first: one that reads shut is left alone, and one that
+ * cannot be read is never clicked (a click is a toggle: no read, no click). Open: a careful walk (walk only) to 2
+ * from it on the bot's own side when it is out of the click's reach (a walk to the gate itself goes through it, and
+ * the tool's own walk into reach is a plain one, which may place and break blocks by the fence, an animal on the
+ * lead), the lock's gates from the lock's post (lockStand); the shut click (shutNow); and the gate read again.
+ * Three tries, then it is said by the answer: true only for a gate read shut. `stay`: no walk at all (the caller
+ * stands where it must: a run inside the hall never walks into the lock for a click).
+ *
+ * This was pens.ts's `shut`, with the read back: on Nov 24 a gate "shut" by one click and not read stood open.
+ * It never throws; a run given up gets false (its calls fail), and shuts by shutNow in its exit.
+ */
+export async function shutGate(ctx: WalkContext, gate: Pos, o: { stay?: boolean } = {}): Promise<boolean> {
+  for (let n = 0; n < CLICK_TRIES; n++) {
+    const open = await gateRead(ctx, gate);
+    if (open !== true) return open === false;
+    if (ctx.signal.aborted) return false;
+    if (!o.stay) {
+      const me = (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
+      const c = mid(gate), d = horiz(me, c);
+      if (Math.hypot(d, me.y + EYE - (gate.y + 1)) > CLICK_REACH) {
+        const stand = lockStand(ctx.world, gate, me);
+        const near = stand === undefined ? { x: Math.floor(c.x + (me.x - c.x) * 2 / d), y: gate.y, z: Math.floor(c.z + (me.z - c.z) * 2 / d), range: 1 } : stand;
+        if (near) await ctx.call('goto', { ...near, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
+      }
+    }
+    await shutNow(ctx, gate).catch(() => undefined);
+  }
+  return (await gateRead(ctx, gate)) === false;
+}
+
+/**
+ * A gate opened by the raw click (useOn) from where the bot stands, within 4.5 of its eye or not at all: it walks
+ * nowhere, the caller has walked up to it carefully. Read first (one that reads open is left alone), clicked, read
+ * again; three tries, none after a click that was out of reach. Whether it reads open: no wait at a gate that was
+ * only thought open. It throws where the look at the gate does not answer, as gateIsOpen does.
+ */
+export async function openGate(ctx: Pick<WalkContext, 'call'>, gate: Pos): Promise<boolean> {
+  for (let n = 0; n < CLICK_TRIES; n++) {
+    if (await gateIsOpen(ctx, gate)) return true;
+    const r = await ctx.call<{ used?: boolean }>('useOn', { ...gate, face: 'up', toggle: true }).catch(() => ({ used: false }));
+    if (r?.used === false) return false;
+  }
+  return gateIsOpen(ctx, gate);
+}
+
+/** A gate the bridge keeps for the brain (strictGates), with a name for the log. */
+export interface StrictGate { at: Pos; name: string }
+
+/**
+ * The gates no villager may find open, as world memory has them: the yard's own (yardGates), the hall's gate, the
+ * gate of the lock in front of it and the gate of the fence ring round the Nether portal, each once its zone is
+ * written. The bridge never forgets one of these once it took it as the bot's, and reports each by its block state
+ * whoever opened it (gates.strict, gates.status).
+ */
+export function strictGates(world: WorldMemory): StrictGate[] {
+  const gates: StrictGate[] = yardGates(world).map(g => ({ at: g.gate, name: `the yard's ${g.side} gate` }));
+  const h = world.zones?.['hall:gate']?.[0];
+  if (h) gates.push({ at: { x: h.x, y: h.y, z: h.z }, name: 'the hall\'s gate' });
+  const lock = lockOf(world);
+  if (lock) gates.push({ at: lock.p, name: 'the lock\'s gate' });
+  const ring = ringPlanOf(world);
+  if (ring) gates.push({ at: ring.gate, name: 'the portal ring\'s gate' });
+  return gates.filter((g, i) => gates.findIndex(o => same(o.at, g.at)) === i);
+}
+
+/**
+ * What gates.strict is sent, whole (the call replaces the bridge's set each time): the strict gates; the lock's two
+ * gates as a pair, of which the bridge never lets both stand open; and the lock's gate guarded with the lock's inside
+ * as its box, never open onto a villager standing in there. The pair and the guard only where a lock stands.
+ */
+export function strictSet(world: WorldMemory): { gates: Pos[]; pairs: [Pos, Pos][]; guard: { gate: Pos; box: Lock['box'] }[] } {
+  const lock = lockOf(world);
+  return {
+    gates: strictGates(world).map(g => g.at),
+    pairs: lock ? [[lock.p, lock.h]] : [],
+    guard: lock ? [{ gate: lock.p, box: { ...lock.box } }] : []
+  };
+}
+
+/** Every strict gate as it reads now, by its block (world.region): open, shut, or undefined where it could not be read. */
+export async function gatesRead(ctx: Pick<WalkContext, 'call'>, world: WorldMemory): Promise<(StrictGate & { open?: boolean })[]> {
+  const out: (StrictGate & { open?: boolean })[] = [];
+  for (const g of strictGates(world)) {
+    const open = await gateRead(ctx, g.at);
+    out.push(open === undefined ? g : { ...g, open });
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------------------------------------ the pens' fences
@@ -320,24 +491,21 @@ export function inPenFence(f: PenFence & { way: PenWay }, q: Pos): boolean {
   return q.x > f.x1 + 0.5 && q.x < f.x2 + 0.5 && q.z > f.z1 + 0.5 && q.z < f.z2 + 0.5 && Math.abs(Math.floor(q.y) - f.way.gate.y) <= 1;
 }
 
-const gateIsOpen = async (ctx: WalkContext, g: Pos): Promise<boolean> =>
-  /open=true/.test((await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...g, width: 1, height: 1, length: 1 })).blocks[0] ?? '');
-const clickGate = (ctx: WalkContext, g: Pos) => ctx.act('use-item-on-block', { ...g, face: 'up', toggle: true });
-
 /**
  * Out of a pen through its gate, the gate shut behind: pens.ts penVisit's way out, and every walk's that sets out
  * from inside a pen (outOfPen). A sword in hand first (the wheat put away: the herd stays in, and does not follow the
- * bot out); a careful walk (walk only) to the cell two in from the gate, the gate opened if it is shut, a careful
- * walk to the cell just outside it, and the gate clicked shut. A step that fails (a walk that ends short, a look at
- * the gate that does not answer) is let go and the next tried: the click shut comes from wherever the bot stands.
+ * bot out); a careful walk (walk only) to the cell two in from the gate, the gate opened if it is shut (openGate), a
+ * careful walk to the cell just outside it, and the gate shut and read shut (shutGate). A step that fails (a walk
+ * that ends short, a look at the gate that does not answer) is let go and the next tried: the shut is made from where
+ * the bot stands, after a careful walk up to the gate on its own side where it stands out of reach.
  */
 export async function throughPenGate(ctx: WalkContext, way: PenWay): Promise<void> {
   const weapon = ctx.s.items.find(i => /_sword$/.test(i.name))?.name;
   if (weapon) await ctx.call('item.select', { name: weapon }).catch(() => undefined);
   await ctx.call('goto', { ...way.inside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
-  if (!(await gateIsOpen(ctx, way.gate).catch(() => true))) await clickGate(ctx, way.gate).catch(() => undefined);
+  await openGate(ctx, way.gate).catch(() => undefined);
   await ctx.call('goto', { ...way.outside, range: 0, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
-  if (await gateIsOpen(ctx, way.gate).catch(() => false)) await clickGate(ctx, way.gate).catch(() => undefined);
+  await shutGate(ctx, way.gate);
 }
 
 /**
@@ -369,9 +537,7 @@ export async function outOfPen(ctx: WalkContext): Promise<{ pen?: string; out?: 
     await throughPenGate(ctx, way);
   } finally {
     // (the bridge's own click, within reach or not at all: it walks nowhere)
-    if (ctx.signal.aborted) {
-      await brainRun.exit(async () => { if (await gateIsOpen(ctx, way.gate)) await ctx.call('useOn', { ...way.gate, face: 'up', toggle: true }); }).catch(() => undefined);
-    }
+    if (ctx.signal.aborted) await brainRun.exit(() => shutNow(ctx, way.gate)).catch(() => undefined);
   }
   if (ctx.signal.aborted) throw new Error('aborted');
   const now = (await ctx.status().catch(() => undefined))?.position;

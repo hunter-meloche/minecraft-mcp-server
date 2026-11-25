@@ -1,7 +1,19 @@
-import test from 'ava';
+import test, { type ExecutionContext } from 'ava';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import sinon from 'sinon';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ToolFactory } from '../../src/tool-factory.js';
+import { registerBrainTools } from '../../src/client/brain/brain-tools.js';
 import { activityAt, daylightLeft } from '../../src/client/brain/schedule.js';
 import { findLandmarks } from '../../src/client/brain/memory.js';
-import { Brain, decide, wedgedOut } from '../../src/client/brain/brain.js';
+import { Brain, CRITICAL_CUTS, NO_LOOP_HOLD, SURVIVAL, decide, wedgedOut } from '../../src/client/brain/brain.js';
+import { lockSeen, outOfHallGoal, outOfHallWants, villagerCareGoal } from '../../src/client/brain/villagercare.js';
+import { hallChoresGoal, inHallBox } from '../../src/client/brain/hallchores.js';
+import { fetchOf, peekFetch, type Trip } from '../../src/client/brain/fetch.js';
+import { strictGates, strictSet } from '../../src/client/brain/yardgates.js';
+import { H, HOME as YARD_HOME, T0, YARD_GATES, isOpen, yard, type Pasture } from '../helpers/pasture.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
 import { closeDoors, returnIdle, type Goal, type GoalContext, type Snapshot } from '../../src/client/brain/goals.js';
 import { out as afield } from '../../src/client/brain/pockets.js';
@@ -1168,4 +1180,361 @@ test('F1: nor with the empty bucket in hand: a pour that took left it there, the
   await settle();
   t.deepEqual(calls, ['select diamond_sword', 'walk with diamond_sword']);
   brain.setEnabled(false);
+});
+
+// ------------------------------------------------------------------------------------------------ the villager fetch's wiring (idle-plan V, S0)
+
+/** The brain's own tools on a stub server (brain-tools.ts): a tool by name, its text. */
+function brainTools(brain: Brain, rt: ClientRuntime) {
+  const server = { tool: sinon.stub() } as unknown as McpServer;
+  registerBrainTools(new ToolFactory(server, { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) }), brain, rt);
+  const calls = (server.tool as sinon.SinonStub).getCalls();
+  return async (name: string, args: Record<string, unknown> = {}) => ((await calls.find(c => c.args[0] === name)!.args[3](args)).content as { text: string }[]).map(c => c.text).join('\n');
+}
+const leadTrip = (beat: number): Trip => ({
+  id: 7, kind: 'bring', site: 'v:-675,2249', state: 'hop', beat, prep: {}, gate: { at: { x: -565, y: 63, z: 2183 }, side: 'west', inner: { x: -563, y: 63, z: 2183 }, outer: { x: -567, y: 63, z: 2183 }, yard: 31 },
+  spare: [], lure: 'fletching_table', hop: { n: 5, replaced: 0 }, avoid: [], times: {}, counts: { hops: 4, misses: 0, wedges: 0, pins: 0 }
+});
+/** A goal whose run holds on until it is stopped, and then (its exit handler, outside the run; `exitMs` long) shuts a held gate. */
+const holding = (name: string, priority: number, wants: () => boolean, section?: { now: () => number }, exitMs = 0): Goal => ({
+  name, priority, wants: () => (wants() ? `${name} wants` : null), timeoutMs: 60 * 60_000, retryMs: 1000, cuts: () => false,
+  run: async ctx => {
+    if (section) afield.critical = { by: ctx.signal, until: section.now() + 6 * 60_000, why: 'hall' };
+    try { return (await ctx.act('slow')).text; } finally {
+      await brainRun.exit(async () => {
+        if (exitMs) await new Promise(r => setTimeout(r, exitMs));
+        return ctx.call('gates.release', { x: -556, y: 63, z: 2137, shut: true });
+      }).catch(() => undefined);
+    }
+  }
+});
+
+test('wired: out of the hall is a survival goal right after retreat; care after food, never held by the loop watch; the shells before the hall chores; flight alone cuts a critical section', (t) => {
+  const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  const names = (new Brain(rt, { tickMs: 1e9 }) as unknown as { goals: Goal[] }).goals.map(g => g.name);
+  t.is(names[names.indexOf('retreat') + 1], 'out of the hall');
+  t.true(SURVIVAL.has('out of the hall'));
+  t.is(names[names.indexOf('food') + 1], 'villager care');
+  t.true(names.indexOf('hall shells') >= 0 && names.indexOf('hall shells') < names.indexOf('hall chores'));
+  t.deepEqual([...NO_LOOP_HOLD], ['villager care']);
+  t.deepEqual([...CRITICAL_CUTS].sort(), ['break out', 'out from under', 'out of a pit', 'recover', 'retreat']);
+  t.like(villagerCareGoal, { priority: 62, retryMs: 5000, failHoldMs: 60_000, timeoutMs: 10 * 60_000 });
+});
+
+test.serial('D35, E16: a run in a critical section (a chores visit inside the hall) is cut by flight alone: not the stash, the farm, the shelter or food; retreat cuts it, and its exit handler shuts the gate', async (t) => {
+  t.teardown(() => { delete afield.critical; });
+  let now = 1_000_000;
+  const { rt, calls } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  let wanted = new Set(['hall chores']);
+  const want = (name: string, priority: number): Goal => ({ name, priority, wants: () => (wanted.has(name) ? `${name} wants` : null), run: async () => `${name} ran`, timeoutMs: 60_000, retryMs: 1000 });
+  const goals = [want('retreat', 85), want('shelter', 80), want('food', 76), want('stash', 60), want('farm', 47), holding('hall chores', 30, () => wanted.has('hall chores'), { now: () => now })];
+  const brain = new Brain(rt, { tickMs: 1e9, goals, now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  t.regex(brain.status(), /Now: hall chores/);
+  for (const g of ['stash', 'farm', 'shelter', 'food']) {
+    wanted = new Set(['hall chores', g]);
+    now += 1000;
+    await brain.tick(); await settle();
+    t.regex(brain.status(), /Now: hall chores/, g);
+    t.false(calls.includes('cancel'), g);
+  }
+  wanted = new Set(['hall chores', 'retreat']);
+  now += 1000;
+  await brain.tick(); await settle();
+  t.regex(brain.status(), /stopping hall chores: retreat is more urgent/);
+  t.true(calls.includes('gates.release'), 'the exit handler shut the gate it held');
+  t.is(afield.critical, undefined, 'the section ended with its run');
+  brain.setEnabled(false);
+  // (the same run with no section of its own: the stash cuts it as ever)
+  const b = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  wanted = new Set(['hall chores']);
+  const plain = new Brain(b.rt, { tickMs: 1e9, goals: [want('stash', 60), holding('hall chores', 30, () => wanted.has('hall chores'))], now: () => now });
+  plain.setEnabled(true);
+  await plain.tick(); await settle();
+  wanted = new Set(['hall chores', 'stash']);
+  await plain.tick(); await settle();
+  t.regex(plain.status(), /stopping hall chores: stash is more urgent/);
+  plain.setEnabled(false);
+});
+
+test.serial('D24: an acting tool is refused while a villager is led or a run is in a critical section (said why); set-autonomy off takes the bot over, the run\'s exit handler first', async (t) => {
+  t.teardown(() => { delete afield.critical; });
+  let now = 1_000_000;
+  const { rt, calls } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  // (an exit handler that takes its time: 60 ms)
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [holding('work: villagers', 20, () => true, undefined, 60)], now: () => now });
+  const tool = brainTools(brain, rt);
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  const world = brain.worldMemory()!;
+  world.fetch = { v: 1, journal: [], wards: [], nextId: 8, trip: leadTrip(now) };
+  await t.throwsAsync(brain.manual('dig-block'), { message: /^Not now \(dig-block\): a villager is being led \(trip 7, hop 5\), and only flight cuts that short\. set-autonomy \{enabled:false\} takes the bot over \(the run's exit handler runs first\)/ });
+  t.false(calls.includes('cancel'));
+  t.notRegex(brain.status(), /Paused for the LLM/);
+  // a trip nobody drives (its beat 90 s old): the tool takes over as ever
+  delete world.fetch.trip;
+  const section = new AbortController();
+  afield.critical = { by: section.signal, until: now + 60_000, why: 'hall' };
+  await t.throwsAsync(brain.manual('place-block'), { message: /^Not now \(place-block\): the bot is inside the villager hall/ });
+  // set-autonomy off: the run is stopped and its handler runs (the held gate released shut) before the tool answers
+  await tool('set-autonomy', { enabled: false });
+  t.false(brain.enabled);
+  t.true(calls.includes('gates.release'), 'the exit handler ran before the reply');
+  delete afield.critical;
+  world.fetch.trip = leadTrip(now - 91_000);
+  await t.notThrowsAsync(brain.manual('dig-block'));
+});
+
+test.serial('E40: care is never silenced: a row that cannot do its work is a text, not a failure (no hold); three throws hold it a minute, not the night; the loop watch never holds it; a timeout holds it 5 s', async (t) => {
+  let now = 1_000_000;
+  // (1) the gate will not shut: said, and no hold of the brain's
+  {
+    const { rt, calls } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+    const call = rt.call;
+    rt.call = (async (m: string, p?: Record<string, unknown>) => (m === 'world.region' && p?.width === 1 ? { blocks: ['oak_fence_gate[facing=south,open=true]'] } : call(m, p))) as ClientRuntime['call'];
+    const brain = new Brain(rt, { tickMs: 1e9, goals: [villagerCareGoal], now: () => now });
+    brain.setEnabled(true);
+    await brain.tick(); await settle();
+    const g = { x: 2, y: 64, z: 0 };
+    fetchOf(brain.worldMemory()!).gates = { at: now, open: [g], leftOpen: [g] };
+    now += 6000;
+    fetchOf(brain.worldMemory()!).gates!.at = now;
+    await brain.tick(); await settle();
+    t.regex(brain.status(), /done villager care in 0s: a gate at \(2, 64, 0\) does not read shut/);
+    t.notRegex(brain.status(), /Retrying later: .*villager care|failed villager care/);
+    t.true(calls.filter(c => c === 'useOn').length >= 1, 'the bridge\'s own click, read back');
+    brain.setEnabled(false);
+  }
+  // (2) three throws in a row: a minute off, not the night
+  {
+    const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+    let runs = 0;
+    const care: Goal = { ...villagerCareGoal, gate: undefined, declines: undefined, urgency: undefined, wants: () => 'a gate left open', run: async () => { runs++; throw new Error('no answer'); } };
+    const brain = new Brain(rt, { tickMs: 1e9, goals: [care], now: () => now });
+    brain.setEnabled(true);
+    for (let i = 0; i < 3; i++) { await brain.tick(); await settle(); now += 6000; }
+    t.is(runs, 3);
+    t.regex(brain.status(), /villager care failed 3 times in a row: left for 1 min/);
+    now += 30_000;
+    await brain.tick(); await settle();
+    t.is(runs, 3);
+    now += 31_000;
+    await brain.tick(); await settle();
+    t.is(runs, 4, 'back a minute on');
+    brain.setEnabled(false);
+  }
+  // (3) round and round with nothing to show: the loop is seen, nothing is backed off
+  {
+    const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 6000 });
+    let runs = 0, end = () => { /* nothing runs yet */ };
+    const care: Goal = { ...villagerCareGoal, gate: undefined, declines: undefined, urgency: undefined, wants: () => 'a gate left open', run: () => new Promise<string>(res => { runs++; end = () => res('the gate does not read shut'); }) };
+    const brain = new Brain(rt, { tickMs: 1e9, goals: [care], now: () => now });
+    brain.setEnabled(true);
+    await brain.tick(); await settle();
+    for (let i = 0; i < 6; i++) { now += 2000; end(); await settle(); }
+    t.true(runs >= 6, `${runs} runs`);
+    t.regex(brain.status(), /LOOP \(spinning\)/);
+    t.notRegex(brain.status(), /backed off/);
+    brain.setEnabled(false);
+  }
+  // (4) a run that hangs: stopped at its 10 minutes, and back 5 s on
+  {
+    const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+    let runs = 0;
+    const care: Goal = { ...villagerCareGoal, gate: undefined, declines: undefined, urgency: undefined, wants: () => 'a gate left open', run: async ctx => { runs++; return (await ctx.act('slow')).text; } };
+    const brain = new Brain(rt, { tickMs: 1e9, goals: [care], now: () => now });
+    brain.setEnabled(true);
+    await brain.tick(); await settle();
+    now += 10 * 60_000 + 1000;
+    await brain.tick(); await settle();
+    t.regex(brain.status(), /villager care ran out of time/);
+    now += 6000;
+    await brain.tick(); await settle();
+    t.is(runs, 2);
+    brain.setEnabled(false);
+  }
+});
+
+/** A brain over the pasture (its memory the pasture's world, as brain.json; its runtime the pasture's bridge and tools). */
+function brainOn(t: ExecutionContext, p: Pasture, goals: Goal[]) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-brain-'));
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const memoryFile = path.join(dir, 'brain.json'), logFile = path.join(dir, 'brain.log');
+  fs.writeFileSync(memoryFile, JSON.stringify({ 'seed:1': p.world }));
+  const answer = (r: { ok: boolean; text: string }) => reply(r.text, !r.ok);
+  const rt = {
+    actions: new Proxy({}, { get: (_, tool: string) => async (a: Record<string, unknown>) => answer(await p.ctx.act(tool, a)) }),
+    call: (async (m: string, q?: Record<string, unknown>) => {
+      if (brainRun.getStore()?.signal.aborted) throw new Error('aborted: the brain gave this job up');
+      return p.ctx.call(m, q);
+    }) as ClientRuntime['call'],
+    status: async () => ({ ...(await p.ctx.status()), hashedSeed: '1' }),
+    home: () => ({ ...YARD_HOME, dimension: 'overworld' }),
+    lastDeath: () => undefined, setManualHook: () => undefined, builtNear: () => [], setHomeZone: () => undefined,
+    restoreBlock: async () => undefined, adoptStates: () => undefined, protectBuilt: () => undefined,
+    own: { put: (...a: Parameters<NonNullable<GoalContext['own']>['put']>) => p.ctx.own!.put(...a), take: (...a: Parameters<NonNullable<GoalContext['own']>['take']>) => p.ctx.own!.take(...a) }
+  } as unknown as ClientRuntime;
+  const brain = new Brain(rt, { tickMs: 1e9, now: () => p.now(), goals, memoryFile, logFile });
+  return { brain, rt, said: () => fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map(l => l.slice(25)) };
+}
+
+test.serial('E4: the strict set at the start (the closer on, then the set whole with the lock\'s pair and guard), sent again to a relaunched client; a gate opened across the relaunch is reported; the watch on the brain\'s clock', async (t) => {
+  const p = yard({ at: { x: -550, y: 63, z: 2145 } });
+  const { brain, said } = brainOn(t, p, []);
+  brain.setEnabled(true);
+  await brain.tick();
+  const world = brain.worldMemory()!;
+  const sent = p.log.filter(e => /^gates\./.test(e.name)).map(e => e.name);
+  t.deepEqual(sent.slice(0, 3), ['gates.status', 'gates.auto', 'gates.strict']);
+  t.like(p.log.find(e => e.name === 'gates.auto')!.params, { enabled: true });
+  t.deepEqual(p.log.find(e => e.name === 'gates.strict')!.params, JSON.parse(JSON.stringify(strictSet(world))));
+  t.is(p.holds.strictGates().length, strictGates(world).length);
+  t.is(p.holds.pairs(), 1);
+  t.is(p.holds.guards().length, 1);
+  t.true(said().some(l => /^gates: the strict set sent \(at the start\): 7 strict gate\(s\), 1 pair\(s\), 1 guard\(s\)$/.test(l)), said().join('\n'));
+  // the next tick: the count is the brain's, nothing sent; the gates read into fetch.gates on the brain's clock
+  const n = p.log.length;
+  await brain.tick();
+  t.false(p.log.slice(n).some(e => e.name === 'gates.strict'));
+  t.like(peekFetch(world).gates, { at: T0 + p.log.slice(n).find(e => e.name === 'gates.status')!.t * 50, open: [], leftOpen: [] });
+  t.true(p.log.slice(n).some(e => e.name === 'world.entities' && e.params.maxDistance === 128 && e.params.type === undefined), 'a look into the lock');
+  // the client relaunched (the brain lives on): its sets are gone, a gate is opened while it is down
+  p.kill(true);
+  p.swing(YARD_GATES.west, true, 'a player');
+  p.restart();
+  p.advance(120);
+  const m = p.log.length;
+  await brain.tick();
+  t.deepEqual(p.log.slice(m).filter(e => /^gates\./.test(e.name)).map(e => e.name), ['gates.status', 'gates.auto', 'gates.strict']);
+  t.is(p.holds.strictGates().length, strictGates(world).length);
+  t.true(said().some(l => /^gates: the strict set sent \(the bridge counted 0, the brain 7: a relaunched client\)/.test(l)));
+  // reported by its block state though the closer never took it as the bot's; out of reach: left open
+  await brain.tick();
+  t.deepEqual(peekFetch(world).gates!.leftOpen, [YARD_GATES.west]);
+  t.true(isOpen(p.get(YARD_GATES.west)), 'the bridge only reports it: care shuts it');
+  brain.setEnabled(false);
+});
+
+test.serial('E4 end to end: the gate watch finds a gate left open, care cuts the chore that runs and shuts it; a jar with no gate holds sends nothing and the shells build nothing', async (t) => {
+  const p = yard({ at: { x: -550, y: 63, z: 2145 } });
+  let chores = true;
+  const chore: Goal = { name: 'tidy', priority: 34, wants: () => (chores ? 'a stray' : null), timeoutMs: 60 * 60_000, retryMs: 1000,
+    run: ctx => new Promise<string>((_, no) => ctx.signal.addEventListener('abort', () => no(new Error('aborted')))) };
+  const { brain, said } = brainOn(t, p, [villagerCareGoal, chore]);
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  t.regex(brain.status(), /Now: tidy/);
+  p.swing(YARD_GATES.west, true, 'a player');
+  p.advance(10);
+  chores = false;
+  await brain.tick(); await settle();
+  t.true(said().some(l => /^stopping tidy: villager care is more urgent \(a gate left open at \(-565, 63, 2183\): shut it\)$/.test(l)), said().join('\n'));
+  await brain.tick();
+  for (let i = 0; i < 5; i++) await settle();
+  t.true(said().some(l => /^done villager care in \d+s: shut the yard's west gate at \(-565, 63, 2183\)$/.test(l)), said().join('\n'));
+  t.false(isOpen(p.get(YARD_GATES.west)));
+  brain.setEnabled(false);
+  // the jar before the gate holds: gates.status unknown, nothing sent, nothing written, and the shells decline
+  const old = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  const call = old.rt.call;
+  const asked: string[] = [];
+  old.rt.call = (async (m: string, q?: Record<string, unknown>) => { if (/^gates\./.test(m)) { asked.push(m); throw new Error(`unknown method: ${m}`); } return call(m, q); }) as ClientRuntime['call'];
+  let clock = T0;
+  const b = new Brain(old.rt, { tickMs: 1e9, now: () => clock, goals: [] });
+  const shells = (new Brain(old.rt, { tickMs: 1e9 }) as unknown as { goals: Goal[] }).goals.find(g => g.name === 'hall shells')!;
+  b.setEnabled(true);
+  await b.tick();
+  const w = b.worldMemory()!;
+  w.zones = { ...p.world.zones };
+  w.yard = { ...p.world.yard! };
+  // (a hall with a villager in it: the watch would read the gates every tick, but this bridge never answered)
+  w.villages = { sites: [], players: [], hall: { count: 1, at: clock } } as unknown as WorldMemory['villages'];
+  for (let i = 0; i < 6; i++) { clock += 5000; await b.tick(); }
+  t.deepEqual(asked, ['gates.status'], 'asked once in the minute (first at the second tick: the yard came with it), and nothing sent');
+  clock += 36_000;
+  await b.tick();
+  t.deepEqual(asked, ['gates.status', 'gates.status']);
+  b.setEnabled(false);
+  t.regex(shells.declines!(snap({ position: { x: -550, y: 63, z: 2145 }, home: { ...YARD_HOME, dimension: 'overworld' }, distHome: 38 }), w)!.text, /^the bridge keeps no strict gates/);
+  t.is(w.fetch, undefined, 'no record made for a world on the old jar');
+});
+
+test.serial('the look round home (discover) notes who is at work in the hall by the time of day (whose job block is whose), lowers no count on a blind look, and notes the lock', async (t) => {
+  const p = yard({ at: { x: -550, y: 63, z: 2145 }, tod: 3000 });
+  const table = p.world.zones!['hall:fletching']![0];
+  p.villager({ at: { x: table.x, y: table.y, z: table.z + 1 }, id: 9301, profession: 'fletcher', mind: 'still' });
+  const { brain } = brainOn(t, p, []);
+  brain.setEnabled(true);
+  await brain.tick();
+  const world = brain.worldMemory()!;
+  t.is(world.hallChores?.census?.villagers.length, 1);
+  t.deepEqual(Object.keys(world.hallChores?.work ?? {}), ['00000000-0000-4000-8000-000000002455']);
+  t.like(lockSeen(world), { villagers: 0 });
+  // ten minutes on, just rejoined: every cell reads null and the look sees nobody; the census is kept
+  p.advance(10 * 60 * 20 + 20);
+  p.blind(400);
+  await brain.tick();
+  t.is(world.hallChores?.census?.villagers.length, 1, 'a blind look lowers no count');
+  brain.setEnabled(false);
+});
+
+test.serial('B1: a chores visit with no lock (the hall\'s own gate) is one critical section: `out of the hall` does not cut it with the bot inside; the visit is done and the gate shut behind', async (t) => {
+  t.teardown(() => { delete afield.critical; });
+  const p = yard({ at: { x: -550, y: 63, z: 2145 }, lock: false, tod: 2000 });
+  const table = p.world.zones!['hall:fletching']![0];
+  p.villager({ at: { x: table.x, y: table.y, z: table.z + 1 }, id: 9302, profession: 'fletcher', mind: 'still' });
+  p.give('stick', 64);
+  p.give('emerald', 62);
+  const offer = { index: 0, costA: { name: 'stick', count: 32 }, costB: null, result: { name: 'emerald', count: 1 }, uses: 0, maxUses: 16, outOfStock: false };
+  // the trade screen held open until the test has ticked the brain with the bot inside
+  let reached = () => { /* set below */ };
+  const inside = new Promise<void>(r => { reached = r; });
+  let go = () => { /* set below */ };
+  const held = new Promise<void>(r => { go = r; });
+  p.on.call['trade.open'] = async q => { reached(); await held; return { open: true, level: 1, xp: 0, id: q.id, profession: 'fletcher', offers: [{ ...offer }] }; };
+  p.on.call['trade.do'] = q => {
+    const times = Number(q.times ?? 1);
+    p.take('stick', 32 * times);
+    p.give('emerald', times);
+    return { ok: true, traded: times, count: times, spent: { stick: 32 * times }, stopped: 'done', open: true, offer: { ...offer, uses: times }, level: 1, xp: times };
+  };
+  p.on.call['trade.close'] = () => ({ ok: true });
+  const { brain, said } = brainOn(t, p, [outOfHallGoal, hallChoresGoal]);
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  // (the first tick looked into the hall: the census; the next starts the visit)
+  if (!/Now: hall chores/.test(brain.status())) { await brain.tick(); await settle(); }
+  t.regex(brain.status(), /Now: hall chores/);
+  await inside;
+  const world = brain.worldMemory()!;
+  t.true(inHallBox(world, p.bot.at), `the bot in the hall at ${JSON.stringify(p.bot.at)}`);
+  t.like(afield.critical, { why: 'hall' });
+  t.is(outOfHallWants(p.look(), world), null, 'a visit under way is left be');
+  await brain.tick(); await settle();
+  t.regex(brain.status(), /Now: hall chores/);
+  t.false(said().some(l => /^stopping hall chores/.test(l)), said().join('\n'));
+  go();
+  for (let i = 0; i < 10 && /Now: hall chores/.test(brain.status()); i++) await settle();
+  t.true(said().some(l => /^done hall chores in \d+s: fletcher: sold 64 sticks for 2 emeralds \(64 now\)/.test(l)), said().join('\n'));
+  t.false(inHallBox(world, p.bot.at), 'out of the hall');
+  t.false(isOpen(p.get(H)), 'its gate shut behind');
+  t.is(afield.critical, undefined, 'the section ended with the visit');
+  t.is(outOfHallWants(p.look(), world), null);
+  brain.setEnabled(false);
+});
+
+test('the debug dumps: a trip\'s (fetch-*) in a folder of their own, 20 kept; the rails\' as before (five and the new one)', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-dumps-'));
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let now = Date.UTC(2026, 10, 25, 12, 0, 0);
+  const { rt } = fakeRuntime({ pos: { x: 0, y: 64, z: 0 }, time: 1000 });
+  const dumper: Goal = { name: 'dumper', priority: 10, wants: () => 'dump', timeoutMs: 60_000, retryMs: 0, run: async ctx => { for (let i = 0; i < 25; i++) { now += 1000; ctx.dump!(`fetch-hop${i}`, { i }); ctx.dump!(`extension${i}`, { i }); } return 'dumped'; } };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [dumper], now: () => now, logFile: path.join(dir, 'brain.log') });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  brain.setEnabled(false);
+  t.is(fs.readdirSync(path.join(dir, 'fetch-debug')).length, 20);
+  t.is(fs.readdirSync(path.join(dir, 'rails-debug')).length, 6);
+  t.true(fs.readdirSync(path.join(dir, 'fetch-debug')).every(f => /-fetch-hop\d+\.json$/.test(f)));
 });

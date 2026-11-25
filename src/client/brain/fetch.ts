@@ -396,9 +396,10 @@ const WHY: Record<'prep' | 'dawn' | 'look', (n: number) => string> = {
 /**
  * brain-status, `Fetch:` (pure over the memory): what stops everything first (`HALT`), the trip or the switches, the
  * wards and where each is, the gates, the lock and the ring as last read, what is out by the journal, why no trip
- * ran, the last one's end. "Do not restart" while a villager is being led.
+ * ran, the last one's end. "Do not restart" while a villager is being led. `notes`: the care goal's word on the gates
+ * (villagercare.ts careNotes: one that will not stay shut), after the gates left open.
  */
-export function fetchLine(world: WorldMemory, now: number): string {
+export function fetchLine(world: WorldMemory, now: number, notes: readonly string[] = []): string {
   const f = sound(world.fetch), t = f.trip, live = tripLive(world, now), parts: string[] = [];
   const name = (w: Ward) => `ward ${w.key.slice(0, 4)}..`;
   if (f.halt) parts.push(`HALT: ${f.halt.why}`);
@@ -422,6 +423,7 @@ export function fetchLine(world: WorldMemory, now: number): string {
   if (h && f.gates?.open.some(g => same(g, h)) && openByDesign(world, h)) parts.push('H open (it goes in when it will)');
   const left = (f.gates?.leftOpen ?? []).filter(g => !openByDesign(world, g));
   if (left.length) parts.push(`gate(s) left open at ${left.map(fmt).join(', ')}`);
+  parts.push(...notes);
   const shell = (what: 'lock' | 'ring', name: string, ready: string, faults = f.shells?.[what]) => (f.shells?.building === what ? `${name} being built`
     : !faults ? `${name} not read yet` : faults.length ? `${name}: ${faults[0]}${faults.length > 1 ? ` (and ${faults.length - 1} more)` : ''}` : ready);
   parts.push(shell('lock', 'the lock', 'lock ready'), shell('ring', 'the portal\'s ring', 'portal ringed'));

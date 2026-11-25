@@ -9,7 +9,7 @@ import { goHome } from '../../src/client/brain/homeward.js';
 import { leaveYard } from '../../src/client/brain/yardgates.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import sinon from 'sinon';
-import { fetchForPens, pens, penWay, standsClear } from '../../src/client/brain/pens.js';
+import { CLOSER_OFF, fetchForPens, pens, penWay, standsClear } from '../../src/client/brain/pens.js';
 import { BREED_STOCK } from '../../src/client/brain/animals.js';
 import { freeChestTotals } from '../../src/client/brain/chests.js';
 import { stashList } from '../../src/client/brain/chores.js';
@@ -97,6 +97,8 @@ class Pasture {
   /** gates the bot opened by walking through them, for the client's closer */
   opened = new Set<string>();
   gatesAuto = true;
+  /** for how long the closer was asked to stay off, each time it was (gates.auto {enabled: false, forMs}) */
+  offs: (number | undefined)[] = [];
   sprint = true;
   /** what was done, in order (walks, uses, toggles, the client switches) */
   log: string[] = [];
@@ -374,6 +376,7 @@ class Pasture {
           this.open.set(k(g), !this.isOpen(g));
           this.opened.delete(k(g));
           this.log.push(`useOn ${k(g)}`);
+          if (this.opts.abortOnOpen && k(this.opts.abortOnOpen.gate) === k(g) && this.isOpen(g)) this.opts.abortOnOpen.abort();
           return { used: true };
         }
         if (method === 'world.region') {
@@ -392,6 +395,7 @@ class Pasture {
         if (method === 'gates.auto') {
           // (off, it forgets what it took as the bot's: Gates.java; on again, it takes only what opens from then on)
           this.gatesAuto = !!p.enabled;
+          if (!p.enabled) this.offs.push(p.forMs === undefined ? undefined : Number(p.forMs));
           if (!p.enabled) this.opened.clear();
           this.log.push(`gates.auto ${p.enabled ? 'on' : 'off'}`);
           return { enabled: p.enabled };
@@ -591,11 +595,15 @@ test('a wild cow is put on a lead and walked in: through the yard\'s gate (shut 
   const onLead = pa.log.slice(pa.log.indexOf('entity.use #7 lead'), pa.log.indexOf('entity.use #7'));
   t.true(onLead.filter(l => l.startsWith('goto')).every(l => l.startsWith('goto careful')), onLead.join('\n'));
   t.deepEqual(pa.log.slice(-2), ['sprint on', 'gates.auto on']);
-  // the yard's east gate: Baritone opened it on the way out (the closer shut it behind), and on the way in with the
-  // cow behind, the bot shut it once the cow was through; the pen's gate opened for them and shut behind the bot
+  // the yard's east gate: Baritone opened it on the way out, and the bot shut it behind itself from the cell 2 outside
+  // (not yet the 2.2 past it the closer waits for: read open, clicked, read shut); on the way in with the cow behind,
+  // the bot shut it once the cow was through; the pen's gate opened for them and shut behind the bot
   t.false(pa.isOpen(YARD_GATES[1]));
   t.false(pa.isOpen(GATE));
-  t.deepEqual(pa.log.filter(l => l.startsWith('use-item-on-block')), [`use-item-on-block ${k(YARD_GATES[1])}`, `use-item-on-block ${k(GATE)}`, `use-item-on-block ${k(GATE)}`]);
+  t.deepEqual(pa.log.filter(l => l.startsWith('useOn')), [`useOn ${k(YARD_GATES[1])}`, `useOn ${k(YARD_GATES[1])}`, `useOn ${k(GATE)}`, `useOn ${k(GATE)}`]);
+  t.is(pa.log[pa.log.indexOf(`baritone opens ${k(YARD_GATES[1])}`) + 1], `useOn ${k(YARD_GATES[1])}`, 'shut behind the walk out, before the walk on');
+  // every click on a gate the bridge's own, from within its reach: never the tool, whose walk into reach is a plain one
+  t.false(pa.log.some(l => l.startsWith('use-item-on-block')), pa.log.join('\n'));
   t.false(pa.log.includes('the closer shuts -533,63,2183') && pa.log.lastIndexOf('the closer shuts -533,63,2183') > pa.log.indexOf('entity.use #7 lead'), 'the closer never shut it on the cow');
   // what it saw and did is written down: the pen holds one now, and the place it was seen is forgotten
   t.like(penCount(world, 'cow'), { adults: 1, babies: 0, at: T0 });
@@ -681,7 +689,7 @@ test('a fetch that ends past the yard\'s gate, short of the pen, shuts that gate
   const broke = await fetchForPens(p2.ctx(w2), 'east', { now: () => T0 });
   t.regex(broke.text, /the lead broke \d+ from the gate \(the cow 13 off\), put on again; the lead broke \d+ from the gate \(the cow 13 off\); the lead picked up$/);
   t.false(p2.isOpen(YARD_GATES[1]), p2.log.join('\n'));
-  // and walked up to carefully: from the lead on, no plain walk (use-item-on-block's own, to a gate out of reach)
+  // and walked up to carefully: from the lead on, no plain walk (as use-item-on-block's own was, to a gate out of reach)
   t.false(p2.log.slice(p2.log.indexOf('entity.use #7 lead')).some(l => /^goto -/.test(l)), p2.log.join('\n'));
 });
 
@@ -712,7 +720,8 @@ test('a fetch the brain gives up on its first leg in past the yard\'s gate, befo
   }) as GoalContext['call'];
   await t.throwsAsync(brainRun.run({ signal: ac.signal }, () => fetchForPens({ ...base, call }, 'east', { now: () => T0 })), { message: /aborted/ });
   t.false(pa.isOpen(YARD_GATES[1]), pa.log.join('\n'));
-  t.true(pa.log.includes(`useOn ${k(YARD_GATES[1])}`), pa.log.join('\n'));
+  // (the click of the run given up, after the one that shut the gate behind the walk out to the cow)
+  t.true(pa.log.lastIndexOf(`useOn ${k(YARD_GATES[1])}`) > pa.log.indexOf('entity.use #7 lead'), pa.log.join('\n'));
   t.is(pa.led.size, 0);
   t.true(pa.gatesAuto && pa.sprint);
   // not given up, the walk to 4 in ending a little past the cell's middle (Baritone's to a block): clicked from there,
@@ -726,7 +735,7 @@ test('a fetch the brain gives up on its first leg in past the yard\'s gate, befo
     return r;
   }) as GoalContext['call'];
   t.deepEqual(await fetchForPens({ ...b2, call: call2 }, 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 47 out; led in' });
-  const click = pb.log.indexOf(`use-item-on-block ${k(YARD_GATES[1])}`);
+  const click = pb.log.lastIndexOf(`useOn ${k(YARD_GATES[1])}`);
   t.is(pb.log.slice(0, click).filter(l => l.startsWith('goto')).at(-1), 'goto careful -537,2183', pb.log.join('\n'));
 });
 
@@ -786,16 +795,13 @@ test.serial('the walk back to shut the yard\'s gate behind a fetch that ended sh
   const world = liveWorld();
   const pa = new Pasture([cow(7, -469, 2183)], world, KIT, { breakOn: [16, 17] });
   const ctx = pa.ctx(world);
-  const call = ctx.call, act = ctx.act;
+  const call = ctx.call;
   const seen: string[] = [];
   ctx.call = (async (method: string, p?: Record<string, unknown>) => {
     if (method === 'goto') seen.push(`goto ${p!.x},${p!.z}: ${afield.ledBy === ctx.signal ? 'led' : 'free'}`);
+    if (method === 'useOn') seen.push(`click ${p!.x},${p!.z}: ${afield.ledBy === ctx.signal ? 'led' : 'free'}`);
     return call(method, p);
   }) as GoalContext['call'];
-  ctx.act = async (tool, a = {}) => {
-    if (tool === 'use-item-on-block') seen.push(`click ${a.x},${a.z}: ${afield.ledBy === ctx.signal ? 'led' : 'free'}`);
-    return act(tool, a);
-  };
   const r = await fetchForPens(ctx, 'east', { now: () => T0 });
   t.regex(r.text, /the lead broke \d+ from the gate \(the cow 13 off\); the lead picked up$/);
   // after the second break (the lead picked up): back to 2 from the east gate, and the click, both still the walk's
@@ -803,6 +809,47 @@ test.serial('the walk back to shut the yard\'s gate behind a fetch that ended sh
   t.false(pa.isOpen(YARD_GATES[1]));
   // and once the run is done, nothing is held
   t.is(afield.ledBy, undefined);
+});
+
+// (serial: the renewal's interval is the module's)
+test.serial('the client\'s closer is switched off for two minutes at a time, never for good, and asked again while the walk in or the stay in the pen lasts; on again at the end', async (t) => {
+  // as it runs live (a fetch of under a minute): off once for the walk through the yard's gate and once for the pen's,
+  // each for the bridge's two minutes, after which the bridge puts the closer back on by itself: a brain killed with
+  // it off left it off before, and the bot's own walk then left a yard gate open (Nov 24)
+  const world = liveWorld();
+  const pa = new Pasture([cow(407, -469, 2183)], world, KIT);
+  t.deepEqual(await fetchForPens(pa.ctx(world), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 81 out; led in' });
+  t.deepEqual(pa.offs, [CLOSER_OFF.forMs, CLOSER_OFF.forMs]);
+  t.is(CLOSER_OFF.forMs, 120_000, 'the bridge\'s own cap (GateHolds.MAX_OFF_MS)');
+  t.true(CLOSER_OFF.renewMs < CLOSER_OFF.forMs);
+  // a walk that lasts past the interval (here every asking is due): asked again at each leg while it is to stay off,
+  // so the closer does not come back on in the middle and shut the gate on the cow's nose
+  const was = CLOSER_OFF.renewMs;
+  CLOSER_OFF.renewMs = 0;
+  t.teardown(() => { CLOSER_OFF.renewMs = was; });
+  const w2 = liveWorld();
+  const pb = new Pasture([cow(408, -469, 2183)], w2, KIT);
+  t.deepEqual(await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 81 out; led in' });
+  t.true(pb.offs.length >= 6 && pb.offs.every(ms => ms === CLOSER_OFF.forMs), JSON.stringify(pb.offs));
+  // off only while it is meant to be: on again once the yard's gate is shut behind the cow (no asking again till the
+  // pen's gate), and on at the end
+  const shutYard = pb.log.lastIndexOf(`useOn ${k(YARD_GATES[1])}`), openPen = pb.log.indexOf(`useOn ${k(GATE)}`);
+  t.is(pb.log[shutYard + 1], 'gates.auto on');
+  t.false(pb.log.slice(shutYard + 2, pb.log.lastIndexOf('gates.auto off', openPen)).includes('gates.auto off'), pb.log.join('\n'));
+  t.is(pb.log.at(-1), 'gates.auto on');
+  t.true(pb.gatesAuto);
+  t.false(pb.isOpen(YARD_GATES[1]) || pb.isOpen(GATE));
+  // the stay in the pen (a cull, its drops, two feeds: it runs past two minutes live): asked again before each thing
+  // done in there and before the walk out; the gate shut behind the bot both ways, the closer on again after
+  const own = [[-557, 2166], [-556, 2166], [-555, 2166], [-554, 2166], [-553, 2166], [-557, 2168], [-556, 2168]].map(([x, z], i) => cow(411 + i, x, z));
+  const w3 = liveWorld();
+  const pc = new Pasture(own, w3, KIT);
+  t.regex(await pens.run(pc.ctx(w3)), /^cow: culled one .*; cow: fed 2 to breed; cow: fed 2 to breed$/);
+  t.deepEqual(pc.offs, [CLOSER_OFF.forMs, CLOSER_OFF.forMs, CLOSER_OFF.forMs, CLOSER_OFF.forMs], 'in, the second thing, the third, the way out');
+  t.deepEqual(gateLog(pc).filter(l => !/^gates\.auto off$/.test(l)), [...Array.from({ length: 4 }, () => `useOn ${k(GATE)}`), 'gates.auto on']);
+  t.is(gateLog(pc)[0], 'gates.auto off');
+  t.false(pc.isOpen(GATE));
+  t.true(pc.gatesAuto);
 });
 
 test('the fetch keeps to the cow range: a cow seen 255 out that grazes on past it is not followed', async (t) => {
@@ -1060,7 +1107,7 @@ test('the live way in from the north gate: lined up on the gate, through it in o
   t.true(onLead.every(l => l.startsWith('goto careful')));
   // the north gate shut behind the cow from 4 in, in reach: no walk back to it past the cow (a run given up in that
   // walk left it open, the click of a run given up walking nowhere)
-  const click = pa.log.indexOf(`use-item-on-block ${k(YARD_GATES[0])}`);
+  const click = pa.log.lastIndexOf(`useOn ${k(YARD_GATES[0])}`);
   t.is(pa.log.slice(0, click).filter(l => l.startsWith('goto')).at(-1), 'goto careful -549,2123', pa.log.join('\n'));
   // through the north gate in one walk: from 2 out (3 out, the walk to within 1 of it) straight to 2 in
   const through = onLead.indexOf('goto careful -549,2121');
@@ -1083,7 +1130,7 @@ test('a stray north of the pen is walked round it on the lead, not drawn against
   t.true(penned(herd[1]), JSON.stringify(herd[1].position));
   t.deepEqual(pa.ledLooks.filter(byGate), []);
   // never into the pen but by its gate from its gate's side: no walk on the lead to a cell of the pen before the gate opened
-  const onLead = pa.log.slice(pa.log.indexOf('entity.use #2 lead'), pa.log.indexOf(`use-item-on-block ${k(GATE)}`));
+  const onLead = pa.log.slice(pa.log.indexOf('entity.use #2 lead'), pa.log.indexOf(`useOn ${k(GATE)}`));
   t.false(onLead.some(l => /^baritone opens/.test(l) && l.endsWith(k(GATE))), onLead.join('\n'));
   // a cow that will not come round behind the bot (caught on something 2 east of the gate's line, south of the
   // pen): waited for, out along the gate's line and in again twice, not walked in with; let go there, said where
@@ -1094,7 +1141,7 @@ test('a stray north of the pen is walked round it on the lead, not drawn against
   pb.pull = (c, stop, by) => { pull(c, stop, by); if (c.position.z > GATE.z && c.position.x < GATE.x + 2) c.position = { ...c.position, x: GATE.x + 2 }; };
   const stuck = await fetchForPens(pb.ctx(w2), 'east', { now: () => T0 });
   t.regex(stuck.text, /^cow: on the lead from 47 out; it would not come round to the gate \(it stood 2 off at \(-553, 63, 217\d\)\): let go of it there, the lead picked up$/, stuck.text);
-  t.false(pb.log.includes(`use-item-on-block ${k(GATE)}`), 'the pen\'s gate never opened for it');
+  t.false(pb.log.includes(`useOn ${k(GATE)}`), 'the pen\'s gate never opened for it');
   t.is(pb.log.filter(l => l === 'goto careful -555,2177').length, 3, pb.log.join('\n'));
   t.is(pb.led.size, 0);
   t.is(pb.count('lead'), 2);
@@ -1108,7 +1155,7 @@ test('a door the walk to the pen passes, of a build world memory does not know, 
     t.false(pa.isOpen(DOOR), pa.log.join('\n'));
     t.true(pa.log.includes(`baritone opens ${k(DOOR)}`) && pa.log.includes(`the closer shuts ${k(DOOR)}`), pa.log.join('\n'));
     // (off again for the pen's gate: the bot opens and shuts that one itself)
-    const opens = pa.log.indexOf(`use-item-on-block ${k(GATE)}`);
+    const opens = pa.log.indexOf(`useOn ${k(GATE)}`);
     t.is(pa.log.lastIndexOf('gates.auto off', opens), opens - 1, pa.log.join('\n'));
     t.false(pa.isOpen(GATE));
     t.true(pa.gatesAuto);
@@ -1123,7 +1170,7 @@ test('a door the walk to the pen passes, of a build world memory does not know, 
   const w2 = liveWorld({ work: { dry: {}, next: {}, sites: { cow: [{ x: -564, y: 68, z: 2108 }] }, pen: {}, tier: 0, deep: { starts: [], clean: 0, deaths: [] } } });
   const pb = new Pasture([cow(7, -561, 2112)], w2, KIT, { doors: [DOOR] });
   t.deepEqual(await fetchForPens(pb.ctx(w2), 'in sight', { now: () => T0 }), { gain: 1, text: 'cow: on the lead from 71 out; led in' });
-  const shutNorth = pb.log.indexOf(`use-item-on-block ${k(YARD_GATES[0])}`);
+  const shutNorth = pb.log.lastIndexOf(`useOn ${k(YARD_GATES[0])}`);
   t.true(shutNorth > 0 && pb.log[shutNorth + 1] === 'gates.auto on', pb.log.join('\n'));
   ends(pb);
   t.false(pb.isOpen(YARD_GATES[0]));
@@ -1231,7 +1278,7 @@ test('a led cow held by what world memory does not know (a build, a post) is let
   const r = await fetchForPens(pa.ctx(world), 'east', { now: () => T0 });
   t.regex(r.text, /^cow: on the lead from 47 out; the cow would not follow \(it stood \d off at \(-541, 63, 21\d\d\)\): let go of it there, the lead picked up$/, r.text);
   t.true(pa.legs <= 25, `${pa.legs} led walks`);
-  t.false(pa.log.includes(`use-item-on-block ${k(GATE)}`));
+  t.false(pa.log.includes(`useOn ${k(GATE)}`));
   t.false(pa.isOpen(YARD_GATES[1]) || pa.isOpen(GATE));
   t.true(pa.gatesAuto);
   t.is(pa.led.size, 0);
@@ -1251,7 +1298,7 @@ test('two on leads at the pen\'s gate, one lined up and one not: the one that wo
   t.false(penned(herd[1]));
   // off its lead (and the lead picked up) before the pen's gate opened: never walked out to through the open gate
   const off8 = pa.log.indexOf('entity.use #8');
-  t.true(off8 > 0 && off8 < pa.log.indexOf(`use-item-on-block ${k(GATE)}`), pa.log.join('\n'));
+  t.true(off8 > 0 && off8 < pa.log.indexOf(`useOn ${k(GATE)}`), pa.log.join('\n'));
   t.is(pa.count('lead'), 2);
   t.false(pa.isOpen(YARD_GATES[1]) || pa.isOpen(GATE));
   // the second held 3 or 4 east of the line: the walk up to it to take the lead off, and onto the lead, takes the bot
@@ -1330,7 +1377,7 @@ test('the walk to the pen with a wall 2 out from its gate that world memory does
   t.true(penned(herd[1]), JSON.stringify(herd[1].position));
   t.false(text.includes('would not come round'), text);
   const onLead = pa.log.slice(pa.log.indexOf('entity.use #2 lead'));
-  const [outside, opens, inside] = ['goto careful -555,2172', `use-item-on-block ${k(GATE)}`, 'goto careful -555,2169'].map(l => onLead.indexOf(l));
+  const [outside, opens, inside] = ['goto careful -555,2172', `useOn ${k(GATE)}`, 'goto careful -555,2169'].map(l => onLead.indexOf(l));
   t.true(outside >= 0 && outside < opens && opens < inside, onLead.join('\n'));
   t.deepEqual(walkedTo(pa.log).filter(walls), [], pa.log.join('\n'));
   t.false(pa.isOpen(GATE));
@@ -1604,7 +1651,7 @@ test.serial('the pens round breeds its pair from inside the pen: fed with wheat,
   // in by the gate and shut behind, out again and shut behind, the client's closer off meanwhile; every walk careful:
   // up to the far one (to the inside cell by it nearest the bot, not onto its own), and back to the gate from the
   // corner before the click (out of reach, it walks there plain)
-  t.deepEqual(gateLog(pa), ['gates.auto off', ...Array.from({ length: 4 }, () => `use-item-on-block ${k(GATE)}`), 'gates.auto on']);
+  t.deepEqual(gateLog(pa), ['gates.auto off', ...Array.from({ length: 4 }, () => `useOn ${k(GATE)}`), 'gates.auto on']);
   t.false(pa.isOpen(GATE));
   t.true(pa.careful.every(c => c));
   t.true(pa.log.includes('goto careful -556,2167'), pa.log.join('\n'));
@@ -1698,18 +1745,19 @@ test('a pens round given up or failing on its way out of the pen leaves the gate
   t.true(walkOut.pa.gatesAuto);
   t.is(walkOut.pa.held, 'diamond_sword');
   t.true(walkOut.pa.cows.every(penned));
-  // given up as the click opens the gate to go out (the tool's answer comes back to a run given up: it throws): the
-  // run threw before the closer was on again, and every gate and door Baritone opened after stood open
+  // given up as the click opens the gate to go out (the click's answer comes back to a run given up: it throws): the
+  // run threw before the closer was on again, and every gate and door Baritone opened after stood open. The clicks:
+  // in, shut behind, out (given up there), and the shut from where the bot stands, outside the run
   let clicks = 0;
   const opening = await penRound([153, 154], (ac, base) => ({
-    act: async (tool, a = {}) => {
-      if (tool !== 'use-item-on-block' || ++clicks < 3) return base.act(tool, a);
-      await base.act(tool, a);
+    call: (async (method: string, p: Record<string, unknown> = {}) => {
+      if (method !== 'useOn' || ++clicks !== 3) return base.call(method, p);
+      await base.call(method, p);
       ac.abort();
       throw new Error('aborted');
-    }
+    }) as GoalContext['call']
   }));
-  t.is(clicks, 3);
+  t.is(clicks, 4);
   t.false(opening.pa.isOpen(GATE), opening.pa.log.join('\n'));
   t.true(opening.pa.gatesAuto);
   t.is(opening.pa.held, 'diamond_sword');
@@ -1786,7 +1834,7 @@ test('the pens round culls above 6 adults only, from inside the pen: never a cal
   const pb = new Pasture(full, w2, KIT);
   t.is(await pens.run(pb.ctx(w2)), 'cow: the pen is full (6 adults, 4 babies)');
   t.false(pb.log.some(l => l.startsWith('killed') || l.startsWith('entity.use')));
-  t.false(pb.log.some(l => l.startsWith('use-item-on-block')), 'nobody went in');
+  t.false(pb.log.some(l => /^(use-item-on-block|useOn)/.test(l)), 'nobody went in');
 });
 
 test('live, Nov 13: a cull in the cow pen\'s corner by its corner post, the drops in the post\'s cell, on top of it and past it: every walk of the visit on the pen\'s inside cells, never the fence\'s; what fell past the fence left', async (t) => {
@@ -1836,7 +1884,7 @@ test('live, Nov 13: a cull in the cow pen\'s corner by its corner post, the drop
 const IN_PEN: Pos = { x: -557, y: 63, z: 2170 };
 /** what a walk out of the pen did, in order: the walks, the clicks on the gate, Baritone's own way through it, the closer */
 const exitLog = (pa: Pasture) => pa.log.filter(l => /^(goto|use-item-on-block|useOn|baritone opens|the closer|go-home|move-to-position)/.test(l));
-const PEN_WAY_OUT = ['goto careful -555,2169', `use-item-on-block ${k(GATE)}`, 'goto careful -555,2172', `use-item-on-block ${k(GATE)}`];
+const PEN_WAY_OUT = ['goto careful -555,2169', `useOn ${k(GATE)}`, 'goto careful -555,2172', `useOn ${k(GATE)}`];
 
 test('live, Nov 13: the shelter at night from inside the cow pen walks out by the pen\'s gate, carefully, the gate shut behind, then home to bed; and the brain sends the pens\' rings with the yard\'s', async (t) => {
   // live the walk home from (-557, 63, 2170) was go-home's own way, over the pen's west fence: wedged in it five times
@@ -1918,13 +1966,13 @@ test('only from inside a pen\'s fence: pressed against a post from inside it wal
   for (const at of [{ x: -557.925, y: 63, z: 2168.5 }, { ...mid(HOME) }, { x: -554.5, y: 63, z: 2171.8 }]) {
     const r = await from(at);
     t.deepEqual(r.said, [], JSON.stringify(at));
-    t.false(r.log.some(l => l.startsWith('use-item-on-block') || l.startsWith('goto careful')), JSON.stringify(at));
+    t.false(r.log.some(l => /^(use-item-on-block|useOn|goto careful)/.test(l)), JSON.stringify(at));
   }
   // the sheep pen, its gate north: in by 2 from it, out to the cell north of it
   const sheep = liveWorld({ zones: { ...liveWorld().zones, 'pen:sheep': [{ x: -542, y: 62, z: 2196, width: 7, length: 7 }], 'pen:sheep:gate': [{ x: -539, y: 63, z: 2196 }] } });
   const r = await from({ x: -540.5, y: 63, z: 2200.5 }, sheep);
   t.deepEqual(r.said, ['out of the sheep pen by its gate (-539, 63, 2196)']);
-  t.deepEqual(r.log, ['goto careful -539,2198', 'use-item-on-block -539,63,2196', 'goto careful -539,2195', 'use-item-on-block -539,63,2196', 'go-home']);
+  t.deepEqual(r.log, ['goto careful -539,2198', 'useOn -539,63,2196', 'goto careful -539,2195', 'useOn -539,63,2196', 'go-home']);
 });
 
 test('a pen whose gateway a cow stands in: one try out, the gate shut behind from where the bot stands, said, and the walk home goes on as it would have; given up on the way out, the gate is clicked shut and nothing walks on', async (t) => {

@@ -9,10 +9,13 @@ import { addZone } from './milestones.js';
 import { bedPlan } from './villagers.js';
 import { mendingLacking } from './anvil.js';
 import { storedNetherHelmets } from './netherset.js';
-import { ROOM } from './pockets.js';
+import { out as afield, ROOM } from './pockets.js';
 import { holdHarmless } from './fluidpick.js';
 import { goHome } from './homeward.js';
-import { inFence } from './yardgates.js';
+import { gateIsOpen, gateRead, inFence, openGate, shutGate, shutNow } from './yardgates.js';
+import { dropEntry, fetchOf, inHallOrLock, journal, peekFetch } from './fetch.js';
+import { inLock, lockFaults, lockPlanOf, spanOf, type LockPlan } from './villagerwalk.js';
+import { Ground } from './boatroute.js';
 
 /**
  * The villager chores in the bot's own hall (P5d of the progression plan): the villagers bred up to four adults with
@@ -20,6 +23,15 @@ import { inFence } from './yardgates.js';
  * the fletcher pays for sticks, and the anvil (anvil.ts) puts it on the gear. Everything waits on villagers in the hall:
  * with it empty (live Nov 18: the move from the west village found no boat way, and the rails home are switched off)
  * the goal never wants, and nothing is made, placed or thrown.
+ *
+ * In and out through the lock (throughLock), once one stands in front of the hall's gate (the villager fetch, idle-plan
+ * V 6.5): the bot goes in by the lock's gate, shuts it behind and reads it shut, and only then opens the hall's; out the
+ * same way round, and never with a villager in the lock. Villagers open no gate but walk out of an open one: live on
+ * Nov 24 the hall's gate let a villager out each of the three times it stood open with one awake inside, once within
+ * 4 s, and the second villager led home got out for good when its job block was dug with the gate open. So a job site
+ * is broken for a reroll only with every gate read shut just before (breakSite, jobBreakOk), and the whole stay inside is one
+ * section of the run that only flight may cut (pockets.ts out.critical): the farm and the pens round cut a visit with
+ * the bot inside twice in four minutes that day, and the next goal's plain walk out is how a villager leaves with it.
  *
  * The rules relied on, read in the 26.3 jar (versions/26.3/26.3.jar):
  * - Breeding (ai/behavior/VillagerMakeLove): two adults both `canBreed` (Villager: foodLevel plus the food points in
@@ -101,24 +113,38 @@ export const CHORE_SLOTS = 5;
 const DAY_LEFT = 2400;
 /**
  * The waits on the villagers: a look every pollMs; a job given up after loseLooks looks without it going, a new one
- * after jobLooks without one coming (the AI looks for a site every few seconds and walks to it). A test sets pollMs 0.
+ * after jobLooks without one coming (the AI looks for a site every few seconds and walks to it). At the lock: lockLooks
+ * for it to be free before a visit (nobody in it, both gates read shut: 20 s), backLooks for a villager that stepped
+ * into it to go back into the hall by the hall's gate, opened for it (60 s: an employed one walks back to its block in
+ * work hours), asideLooks for one that followed the bot into it (20 s). A test sets pollMs 0; `sleep`: the wait itself,
+ * where a test's world keeps its own time.
  */
-export const HALL_WAITS = { pollMs: 3000, loseLooks: 10, jobLooks: 30, dropMs: 400, dropLooks: 4 };
+export const HALL_WAITS: { pollMs: number; loseLooks: number; jobLooks: number; dropMs: number; dropLooks: number; lockLooks: number; backLooks: number; asideLooks: number; sleep?: (ms: number) => Promise<void> } =
+  { pollMs: 3000, loseLooks: 10, jobLooks: 30, dropMs: 400, dropLooks: 4, lockLooks: 7, backLooks: 20, asideLooks: 7 };
+/** A stay inside the hall is one critical section for this long at most (real ms), and never past this time of day; the chores wrap up at WRAP_AT. */
+const STAY_MAX = 6 * MINUTE;
+const STAY_END = 11_800;
+const WRAP_AT = 11_000;
+/** The bot eats before it goes in when its food is under this: nothing but flight cuts the stay, the food goal neither. */
+const FED = 18;
+/** The hall's gate held open for a villager that followed the bot into the lock: the bridge's hold, a little longer than the wait (asideLooks). */
+const HOLD_MS = 25_000;
 /** Runs in a row that put the lectern down and saw no villager take it: then the chore is passed over (CHORE_FAIL_WAIT). */
 export const LECTERN_WAITS = 3;
 
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const fmt = (p: Pos) => `(${p.x}, ${p.y}, ${p.z})`;
 const keyOf = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
-const pause = (ms: number) => (ms > 0 ? new Promise(r => setTimeout(r, ms)) : Promise.resolve());
+const pause = (ms: number): Promise<unknown> => (ms <= 0 ? Promise.resolve() : HALL_WAITS.sleep ? HALL_WAITS.sleep(ms) : new Promise(r => setTimeout(r, ms)));
+const same = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) => a.x === b.x && a.y === b.y && a.z === b.z;
 const AIR = /^(air|cave_air|void_air)$/;
 const idOf = (b: string | null | undefined) => (b ?? '').replace(/^minecraft:/, '').replace(/\[.*$/, '');
 const block = (p: { x: number; y: number; z: number }) => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
 
 // ------------------------------------------------------------------------------------------------ memory
 
-/** A villager in the hall as the last look saw it. */
-export interface HallVillager { id: number; baby: boolean; profession: string; level: number; at: Pos }
+/** A villager in the hall as the last look saw it (`id`: the client's, a session's only; `uuid`: the game's own, where the bridge gives it). */
+export interface HallVillager { id: number; uuid?: string; baby: boolean; profession: string; level: number; at: Pos }
 
 /** Kept in brain.json per world (world.hallChores). */
 export interface HallChoresMemory {
@@ -147,6 +173,12 @@ export interface HallChoresMemory {
   fletcher?: { id?: number; sticks?: boolean; price?: number; level?: number; xp?: number; sold: number; outAt?: number; rolls: number; day: number; today: number; siteOut?: number };
   /** when each chore last failed (ms): passed over for CHORE_FAIL_WAIT, so one that keeps failing holds up none of the rest */
   failed?: Partial<Record<Chore, number>>;
+  /**
+   * where each villager in the hall was seen in work hours (WORK_HOURS: an employed one keeps by its job site then), its
+   * last WORK_SEEN looks, by its uuid (else `#` and the client's id, a session's only): the evidence of whose job block
+   * is whose (hallSites), noted by a look that gives the time of day (noteHall)
+   */
+  work?: Record<string, { profession: string; seen: { at: Pos; t: number }[] }>;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -161,6 +193,7 @@ export function hallChoresOf(world: WorldMemory): HallChoresMemory {
   if (m.librarian && !(fin(m.librarian.rolls) && fin(m.librarian.day) && fin(m.librarian.today))) delete m.librarian;
   if (m.fletcher && !(fin(m.fletcher.sold) && fin(m.fletcher.rolls))) delete m.fletcher;
   if (m.failed !== undefined && !isObj(m.failed)) delete m.failed;
+  if (m.work !== undefined && !isObj(m.work)) delete m.work;
   return m;
 }
 /** The same for a gate: reads only (an absent or broken memory is an empty one, nothing written). */
@@ -197,7 +230,7 @@ export function inHallBox(world: WorldMemory, p: { x: number; y: number; z: numb
 /** The villagers a world.entities reply shows inside the hall (pure). */
 export function hallVillagers(world: WorldMemory, seen: readonly Seen[]): HallVillager[] {
   return seen.filter(e => e && e.name === 'villager' && e.position && inHallBox(world, e.position))
-    .map(e => ({ id: e.id, baby: !!e.baby, profession: e.profession ?? 'none', level: fin(e.level) ? e.level : 1, at: { ...e.position! } }));
+    .map(e => ({ id: e.id, ...(typeof e.uuid === 'string' && e.uuid ? { uuid: e.uuid } : {}), baby: !!e.baby, profession: e.profession ?? 'none', level: fin(e.level) ? e.level : 1, at: { ...e.position! } }));
 }
 
 /**
@@ -205,12 +238,30 @@ export function hallVillagers(world: WorldMemory, seen: readonly Seen[]): HallVi
  * the time; a baby more than at the last feed ends that feed's wait (its bread did its work). Returns how many are in
  * the hall, undefined with no hall. Called by the chores, the move's count (villagemove.ts countHall) and the brain's
  * look round home (brain.ts discover), so a villager brought in or born is seen without the chores running.
+ *
+ * `whole` false: a look that did not see the whole hall (cells of it not loaded: in the seconds after a rejoin the
+ * client lists no entity and reads every cell null). Such a look lowers no count: the villagers of the last census it
+ * does not show (by the game's own uuid, else by the client's id) are kept as they were, with that census's time. Only
+ * a whole look finds a villager gone. A census emptied by a blind look said "the villager hall is empty", and the move
+ * wanted villagers again.
+ *
+ * `tod`: the time of day of the look, where the caller knows it. In work hours each villager seen is noted where it
+ * stood (`work`, the evidence of whose job block is whose: hallSites); a whole look drops the evidence of one gone.
  */
-export function noteHall(world: WorldMemory, seen: readonly Seen[], now: number): number | undefined {
+export function noteHall(world: WorldMemory, seen: readonly Seen[], now: number, whole = true, tod?: number): number | undefined {
   if (!hallBox(world)) return undefined;
-  const villagers = hallVillagers(world, seen).slice(0, 16);
+  const looked = hallVillagers(world, seen).slice(0, 16);
+  let villagers = looked;
   const m = hallChoresOf(world);
-  m.census = { at: now, villagers };
+  let at = now;
+  const was = m.census?.villagers.filter(v => isObj(v)) ?? [];
+  if (!whole && villagers.length < was.length) {
+    const uuids = new Set(villagers.flatMap(v => (v.uuid ? [v.uuid] : []))), ids = new Set(villagers.map(v => v.id));
+    villagers = [...villagers, ...was.filter(v => (v.uuid ? !uuids.has(v.uuid) : !ids.has(v.id)))].slice(0, was.length);
+    at = m.census!.at;
+  }
+  m.census = { at, villagers };
+  noteWork(m, looked, villagers, now, whole, tod);
   // a birth is a baby more than at the feed: by the babies, not the head count (an adult moved in is no baby, and a
   // baby after one was lost leaves the count where it was); or, with no villager move since the feed, a head more than
   // the count last seen once a baby could have grown up (BABY_GROWS: born and grown unseen while the bot was away, no
@@ -231,6 +282,95 @@ export function noteHall(world: WorldMemory, seen: readonly Seen[], now: number)
     b.total = villagers.length;
   }
   return villagers.length;
+}
+
+// ------------------------------------------------------------------------------------------------ whose job block is whose
+
+/** Work hours (time of day): an employed villager keeps by its job site from 2000 to 9000 (the 26.3 schedule's WORK). */
+const WORK_HOURS = { from: 2000, to: 9000 };
+/** Looks kept of each villager in work hours: enough that one strolling off its block on a look or two is still placed. */
+const WORK_SEEN = 8;
+/** Within this of a job block (across, at its level or one off) a villager at work is seen by it. */
+const BY_SITE = 2;
+/** A villager's key in the work evidence: the game's uuid, else the client's id (a session's only). */
+const workKey = (v: HallVillager) => v.uuid ?? `#${v.id}`;
+
+/**
+ * The work evidence of a look (noteHall): in work hours, each villager it saw in the hall where it stood, its last
+ * WORK_SEEN looks kept; on a whole look the evidence of a villager not in the census any more goes (one led off, or
+ * gone). A look of unknown hour notes nothing.
+ */
+function noteWork(m: HallChoresMemory, looked: readonly HallVillager[], census: readonly HallVillager[], now: number, whole: boolean, tod: number | undefined): void {
+  const day = fin(tod) ? ((tod % 24_000) + 24_000) % 24_000 : -1;
+  if (day >= WORK_HOURS.from && day < WORK_HOURS.to) {
+    const work = (m.work ??= {});
+    for (const v of looked) {
+      if (v.baby) continue;
+      const k = workKey(v);
+      const was = isObj(work[k]) && Array.isArray(work[k].seen) && work[k].profession === v.profession ? work[k].seen : [];
+      work[k] = { profession: v.profession, seen: [...was, { at: { ...v.at }, t: now }].slice(-WORK_SEEN) };
+    }
+  }
+  if (whole && m.work) {
+    const keys = new Set(census.map(workKey));
+    for (const k of Object.keys(m.work)) if (!keys.has(k)) delete m.work[k];
+    if (!Object.keys(m.work).length) delete m.work;
+  }
+}
+
+/** The profession whose job site each block is (the 26.3 jar's PoiTypes: a cauldron of any fill is the leatherworker's). */
+export const SITE_PROFESSION: Readonly<Record<string, string>> = {
+  lectern: 'librarian', fletching_table: 'fletcher', composter: 'farmer', barrel: 'fisherman', blast_furnace: 'armorer', smoker: 'butcher',
+  cartography_table: 'cartographer', brewing_stand: 'cleric', cauldron: 'leatherworker', water_cauldron: 'leatherworker', lava_cauldron: 'leatherworker',
+  powder_snow_cauldron: 'leatherworker', grindstone: 'weaponsmith', loom: 'shepherd', smithing_table: 'toolsmith', stonecutter: 'mason'
+};
+
+/** A job block in the hall and, by the evidence, whose it is (hallSites). */
+export interface HallSite {
+  at: Pos;
+  block: string;
+  profession: string;
+  /** the villager in the hall it is taken to be held by: `looks` of its work-hour looks within 2 of the block, the last at `last` */
+  holder?: { key: string; id: number; looks: number; last: number };
+}
+
+/**
+ * Whose job block is whose in the hall, by evidence (pure; the villager fetch's plan prints it, idle-plan V decision
+ * 19): each job block given (`blocks`: a scan of the hall, since one the lead put down by hand is in no record) that
+ * stands in the hall, with the villager of its profession, in the hall at the last census, that was seen within 2 of it
+ * in work hours on the most looks (`work`, noteHall), one block to a villager and the most looks first; and, by kind,
+ * how many stand free whoever holds which: the blocks of the kind past the census's adults of its profession. Live on
+ * Nov 24 two fletching tables stood in the hall with one fletcher, and it worked at the lead's, not at the one the
+ * chores keep (`hall:fletching`): the count by kind said one was free, and only the evidence which.
+ */
+export function hallSites(world: WorldMemory, blocks: readonly { at: Pos; name: string }[]): { sites: HallSite[]; free: Record<string, number> } {
+  const census = peek(world).census?.villagers.filter(v => isObj(v)) ?? [];
+  const work = isObj(peek(world).work) ? peek(world).work! : {};
+  const sites: HallSite[] = blocks.flatMap(b => {
+    const name = idOf(b.name);
+    const profession = SITE_PROFESSION[name];
+    return profession && inHallBox(world, b.at) ? [{ at: block(b.at), block: name, profession }] : [];
+  });
+  // every pair of a block and a villager of its profession seen by it at work, the strongest evidence first
+  const pairs = sites.flatMap((s, i) => census.flatMap(v => {
+    const w = work[workKey(v)];
+    if (v.baby || v.profession !== s.profession || !isObj(w) || !Array.isArray(w.seen)) return [];
+    const by = w.seen.filter(q => isObj(q) && isObj(q.at) && fin(q.t) && Math.hypot(q.at.x - (s.at.x + 0.5), q.at.z - (s.at.z + 0.5)) <= BY_SITE && Math.abs(Math.floor(q.at.y) - s.at.y) <= 1);
+    return by.length ? [{ i, v, looks: by.length, last: Math.max(...by.map(q => q.t)) }] : [];
+  })).sort((a, b) => b.looks - a.looks || b.last - a.last);
+  const taken = new Set<string>();
+  for (const p of pairs) {
+    if (sites[p.i].holder || taken.has(workKey(p.v))) continue;
+    taken.add(workKey(p.v));
+    sites[p.i].holder = { key: workKey(p.v), id: p.v.id, looks: p.looks, last: p.last };
+  }
+  const free: Record<string, number> = {};
+  for (const s of sites) {
+    if (s.block in free) continue;
+    const kind = sites.filter(o => o.block === s.block).length;
+    free[s.block] = Math.max(0, kind - census.filter(v => !v.baby && v.profession === s.profession).length);
+  }
+  return { sites, free };
 }
 
 /** The census in numbers. */
@@ -481,8 +621,39 @@ const inYard = (s: Snapshot, world: WorldMemory) =>
   !!world.yard && !!s.home && s.dimension === 'overworld' && outsideBy(world.yard, s.position) === 0 && onHomeLevel(s.position, s.home);
 
 /**
+ * Why no visit to the hall begins now for the villager fetch's sake (pure, over fetch.ts's record as last written;
+ * nothing with no record): the lock or the portal's ring is being built (the builder's walk and the plug in the hall's
+ * doorway); a villager is being brought in through the yard's gate, the yard, the lock or the hall's gate; a ward is in
+ * the lock; the hall's gate reads open (the gate watch's last read: it stands open behind the lock's shut gate for one
+ * that goes in when it will); or a ward is led or astray within 32 of the lock's gate (it would follow the bot in).
+ */
+function fetchHold(world: WorldMemory, now: number): Decline | undefined {
+  if (!world.fetch) return undefined;
+  const f = peekFetch(world);
+  const hold = (text: string): Decline => ({ cause: 'hold', text: `${text}: no visit to the villager hall` });
+  if (f.shells?.building) return hold(`the ${f.shells.building === 'lock' ? 'hall\'s lock' : 'portal\'s ring'} is being built`);
+  if (f.trip && ['gate', 'yardhop', 'lock', 'door'].includes(f.trip.state)) return hold(`a villager is being brought in (trip ${f.trip.id}: ${f.trip.state})`);
+  if (f.wards.some(w => w.where === 'lock')) return hold('a villager is in the lock');
+  const h = world.zones?.['hall:gate']?.[0];
+  // (the gate watch's read only while fresh, as care takes it: a last read never written again, an older jar or the
+  // watch idle, keeps no visit out for good)
+  const gates = f.gates && now - f.gates.at <= GATES_FRESH ? f.gates : undefined;
+  if (h && gates?.open.some(g => same(g, h))) return hold('the hall\'s gate stands open');
+  const loose = f.wards.filter(w => (w.where === 'led' || w.where === 'astray') && !w.dim);
+  const p = loose.length ? lockPlanOf(world)?.p ?? h : undefined;
+  const near = p && loose.map(w => Math.hypot(w.last.at.x - p.x, w.last.at.z - p.z)).sort((a, b) => a - b)[0];
+  if (near !== undefined && near <= WARD_NEAR) return hold(`a villager of the bot's is loose ${Math.round(near)} from the lock (it would follow the bot in)`);
+  return undefined;
+}
+/** A ward led or astray this near the lock's gate keeps the chores out. */
+const WARD_NEAR = 32;
+/** How old a read of the gate watch may be (villagercare.ts takes the same). */
+const GATES_FRESH = 30_000;
+
+/**
  * The goal's one answer (pure): no hall, or none in it as last seen (inert: nothing is made, placed or thrown for an
- * empty hall), then the next chore (chorePlan), from the yard, by day, with room in the pockets.
+ * empty hall), then the next chore (chorePlan), while the villager fetch does not keep the hall to itself (fetchHold),
+ * from the yard, by day and not in thunder, with room in the pockets.
  */
 const gate = (s: Snapshot, world: WorldMemory): Gate => {
   if (!hallBox(world)) return { cause: 'unneeded', text: 'no villager hall yet' };
@@ -490,10 +661,14 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
   if (!c?.villagers.length) return { cause: 'unneeded', text: c ? 'the villager hall is empty' : 'the villager hall not looked into yet' };
   const plan = chorePlan(s, world);
   if ('none' in plan) return plan.none;
+  const hold = fetchHold(world, s.now);
+  if (hold) return hold;
   if (!inYard(s, world)) {
     return { cause: 'away', text: !s.home ? 'no home set' : s.dimension !== 'overworld' ? `in ${s.dimension}` : `${Math.round(s.distHome)} blocks from home, not in the yard on home's level (the hall's chores work from the yard)` };
   }
   if (36 - s.slotsUsed - ROOM.yard < CHORE_SLOTS) return no.pockets(s, 'hall chores', 36 - ROOM.yard - CHORE_SLOTS + 1);
+  // (in thunder the villagers run for their beds and the shelter takes the bot in: the hour, as the day's end is)
+  if (s.thundering) return { cause: 'late', text: 'thunder: no visit to the villager hall' };
   return no.late(s, 'hall chores', DAY_LEFT) ?? { want: plan.want };
 };
 
@@ -538,12 +713,30 @@ const clock = (ctx: GoalContext) => ctx.s.now + Math.max(0, Date.now() - (began.
 const inventory = async (ctx: GoalContext): Promise<InventoryItem[]> => (await ctx.call<{ items: InventoryItem[] }>('inventory')).items;
 const carried = (items: InventoryItem[], name: string) => items.filter(i => i.slot >= 0 && i.slot < 36 && i.name === name).reduce((a, i) => a + i.count, 0);
 
-/** The villagers in the hall now (world.entities), the census noted; undefined when the look failed. */
+/** Whether the client has the whole hall and its lock: no cell of their floor's level reads null (in the seconds after a rejoin every cell does). */
+async function hallLoaded(ctx: GoalContext): Promise<boolean> {
+  const h = hallBox(ctx.world);
+  if (!h) return false;
+  const l = lockPlanOf(ctx.world)?.zone;
+  const x1 = Math.min(h.x, l?.x ?? h.x), z1 = Math.min(h.z, l?.z ?? h.z);
+  const x2 = Math.max(h.x + h.width, l ? l.x + l.width : h.x), z2 = Math.max(h.z + h.length, l ? l.z + l.length : h.z);
+  const r = await ctx.call<{ blocks?: (string | null)[] }>('world.region', { x: x1, y: h.y + 1, z: z1, width: x2 - x1, height: 1, length: z2 - z1 }).catch(() => undefined);
+  return Array.isArray(r?.blocks) && r.blocks.length > 0 && !r.blocks.some(b => b === null || b === undefined);
+}
+
+/**
+ * The villagers in the hall now (world.entities), the census noted; undefined when the look failed. A look that shows
+ * fewer than the census holds lowers it only when the hall itself is loaded (hallLoaded): one gone is gone on a whole
+ * look, and on no other (noteHall). With the time of day: in work hours, where each stood is evidence of whose job
+ * block is whose (hallSites).
+ */
 async function look(ctx: GoalContext): Promise<HallVillager[] | undefined> {
   const r = await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 128, type: 'villager' }).catch(() => undefined);
   if (!Array.isArray(r?.entities)) return undefined;
-  noteHall(ctx.world, r.entities, ctx.s.now);
-  return hallVillagers(ctx.world, r.entities);
+  const seen = hallVillagers(ctx.world, r.entities);
+  const whole = seen.length >= (hallChoresOf(ctx.world).census?.villagers.length ?? 0) || await hallLoaded(ctx);
+  noteHall(ctx.world, r.entities, ctx.s.now, whole, todNow(ctx));
+  return seen;
 }
 
 /** One villager by its id, as the hall sees it now (undefined when it is not in the hall). */
@@ -574,25 +767,39 @@ async function walkTo(ctx: GoalContext, p: Pos, range: number): Promise<void> {
   if (g?.arrived === false) throw new Error(`no way on foot to ${fmt(block(p))} in the hall`);
 }
 
-/** Into the hall on foot, through its gate (A11: a careful walk, nothing broken or placed); from inside the fence. */
-async function enterHall(ctx: GoalContext): Promise<void> {
+/**
+ * Into the hall on foot, through its gate (A11: a careful walk, nothing broken or placed); from inside the fence. The
+ * way in while no lock stands. Fed first, and from the walk to its gate on the stay is the run's critical section, as
+ * through the lock (stayCritical): `out of the hall` would else take the bot out of every visit the moment it is in.
+ */
+async function enterPlain(ctx: GoalContext): Promise<void> {
   await holdHarmless(ctx);
-  const here = (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
-  if (!inFence(ctx.world, here)) await goHome(ctx, 180_000).catch(() => undefined);
+  const st = await ctx.status().catch(() => undefined);
+  if (!inFence(ctx.world, st?.position ?? ctx.s.position)) await goHome(ctx, 180_000).catch(() => undefined);
   if (ctx.signal.aborted) throw new Error('aborted');
-  const inside = ctx.world.zones?.['hall:inside']?.[0];
-  const h = hallBox(ctx.world)!;
-  const mid = inside ?? { x: h.x + Math.floor(h.width / 2), y: h.y + 1, z: h.z + Math.floor(h.length / 2) };
-  const g = await ctx.call<{ arrived?: boolean }>('goto', { ...block(mid), range: 1, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
-  if (g?.arrived === false) throw new Error(`no way on foot into the villager hall at ${fmt(block(mid))}`);
+  if ((st?.food ?? ctx.s.food) < FED) await ctx.act('eat', {}).catch(() => undefined);
+  if (ctx.signal.aborted) throw new Error('aborted');
+  stayCritical(ctx);
+  await toInside(ctx);
+}
+
+/** The middle of the room (`hall:inside`), where a visit walks in to. */
+const insideOf = (world: WorldMemory): Pos => {
+  const h = hallBox(world)!;
+  return block(world.zones?.['hall:inside']?.[0] ?? { x: h.x + Math.floor(h.width / 2), y: h.y + 1, z: h.z + Math.floor(h.length / 2) });
+};
+async function toInside(ctx: GoalContext): Promise<void> {
+  const mid = insideOf(ctx.world);
+  const g = await ctx.call<{ arrived?: boolean }>('goto', { ...mid, range: 1, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
+  if (g?.arrived === false) throw new Error(`no way on foot into the villager hall at ${fmt(mid)}`);
 }
 
 /**
  * Out of the hall by its gate, and the gate shut: the bridge's Gates shuts what the bot opens as it walks off, and a
- * gate still open (the walk cut short beside it) is clicked shut here. Villagers open no gate, but walk out of an open
- * one: a hall left open loses them to the yard.
+ * gate still open (the walk cut short beside it) is shut here and read shut (yardgates.ts shutGate). Villagers open no
+ * gate, but walk out of an open one: a hall left open loses them to the yard. The way out while no lock stands.
  */
-async function leaveHall(ctx: GoalContext): Promise<string> {
+async function leavePlain(ctx: GoalContext): Promise<string> {
   const g = ctx.world.zones?.['hall:gate']?.[0];
   const h = hallBox(ctx.world);
   // (a run stopped by something more urgent leaves the walk to it: the gate the bot opened Gates shuts as it goes)
@@ -601,10 +808,408 @@ async function leaveHall(ctx: GoalContext): Promise<string> {
   if (!here || !inHallBox(ctx.world, here)) return '';
   const out = g.z === h.z ? [0, -2] : g.z === h.z + h.length - 1 ? [0, 2] : g.x === h.x ? [-2, 0] : [2, 0];
   await ctx.call('goto', { x: g.x + out[0], y: g.y, z: g.z + out[1], range: 1, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
-  const r = await ctx.call<{ blocks: (string | null)[] }>('world.region', { ...g, width: 1, height: 1, length: 1 }).catch(() => undefined);
-  if (!/open=true/.test(r?.blocks?.[0] ?? '')) return '';
-  const shut = await ctx.act('use-item-on-block', { ...g, face: 'up', toggle: true }).catch(() => ({ ok: false, text: '' }));
-  return shut.ok ? '; shut the hall\'s gate' : '; the hall\'s gate may be open';
+  if (!(await gateIsOpen(ctx, g).catch(() => false))) return '';
+  return (await shutGate(ctx, g)) ? '; shut the hall\'s gate' : '; the hall\'s gate may be open';
+}
+
+// ------------------------------------------------------------------------------------------------ through the lock
+
+/**
+ * How a passage ended. `ok`: the bot is where it was going, every gate read shut behind it (`said`: a word for the
+ * run's result). Not ok: `why`, and the bot is where it was safe to stop: outside, or inside the hall behind the
+ * lock's shut gate.
+ */
+export type Passage = { ok: true; said?: string } | { ok: false; why: string };
+
+/** The lock in front of the hall's gate as the chores walk it: every cell from its blueprint's landmarks (villagerwalk.ts lockPlanOf). */
+interface LockWay {
+  lock: LockPlan;
+  /** where the bot stands between the two gates: the inside cell nearest the lock's post, aside of the gates' line, both gates in reach */
+  far: Pos;
+  /** outside the lock's gate: the cell before it, and the one 2 beyond it */
+  outer: Pos;
+  beyond: Pos;
+  /** inside the hall: the cell before its gate (the lock's gate is in reach from there), and the one 3 in (a gate clicked open from there is not the closer's) */
+  inner: Pos;
+  deep: Pos;
+  /** how far out from the hall's gate a place is along the gates' line: under 0 in the hall, 0 the hall's gate, 1 and 2 between the gates, 3 the lock's */
+  along: (p: { x: number; z: number }) => number;
+}
+
+function lockWay(world: WorldMemory): LockWay | undefined {
+  const lock = lockPlanOf(world);
+  if (!lock) return undefined;
+  const ox = Math.sign(lock.p.x - lock.h.x), oz = Math.sign(lock.p.z - lock.h.z);
+  const step = (from: Pos, n: number): Pos => ({ x: from.x + n * ox, y: from.y, z: from.z + n * oz });
+  const off = (c: Pos) => Math.abs(c.x - lock.post.x) + Math.abs(c.z - lock.post.z);
+  return {
+    lock, far: [...lock.inside].sort((a, b) => off(a) - off(b))[0], outer: step(lock.p, 1), beyond: step(lock.p, 2), inner: step(lock.h, -1), deep: step(lock.h, -3),
+    along: q => (Math.floor(q.x) - lock.h.x) * ox + (Math.floor(q.z) - lock.h.z) * oz
+  };
+}
+
+/** Calls made for a run the brain has given up as well (its own fail from then on): the gates put right from where the bot stands. */
+const tidy = (fn: () => Promise<unknown>) => brainRun.exit(() => fn()).catch(() => undefined);
+/** The time of day now by the run's own clock (its snapshot's, and the real time since it began). */
+const todNow = (ctx: GoalContext) => ctx.s.timeOfDay + Math.max(0, Date.now() - (began.get(ctx) ?? Date.now())) / 50;
+/** What a stay keeps in hand at its end for the step it would begin (a reroll: the job's looks to go and to come back, and the walks) and the way out. */
+const stepLeft = () => HALL_WAITS.pollMs * (HALL_WAITS.loseLooks + HALL_WAITS.jobLooks) + MINUTE;
+/**
+ * Whether a stay inside ends now, and why: dusk (WRAP_AT), or its critical section too near its cap for one more step
+ * and the way out (stepLeft: past the cap the run is no longer critical, and the next goal would cut it between two
+ * steps of a chore, the lectern dug and the librarian jobless). A stay is cut by nothing but flight, so it ends itself:
+ * no reroll and no wait by a lectern is begun then. Undefined: go on.
+ */
+const wrapUp = (ctx: GoalContext): string | undefined => {
+  const c = afield.critical;
+  if (c?.by !== ctx.signal) return undefined;
+  if (todNow(ctx) >= WRAP_AT) return 'the day is ending';
+  return clock(ctx) >= c.until - stepLeft() ? 'the stay inside is at its end' : undefined;
+};
+
+/**
+ * The whole stay inside the hall is one critical section of this run (pockets.ts out.critical, `hall`): from here
+ * until throughLock has brought the bot out again, nothing but flight cuts it. For STAY_MAX at most and never past
+ * STAY_END: a run that died inside leaves no section standing.
+ */
+function stayCritical(ctx: GoalContext): void {
+  if (afield.critical?.by === ctx.signal) return;
+  afield.critical = { by: ctx.signal, until: clock(ctx) + Math.min(STAY_MAX, Math.max(0, STAY_END - todNow(ctx)) * 50), why: 'hall' };
+}
+
+/** Where the bot stands now (its block); it throws where the look fails: a passage never goes by a stale place. */
+async function standing(ctx: GoalContext): Promise<Pos> {
+  const at = (await ctx.status()).position;
+  if (!at) throw new Error('no look at where the bot stands');
+  return block(at);
+}
+
+/**
+ * What is broken of the lock, or undefined: its blocks read (villagerwalk.ts lockFaults), and a wall, roof or gate
+ * gone, a doorway one high, or cells of it not read. Who is in it and how its gates stand is the passage's own to read
+ * at each step; a tuft of grass in the post's sight is the fetch's business, not the chores'.
+ */
+async function lockBroken(ctx: GoalContext, w: LockWay): Promise<string | undefined> {
+  const b = spanOf(w.lock);
+  const g = new Ground(b.y1, b.y2 - b.y1 + 1);
+  try {
+    await g.read(ctx, b.x1, b.z1, b.x2, b.z2);
+  } catch {
+    return 'the lock could not be read';
+  }
+  return lockFaults(ctx.world, g).find(f => f.kind === 'zones' || f.kind === 'unread' || f.kind === 'structure')?.text;
+}
+
+/** The lock as a passage reads it: who is in it or in one of its two doorways, and how its two gates stand. */
+interface LockLook { villagers: number; animals: string[]; p?: boolean; h?: boolean }
+
+/**
+ * A look at the lock: every villager and every other living thing in its six cells or in the cell of either gate (one
+ * standing in a doorway as its gate shuts ends on either side), the players apart; and the two gates by their blocks.
+ * Undefined where the look at the entities fails.
+ */
+async function lockLook(ctx: GoalContext, w: LockWay): Promise<LockLook | undefined> {
+  const r = await ctx.call<{ entities?: (Seen & { health?: number })[] }>('world.entities', { maxDistance: 128 }).catch(() => undefined);
+  if (!Array.isArray(r?.entities)) return undefined;
+  const { lock } = w;
+  const doorway = (q: Pos) => [lock.p, lock.h].some(g => Math.floor(q.x) === g.x && Math.floor(q.z) === g.z && Math.abs(Math.floor(q.y) - g.y) <= 1);
+  const there = r.entities.filter(e => e?.position && (inLock(lock, e.position) || doorway(e.position)));
+  const villager = (e: Seen) => e.name === 'villager' || e.name === 'wandering_trader';
+  return {
+    villagers: there.filter(villager).length,
+    animals: there.filter(e => !villager(e) && e.name !== 'player' && typeof e.health === 'number').map(e => e.name),
+    p: await gateRead(ctx, lock.p), h: await gateRead(ctx, lock.h)
+  };
+}
+
+/** Why the lock is not free for the bot to come in by its gate, or undefined: somebody in it, or a gate not read shut. */
+function lockBusy(l: LockLook | undefined): string | undefined {
+  if (!l) return 'could not look into the lock';
+  if (l.villagers) return 'a villager is in the lock';
+  if (l.animals.length) return `a ${l.animals[0]} is in the lock`;
+  if (l.p !== false) return l.p ? 'the lock\'s gate stands open' : 'the lock\'s gate could not be read';
+  if (l.h !== false) return l.h ? 'the hall\'s gate stands open' : 'the hall\'s gate could not be read';
+  return undefined;
+}
+
+/**
+ * The journal's entry for the hall's gate standing open behind the lock's shut one (fetch.ts: the gate watch and care
+ * leave such a gate alone, openByDesign): `own`, the one this module wrote, for a villager in the lock it opened the
+ * gate for (trip 0); else any, a trip's too (its ward in the lock, going in when it will).
+ */
+const hallGateEntry = (world: WorldMemory, h: Pos, own = true) =>
+  (world.fetch ? fetchOf(world).journal.find(e => e.k === 'gate' && e.which === 'hall' && (!own || e.trip === 0) && same(e.at, h)) : undefined);
+
+/**
+ * In through the lock (it throws why not; throughLock brings the bot out again from wherever it got to):
+ *   1. the lock sound, nobody in it or in a doorway, both gates read shut: looked at for 20 s, else no visit;
+ *   2. fed, and from here the stay is critical;
+ *   3. a careful walk to the cell before the lock's gate; the lock looked at again from there;
+ *   4. in to the cell aside of the gates' line (the walk opens the lock's gate), and that gate shut and read shut;
+ *   5. on to the middle of the hall (the walk opens the hall's gate, behind the lock's shut one), and the hall's gate
+ *      shut and read shut.
+ * An animal that came into the lock with the bot: out again (the hall's gate is not opened for a cow). A villager that
+ * did: on into the hall all the same, the lock's gate shut behind both: it is contained, and the lock's gate never
+ * opens onto it. Found inside the hall already (a run's second chore): only the walk to the middle.
+ */
+async function inByLock(ctx: GoalContext, w: LockWay): Promise<void> {
+  const { lock } = w;
+  const stopped = () => { if (ctx.signal.aborted) throw new Error('aborted'); };
+  await holdHarmless(ctx);
+  let here = await standing(ctx);
+  if (!inFence(ctx.world, here)) await goHome(ctx, 180_000).catch(() => undefined);
+  stopped();
+  here = await standing(ctx);
+  if (inHallBox(ctx.world, here) && w.along(here) < 0) {
+    stayCritical(ctx);
+    return toInside(ctx);
+  }
+  if (!inHallOrLock(ctx.world, here)) {
+    const broken = await lockBroken(ctx, w);
+    if (broken) throw new Error(`no visit to the villager hall: ${broken}`);
+    for (let i = 0; ; i++) {
+      stopped();
+      const why = lockBusy(await lockLook(ctx, w));
+      if (!why) break;
+      if (i + 1 >= HALL_WAITS.lockLooks) throw new Error(`no visit to the villager hall: ${why}`);
+      await pause(HALL_WAITS.pollMs);
+    }
+    const st = await ctx.status().catch(() => undefined);
+    if ((st?.food ?? ctx.s.food) < FED) await ctx.act('eat', {}).catch(() => undefined);
+    stopped();
+    stayCritical(ctx);
+    const g = await ctx.call<{ arrived?: boolean }>('goto', { ...w.outer, range: 0, careful: true, timeoutMs: 60_000 }, 75_000).catch(() => ({ arrived: false }));
+    stopped();
+    if (g?.arrived === false) throw new Error(`no way on foot to the lock's gate at ${fmt(w.outer)}`);
+    // (again from the gate itself: the walk here took its time)
+    const why = lockBusy(await lockLook(ctx, w));
+    if (why) throw new Error(`no visit to the villager hall: ${why}`);
+    await ctx.call('goto', { ...w.far, range: 0, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    stopped();
+    here = await standing(ctx);
+    if (!inLock(lock, here)) {
+      // (a walk that ended short: the gate it may have opened is not left to the closer)
+      await shutGate(ctx, lock.p);
+      throw new Error(`no way on foot into the lock at ${fmt(w.far)}`);
+    }
+  }
+  stayCritical(ctx);
+  if (!(await shutGate(ctx, lock.p, { stay: true }))) throw new Error(`the lock's gate at ${fmt(lock.p)} will not shut`);
+  const l = await lockLook(ctx, w);
+  if (l?.animals.length) throw new Error(`a ${l.animals[0]} came into the lock with the bot`);
+  if (l?.villagers) say(ctx, 'hall: a villager came into the lock with the bot: on into the hall, the lock\'s gate shut behind both');
+  await toInside(ctx);
+  if (!(await shutGate(ctx, lock.h))) throw new Error(`the hall's gate at ${fmt(lock.h)} will not shut`);
+}
+
+/**
+ * Out through the lock, from wherever the bot stands in the hall or between the gates (outside: nothing to do):
+ *   1. the lock's gate read shut (one open is shut from the cell before the hall's gate, in reach: never by a walk
+ *      into the lock);
+ *   2. no villager in the lock. One there (a resident that stepped out as the bot came in): the hall's gate is opened
+ *      for it from 3 inside (out of the closer's reach of adoption: it stays open) and it is waited for, 60 s; back
+ *      in, the gate is shut and the bot goes on; still there, the run ends inside, the hall's gate open behind the
+ *      lock's shut one (written down: the gate watch leaves it), and the next try finds it so and comes straight back;
+ *   3. into the lock's cell aside of the gates' line (the walk opens the hall's gate), and that gate shut and read shut;
+ *   4. nobody but the bot in the lock. One that followed: the hall's gate held (the bridge's hold: the closer would
+ *      shut it at once from here) and opened again, the bot aside, 20 s for it to go back; three times, then back
+ *      inside as in 2;
+ *   5. the hall's gate read shut once more, out by the lock's gate (the walk opens it) to 2 beyond it, never a stop in
+ *      its cell (the bridge's guard waits while the bot stands there, and the bot is no wall), and it shut and read shut.
+ * The lock's gate is opened only by the walk of step 5, after the look of step 4: never with the hall's gate open,
+ * never onto a villager.
+ */
+async function outByLock(ctx: GoalContext, w: LockWay): Promise<Passage> {
+  const { lock } = w;
+  const no = (why: string): Passage => ({ ok: false, why });
+  let here = await standing(ctx);
+  if (!inHallOrLock(ctx.world, here)) return { ok: true };
+  if (afield.critical?.by !== ctx.signal) stayCritical(ctx);
+  const shutH = async (o?: { stay?: boolean }) => {
+    const shut = await shutGate(ctx, lock.h, o);
+    const e = shut ? hallGateEntry(ctx.world, lock.h) : undefined;
+    if (e) dropEntry(ctx, e);
+    return shut;
+  };
+  /** the hall's gate open for a villager in the lock, written down (before it is opened) unless the journal has it so already */
+  const noteOpen = (until?: number) => {
+    if (!hallGateEntry(ctx.world, lock.h, false)) journal(ctx, { k: 'gate', trip: 0, at: { ...lock.h }, which: 'hall', t: clock(ctx), ...(until ? { until } : {}) });
+  };
+  /** the hall's gate opened behind the lock's shut one; `held`: under the bridge's hold, which shuts it by itself when it ends */
+  const openH = async (held: boolean) => {
+    noteOpen(held ? clock(ctx) + HOLD_MS : undefined);
+    if (held) await ctx.call('gates.hold', { x: lock.h.x, y: lock.h.y, z: lock.h.z, ms: HOLD_MS }).catch(() => undefined);
+    return openGate(ctx, lock.h).catch(() => false);
+  };
+  const villagers = async () => (await lockLook(ctx, w))?.villagers;
+  /** a villager in the lock and the bot in the hall: the hall's gate open for it, from 3 inside; `wait`: looked at until it is back */
+  const letBack = async (wait: boolean): Promise<Passage | undefined> => {
+    if (await gateRead(ctx, lock.h) !== true) {
+      await ctx.call('goto', { ...w.deep, range: 0, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+      // (the walk here shut the lock in again, or let it out: looked at again before the gate is touched)
+      const v = await villagers();
+      if (v === 0) return undefined;
+      if (v === undefined) return no('could not look into the lock');
+      if (!(await openH(false))) return no('a villager is in the lock, and the hall\'s gate would not open for it');
+    } else {
+      // (open already: left so by an earlier try, or by a trip for its ward; whoever opened it, it is open for the one in the lock)
+      noteOpen();
+      if (wait) return no('a villager is in the lock: waiting (the hall\'s gate stands open for it)');
+    }
+    for (let i = 0; wait && i < HALL_WAITS.backLooks; i++) {
+      if (ctx.signal.aborted) throw new Error('aborted');
+      await pause(HALL_WAITS.pollMs);
+      if (await villagers() === 0) return undefined;
+    }
+    return no('a villager is in the lock and has not come back in: waiting, the hall\'s gate open for it behind the lock\'s shut one');
+  };
+  if (w.along(here) <= 0) {
+    // 1. (from the hall the lock's gate is clicked from the cell before the hall's gate: shutGate's own walk)
+    if (await gateRead(ctx, lock.p) !== false && !(await shutGate(ctx, lock.p))) return no(`the lock's gate at ${fmt(lock.p)} does not read shut, and will not shut from inside the hall`);
+    // 2.
+    const v = await villagers();
+    if (v === undefined) return no('could not look into the lock');
+    if (v > 0) {
+      const stay = await letBack(true);
+      if (stay) return stay;
+      if (!(await shutH())) return no(`the hall's gate at ${fmt(lock.h)} will not shut`);
+    }
+    // 3.
+    await ctx.call('goto', { ...w.far, range: 0, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+    if (ctx.signal.aborted) throw new Error('aborted');
+    here = await standing(ctx);
+    if (w.along(here) <= 0) {
+      await shutH();
+      return no(`no way on foot from the hall into its lock at ${fmt(w.far)}`);
+    }
+  }
+  if (!(await shutH({ stay: true }))) return no(`the hall's gate at ${fmt(lock.h)} will not shut`);
+  // 4.
+  for (let n = 0; ; n++) {
+    const v = await villagers();
+    if (v === undefined) return no('could not look into the lock');
+    if (v === 0) break;
+    if (n >= 3) {
+      // back inside: the walk opens the hall's gate (the lock's is shut), and whoever is still in the lock has it open
+      await ctx.call('goto', { ...w.deep, range: 0, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+      here = await standing(ctx);
+      if (w.along(here) > 0) return no('a villager followed the bot into the lock and stays: waiting in the lock, its gate shut');
+      // (the gate the walk in opened is shut first, whatever the closer did: then it is open only as letBack opens it)
+      if (!(await shutH())) return no(`the hall's gate at ${fmt(lock.h)} will not shut`);
+      return (await letBack(false)) ?? no('a villager keeps following the bot into the lock: back inside');
+    }
+    say(ctx, `hall: a villager followed into the lock: the hall's gate open again for it (${n + 1} of 3)`);
+    if (await gateRead(ctx, lock.p) !== false) return no(`the lock's gate at ${fmt(lock.p)} does not read shut`);
+    await openH(true);
+    for (let i = 0; i < HALL_WAITS.asideLooks; i++) {
+      if (ctx.signal.aborted) throw new Error('aborted');
+      await pause(HALL_WAITS.pollMs);
+      if (await villagers() === 0) break;
+    }
+    if (!(await shutH({ stay: true }))) return no(`the hall's gate at ${fmt(lock.h)} will not shut`);
+  }
+  // 5.
+  if (await gateRead(ctx, lock.h) !== false) return no(`the hall's gate at ${fmt(lock.h)} does not read shut`);
+  await ctx.call('goto', { ...w.beyond, range: 0, careful: true, timeoutMs: 30_000 }, 45_000).catch(() => undefined);
+  const shut = await shutGate(ctx, lock.p);
+  here = await standing(ctx);
+  if (inHallOrLock(ctx.world, here)) return no(`no way on foot out of the lock by its gate at ${fmt(lock.p)}`);
+  if (!shut || await gateRead(ctx, lock.h) !== false) return no('out of the hall, and a gate of the lock does not read shut');
+  return { ok: true };
+}
+
+/**
+ * Into the villager hall, or out of it, the way that is safe for those who live there. With a lock standing in front
+ * of the hall's gate (its zones written: villagerwalk.ts lockPlanOf): through it, its two gates never open together
+ * and the outer never open onto a villager (inByLock, outByLock), every walk careful, every click the bridge's own
+ * and read back (yardgates.ts shutGate, openGate). With none: the hall's own gate as before (enterPlain, leavePlain),
+ * shut behind and read shut. Either way the stay between an `in` and the `out` that follows is a critical section of
+ * the run (stayCritical: only flight cuts it, `out of the hall` leaves it be).
+ *
+ * `in` answers not ok with why, the bot brought out again from wherever it got to, and throws only for a run given
+ * up. `out` never throws: not ok, the bot is still inside, behind the lock's shut gate, and whoever asks again (the
+ * next chores visit, the goal that takes a bot found in the hall out of it) starts from where it stands. A run given
+ * up in the middle leaves the gates to the bridge: each is asked shut from where the bot stands, outside the run.
+ */
+export async function throughLock(ctx: GoalContext, way: 'in' | 'out'): Promise<Passage> {
+  const w = lockWay(ctx.world);
+  let inside = false;
+  if (!w) {
+    // (the stay's critical section as through the lock: set by the way in, over once out or when the way in failed)
+    const over = () => { if (!inside && afield.critical?.by === ctx.signal) delete afield.critical; };
+    if (way === 'out') {
+      try {
+        return { ok: true, said: await leavePlain(ctx) };
+      } finally {
+        over();
+      }
+    }
+    try {
+      await enterPlain(ctx);
+      inside = true;
+      return { ok: true };
+    } catch (e) {
+      if (ctx.signal.aborted) throw e;
+      return { ok: false, why: (e as Error).message };
+    } finally {
+      over();
+    }
+  }
+  try {
+    // (an entry left by a visit that was killed with the hall's gate held: the gate reads shut, the entry goes)
+    const stale = hallGateEntry(ctx.world, w.lock.h);
+    if (stale && await gateRead(ctx, w.lock.h) === false) dropEntry(ctx, stale);
+    if (way === 'out') return await outByLock(ctx, w);
+    await inByLock(ctx, w);
+    inside = true;
+    return { ok: true };
+  } catch (e) {
+    const why = (e as Error).message;
+    if (ctx.signal.aborted) {
+      if (way === 'in') throw e;
+      return { ok: false, why: 'given up on the way out' };
+    }
+    if (way === 'out') return { ok: false, why };
+    const back = await outByLock(ctx, w).catch((x: Error): Passage => ({ ok: false, why: x.message }));
+    return { ok: false, why: back.ok ? why : `${why}; ${back.why}` };
+  } finally {
+    if (ctx.signal.aborted) {
+      await tidy(() => shutNow(ctx, w.lock.p));
+      if (!hallGateEntry(ctx.world, w.lock.h, false)) await tidy(() => shutNow(ctx, w.lock.h));
+    }
+    if (!inside && afield.critical?.by === ctx.signal) delete afield.critical;
+  }
+}
+
+/** Into the hall for a chore (throughLock): it throws why not. */
+async function enterHall(ctx: GoalContext): Promise<void> {
+  const r = await throughLock(ctx, 'in');
+  if (!r.ok) throw new Error(r.why);
+}
+
+/** Out of the hall at a run's end (throughLock): a word for the run's result. */
+async function leaveHall(ctx: GoalContext): Promise<string> {
+  const r = await throughLock(ctx, 'out');
+  return r.ok ? r.said ?? '' : `; still in the villager hall: ${r.why}`;
+}
+
+/**
+ * Whether a job site may be broken now, for a reroll: every gate between the hall and the yard read shut (the lock's
+ * and the hall's; the hall's alone while no lock stands). Why not, else undefined. `shut`: one not read shut is shut
+ * first (the lock's from the cell before the hall's gate: in reach, and no walk into the lock), and both read again.
+ * The second villager led home got out for good when the lead dug its job block with the hall's gate open (Nov 24): a
+ * villager whose site goes is jobless at once, and walks to whatever free site it can reach, the gate open or not.
+ */
+async function jobBreakOk(ctx: GoalContext, shut: boolean): Promise<string | undefined> {
+  const lock = lockPlanOf(ctx.world);
+  const h = ctx.world.zones?.['hall:gate']?.[0];
+  const gates: [string, Pos][] = [...(lock ? [['the lock\'s gate', lock.p] as [string, Pos]] : []), ...(h ? [['the hall\'s gate', block(h)] as [string, Pos]] : [])];
+  if (shut) for (const [, g] of gates) if (await gateRead(ctx, g) !== false) await shutGate(ctx, g);
+  for (const [name, g] of gates) {
+    const open = await gateRead(ctx, g);
+    if (open !== false) return `${name} at ${fmt(g)} ${!open ? 'could not be read' : shut ? 'stands open and will not shut' : 'stands open'}`;
+  }
+  return undefined;
 }
 
 const blockAt = async (ctx: GoalContext, p: Pos) =>
@@ -729,11 +1334,17 @@ const toFront = (ctx: GoalContext, cell: Pos) =>
 /**
  * Put a job site down in its cell (place-block from the cell in front, stood on: a walk to within 1 of the front ended
  * where it was with the bot in the site's own cell after picking the drop up, and the bridge refused the place four
- * times over, "the bot is standing there"), the block made first where none is carried.
+ * times over, "the bot is standing there"), the block made first where none is carried. Made outside: with a lock
+ * standing the bot goes out through it first (throughLock), since the making's own walk to the chests and the table is
+ * a plain one, and from inside the hall it went out through both gates in one go.
  */
 async function placeSite(ctx: GoalContext, cell: Pos, item: string): Promise<void> {
   let why = '';
   if (carried(await inventory(ctx), item) < 1) {
+    if (lockPlanOf(ctx.world)) {
+      const out = await throughLock(ctx, 'out');
+      if (!out.ok) throw new Error(`a ${item} to make for the hall, and no way out for it: ${out.why}`);
+    }
     const short = await prepare(ctx, item, 1);
     if (Object.keys(short).length) throw new Error(`a ${item} for the hall: short of ${Object.entries(short).map(([k, v]) => `${v} ${k}`).join(', ')}`);
     await enterHall(ctx);
@@ -756,9 +1367,11 @@ async function placeSite(ctx: GoalContext, cell: Pos, item: string): Promise<voi
 /**
  * Break a job site and pick it up: dug by hand from the cell in front (dig.here: a block, never anything else; a villager
  * is no block and is never hit), only when it is that site (another block in its cell is someone's: an improvement
- * run's, left alone); the drop waited for a moment (dig.here answers on the client's own break, before the server's
- * drop is there and while it waits out its pickup delay), else walked onto and stepped back off at once; a site whose
- * drop is lost is made again (placeSite).
+ * run's, left alone), and never with a gate open: every gate between the hall and the yard is read shut immediately
+ * before the dig (jobBreakOk), one found open shut first, and a gate that will not shut leaves the site standing (a
+ * failure: the chore is passed over, not wanted again at the next tick). The drop waited for a moment (dig.here
+ * answers on the client's own break, before the server's drop is there and while it waits out its pickup delay), else
+ * walked onto and stepped back off at once; a site whose drop is lost is made again (placeSite).
  */
 async function breakSite(ctx: GoalContext, cell: Pos, item: string): Promise<void> {
   await walkTo(ctx, frontOf(ctx.world, cell), 1);
@@ -767,6 +1380,16 @@ async function breakSite(ctx: GoalContext, cell: Pos, item: string): Promise<voi
   if (AIR.test(there)) return;
   if (there !== item) throw new Error(`${there} stands in the ${item}'s cell at ${fmt(cell)}: not dug`);
   const had = carried(await inventory(ctx), item);
+  let open = await jobBreakOk(ctx, false);
+  if (open) {
+    // (shut first, which may take the bot off the site's front; then back to it, and the gates read once more)
+    open = await jobBreakOk(ctx, true);
+    if (!open) {
+      await walkTo(ctx, frontOf(ctx.world, cell), 1);
+      open = await jobBreakOk(ctx, false);
+    }
+    if (open) throw new Error(`the ${item} at ${fmt(cell)} is not dug with a gate open: ${open}`);
+  }
   const r = await ctx.call<{ dug?: boolean; reason?: string }>('dig.here', { ...cell, timeoutMs: 15_000 }, 25_000).catch(e => ({ dug: false, reason: (e as Error).message }));
   if (!r.dug && r.reason !== 'air') throw new Error(`the ${item} at ${fmt(cell)} did not come out: ${r.reason ?? 'not dug'}`);
   for (let i = 0; i < HALL_WAITS.dropLooks; i++) {
@@ -793,7 +1416,9 @@ function countRoll(c: { day: number; today: number }, day: number): void {
  * Mending offered: kept (state `mending`), the rolls stop. Traded with already (xp over 0, or above level 1): kept as
  * it is (`locked`), nothing rerolled. Else, under ROLLS_A_DAY today: the lectern broken and picked up, the job waited to
  * go, the lectern put back, the job waited to come back (the same villager or another unemployed one), and read again;
- * up to ROLLS_A_RUN rerolls a run. `fresh`: a librarian just made (the lectern just put down).
+ * up to ROLLS_A_RUN rerolls a run, none begun once the day or the stay is ending (a stay inside ends itself: wrapUp), and
+ * the lectern broken only with every gate read shut just before (breakSite). `fresh`: a librarian just made (the
+ * lectern just put down).
  */
 async function rollChore(ctx: GoalContext, first: HallVillager): Promise<string> {
   const m = hallChoresOf(ctx.world);
@@ -837,7 +1462,9 @@ async function rollChore(ctx: GoalContext, first: HallVillager): Promise<string>
     }
     if (todayOf(lib, day) >= ROLLS_A_DAY) return `the librarian rerolled ${todayOf(lib, day)} times today: the rest tomorrow (${lib.rolls} rolls in all)`;
     if (rerolled >= ROLLS_A_RUN) return `rerolled the librarian ${rerolled} times (${lib.rolls} rolls in all, ${todayOf(lib, day)} today), no Mending yet`;
-    // the reroll: the lectern out, the job gone, the lectern back, a librarian again
+    const end = wrapUp(ctx);
+    if (end) return `rerolled the librarian ${rerolled} times (${lib.rolls} rolls in all), no Mending yet: ${end}`;
+    // the reroll: the lectern out (never with a gate open: breakSite), the job gone, the lectern back, a librarian again
     await breakSite(ctx, cell, 'lectern');
     countRoll(lib, day);
     rerolled++;
@@ -882,6 +1509,9 @@ async function lecternChore(ctx: GoalContext): Promise<string> {
   } else await enterHall(ctx);
   lib.placedAt = clock(ctx);
   ctx.save?.();
+  // (no wait by it at the stay's end: the next visit finds who took it)
+  const end = wrapUp(ctx);
+  if (end) return `a lectern at ${fmt(cell)}; not waited by: ${end}`;
   const inside = ctx.world.zones?.['hall:inside']?.[0];
   if (inside) await ctx.call('goto', { ...block(inside), range: 1, careful: true, timeoutMs: 20_000 }, 30_000).catch(() => undefined);
   const v = await jobTaken(ctx, 'librarian');
@@ -1013,8 +1643,9 @@ async function sticksChore(ctx: GoalContext, v: HallVillager): Promise<string> {
 }
 
 /**
- * The fletcher without the stick trade, never traded with: its fletching table broken and put back as the librarian's
- * lectern is, its new offers read (a look only), until the stick trade shows (FLETCHER_ROLLS_A_DAY a day).
+ * The fletcher without the stick trade, never traded with: its fletching table broken (every gate read shut just
+ * before: breakSite) and put back as the librarian's lectern is, its new offers read (a look only), until the stick
+ * trade shows (FLETCHER_ROLLS_A_DAY a day).
  */
 async function fletcherChore(ctx: GoalContext, v: HallVillager | undefined): Promise<string> {
   const m = hallChoresOf(ctx.world);
@@ -1042,6 +1673,8 @@ async function fletcherChore(ctx: GoalContext, v: HallVillager | undefined): Pro
     if (f.sticks) return 'fletcher: the stick trade is there after all';
     if (f.xp > 0 || f.level > 1) return 'fletcher: no stick trade, and it has traded: kept as it is';
   }
+  const end = wrapUp(ctx);
+  if (end) return `fletcher: no stick trade; no reroll begun: ${end}`;
   await breakSite(ctx, cell, 'fletching_table');
   countRoll(f, day);
   f.rolls += 1;
@@ -1067,9 +1700,10 @@ async function fletcherChore(ctx: GoalContext, v: HallVillager | undefined): Pro
 
 /**
  * The villager chores, by day from the yard, while the hall has villagers in it: the hall looked into first (the
- * census), the next chore planned again from what it shows (chorePlan), done, and out by the gate (shut behind). A
- * villager is never hit: no attack, no weapon swung near one (the bridge's trade.open refuses a weapon in hand, the
- * throws and digs are no hits); the Guardian's own rules hold for the mobs.
+ * census), the next chore planned again from what it shows (chorePlan), done, and out again, every gate shut behind
+ * (throughLock: through the lock where one stands; a run that cannot get out past a villager in the lock ends inside
+ * and says so). A villager is never hit: no attack, no weapon swung near one (the bridge's trade.open refuses a weapon
+ * in hand, the throws and digs are no hits); the Guardian's own rules hold for the mobs.
  */
 export const hallChoresGoal: Goal = {
   name: 'hall chores',
@@ -1085,7 +1719,8 @@ export const hallChoresGoal: Goal = {
     began.set(ctx, Date.now());
     const vs = await look(ctx);
     if (!vs) throw new Error('could not look at the villager hall');
-    if (!vs.length) return 'the villager hall is empty';
+    // (nobody seen, and the census not lowered: the look was not whole, noteHall)
+    if (!vs.length) return hallChoresOf(ctx.world).census?.villagers.length ? 'the villager hall is not in sight (nothing of it is loaded): nothing done' : 'the villager hall is empty';
     const plan = chorePlan(ctx.s, ctx.world);
     if ('none' in plan) return `nothing to do: ${plan.none.text}`;
     const n = headcount(vs);

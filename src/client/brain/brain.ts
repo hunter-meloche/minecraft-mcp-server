@@ -27,8 +27,20 @@ import { clock, explainIdle, idleLine, idleNow, idleOverLine, idleReport, tally,
  * Staying alive: never backed off by the loop watch, and the only goals that cut a trip short out there. Leaving the
  * Nether is one (a trip down there is home by dusk, and whatever stops one leaves the bot there).
  */
-export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 'out of a pit', 'break out', 'recover', 'retreat', 'shelter', 'food', 'leave nether']);
-import { breakOut, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Goal, type GoalContext, type Snapshot } from './goals.js';
+export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 'out of a pit', 'break out', 'recover', 'retreat', 'out of the hall', 'shelter', 'food', 'leave nether']);
+/**
+ * What may cut a critical section of a run short (pockets.ts out.critical: a villager's gate step, the lock, the whole
+ * of a chores visit inside the villager hall): flight alone. Not the shelter, not food, not out of the hall: on Nov 24
+ * the farm and the pens round cut a chores visit with the bot inside twice in four minutes, and the next goal's plain
+ * walk out by the gate is how a villager leaves with it.
+ */
+export const CRITICAL_CUTS: ReadonlySet<string> = new Set(['retreat', 'out of a pit', 'out from under', 'break out', 'recover']);
+/**
+ * Never the loop watch's to hold: the villager care goal. Its rows that find nothing, and its turns with the chores, are
+ * what the watch calls going round, and a goal that shuts the gates a villager would leave by must not be silenced.
+ */
+export const NO_LOOP_HOLD: ReadonlySet<string> = new Set(['villager care']);
+import { breakOut, fromGate, nearHome, onHomeLevel, returnIdle, shelterGoal, wake, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import { outFromUnder, outOfPit } from './underyard.js';
 import { food, larder, recoverGoal, retreat } from './food.js';
 import { farm, furnaceLine, kit, lights, packOres, smelt, sortStorage, stash, stock } from './chores.js';
@@ -41,10 +53,10 @@ import { yardGrowGoal, yardGrowStatus } from './yardgrow.js';
 import { storageGoal } from './storehouse.js';
 import { bedGoal } from './home.js';
 import { clearOut, dryBlocked, ladderOf, pick, releaseOldestDry, shareHolds, skippedLine, taskOf, workGoals, workLine, workTick } from './work.js';
-import { NEAR_HOME, out as afield } from './pockets.js';
+import { NEAR_HOME, liveCritical, out as afield } from './pockets.js';
 import { statusAnswer } from './chatstatus.js';
 import { getOut, wedgedOut } from './wedge.js';
-import { penFences } from './yardgates.js';
+import { penFences, strictGates, strictSet } from './yardgates.js';
 import { holdHarmless, unsafeInHand } from './fluidpick.js';
 import { NETHER, OVERWORLD, allOwnPortals, leaveNetherGoal, netherLine, netherOf, notePortals, type PortalShape } from './nether.js';
 import { netherSparesGoal, regearGoal } from './regear.js';
@@ -56,6 +68,10 @@ import { closeUpGoal, tooFarFrom } from './villagemove.js';
 import { railsHomeLine } from './railshome.js';
 import { VILLAGE_RANGE, movesOn, noteBells, noteSeen, villagersLine, villagesOf, type Seen } from './village.js';
 import { smithDropsGoal } from './netherite.js';
+import { shellsGoal } from './hallshells.js';
+import { careNotes, noteLock, outOfHallGoal, villagerCareGoal } from './villagercare.js';
+import { fetchLine, fetchOf, fetchSafe, peekFetch } from './fetch.js';
+import { lockOf } from './villagerwalk.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
 export { wedgedOut };
@@ -101,12 +117,32 @@ interface Running {
  * nothing to show (2026-11-08: "done food in 3s: ... now carrying 0 food points", 51 times in a row).
  */
 const HAND_OVER_MS = 2000;
+/** While a lock stands and the bot is by it, the gate watch looks into the lock this often (villagercare.ts noteLock). */
+const LOCK_LOOK_MS = 30_000;
 /** An idle streak led by a hold lasts this long before one of the holds is let go early. */
 const HOLD_IDLE_MS = 60_000;
 /** Idle this long while a rung of the work queue waits on its dry marks (whatever leads the idle time): the oldest mark is let go. */
 const DRY_IDLE_MS = 30_000;
 /** The holds that may be let go early: a run that got wedged or stuck, ran out of time, or failed (not a loop's, not "until morning"). */
 const ORDINARY_HOLD = /^(wedged$|stuck$|timed out$|failed: )/;
+
+/**
+ * Whether a box read (discover's: x fastest, then z, then y) saw the whole of the hall's floor: none of its cells
+ * inside the box null. A hall outside the box is no part of the read, and counts as seen, as it did.
+ */
+function hallWhole(world: WorldMemory, box: { x: number; y: number; z: number; width: number; height: number; length: number }, blocks: (string | null)[]): boolean {
+  const h = world.zones?.hall?.[0];
+  if (!h || !Number.isFinite(h.width) || !Number.isFinite(h.length)) return true;
+  const y = h.y + 1 - box.y;
+  if (y < 0 || y >= box.height) return true;
+  for (let z = Math.max(h.z, box.z); z < Math.min(h.z + h.length!, box.z + box.length); z++) {
+    for (let x = Math.max(h.x, box.x); x < Math.min(h.x + h.width!, box.x + box.width); x++) {
+      const b = blocks[(x - box.x) + (z - box.z) * box.width + y * box.width * box.length];
+      if (b === null || b === undefined) return false;
+    }
+  }
+  return true;
+}
 
 /**
  * The goals in the order they are tried: the most urgent first. Each urgency is asked once: inside the sort it was
@@ -212,7 +248,7 @@ export class Brain {
   constructor(private rt: ClientRuntime, private opts: BrainOptions = {}) {
     this.memory = new BrainMemory(opts.memoryFile);
     const structures = this.structures;
-    this.goals = opts.goals ?? [wake, outFromUnder, outOfPit, breakOut, recoverGoal(() => rt.lastDeath()), smithDropsGoal, leaveNetherGoal(), retreat, shelterGoal(), food, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
+    this.goals = opts.goals ?? [wake, outFromUnder, outOfPit, breakOut, recoverGoal(() => rt.lastDeath()), smithDropsGoal, leaveNetherGoal(), retreat, outOfHallGoal, shelterGoal(), food, villagerCareGoal, homeSetGoal, regearGoal, kit, closeUpGoal, stash, storageGoal, goldGoal, smelt, larder, farm, structureGoal(structures, b => rt.protectBuilt(b), (c, r) => rt.builtNear(c, r)), missionGoal, bedGoal, yardGrowGoal, stock, deepTrip, repairGoal(rt), tidyGoal(rt), treeFarm, pens, caneRound, wartRound, enchantGoal, anvilGoal, brewGoal, this.withHolds(shellsGoal), hallChoresGoal, netherSparesGoal, lights, donateGoal, sortStorage, packOres, signsGoal, driftGoal(structures), projectGoal(TREE), ...workGoals(() => rt.lastDeath(), undefined, () => this.now()), returnIdle];
     this.now = opts.now ?? Date.now;
     this.tickMs = opts.tickMs ?? 5000;
     this.leaseMs = opts.leaseMs ?? 10 * 60_000;
@@ -320,12 +356,65 @@ export class Brain {
     this.memory.save();
   }
 
-  /** The LLM ran a tool: step back now and stay out until it has been quiet for a while. */
+  /**
+   * The LLM ran a tool: step back now and stay out until it has been quiet for a while. Not while a villager is being
+   * led or a run is in a step only flight may cut short (a gate held for a villager, the whole of a chores visit
+   * inside the villager hall): the tool is refused with why, since stopping the run there leaves a gate open by a
+   * villager or the bot inside the hall. set-autonomy {enabled:false} takes the bot over all the same (the run's exit
+   * handler runs first: the gate is shut).
+   */
   async manual(tool: string): Promise<void> {
+    const busy = this.busyWhy();
+    if (busy) throw new Error(`Not now (${tool}): ${busy}, and only flight cuts that short. set-autonomy {enabled:false} takes the bot over (the run's exit handler runs first), or ask again in a few minutes`);
     this.leaseUntil = this.now() + this.leaseMs;
     this.leaseTool = tool;
     void this.show();
     if (this.running) await this.stopRunning(`the LLM took over (${tool})`);
+  }
+
+  /** Why the bot may not be taken over now (fetch.ts fetchSafe without the place: a villager led, a critical section), or undefined. */
+  private busyWhy(): string | undefined {
+    const now = this.now(), critical = liveCritical(now);
+    const world = this.worldId ? this.memory.world(this.worldId) : undefined;
+    if (!world) return critical ? 'a run is in a step only flight may cut short' : undefined;
+    const r = fetchSafe(world, undefined, now, critical);
+    return r.safe ? undefined : r.why;
+  }
+
+  /**
+   * Whether a restart (or a take-over) is safe now, for the fetch-safe tool and scripts/safe-restart.sh: not while a
+   * villager is being led, nor in a critical section, nor with the bot in the villager hall or its lock (`at`: where
+   * it stands, in the overworld only; else the last look's).
+   */
+  safeNow(at?: { x: number; y: number; z: number }, dimension?: string): { safe: boolean; why?: string } {
+    const world = this.worldId ? this.memory.world(this.worldId) : undefined;
+    const now = this.now();
+    if (!world) return liveCritical(now) ? { safe: false, why: 'a run is in a step only flight may cut short' } : { safe: true };
+    const s = this.last;
+    const where = (dimension ?? s?.dimension) === OVERWORLD ? at ?? s?.position : undefined;
+    return fetchSafe(world, where, now, liveCritical(now));
+  }
+
+  /**
+   * The autopilot off, and the running goal stopped and waited for, 5 s at most (its exit handler: a held gate released
+   * shut, a lure anchored): set-autonomy {enabled:false} answers only then, so the LLM's next acting call never runs
+   * beside the handler (idle-plan V 6.2, D24: the takeover comes with the exit handler first). The goal it stopped, if any.
+   */
+  async turnOff(): Promise<string | undefined> {
+    const r = this.running;
+    this.setEnabled(false);
+    if (r) await Promise.race([r.done, new Promise(res => setTimeout(res, 5000))]);
+    return r?.goal.name;
+  }
+
+  /**
+   * For a restart (fetch-safe {stop}, the harness's /stop): the autopilot off in this process, the running goal
+   * stopped and waited for (turnOff), and brain.json saved. The goal it stopped, if any.
+   */
+  async stopForRestart(): Promise<string | undefined> {
+    const was = await this.turnOff();
+    this.memory.save();
+    return was;
   }
 
   /** One look and decision; the timer calls it, tests call it directly. */
@@ -345,6 +434,7 @@ export class Brain {
       seen = s;
       const world = this.memory.world(this.worldId);
       world.id = this.worldId;
+      if (this.attached !== this.worldId) this.attach(world);
       // the spare set's record as one set (chests.ts oneSpareSet): two were stored on Nov 15, the second is plain stock
       const loose = oneSpareSet(world);
       if (loose.length) this.note(`spare set: one set kept, ${loose.length} pieces of a second let go as plain stock (${loose.map(p => `${p.name} in slot ${p.slot} of (${p.chest.x}, ${p.chest.y}, ${p.chest.z})`).join(', ')})`);
@@ -362,6 +452,11 @@ export class Brain {
       this.measure('portals', () => this.rt.setOwnPortals?.(allOwnPortals(world)));
       await this.seePortals(s, world);
       await this.seeVillages(s, world);
+      await this.gateWatch(s, world).catch((e: unknown) => {
+        if (this.mishaps.has('gates')) return;
+        this.mishaps.add('gates');
+        this.note(`gate watch failed (noted once): ${String((e as Error)?.message ?? e)}`);
+      });
       this.idleTrack(s);
       this.workQueue(s, world);
       this.measure('daily', () => this.dailyLines(s, world));
@@ -419,7 +514,11 @@ export class Brain {
         // and wherever it is, a run walking an animal home (on a lead, or after its food: the cows rung, the pens
         // round's stray): it would be let go where the run stopped. Only this run's own word counts (its signal)
         const leading = !!afield.ledBy && afield.ledBy === r.abort.signal;
-        const may = (g: Goal) => SURVIVAL.has(g.name) || (!leading && (tripOut ? g.name === kit.name && !s.items.some(i => i.name.endsWith('_pickaxe')) : cuts(g)));
+        // and a run in a critical section of its own (a villager's gate step, the lock, the whole of a chores visit
+        // inside the hall: pockets.ts out.critical): only flight cuts it, whatever else would (idle-plan V 6.2)
+        const c = afield.critical;
+        const critical = !!c && c.by === r.abort.signal && this.now() < c.until;
+        const may = (g: Goal) => critical ? CRITICAL_CUTS.has(g.name) : SURVIVAL.has(g.name) || (!leading && (tripOut ? g.name === kit.name && !s.items.some(i => i.name.endsWith('_pickaxe')) : cuts(g)));
         const next = decide(s, world, this.goals.filter(g => p(g) > p(r.goal) && may(g)), this.retryAt);
         if (next) await this.stopRunning(`${next.goal.name} is more urgent (${next.reason})`);
         return;
@@ -551,6 +650,8 @@ export class Brain {
     if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined, hallChoresText(world, this.now(), s?.counts.get('emerald') ?? 0))));
     // the rails home (the villager move's fallback): the switch, the line's state
     if (world) this.measure('status', () => lines.push(railsHomeLine(world, this.now())));
+    // the villager fetch (fetch.ts): the lock, the ring, the gates left open, the journal; only where it has a record
+    if (world?.fetch) this.measure('status', () => lines.push(fetchLine(world, this.now(), careNotes(world, this.now()))));
     if (world) this.measure('status', () => {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
@@ -748,6 +849,97 @@ export class Brain {
     this.measure('portals', () => notePortals(world, r.dimension ?? s.dimension, r.portals!));
   }
 
+  /** the world the brain last came into in this process (attach) */
+  private attached?: string;
+
+  /**
+   * The first look at a world in this process: the villager fetch's record made whole and saved (fetch.ts fetchOf: a
+   * journal entry, a ward or a trip brain.json holds that cannot be read is dropped, and said by a halt that stands until
+   * the lead has looked; saved now, not at the next run's end). A world with no record is left without one.
+   */
+  private attach(world: WorldMemory): void {
+    this.attached = this.worldId;
+    if (world.fetch === undefined) return;
+    const f = fetchOf(world);
+    if (f.halt) this.note(`villagers: HALT: ${f.halt.why}`);
+    this.memory.save();
+  }
+
+  /** the gate watch: when the bridge was last asked how the strict gates stand, and when the lock was last looked into */
+  private gatesAt = -Infinity;
+  private lockAt = -Infinity;
+  /** the strict set as last sent: for which world, how many gates, when */
+  private strictSent?: { world: string; n: number; at: number };
+  /** the bridge keeps strict gates (it answered gates.status in this process): a jar with the gate holds */
+  private holdsKept = false;
+
+  /**
+   * A goal that builds with the bridge's gate holds (the shells: the lock and the portal's ring, each built with the
+   * hall's gate strict, its own gate strict once it stands): until the bridge has answered gates.status in this
+   * process it declines, so a world on a jar without the holds is left as it was, with no build tried and failed every
+   * few minutes.
+   */
+  private withHolds(goal: Goal): Goal {
+    const no: Decline = { cause: 'unneeded', text: 'the bridge keeps no strict gates (an older jar, or its client not up yet): nothing built' };
+    const gate = (s: Snapshot, world: WorldMemory): Gate => (!this.holdsKept ? no : goal.gate ? goal.gate(s, world) : (goal.wants(s, world) ? { want: goal.wants(s, world)! } : no));
+    return { ...goal, gate, ...fromGate(gate) };
+  }
+
+  /**
+   * The gate watch (idle-plan V 4.6, 3.3), in the overworld once the yard has a gate the bridge is to keep strict
+   * (yardgates.ts strictGates: the yard's, the villager hall's, the lock's, the portal ring's):
+   *   - the strict set sent whole (gates.auto on, then gates.strict with the lock's pair and guard) at the start, and
+   *     again whenever the bridge counts another number than the brain's own: a relaunched client keeps none (the
+   *     bridge's sets live in the client), and a gate opened across the relaunch is then the bridge's to report again;
+   *   - while a lock stands, the hall has villagers, a ward exists or a shell is being built: how the strict gates
+   *     stand, every tick, into `fetch.gates` (open, and what the bridge calls leftOpen: open, nobody holding it, and
+   *     the bot out of reach of it or it open 5 s), on the brain's own clock, the cells as the zones hold them. A row
+   *     the bridge reads `loaded: false` is as it was last seen and is left out. The care goal acts on it;
+   *   - while a lock stands and the bot is by it, who is in the lock, every half minute (villagercare.ts noteLock):
+   *     care's rows for a villager shut in there and for the hall's gate left open behind it go by that look.
+   * Otherwise the bridge is asked once a minute, for the count alone. A jar without the holds answers nothing: nothing
+   * is written or sent, it is asked again once a minute, and the shells goal builds nothing (withHolds).
+   */
+  private async gateWatch(s: Snapshot, world: WorldMemory): Promise<void> {
+    if (s.dimension !== OVERWORLD || !this.worldId) return;
+    const want = strictGates(world);
+    if (!want.length) return;
+    const f = world.fetch ? peekFetch(world) : undefined, lock = lockOf(world);
+    const counted = (world.villages as { hall?: { count?: unknown } } | undefined)?.hall?.count;
+    const hall = (typeof counted === 'number' && counted > 0) || (world.hallChores?.census?.villagers?.length ?? 0) > 0;
+    const watching = !!lock || hall || !!f?.wards.length || !!f?.shells?.building;
+    const now = this.now();
+    // (every tick only once the bridge has answered: a jar without the holds is asked once a minute, in case one comes up)
+    if (now - this.gatesAt < (watching && this.holdsKept ? 0 : 60_000)) return;
+    this.gatesAt = now;
+    type Row = { x: number; y: number; z: number; open?: boolean; loaded?: boolean; leftOpen?: boolean };
+    const st = await this.rt.call<{ count?: number; strict?: Row[] }>('gates.status', {}).catch(() => undefined);
+    if (!st || typeof st.count !== 'number' || !Array.isArray(st.strict)) return;
+    this.holdsKept = true;
+    const sent = this.strictSent;
+    const fresh = sent?.world !== this.worldId;
+    if (fresh || (st.count !== want.length && (st.count === 0 || now - sent!.at >= 60_000))) {
+      // (the closer asked on only at the start, or for a client that keeps nothing, and never under a walk leading an
+      // animal: the pens' walk asks it off for a while and would find it on again mid-walk)
+      if ((fresh || st.count === 0) && !afield.ledBy) await this.rt.call('gates.auto', { enabled: true }).catch(() => undefined);
+      const r = await this.rt.call<{ strict?: number; pairs?: number; guard?: number }>('gates.strict', strictSet(world) as unknown as Record<string, unknown>).catch((e: Error) => ({ error: e.message }));
+      this.strictSent = { world: this.worldId, n: want.length, at: now };
+      const kept = 'error' in r ? `not taken (${r.error})` : `${r.strict ?? '?'} strict gate(s)${r.pairs ? `, ${r.pairs} pair(s)` : ''}${r.guard ? `, ${r.guard} guard(s)` : ''}`;
+      this.note(`gates: the strict set sent (${fresh ? 'at the start' : `the bridge counted ${st.count}, the brain ${want.length}: a relaunched client`}): ${kept}`);
+      return;
+    }
+    if (!watching) return;
+    const cell = (r: Row) => ({ x: Math.floor(r.x), y: Math.floor(r.y), z: Math.floor(r.z) });
+    const rows = st.strict.filter(r => !!r && Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.z) && r.loaded !== false);
+    fetchOf(world).gates = { at: now, open: rows.filter(r => r.open === true).map(cell), leftOpen: rows.filter(r => r.leftOpen === true).map(cell) };
+    // (who is in the lock: from by it only, where a look sees all of it)
+    if (lock && now - this.lockAt >= LOCK_LOOK_MS && Math.hypot(s.position.x - lock.p.x, s.position.z - lock.p.z) <= 96 && onHomeLevel(s.position, s.home)) {
+      this.lockAt = now;
+      const r = await this.rt.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 128 }).catch(() => undefined);
+      if (Array.isArray(r?.entities)) noteLock(world, r.entities, now);
+    }
+  }
+
   /** when the bells the scans saw were last asked for (seeVillages) */
   private villagesAt = -Infinity;
 
@@ -875,8 +1067,11 @@ export class Brain {
     if (hallInSight(world, s.position, s.home)) {
       const r = await this.rt.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 128, type: 'villager' }).catch(() => undefined);
       if (Array.isArray(r?.entities)) {
-        const count = noteHall(world, r.entities, this.now());
+        // whole: no cell of the hall's floor read null (just after a rejoin every one does, and the look sees nobody:
+        // noteHall lowers no count then); with the time of day, whose job block is whose builds from these looks too
+        const count = noteHall(world, r.entities, this.now(), hallWhole(world, box, blocks), s.timeOfDay);
         if (count !== undefined) villagesOf(world).hall = { count, at: this.now() };
+        noteLock(world, r.entities, this.now());
       }
     }
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
@@ -926,16 +1121,19 @@ export class Brain {
       },
       builds: () => this.structureBoxes(world),
       rails: this.rt.rails,
+      own: this.rt.own,
       // (a restart mid-run never reaches the run's save: what a run must keep through one it saves at once)
       save: () => this.measure('save', () => this.memory.save()),
       dump: (name, data) => {
         if (!this.opts.logFile) return;
         try {
-          const dir = path.join(path.dirname(this.opts.logFile), 'rails-debug');
+          // a folder per kind: a trip's records (`fetch-*`) would else push the rails' out, and the fixture's source with them
+          const fetch = name.startsWith('fetch-');
+          const dir = path.join(path.dirname(this.opts.logFile), fetch ? 'fetch-debug' : 'rails-debug');
           fs.mkdirSync(dir, { recursive: true });
-          // (the last few kept: one a failed move day)
+          // (the last few kept: one a failed move day, five and the new one; a trip's 20 with the new one)
           const old = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
-          for (const f of old.slice(0, Math.max(0, old.length - 5))) fs.rmSync(path.join(dir, f), { force: true });
+          for (const f of old.slice(0, Math.max(0, old.length - (fetch ? 19 : 5)))) fs.rmSync(path.join(dir, f), { force: true });
           fs.writeFileSync(path.join(dir, `${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}-${name}.json`), JSON.stringify(data));
         } catch { /* a debug record only */ }
       }
@@ -996,6 +1194,8 @@ export class Brain {
       })
       .finally(() => {
         const mine = this.running?.abort === abort;
+        // a critical section the run left set as it ended is over with it (its own code ends it; this is the net)
+        if (afield.critical?.by === abort.signal) delete afield.critical;
         // booked before the run is let go of: the stretch since the last tick is still its own
         this.measure('run', () => this.bookRun(goal, used, mine));
         if (mine) this.running = undefined;
@@ -1024,7 +1224,8 @@ export class Brain {
     this.stopWhy = undefined;
     const loop = this.loops.end(run, outcome, text, this.now());
     const again = loop ? undefined : this.loops.repeat;
-    const victimOf = (l: { victim: string; goals: string[] }) => !SURVIVAL.has(l.victim) ? l.victim : l.goals.find(g => !SURVIVAL.has(g));
+    const held = (g: string) => !SURVIVAL.has(g) && !NO_LOOP_HOLD.has(g);
+    const victimOf = (l: { victim: string; goals: string[] }) => held(l.victim) ? l.victim : l.goals.find(held);
     if (again) {
       // reported once per half hour, but backed off each time it comes back
       const v = victimOf(again);
