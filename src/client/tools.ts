@@ -110,6 +110,17 @@ export interface RailLay {
 }
 /** What take-up-rail answers: dug (and picked up) or why not. */
 export interface RailTaken { ok: boolean; dug: boolean; block?: string; pickedUp?: boolean; reason?: string }
+/**
+ * What own.put answers: `placed` when a block went down in the cell (the bot's own from then), `ok` when it is the
+ * item asked for (`block`: what stands there, as the bridge names it), or why not.
+ */
+export interface OwnPlaced { ok: boolean; placed: boolean; block?: string; reason?: string }
+/**
+ * What own.take answers: dug (and picked up), `ok` and not dug when nothing stood there any more, or why not. `block`:
+ * what the cell held in the item's place, as the bridge names it, when that was not air: a tuft of grass or water with
+ * `ok` (nothing there), anyone's block or the bot's own of another kind without (never dug).
+ */
+export interface OwnTaken { ok: boolean; dug: boolean; block?: string; pickedUp?: boolean; reason?: string }
 /** A minecart as cart.status reads it: speed in blocks a tick (on the client), the rail under it, who rides it. */
 export interface CartState {
   id: number; uuid?: string; name?: string; position?: Pos; block?: Pos; yaw?: number; own?: boolean; distance?: number;
@@ -312,6 +323,9 @@ const MINE_BEYOND = 12;
 const HAND_WAIT_MS = 2000;
 /** How long after a first read that found nothing a lay whose call timed out is read again (its use done by then). */
 const LOST_READ_MS = 1500;
+/** own.take's wait for the drop of the block it dug: so many looks into the pockets, this far apart, before it walks onto the cell. */
+const OWN_DROP_LOOKS = 4;
+const OWN_DROP_WAIT_MS = 400;
 
 /** How far craft-item looks for a crafting table to walk to. */
 const TABLE_SEARCH = 48;
@@ -497,6 +511,36 @@ export interface ClientRuntime {
      * plant at `at`, the bot stepping aside if it stands there; the world's ground again, not the bot's own.
      */
     restore?: (at: Pos, item: string) => Promise<RailPlaced>;
+  };
+  /**
+   * The bot's own blocks, one at a time (the villager fetch: a lure, a cover, the lock's sill and its socket's wall
+   * block), put down and taken up after the patterns of the rails home's lay and take-up: the record is written before
+   * the block goes down, and nothing is ever dug that the record does not name. Absent from a fake that has none.
+   */
+  own?: {
+    /**
+     * The bot's own block down at `at`: the cell protected BEFORE the place (the dimension as last read; a kill between
+     * the two must not leave a block down that the take refuses) and the client mod told at once (in a village's zone
+     * its dig.here takes only what its list holds), then `item` selected and placed (place; `face`: the side of the cell
+     * clicked against first, default down). Too far: one careful walk into reach (never a plain one), then once more,
+     * unless `stay` (nothing walked at all). A reply that was lost: the cell is read, the block there after all is the
+     * bot's. Not down: off the record again, unless the cell was the bot's before or could not be read (the take's own
+     * read sees air as gone). `ok` only when `item` itself stands there: item.select takes a name in part where the
+     * very item is not carried (dark_oak_planks for oak_planks), and what came out then is `placed`, the bot's, not ok.
+     */
+    put: (at: Pos, item: string, o?: { face?: string; stay?: boolean }) => Promise<OwnPlaced>;
+    /**
+     * The bot's own `item` up from `at`. Air there, or what a block is placed into as into air (grass, snow, water:
+     * `block` says which): off the record, `{ok: true, dug: false}`. Another block there (`block`):
+     * NEVER dug, `{ok: false}`, and off the record (someone broke the bot's and put their own: theirs now), unless the
+     * record itself names that block (the lock's wall block back in the socket, asked for as the lure by a journal a
+     * kill left behind: the bot's own still, and kept). `item` there and not in the record: refused, unless `adopt`
+     * (the caller's journal names this cell and this item: protected again first, the client mod told). Then dug from
+     * where the bot stands (dig.here: no Baritone, never `dig`, never `force`), with one careful walk into reach and
+     * sight when it cannot see it, unless `stay`. The drop is waited for 4 x 400 ms, then the cell walked onto
+     * (carefully; not with `stay`), unless `pickup: false` (`pickedUp` is then not said).
+     */
+    take: (at: Pos, item: string, o?: { stay?: boolean; pickup?: boolean; adopt?: boolean }) => Promise<OwnTaken>;
   };
 }
 
@@ -2427,6 +2471,143 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
     }
   );
 
+  // ---------------------------------------------------------------- the bot's own blocks (the villager fetch)
+
+  /** A block's name as an item names it ("minecraft:rail[shape=north_south]" -> "rail"). */
+  const blockName = (state: string) => state.replace(/^minecraft:/, '').replace(/\[.*$/, '');
+  /**
+   * What the bridge's `place` puts a block into as into air (Interact.java replaceable: the game's canBeReplaced; the
+   * blocks of the 26.3 jar that say so, a single layer of snow only): fluids, fire, ground cover. A cell that holds
+   * one holds no block of the bot's and none of anyone's: a lure goes down on level grass, and its cell is as often
+   * a tuft of it, snow or shallow water as air.
+   */
+  const ROOM = new RegExp('^(water|lava|bubble_column|fire|soul_fire|light|structure_void|short_grass|tall_grass|fern|large_fern|dead_bush|bush'
+    + '|red_shrub|short_dry_grass|tall_dry_grass|leaf_litter|seagrass|tall_seagrass|vine|glow_lichen|resin_clump|hanging_roots|crimson_roots'
+    + '|warped_roots|nether_sprouts)$');
+  const isRoom = (state: string) => ROOM.test(blockName(state)) || /^(minecraft:)?snow(\[layers=1\])?$/.test(state);
+
+  const putOwn = async (at: Pos, item: string, o: { face?: string; stay?: boolean } = {}): Promise<OwnPlaced> => {
+    const p = floorPos(at);
+    const want = blockName(item);
+    // the bot's own before it goes down, as a laid rail is (the dimension as last read, no call), and the client mod
+    // told now, not at the next look: a run cut short or the process killed after the place must not leave a block
+    // down that the take refuses, nor one in a village's zone that dig.here calls someone's build (live, the lure in
+    // the west village: the bridge would not dig the bot's own table there until it was recorded)
+    const dim = lastDimension;
+    const had = protection.has(dim, p);
+    protection.add(dim, [p]);
+    await syncProtection(dim, true);
+    // (a call that threw or timed out has no answer: the block may be down all the same, read after)
+    let lost = false;
+    const ask = async (): Promise<OwnPlaced> => {
+      lost = false;
+      try { await call('item.select', { name: want }); } catch (e) { return { ok: false, placed: false, reason: (e as Error).message }; }
+      try {
+        const r = await call<{ placed: boolean; block?: string; reason?: string }>('place', { ...p, face: o.face ?? 'down' });
+        return { ok: r.placed, placed: r.placed, ...(r.block ? { block: r.block } : {}), ...(r.reason ? { reason: r.reason } : {}) };
+      } catch (e) {
+        lost = true;
+        return { ok: false, placed: false, reason: (e as Error).message };
+      }
+    };
+    let r = await ask();
+    if (!r.placed && !o.stay && /^too far/.test(r.reason ?? '')) {
+      await carefulNear(p);
+      r = await ask();
+    }
+    // a lost reply: the cell is read (never for a call that was not sent: the run cut short before it), and once more
+    // after a moment when the call timed out and room is read (its use may wait on the client's ticks behind the read)
+    const unsent = /^aborted:/.test(r.reason ?? '');
+    let read: string | undefined;
+    if (!r.placed && lost && !unsent) {
+      read = await stateAt(p);
+      if (read !== undefined && blockName(read) !== want && /timed out|connection closed/.test(r.reason ?? '')) {
+        await new Promise(res => setTimeout(res, LOST_READ_MS));
+        read = await stateAt(p);
+      }
+      if (read !== undefined && blockName(read) === want) {
+        r = { ok: true, placed: true, block: want, reason: `the reply was lost (${r.reason ?? 'no answer'}); read down after` };
+      }
+    }
+    if (r.placed) {
+      // with the state it stands in (a read that fails, the run cut short now, keeps the answer's block)
+      const state = read ?? await stateAt(p) ?? r.block;
+      protection.add(dim, [p], [state]);
+      const name = blockName(state ?? want);
+      if (name !== want) r = { ok: false, placed: true, block: name, reason: `it came out ${name}, not ${want}` };
+    } else if (!had && !(lost && !unsent && read === undefined)) {
+      // not down: off the record again on a plain answer (or a call never sent) and on a lost reply read so (room, or
+      // something else there); kept when the cell could not be read, and the client mod told what is the bot's no more
+      protection.remove(dim, p);
+      await syncProtection(dim);
+    }
+    return r;
+  };
+
+  const takeOwn = async (at: Pos, item: string, o: { stay?: boolean; pickup?: boolean; adopt?: boolean } = {}): Promise<OwnTaken> => {
+    const p = floorPos(at);
+    const want = blockName(item);
+    const dim = await dimension();
+    const state = await stateAt(p);
+    if (!state) return { ok: false, dug: false, reason: 'not loaded' };
+    const name = blockName(state);
+    // gone already (someone took it), or never there (killed between the record and the place): nothing to dig, and
+    // nothing of the bot's there any more (a record with no block within 24 of home is the repair round's to "put back")
+    if (/^(air|cave_air|void_air)$/.test(name)) {
+      protection.remove(dim, p);
+      await syncProtection(dim);
+      return { ok: true, dug: false, reason: 'nothing there' };
+    }
+    if (name !== want) {
+      // another block in the cell: never dug. The bot's own of another kind when the record itself names it (the state
+      // kept when the bot put it there: the socket's wall block, asked for as the lure it replaced): kept. Else someone
+      // broke the bot's and put their own: theirs, and the cell the bot's no more
+      const kept = protection.stateOf(dim, p);
+      if (kept !== undefined && blockName(kept) === name) return { ok: false, dug: false, block: name, reason: `the bot's own ${name} stands there, not its ${want}` };
+      protection.remove(dim, p);
+      await syncProtection(dim);
+      // room, not a block (grass, snow, water: what the place itself goes into): gone or never there, as with air. A
+      // take that called a tuft of grass someone's block failed every time it was asked, for a lure a kill kept from
+      // going down, and an undo that counts its failed tries would end in a halt over nothing
+      if (isRoom(state)) return { ok: true, dug: false, block: name, reason: 'nothing there' };
+      return { ok: false, dug: false, block: name, reason: `the bot did not put that ${name} there (its ${want} is gone)` };
+    }
+    if (!protection.has(dim, p)) {
+      if (!o.adopt) return { ok: false, dug: false, reason: `the bot did not put that ${name} there` };
+      // the caller's journal names this cell and this item (the record lost, or lagging a kill): the bot's own again,
+      // and the client mod told before the dig
+      protection.add(dim, [p], [state]);
+      await syncProtection(dim, true);
+    }
+    const count = async () => (await inventoryCounts()).counts.get(want) ?? 0;
+    const had = o.pickup === false ? 0 : await count();
+    const dig = () => call<{ dug?: boolean; reason?: string }>('dig.here', { ...p, timeoutMs: 15_000 }, 25_000).catch((e: Error) => ({ dug: false, reason: e.message }));
+    let r = await dig();
+    if (!r.dug && !o.stay && /out of reach|out of sight/.test(r.reason ?? '')) {
+      await carefulNear(p);
+      r = await dig();
+    }
+    if (!r.dug && r.reason !== 'air') return { ok: false, dug: false, reason: r.reason ?? 'not dug' };
+    protection.remove(dim, p);
+    await syncProtection(dim);
+    if (!r.dug) return { ok: true, dug: false, reason: 'nothing there' };
+    if (o.pickup === false) return { ok: true, dug: true };
+    // the drop: it flies to a bot standing by; one that does not come in is walked onto, carefully. From here on
+    // nothing throws: the block is dug, and a run cut short now still hears so (pockets unread: not picked up)
+    const more = () => count().then(n => n > had, () => undefined);
+    let got: boolean | undefined = false;
+    for (let k = 0; k < OWN_DROP_LOOKS && got === false; k++) {
+      await new Promise(res => setTimeout(res, OWN_DROP_WAIT_MS));
+      got = await more();
+    }
+    if (got === false && !o.stay) {
+      await call('goto', { ...p, range: 0, careful: true, timeoutMs: 8000 }, 15_000).catch(() => undefined);
+      got = await more();
+      if (got === false) { await new Promise(res => setTimeout(res, 600)); got = await more(); }
+    }
+    return { ok: true, dug: true, pickedUp: got === true };
+  };
+
   register(
     'brewing-stand',
     "Look into a brewing stand: what its three bottles hold (by their potion contents: water, awkward, long_fire_resistance...), the ingredient and the blaze powder fuel, how many brews the burning powder has left, and how long the brew has to go. `take`: once nothing brews, take the potions out into the pockets. The bot walks carefully into reach; the stand keeps brewing with its menu shut.",
@@ -2520,6 +2701,7 @@ export function registerClientTools(factory: ToolFactory, bridge: BridgeClient, 
 
   return {
     rails: { lay: layRail, takeUp: takeUpRail, placeCart, cut: cutGround, restore: restoreGround },
+    own: { put: putOwn, take: takeOwn },
     actions: handlers,
     call,
     status,

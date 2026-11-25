@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.npc.villager.AbstractVillager;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
@@ -524,6 +525,31 @@ public final class Guardian {
         });
     }
 
+    /** Beyond the reach of a click on an entity (3), how much nearer a villager may come before the look is taken off it. */
+    static final double LOOK_OFF_MARGIN = 1.0;
+
+    /**
+     * A villager within a click's reach: look straight down before the use key goes down, and on every tick it is
+     * held. Held, the key clicks what the crosshair is on whenever no item is in use (Minecraft.startUseItem, every 4
+     * ticks: before the first bite, and after the last until the key is let go), and on a villager that is a trade
+     * screen, which also stalls the gate closer (it clicks nothing with a screen open: the end of a hold, the pair and
+     * the guard all wait). The bot eats beside the villager it leads home and beside those in its hall. Straight down
+     * (60 degrees down met the ground 0.93 from the bot's column, and a villager in the next cell was hit at its
+     * legs), and by reach, not by what the crosshair is on at that instant: one that steps under it while the key is
+     * held is clicked as well. Checked against the 26.3 jar (javap): startUseItem clicks Minecraft.hitResult, and
+     * Minecraft.tick picks that again from the look before it reads the keys, so the new pitch counts from the next
+     * tick on. (A villager whose box holds the bot's own eye is hit whatever the look.) Whether the look was moved.
+     */
+    static boolean lookOffVillager(Minecraft mc, LocalPlayer p) {
+        if (p == null || mc.level == null) return false;
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (!(e instanceof AbstractVillager) || !e.isAlive() || !p.isWithinEntityInteractionRange(e, LOOK_OFF_MARGIN)) continue;
+            p.setXRot(90f);
+            return true;
+        }
+        return false;
+    }
+
     /** Eat the best food there is (rotten flesh when desperate), then report. */
     static void eatThen(String before, Consumer<String> done) {
         Minecraft mc = Minecraft.getInstance();
@@ -536,6 +562,7 @@ public final class Guardian {
         int foodBefore = p.getFoodData().getFoodLevel();
         Interact.select(food);
         Interact.using = true;
+        lookOffVillager(mc, p);
         mc.gameMode.useItem(p, InteractionHand.MAIN_HAND);
         mc.options.keyUse.setDown(true);
         Ticker.add(new Ticker.Task() {
@@ -544,6 +571,7 @@ public final class Guardian {
             @Override public boolean tick(Minecraft m) {
                 age++;
                 if (settle < 0) {
+                    lookOffVillager(m, m.player); // one that came into reach while the key is held
                     if (m.player.isUsingItem()) started = true;
                     if (!(started && !m.player.isUsingItem()) && age < 80) return false;
                     m.options.keyUse.setDown(false);

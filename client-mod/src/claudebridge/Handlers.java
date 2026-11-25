@@ -269,10 +269,16 @@ public final class Handlers {
             }
             list.sort(Comparator.comparingDouble(e -> e.distanceTo(pl)));
             for (Entity e : list) {
-                JsonObject o = obj("id", e.getId(), "name", Names.entity(e), "category", e.getType().getCategory().getName(),
+                // the uuid is the server's own (the add-entity packet carries it) and outlives what the id does not: an
+                // unload, a rejoin, days. A villager the bot leads home is one villager by it, however often it goes
+                // out of sight on the way (the fetch, Nov 24: until now only vehicles said theirs)
+                JsonObject o = obj("id", e.getId(), "uuid", e.getStringUUID(), "name", Names.entity(e), "category", e.getType().getCategory().getName(),
                     "position", pos(e.position()), "distance", round(e.distanceTo(pl)), "height", round(e.getBbHeight()));
                 if (e instanceof LivingEntity le) {
                     o.addProperty("health", round(le.getHealth()));
+                    // abed (the sleeping pose is synced): a villager asleep takes no lure, and the hall's gate is not
+                    // opened onto one that is awake. Only said when true
+                    if (le.isSleeping()) o.addProperty("sleeping", true);
                     // synced (AgeableMob's DATA_BABY_ID, so a hoglin's; zombies' and piglins' own flags; a brute never is)
                     o.addProperty("baby", le.isBaby());
                     // what it holds (the server sends a mob's hands on any change, and on sight): a piglin holds the gold

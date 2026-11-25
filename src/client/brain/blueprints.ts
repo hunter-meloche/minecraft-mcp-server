@@ -15,8 +15,10 @@
  *     halves are in the spec so the check sees the top too, while placing and the bill count the lower half only;
  *   - fences are plain `oak_fence` (their north/east/south/west connections follow the neighbours), fence gates name
  *     only facing (open/in_wall/powered change by themselves);
- *   - torches are floor torches (`torch`): build-structure takes a block's id as the item to place and to look for in
- *     the inventory, and `wall_torch` is not an item, so a spec wall torch could never be placed;
+ *   - torches are floor torches (`torch`) wherever a floor is theirs to stand on: Baritone's builder takes a block's id
+ *     as the item to place, and `wall_torch` is not an item. A `wall_torch[facing=...]` is left to build-structure's
+ *     hand pass (every block with a facing is), which hangs a torch on the block behind it: only the hall's lock has
+ *     one, its light at head height, the floor under it being a villager's to walk;
  *   - chests name facing and type (left/right), so the two halves of a double chest are checked as a pair.
  * Things that are not placed from an item (farmland is tilled, water poured from a bucket, saplings and sugar cane
  * planted) are landmarks for later act steps, not spec blocks.
@@ -467,6 +469,66 @@ export function hall(opts: { gateSide?: Side; panelSide?: Side; turned?: boolean
 }
 
 /**
+ * The lock in front of the villager hall's gate (acquiring villagers, S0): THE ONE SOURCE of its geometry. Its builder
+ * writes these landmarks down as zones (`lock:gate`, `lock:socket`...), and everything else reads the zones
+ * (villagerwalk.ts lockOf): three copies of the geometry would be two locks. Drawn with "out" south (+z), as the hall
+ * is drawn with its gate south, and turned with the hall's gate side; H is the hall's gate, y its level:
+ *   - a 5 x 3 footprint in front of the hall's wall, groundOffset 0 with nothing placed in the ground layer (as the
+ *     hall: the yard's ground is the floor, and a build lifts the no-break rule on every kind it replaces);
+ *   - plank walls 2 high on the two sides and across the front, and a plank roof over the whole footprint (a block
+ *     inside can then never be a step out, and nothing drops in): a block beside a fence is a way over it and a fence
+ *     does not stop a zombie's arm, so this is a cell, not a pen;
+ *   - inside, 3 x 2 cells 2 high, left as they are (' ': the builder replaces only air);
+ *   - P ('gate'): an oak fence gate in the middle of the front, the cell over it open, as over the hall's own;
+ *   - a wall torch at head height on the side wall away from the socket (a roofed cell is dark: monsters spawn at
+ *     block light 0);
+ *   - the socket: the lower block of the side wall next to the hall. For a trip it is lifted and the lock's lure put
+ *     in its place: a job block that is part of the wall, with the wall block over it (not to be climbed), reached from
+ *     the one inside cell beside it;
+ *   - the sill: one rail on the ground outside the socket, laid by an act step after the build (in the bill). A
+ *     villager never paths onto a rail from off the rails, so the lure in the socket has no reach cell outside;
+ *   - the post: the bot's standing cell, beside the sill: from its eye the socket's face is 1.6 away, P 3.35, the
+ *     hall's gate 3.78 (the closer and dig.here reach 4.4);
+ *   - S_out ('sout'): the last lure spot outside, 2 out from P's row on the post's side: its face toward the post's
+ *     side is in dig.here's sight from the post, 3.2 from the eye. One cell nearer P's lane the ray from the post
+ *     passes through the lock's front corner.
+ * `mirror` draws all of it the other way round (socket, sill, post, S_out and the torch change sides), for a hall
+ * whose ground on that side is taken. Landmarks: 'inside' x6 (feet level), 'gate', 'socket', 'sill', 'post', 'sout',
+ * 'torch', and 'hall': the hall's gate H, which is not built: it is where the blueprint goes (its origin is H less
+ * this landmark), outside the footprint as the sill, the post and S_out are.
+ */
+export function hallLock(mirror = false, gateSide: Side = 'south'): Blueprint {
+  checkSide(gateSide);
+  const W = 5, L = 3;
+  const g = new Grid(W, 4, L, ' ');
+  // an x of the plain layout (the socket on the east side) in the layout asked for
+  const m = (x: number) => (mirror ? W - 1 - x : x);
+  for (let z = 0; z < L; z++) for (let x = 0; x < W; x++) {
+    if (x === 0 || x === W - 1 || z === L - 1) for (const y of [1, 2]) g.set(x, y, z, 'P');
+    g.set(x, 3, z, 'P');
+  }
+  const gate = { x: 2, y: 1, z: L - 1 };
+  g.set(gate.x, 1, gate.z, 'G');
+  g.set(gate.x, 2, gate.z, '.');
+  const torch = { x: m(1), y: 2, z: 0 };
+  g.set(torch.x, torch.y, torch.z, 'T');
+  const landmarks: Landmark[] = [];
+  for (let z = 0; z < L - 1; z++) for (let x = 1; x < W - 1; x++) landmarks.push({ kind: 'inside', at: { x, y: 1, z } });
+  landmarks.push(
+    { kind: 'gate', at: gate }, { kind: 'socket', at: { x: m(W - 1), y: 1, z: 0 } }, { kind: 'sill', at: { x: m(W), y: 1, z: 0 } },
+    { kind: 'post', at: { x: m(W), y: 1, z: 1 } }, { kind: 'sout', at: { x: m(W - 1), y: 1, z: L + 1 } }, { kind: 'torch', at: torch },
+    { kind: 'hall', at: { x: gate.x, y: 1, z: -1 } }
+  );
+  const spec: StructureSpec = {
+    // the torch hangs on the side wall behind it: it faces into the cell
+    palette: { P: 'oak_planks', G: 'oak_fence_gate[facing=south]', T: `wall_torch[facing=${mirror ? 'west' : 'east'}]` },
+    layers: g.layers()
+  };
+  const bp = blueprint('hall-lock', spec, { entrances: [{ ...gate, facing: 'south' }], landmarks, bill: { rail: 1 }, groundOffset: 0 });
+  return rotate(bp, TURNS_FROM_SOUTH[gateSide]);
+}
+
+/**
  * A nether portal's frame (P2a of the progression plan), 6 x 6 x 3, groundOffset 0, drawn along x (`axis` 'x'; 'z'
  * turns it a quarter): in the middle row (z 1) a 6 x 1 plinth of cobblestone in the ground layer itself (layer 0), on
  * it the standard 4 wide x 5 tall frame (layers 1-5): 10 obsidian, the four corners cobblestone (a portal lights
@@ -572,6 +634,38 @@ export function fenceRing(box: { width: number; length: number }, gates: Gate[],
 export function pen(size = 7, gateSide: Side = 'south'): Blueprint {
   if (!Number.isInteger(size) || size < 3) throw new RangeError(`a pen needs a size of at least 3, not ${size}`);
   return ring('pen', { width: size, length: size }, [{ side: gateSide, offset: Math.floor(size / 2) }], (_, corner) => corner);
+}
+
+/**
+ * The fence round the yard's Nether portal (acquiring villagers, S0: a villager walked into the open portal and was
+ * lost in the Nether, and a zombified piglin came out of it into the hall): a 1-high oak fence ring on the cells just
+ * outside the ground the frame's own build keeps (portal.ts ringOf: the plinth's row, the rows either side of it and a
+ * cell past each end of the plinth), so the walk-in rows stay inside it: 10 x 5 round a portal along x, 5 x 10 round
+ * one along z. One gate, on `gateSide`: on a short side in the plinth's row; on a long side RING_GATE_ASIDE cells
+ * along from the frame's inside (its lowest corner, where the bot walks in), toward the ring's low end and so away
+ * from both portal cells. Not in line with it: the bridge's closer shuts a gate behind the bot only once its feet are
+ * 2.2 clear of the gate's middle (and its eye within 4.4), and a bot that stands in a portal cell two cells straight
+ * behind its gate never is (2.06 at most): that gate would stand open for the whole of every Nether trip. Three along,
+ * the rule is met wherever the bot's feet are in the cell before the frame's own (2.6 to 3.8 from the gate's middle,
+ * 4.0 at most by the eye), which every way in from the gate crosses: the gate is shut before the bot stands in the
+ * portal. No torches: a block on or by a fence is the first step over it.
+ * Landmarks: 'gate', and 'portal': the portal site's minimum corner at ground level (y -1: the ring stands on the
+ * ground, the site's own layer 0 is in it), which is not built: it is where the blueprint goes.
+ */
+export const RING_GATE_ASIDE = 3;
+export function portalRing(axis: 'x' | 'z' = 'x', gateSide: Side = 'south'): Blueprint {
+  if (axis !== 'x' && axis !== 'z') throw new Error(`a portal's axis is x or z, not "${String(axis)}"`);
+  checkSide(gateSide);
+  const frame = portal({ axis });
+  // from the site out to the fence: past the plinth's end and one more along the frame, one across it
+  const pad = axis === 'x' ? { x: 2, z: 1 } : { x: 1, z: 2 };
+  const box = { width: frame.size.width + 2 * pad.x, length: frame.size.length + 2 * pad.z };
+  const inside = frame.landmarks.find(l => l.kind === 'frame')!.at;
+  const alongX = gateSide === 'north' || gateSide === 'south';
+  const long = alongX === (axis === 'x');
+  const offset = (alongX ? inside.x + pad.x : inside.z + pad.z) - (long ? RING_GATE_ASIDE : 0);
+  const bp = ring('portal-ring', box, [{ side: gateSide, offset }], () => false);
+  return { ...bp, landmarks: [...bp.landmarks, { kind: 'portal', at: { x: pad.x, y: -1, z: pad.z } }] };
 }
 
 /**

@@ -79,6 +79,12 @@ export interface GoalContext {
    */
   rails?: ClientRuntime['rails'];
   /**
+   * the bot's own blocks put down and taken up one at a time (tools.ts own.put / own.take: the record before the place,
+   * dig.here from where it stands, never a block that is not the bot's), for the villager fetch's lures, covers and
+   * the lock's sill and socket (fetch.ts, lure.ts, hallshells.ts); none where the runtime has none
+   */
+  own?: ClientRuntime['own'];
+  /**
    * brain.json written now (the brain saves at a run's end only): for a run that writes a record the world must keep
    * through a restart mid-run, as the rails home's of every block it puts down (railshome.ts); none in a test
    */

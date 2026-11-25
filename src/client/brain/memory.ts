@@ -248,6 +248,13 @@ export interface WorldMemory {
   /** The rails home under way (the line, every block of it down, its stage) and the last one's end (railshome.ts) */
   rails?: import('./railshome.js').RailsMemory;
   /**
+   * The villager fetch by the job-site lure (fetch.ts): the journal of what the bot put down, lifted or holds open for
+   * a villager and has not undone (written before each act), the villagers it answers for (the wards), the trip under
+   * way, the lock's and the portal ring's state as last read. As brain.json may hold it: fetch.ts fetchOf makes it
+   * whole (a malformed entry dropped and said), peekFetch reads it
+   */
+  fetch?: import('./fetch.js').FetchMemory;
+  /**
    * The spare diamond set the portal milestone stored for a regear after a death in the Nether (chests.ts SpareSet):
    * which chest slots hold it. Nothing else takes or uses those pieces
    */

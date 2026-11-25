@@ -777,7 +777,10 @@ public final class Interact {
             Direction face = null;
             Vec3 aim = null;
             for (Direction d : Direction.values()) {
-                if (!replaceable(mc.level.getBlockState(target.relative(d)))) continue; // covered: not seen
+                // a face is covered only by a full cube before it. A rail, a torch or a flower there hides nothing (as
+                // "not replaceable" such a face was "out of reach or out of sight": the lock's socket has a rail before
+                // its one open face). The clip below stays the judge of what the eye sees
+                if (mc.level.getBlockState(target.relative(d)).isCollisionShapeFullBlock(mc.level, target.relative(d))) continue; // covered: not seen
                 Vec3 fc = Vec3.atCenterOf(target).add(d.getUnitVec3().scale(0.49));
                 if (fc.distanceTo(eye) > reach - 0.1) continue;
                 var hit = mc.level.clip(new net.minecraft.world.level.ClipContext(eye, fc, net.minecraft.world.level.ClipContext.Block.OUTLINE,

@@ -30,10 +30,24 @@ export const TRIP_STASH_RANGE = 40;
 /**
  * A run of the work queue is under way (`work`), and it is a trip out or down (`trip`): work.ts raises and lowers
  * them round each run, the stash and the brain read them to leave such a run alone. `ledBy`: the run (its signal)
- * walking an animal home, on a lead or after its food (pens.ts), which the brain lets only survival cut short. Here, in the one module
- * both sides import. In this process only: after a restart nothing is under way.
+ * walking an animal home, on a lead or after its food (pens.ts), which the brain lets only survival cut short.
+ * `critical`: a section of a run that only flight may cut (Critical, below). Here, in the one module both sides
+ * import. In this process only: after a restart nothing is under way.
  */
-export const out: { trip: boolean; work: boolean; ledBy?: AbortSignal } = { trip: false, work: false };
+export const out: { trip: boolean; work: boolean; ledBy?: AbortSignal; critical?: Critical } = { trip: false, work: false };
+/**
+ * A critical section (the villager fetch, idle-plan V 6.2): `by` the signal of the run that is in it, `until` its end
+ * in real ms (a cap: one left set by a run that died ends by itself), `why` what it is round: a hall chores' whole
+ * stay inside the villager hall (`hall`), a villager led in through a yard gate (`gate`) or into the hall's lock
+ * (`lock`). The farm and the pens round cut a chores visit with the bot inside the hall twice in four minutes (Nov 24,
+ * 14:54 and 14:57), and the next goal's plain walk out through the gate is how a villager leaves with it.
+ */
+export interface Critical { by: AbortSignal; until: number; why: 'hall' | 'gate' | 'lock' }
+/** The critical section under way now, if any: set, its run not aborted, its cap not passed. */
+export const liveCritical = (now: number): Critical | undefined => {
+  const c = out.critical;
+  return c && !c.by.aborted && now < c.until ? c : undefined;
+};
 /**
  * Most of one kind of food carried, a stack: the rest goes in the chests. All of it stayed carried before (live: 541
  * bread in nine slots, 265 in five the day before), slots a trip had no use for.
