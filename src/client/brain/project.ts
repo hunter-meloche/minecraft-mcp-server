@@ -417,7 +417,9 @@ export async function prepare(ctx: GoalContext, item: string, n: number, depth =
   if (Object.keys(short).length) return short;
   const output = item === 'planks' ? await planksFor(ctx) : item;
   const c = await ctx.act('craft-item', { outputItem: output, amount: crafts });
-  if (!c.ok) return { [item]: n - have };
+  // (said: a bill short of what it failed to craft names only the item, and the portal's ring was "short of 6
+  // oak_fence" with 2305 logs in the chests, Nov 25, the craft's own answer lost)
+  if (!c.ok) { ctx.progress(`${output} x${crafts * r.makes}: not crafted (${c.text.slice(0, 200)})`); return { [item]: n - have }; }
   const now = await counted();
   return now >= n ? {} : { [item]: n - now };
 }
