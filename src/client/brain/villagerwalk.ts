@@ -654,6 +654,61 @@ export function ringReady(world: WorldMemory, read: Blocks): string[] {
   return faults;
 }
 
+/** What the yard's fence reads as (fenceRead): the faults (none: whole), the ring's cells not read (`unread`) and the row inside's (`rowUnread`), and what the ring held. */
+export interface FenceRead { faults: string[]; unread: number; rowUnread: number; ring: number; fences: number; gates: number }
+/**
+ * Low things at a fence's foot that lift no villager toward its top (a carpet, a rail, a pressure plate, a button, a
+ * closed trapdoor's 3/16, a sign): what the row inside may hold beside the plants and the torches (CLEAR). A fence, a
+ * wall, a pane or bars beside the ring join it (1.5 high: nothing stands on them from the ground).
+ */
+const LOW = /(carpet|_rail|^rail|pressure_plate|_button|^lever|_sign|_banner|trapdoor|tripwire|redstone_wire|_fence|_fence_gate|_wall|_pane|iron_bars)$/;
+
+/**
+ * The yard's fence read as blocks (the yard-follow-up's R5; the records' strict gates and yardGates never look at the
+ * fence itself, so a dug post, a creeper's hole or a step against it was invisible to every read of the fetch): the
+ * ring of the yard's box at its level + 1 is all fence or fence gate, a gate only where `fence:gate` has one (an
+ * unknown gate is one no strict rule keeps shut) and one at each of those; and in the row just inside the ring no
+ * block at that level with room over it at + 2 and + 3 (a floor a villager stands on, beside a fence 1.5 high it then
+ * steps onto and over: the Nov 25 crafting table at (-536, 63, 2120) against the old north fence). Cells that read
+ * null (no chunk) are counted, not faulted: the caller decides (PREP's reads and the dawn's decline over a quarter of
+ * the ring unread; the gate step lets the dawn's read stand for them). Pure.
+ */
+export function fenceFaults(yard: { x1: number; z1: number; x2: number; z2: number; y: number }, gates: readonly Pos[], read: Blocks): FenceRead {
+  const out: FenceRead = { faults: [], unread: 0, rowUnread: 0, ring: 0, fences: 0, gates: 0 };
+  const y1 = yard.y + 1, listed = new Set(gates.map(g => `${g.x},${g.z}`));
+  const look = (x: number, y: number, z: number, onRing: boolean): string | undefined => {
+    const s = read.state(x, y, z);
+    if (s === null || s === undefined) { if (onRing) out.unread++; else out.rowUnread++; return undefined; }
+    return s;
+  };
+  const ring: { x: number; z: number }[] = [];
+  for (let x = yard.x1; x <= yard.x2; x++) ring.push({ x, z: yard.z1 }, ...(yard.z2 !== yard.z1 ? [{ x, z: yard.z2 }] : []));
+  for (let z = yard.z1 + 1; z < yard.z2; z++) ring.push({ x: yard.x1, z }, ...(yard.x2 !== yard.x1 ? [{ x: yard.x2, z }] : []));
+  out.ring = ring.length;
+  for (const c of ring) {
+    const s = look(c.x, y1, c.z, true);
+    if (s === undefined) continue;
+    const id = idOf(s), at = { x: c.x, y: y1, z: c.z }, gate = listed.has(`${c.x},${c.z}`);
+    if (/_fence_gate$/.test(id)) { out.gates++; if (!gate) out.faults.push(`a gate on the yard's fence at ${fmt(at)} that the records do not have (no strict rule keeps it shut)`); continue; }
+    if (/_fence$/.test(id)) { out.fences++; if (gate) out.faults.push(`the yard's gate at ${fmt(at)} is a ${id}`); continue; }
+    out.faults.push(CLEAR.test(s) ? `a gap in the yard's fence at ${fmt(at)} (${id})` : `${id} in the yard's fence line at ${fmt(at)}`);
+  }
+  for (const g of gates) if (!ring.some(c => c.x === g.x && c.z === g.z)) out.faults.push(`the yard's gate at ${fmt(g)} is off its fence line`);
+  if (yard.x2 - yard.x1 >= 2 && yard.z2 - yard.z1 >= 2) {
+    const row: { x: number; z: number }[] = [];
+    for (let x = yard.x1 + 1; x <= yard.x2 - 1; x++) row.push({ x, z: yard.z1 + 1 }, ...(yard.z2 - 1 !== yard.z1 + 1 ? [{ x, z: yard.z2 - 1 }] : []));
+    for (let z = yard.z1 + 2; z <= yard.z2 - 2; z++) row.push({ x: yard.x1 + 1, z }, ...(yard.x2 - 1 !== yard.x1 + 1 ? [{ x: yard.x2 - 1, z }] : []));
+    for (const c of row) {
+      const s1 = look(c.x, y1, c.z, false);
+      if (s1 === undefined || CLEAR.test(s1) || LOW.test(idOf(s1))) continue;
+      const s2 = look(c.x, y1 + 1, c.z, false), s3 = look(c.x, y1 + 2, c.z, false);
+      if (s2 === undefined || s3 === undefined || !CLEAR.test(s2) || !CLEAR.test(s3)) continue;
+      out.faults.push(`a step against the yard's fence at ${fmt({ x: c.x, y: y1, z: c.z })} (${idOf(s1)}): a villager stands on it and steps over`);
+    }
+  }
+  return out;
+}
+
 // ================================================================================================ the villager's ground (S1)
 //
 // A villager without a job walks by itself to the nearest free job-site block it can reach within 48 and takes the

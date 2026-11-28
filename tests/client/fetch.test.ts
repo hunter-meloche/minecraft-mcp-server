@@ -3,7 +3,7 @@ import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
   ASTRAY_HOLD, ASTRAY_NEAR, BEAT_LIVE, FRESH_FREE, GAME_DAY, HOLD_MS, IN_BY, SESSION, beat, clock, cutTrip, dropEntry, endTrip, fetchLine, fetchOf, fetchSafe, floorOk, heldByFetch,
   inHallOrLock, journal, journalItems, liftedFor, need, needLeft, needMs, needParts, needTerms, newTrip, noteWhy, openByDesign, peekFetch, placeGuard, reconcile,
-  restoreAll, restoreOrder, settle, startLate, startNeed, tripLive, tripTo, undo, wardOut, wardSeen, type Change, type FetchMemory, type Looked, type NeedParts, type Trip,
+  restoreAll, restoreOrder, settle, startLate, startNeed, tripLive, tripTo, undo, wardOut, wardSeen, yardHeld, type Change, type FetchMemory, type Looked, type NeedParts, type Trip,
   type TripState, type Ward
 } from '../../src/client/brain/fetch.js';
 import { liveCritical, out } from '../../src/client/brain/pockets.js';
@@ -199,6 +199,21 @@ test('wardOut: a trip from its lifts to its restore, a ward led or in the lock, 
   t.deepEqual([ASTRAY_NEAR, ASTRAY_NEAR + 1].map(d => out1({ wards: [{ ...near, last: { ...near.last, at: { x: -537 - d, y: 70, z: 2193 } } }] })), [true, false]);
   // one ward in the hall's lock is enough, whatever the others
   t.true(out1({ wards: [ward('dead'), ward('lock', { key: 'b' })] }));
+});
+
+test('yardHeld (the yard-follow-up\'s R3): the yard holds still from PREP\'s first read (a trip in prep with its read and kit only, where wardOut is still false) to its restore, and while a ward is out; nothing held with no trip, or one restoring with nobody out', (t) => {
+  const held = (f: Partial<FetchMemory>, now = T0) => yardHeld(world(mem(f)), now);
+  t.false(held({}));
+  // (the dawn path P1: PREP's read and kit stamped in the evening, the lifts owed at dawn: wardOut false, the yard held)
+  const readOnly = { trip: trip('prep', { prep: { read: T0, kit: T0 } }) };
+  t.false(wardOut(world(mem(readOnly)), T0));
+  t.true(held(readOnly));
+  t.true(held({ trip: trip('prep') }), 'from the trip record\'s first write (PREP\'s first part)');
+  const states: TripState[] = ['out', 'survey', 'first', 'hop', 'gate', 'yardhop', 'lock', 'door', 'restore'];
+  t.deepEqual(states.map(s => held({ trip: trip(s, { prep: { lifts: T0 } }) })), [true, true, true, true, true, true, true, true, false]);
+  t.false(held({ trip: trip('restore') }), 'a trip restoring holds nothing by itself');
+  t.true(held({ trip: trip('restore'), wards: [ward('astray', { last: { at: { x: -590, y: 66, z: 2190 }, t: T0, tod: 8990, health: 17, profession: 'none' } })] }), 'a ward astray by home holds it (wardOut)');
+  t.false(held({ wards: [ward('dead')] }));
 });
 
 test('placeGuard: while a ward is out no job-site block is put up outside the hall; tripLive: a trip between its first lure and the lock with a beat under 90 s', (t) => {

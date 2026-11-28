@@ -7,7 +7,7 @@ import { Ground } from '../../src/client/brain/boatroute.js';
 import { ringOf } from '../../src/client/brain/portal.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import {
-  REACH, footprintFree, inLock, lockAt, lockFaults, lockOf, lockPlan, lockPlanOf, lockReady, reach, ringAt, ringPlan, ringPlanOf, ringReady, seesFace,
+  REACH, fenceFaults, footprintFree, inLock, lockAt, lockFaults, lockOf, lockPlan, lockPlanOf, lockReady, reach, ringAt, ringPlan, ringPlanOf, ringReady, seesFace,
   sight, spanOf, withBlock, type Blocks, type LockPlan, type Placed, type RingPlan,
   BOT_WALK, FIRST_PATH, GAME_PATH, HOP_MAX, HOP_MIN, HOP_PATH, RETRACE_DROP, REUSE_MS, RIVAL_R, TRAP_R, botStand, corridor, firstSpot, gateLane, hopSpot, isStand,
   pathFor, reachCells, sameWay, stand, step, trapNear, wayText, yardWay, type HopOpts, type HopSpot, type NoWay, type Stand
@@ -1266,4 +1266,51 @@ test('the west village as read (Nov 23): a lead way to L0 from every candidate, 
     bot = h.botStand;
   }
   t.true(ward.x > -650, `two hops took it from x ${L0.x} to ${ward.x}`);
+});
+
+// ------------------------------------------------------------------------------------------------ the yard's fence read as blocks (R5)
+
+/** The Nov 25 yard as the bot read it (tests/fixtures/yard-2026-11-25.json), and its four gates (brain.json then). */
+const NOV25_GATES: Pos[] = [{ x: -549, y: 63, z: 2119 }, { x: -533, y: 63, z: 2183 }, { x: -549, y: 63, z: 2215 }, { x: -565, y: 63, z: 2183 }];
+const nov25 = () => {
+  const d = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'tests', 'fixtures', 'yard-2026-11-25.json'), 'utf8')) as { yard: { x1: number; z1: number; x2: number; z2: number; y: number }; ground: Parameters<typeof Ground.fromDump>[0] };
+  return { yard: d.yard, g: Ground.fromDump(d.ground) };
+};
+
+test('fenceFaults (R5) on the Nov 25 yard: the ring is all fence and its 4 gates, every cell read; the one step against it is the crafting table at (-536, 63, 2120) by the north fence', (t) => {
+  const { yard, g } = nov25();
+  const r = fenceFaults(yard, NOV25_GATES, g);
+  t.log(r.faults.join('\n'));
+  t.is(r.unread, 0);
+  t.is(r.ring, 2 * 33 + 2 * 95);
+  t.is(r.gates, 4);
+  t.is(r.fences, r.ring - 4);
+  t.deepEqual(r.faults, ['a step against the yard\'s fence at (-536, 63, 2120) (crafting_table): a villager stands on it and steps over']);
+});
+
+test('fenceFaults (R5): a dug post is a gap, a gate the records do not have is said, a listed gate gone to fence or off the line is said, a block with room over it in the row inside is a step (a carpet, a rail or a fence there is not); unloaded cells are counted, never faulted', (t) => {
+  const { yard, g } = nov25();
+  const edit = (cells: [Pos, string | null][]): Blocks => ({ state: (x, y, z) => { const c = cells.find(([p]) => p.x === x && p.y === y && p.z === z); return c ? c[1] : g.state(x, y, z); } });
+  const table: [Pos, string] = [{ x: -536, y: 63, z: 2120 }, 'air'];
+  t.deepEqual(fenceFaults(yard, NOV25_GATES, edit([table])).faults, [], 'whole once the table is gone');
+  const r = fenceFaults(yard, NOV25_GATES, edit([table,
+    [{ x: -540, y: 63, z: 2119 }, 'air'], // a post dug (the creeper's hole, Nov 13)
+    [{ x: -533, y: 63, z: 2150 }, 'oak_fence_gate[facing=east,in_wall=false,open=false,powered=false]'], // a gate nobody wrote down
+    [{ x: -549, y: 63, z: 2215 }, 'oak_fence'], // the south gate fenced over
+    [{ x: -564, y: 63, z: 2160 }, 'oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]'], // a step inside the west fence
+    [{ x: -564, y: 63, z: 2161 }, 'white_carpet'], [{ x: -564, y: 63, z: 2162 }, 'rail[shape=north_south,waterlogged=false]'], [{ x: -564, y: 63, z: 2163 }, 'oak_fence'],
+    [{ x: -564, y: 63, z: 2164 }, 'cobblestone'], [{ x: -564, y: 64, z: 2164 }, 'cobblestone'] // a wall two high: no step
+  ]));
+  t.log(r.faults.join('\n'));
+  t.deepEqual(r.faults, [
+    'the yard\'s gate at (-549, 63, 2215) is a oak_fence',
+    'a gap in the yard\'s fence at (-540, 63, 2119) (air)',
+    'a gate on the yard\'s fence at (-533, 63, 2150) that the records do not have (no strict rule keeps it shut)',
+    'a step against the yard\'s fence at (-564, 63, 2160) (oak_stairs): a villager stands on it and steps over'
+  ]);
+  t.deepEqual(fenceFaults(yard, [...NOV25_GATES, { x: -550, y: 63, z: 2150 }], edit([table])).faults, ['the yard\'s gate at (-550, 63, 2150) is off its fence line']);
+  // (no chunk: counted, not a fault; a third of the ring unread is the caller's to weigh)
+  const blind = fenceFaults(yard, NOV25_GATES, { state: (x, y, z) => (z > 2180 ? null : g.state(x, y, z)) });
+  t.true(blind.unread > 0);
+  t.deepEqual(blind.faults.filter(f => !/crafting_table/.test(f)), []);
 });

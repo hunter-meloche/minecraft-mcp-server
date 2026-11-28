@@ -76,7 +76,7 @@ import { VILLAGE_RANGE, lureOn, movesOn, noteBells, noteSeen, peekVillages, vill
 import { smithDropsGoal } from './netherite.js';
 import { shellsGoal } from './hallshells.js';
 import { careNotes, noteLock, outOfHallGoal, villagerCareGoal } from './villagercare.js';
-import { UNSUPERVISED, fetchLine, fetchOf, fetchSafe, heldByFetch, peekFetch, tripLive, wardSeen, type FetchMemory } from './fetch.js';
+import { UNSUPERVISED, fetchLine, fetchOf, fetchSafe, heldByFetch, peekFetch, tripLive, wardOut, wardSeen, type FetchMemory } from './fetch.js';
 import { lockOf } from './villagerwalk.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
@@ -243,6 +243,8 @@ export class Brain {
   private stillSince = 0;
   /** the stand-still (its stillSince) the wedge check has looked at already */
   private wedgeLooked = -1;
+  /** the stand-still (its stillSince) the watch has said it leaves to a villager's lead (said once) */
+  private ledStillSaid = -1;
   /** goals left "until the morning": let go when the game's morning comes (sleeping brings it at once) */
   private morningHold = new Set<string>();
   /** the idle watchdog: where the bot has stood by day since when, and how far it has escalated */
@@ -413,6 +415,11 @@ export class Brain {
     if (typeof o.arm === 'number' && (!Number.isInteger(o.arm) || o.arm < 0)) throw new Error(`arm ${o.arm}: a whole number of trips, 0 or more`);
     const live = tripLive(world, now);
     if (o.method && o.method !== (seen.method ?? 'boat') && live) throw new Error(`a villager is being led (trip ${seen.trip?.id}): the method stays while it is (villager-moves {enabled:false} lets the trip release it or finish)`);
+    // the dry switch stays as it is once a trip is prepared or under way (S1 review N7): dry on mid-lead counted the
+    // bot's job sites as lifted and the way stopped keeping off them; dry off mid-way set a dry trip out real with no
+    // lifts made. Before PREP's lifts, or once the trip is restoring, it may change
+    const t = seen.trip;
+    if (o.dry !== undefined && t && t.state !== 'restore' && (t.state !== 'prep' || !!t.prepared) && !!o.dry !== !!t.dry) throw new Error(`trip ${t.id} is ${t.state === 'prep' ? 'prepared' : t.state}${t.dry ? ' dry' : ''}: the dry switch stays as it is until the trip is over (villager-moves {enabled:false} puts a prepared trip back)`);
     let forget: FetchMemory['wards'][number] | undefined;
     if (o.forget !== undefined) {
       const k = o.forget.trim(), hits = seen.wards.filter(w => w.key === k || w.uuid === k || (k.length >= 8 && (w.key.startsWith(k) || w.uuid?.startsWith(k))));
@@ -564,10 +571,24 @@ export class Brain {
         // stuck: a Baritone job that hasn't moved the bot a block in 3 minutes (pathing round in circles, wedged)
         const here = `${Math.floor(s.position.x)},${Math.floor(s.position.y)},${Math.floor(s.position.z)}`;
         if (here !== this.stillAt || !s.process) { this.stillAt = here; this.stillSince = this.now(); }
+        // a run leading a villager for the fetch (its trip live, or its own section at a yard gate or the lock): neither
+        // the wedge stop nor the stuck stop cuts it. Stopped there, its exit handler released the gate with the bot in
+        // the gateway, and the step-out dug a post beside G with the ward outside, "left for the repair round" (S1
+        // safety N10, S1 follow-up R6). Its own clock, its guards and its section are its net; said once a stand-still.
+        // Not by out.ledBy: the pens round leads an animal with it, and that walk is stepped out of as ever
+        const crit = afield.critical;
+        const fetchLed = (tripLive(world, this.now()) && !SURVIVAL.has(r.goal.name))
+          || (!!crit && crit.by === r.abort.signal && this.now() < crit.until && (crit.why === 'gate' || crit.why === 'lock'));
+        if (fetchLed && s.process && this.now() - this.stillSince > 30_000) {
+          if (this.ledStillSaid !== this.stillSince) {
+            this.ledStillSaid = this.stillSince;
+            this.note(`${r.goal.name} has not moved a block for ${Math.round((this.now() - this.stillSince) / 1000)}s at ${here}, leading a villager: not stopped (the lead's own clock and guards end it)`);
+          }
+        }
         // half a minute without a block's movement: wedged against a fence? step out by hand (Baritone never will).
         // A walk with an animal on its lead too: it never waits in or by a gateway (pens.ts standsClear), so one
         // standing in a gate this long is wedged, and only the brain gets it out (live, Nov 13: wedged in the north gate)
-        if (s.process && this.now() - this.stillSince > 30_000 && this.wedgeLooked !== this.stillSince) {
+        if (!fetchLed && s.process && this.now() - this.stillSince > 30_000 && this.wedgeLooked !== this.stillSince) {
           this.wedgeLooked = this.stillSince;
           const box = { x: Math.floor(s.position.x) - 1, y: Math.floor(s.position.y), z: Math.floor(s.position.z) - 1, width: 3, height: 2, length: 3 };
           const { blocks } = await this.rt.call<{ blocks: (string | null)[] }>('world.region', box).catch(() => ({ blocks: [] as (string | null)[] }));
@@ -578,22 +599,38 @@ export class Brain {
             // out of and put back (live, Nov 13: 1 h 45 min in the cow pen's corner post, every step-out into the post).
             // Up to 20 s with no run to stop: it asks before each dig, step and put-back whether the bot is still the
             // autopilot's (the LLM's tool, or autonomy off, would otherwise run beside it)
-            const got = await getOut(this.rt, world, s.position, blocks ?? [], () => this.enabled && this.now() >= this.leaseUntil).catch(() => undefined);
-            if (got?.line) this.note(got.line);
+            // and nothing dug while a villager is out (fetch.ts wardOut): a post of the yard's ring, a gate, a block of
+            // the lock or the portal's ring dug and not put back is a gap a villager walks out by. The steps are made;
+            // a wedge they do not free is said and left (S1 follow-up R6)
+            const held = wardOut(world, this.now());
+            let digHeld = false;
+            const mayGo = () => {
+              if (!this.enabled || this.now() < this.leaseUntil) return false;
+              if (held) { digHeld = true; return false; }
+              return true;
+            };
+            const got = await getOut(this.rt, world, s.position, blocks ?? [], mayGo).catch(() => undefined);
+            const line = digHeld && got?.line ? got.line.replace(/; left to the one who took over$/, '; not dug: a villager is out (no post, gate or block of the lock is dug then)') : got?.line;
+            if (line) this.note(line);
             this.holdFor(r.goal.name, this.now() + 5000, 'wedged');
             return;
           }
         }
-        if (s.process && this.now() - this.stillSince > 3 * 60_000) {
+        if (!fetchLed && s.process && this.now() - this.stillSince > 3 * 60_000) {
           this.stillSince = this.now();
           await this.stopRunning(`${r.goal.name} looks stuck (no movement for 3 min at ${here})`);
           this.holdFor(r.goal.name, this.now() + 3 * 60_000, 'stuck');
           return;
         }
-        // (a run that leads a villager, out.ledBy its own, is cut by no clock of the brain's but at LEAD_TIMEOUT_MS: a
-        // lead runs by the trip's own clock, to 8990 or 11800, and care's 10 minutes would cut a resume or a rescue
-        // anywhere, a gate held open included; 6.2: only survival cuts a lead)
-        const leads = afield.ledBy === r.abort.signal && !r.abort.signal.aborted;
+        // (a run that leads a villager, out.ledBy its own with a trip live or inside its own section at a yard gate or
+        // the lock (fetchLed; or the trip live by now, after the wedge's read), is cut by no clock of the brain's but at
+        // LEAD_TIMEOUT_MS: a lead runs by the trip's own clock, to 8990 or 11800, and care's 10 minutes would cut a
+        // resume or a rescue anywhere, a gate held open included; 6.2: only survival cuts a lead. The section counts as
+        // the beat does: gateIn's and lockIn's walks, waits and reads before their poll loops can outlast the beat's
+        // 90 s, and a run past its own timeout was cut there, G released shut on the ward in the gateway (S1 follow-up
+        // Y-1). Not the pens round's lead of an animal, which holds out.ledBy too but never a 'gate' or 'lock' section:
+        // its own 8 minutes, as ever)
+        const leads = afield.ledBy === r.abort.signal && !r.abort.signal.aborted && (fetchLed || tripLive(world, this.now()));
         if (this.now() - r.started > (leads ? Math.max(r.goal.timeoutMs, LEAD_TIMEOUT_MS) : r.goal.timeoutMs)) {
           await this.stopRunning(`${r.goal.name} ran out of time`);
           this.holdFor(r.goal.name, this.now() + r.goal.retryMs, 'timed out');
@@ -1012,6 +1049,7 @@ export class Brain {
   private async gateWatch(s: Snapshot, world: WorldMemory): Promise<void> {
     if (s.dimension !== OVERWORLD || !this.worldId) return;
     const want = strictGates(world);
+    this.strictFell(world, want.length);
     if (!want.length) return;
     const f = world.fetch ? peekFetch(world) : undefined, lock = lockOf(world);
     const counted = (world.villages as { hall?: { count?: unknown } } | undefined)?.hall?.count;
@@ -1051,6 +1089,26 @@ export class Brain {
         this.seeWards(world, r.entities, false, s.timeOfDay);
       }
     }
+  }
+
+  /**
+   * The tripwire (S1 follow-up R7): the strict gates fewer than the set last sent the bridge while a villager trip
+   * exists (not restoring) or a villager is out. On Nov 27 they fell 7 -> 6 -> 3 as the yard grew and its old side came
+   * down; with a trip on, that fall is the hazard itself (a gate the closer forgets, a side of the yard open). The halt
+   * stops every new trip and is said; the smaller set is still sent, since the bridge must match the world. With the
+   * yard held while a trip exists (fetch.ts yardHeld) it should never fire. Nothing with no trip and no ward out.
+   */
+  private strictFell(world: WorldMemory, n: number): void {
+    const sent = this.strictSent;
+    if (!sent || sent.world !== this.worldId || n >= sent.n || world.fetch === undefined) return;
+    const t = peekFetch(world).trip, now = this.now();
+    if (!(t && t.state !== 'restore') && !wardOut(world, now)) return;
+    const f = fetchOf(world);
+    if (f.halt) return;
+    const why = `the strict gates fell from ${sent.n} to ${n} while a villager trip is ${t && t.state !== 'restore' ? `${t.state} (trip ${t.id})` : 'out (a ward led, in the lock or astray)'}: the yard's fence or a gate changed under it`;
+    f.halt = { at: now, why };
+    this.note(`villagers: HALT: ${why}`);
+    this.memory.save();
   }
 
   /**

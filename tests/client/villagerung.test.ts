@@ -5,8 +5,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Brain, decide } from '../../src/client/brain/brain.js';
 import { ToolFactory } from '../../src/tool-factory.js';
 import { registerBrainTools } from '../../src/client/brain/brain-tools.js';
-import { pick, workGoals, type WorkTask } from '../../src/client/brain/work.js';
-import { DAWN_URGENCY, LURE_BUDGET, dryNext, fitsMorning, lureNeed, lureSite, lureState, noteVerdict, prepStayIn, tooFarFor, villagersTask } from '../../src/client/brain/villagemove.js';
+import { TRIP_URGENCY, pick, workGoals, type WorkTask } from '../../src/client/brain/work.js';
+import { DAWN_URGENCY, LURE_BUDGET, dryNext, fitsMorning, lureNeed, lureSite, lureState, noteVerdict, prepStayIn, rungClock, tooFarFor, villagersTask } from '../../src/client/brain/villagemove.js';
 import {
   FETCH_WAIT, FETCH_WAIT_MAX, JUDGE_V, WAIT_AGAIN, WAIT_MAX, fetchWait, freshFree, lureOn, noteSeen, peekVillages, siteOpen, villagersLine, waitAgain, wholeLook,
   type Seen, type Verdict, type VillageLook, type VillageSite
@@ -70,6 +70,8 @@ function world(o: { fetch?: FetchMemory; sites?: VillageSite[]; hall?: number } 
   return {
     landmarks: { chests: [], farmland: [] }, leash: 96, yard: { ...YARD }, chestItems: {}, lastDone: {},
     zones: {
+      // (the fence's ring round the yard as it stands, its gates on the line: the yard whole, yardgates.ts yardWhy)
+      fence: [{ x: YARD.x1, y: YARD.y, z: YARD.z1, width: YARD.x2 - YARD.x1 + 1, length: YARD.z2 - YARD.z1 + 1 }],
       hall: [{ ...HALL }], 'hall:gate': [{ ...H }], 'fence:gate': [{ ...WEST_GATE }, { ...SOUTH_GATE }, { ...NORTH_GATE }],
       'lock:gate': [{ ...LOCK.p }], 'lock:socket': [{ ...LOCK.socket }], 'lock:sill': [{ ...LOCK.sill }], 'lock:post': [{ ...LOCK.post }], 'lock:sout': [{ ...LOCK.sOut }],
       'lock:inside': LOCK.inside.map(c => ({ ...c }))
@@ -365,6 +367,79 @@ test('B16 (B "urgent at dawn"): the prepared trip\'s dawn is over the kit and th
   t.is(LURE_BUDGET, 9 * MINUTE);
 });
 
+// (serial: the work queue's run under way is one per process, and a brain's tick elsewhere in this file clears it)
+test.serial('S1 review N11: from its set-out to the first flip (out, survey, first) the rung\'s run stays at the dawn\'s 71, over the kit (70), smelt (66) and the stash; from the hop on (the lead\'s hold) and with the method absent it is TRIP_URGENCY as ever', async (t) => {
+  const running = async (w: WorldMemory, during: (goal: Goal) => void) => {
+    let release: (r: { gain: number; text: string }) => void = () => undefined;
+    // the rung itself, its run held until the test lets it end
+    const task: WorkTask = { ...villagersTask, run: () => new Promise(res => { release = res; }) };
+    const [goal] = workGoals(() => undefined, [task], () => T0);
+    const ctx = {
+      s: look(23_600), world: w, signal: new AbortController().signal, progress: () => undefined, gain: () => undefined, save: () => undefined,
+      status: async () => ({ inWorld: true, username: 'Bot', screen: null, position: { ...HOME }, timeOfDay: 23_600, dimension: 'overworld' }),
+      call: async () => ({}), act: async () => ({ ok: true, text: '' })
+    } as unknown as Parameters<Goal['run']>[0];
+    const done = goal.run(ctx);
+    for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r));
+    during(goal);
+    release({ gain: 0, text: 'ran' });
+    await done;
+  };
+  const w = world({ fetch: lureRecord({ trip: prepared() }) });
+  const dawn = look(23_600);
+  await running(w, goal => {
+    t.is(goal.urgency!(dawn, w), DAWN_URGENCY, 'prepared, setting out');
+    for (const state of ['out', 'survey', 'first'] as const) {
+      (w.fetch as FetchMemory).trip!.state = state;
+      t.is(goal.urgency!(dawn, w), DAWN_URGENCY, state);
+      t.true(goal.urgency!(dawn, w) > kit.priority, `${state}: the kit does not cut it`);
+    }
+    (w.fetch as FetchMemory).trip!.state = 'hop';
+    t.is(goal.urgency!(dawn, w), TRIP_URGENCY, 'the lead\'s hold keeps it from here');
+  });
+  // inert: the method absent, a trip on the records or not, the running rung is the trip's 58
+  const boat = world({ fetch: lureRecord({ method: undefined, trip: prepared({ state: 'out', prepared: undefined }) }) });
+  await running(boat, goal => t.is(goal.urgency!(dawn, boat), TRIP_URGENCY));
+});
+
+test('S1 review #24: the rung\'s lure trip sleeps on a clock its run\'s end cuts short (the exit handler runs inside the brain\'s 5 s, not beside the next goal)', async (t) => {
+  const ac = new AbortController();
+  const clk = rungClock({ signal: ac.signal }, { now: () => T0, began: T0, budgetMs: MINUTE, enough: () => false });
+  t.is(clk.now(), T0);
+  t.is(clk.budgetMs, MINUTE);
+  // (by the order of events, not by a time: the pasture tests beside it hold this worker's event loop for seconds)
+  const nap = clk.sleep(20_000);
+  ac.abort();
+  const how = await Promise.race([nap.then(() => 'slept', (e: Error) => `cut: ${e.message}`), new Promise<string>(res => setImmediate(() => res('still asleep')))]);
+  t.is(how, 'cut: aborted', 'ended at the abort, before the next turn of the event loop');
+  await t.throwsAsync(clk.sleep(10), { message: 'aborted' }, 'given up already: no wait at all');
+  // a run that goes on sleeps its time
+  const live = rungClock({ signal: new AbortController().signal }, { now: () => T0, began: T0, budgetMs: MINUTE, enough: () => false });
+  const t1 = Date.now();
+  await live.sleep(40);
+  t.true(Date.now() - t1 >= 30);
+});
+
+test('S1 follow-up R2: no trip is prepared or set out on a yard that is not whole: lureSite (PREP, the stay-in, care\'s row 10) and the bring say the yard; a trip whose gate is off the fence holds the bring', (t) => {
+  const prepAt = look(7000), dawn = look(23_600), bring = 'bring:village -693,2262';
+  t.true('site' in lureSite(prepAt, world({ fetch: lureRecord() })), 'the whole yard: the west village');
+  const grown = (w: WorldMemory) => { w.fenceMove = { side: 'north', old: { ...YARD } }; w.yard = { ...YARD, z1: YARD.z1 - 16 }; return w; };
+  t.deepEqual(lureSite(prepAt, grown(world({ fetch: lureRecord() }))), { why: 'the yard is not whole: the fence is moving out to the north' });
+  const down = world({ fetch: lureRecord() });
+  delete down.zones!.fence;
+  t.deepEqual(lureSite(prepAt, down), { why: 'the yard is not whole: the fence is not up round the yard as it stands (being rebuilt)' });
+  t.is(prepStayIn(prepAt, grown(world({ fetch: lureRecord() }))), undefined, 'no stay-in for a trip that cannot be prepared');
+  // the bring: whole, it goes; the yard grown under the prepared trip, held, and no dawn urgency
+  t.is(villagersTask.ready(dawn, world({ fetch: lureRecord({ trip: prepared() }) }), bring), null);
+  const held = grown(world({ fetch: lureRecord({ trip: prepared() }) }));
+  t.deepEqual(villagersTask.ready(dawn, held, bring), { cause: 'hold', text: 'villagers: the yard is not whole: the fence is moving out to the north: no trip sets out' });
+  t.is(villagersTask.urgent!(dawn, held), undefined);
+  // the trip's west gate gone from the records (the yard whole by the rest of them)
+  const gone = world({ fetch: lureRecord({ trip: prepared() }) });
+  gone.zones!['fence:gate'] = gone.zones!['fence:gate']!.filter(g => g.x !== WEST_GATE.x);
+  t.deepEqual(villagersTask.ready(dawn, gone, bring), { cause: 'hold', text: 'villagers: the trip\'s west gate (-565, 63, 2183) is no longer on the yard\'s fence: no trip sets out' });
+});
+
 /** A stand-in rung that goes `reach` out. */
 const rung = (reach: WorkTask['reach']): WorkTask => ({
   name: `out ${reach}`, rank: 6, reach, room: 'yard', budgetMs: MINUTE, variants: () => [{ id: 'there', dist: reach === 'yard' ? 0 : 60 }], ready: () => null,
@@ -483,13 +558,37 @@ test('villager-moves (5.5): the method, arm, dry, a halt cleared, the bell, a wa
   r = await tool('villager-moves', { rails: true });
   t.regex(r.text, /^rails: retired under the lure \(the switch is left as it was\)\./);
   t.false(mem.railsHome);
-  // dry off: the switch and a prepared trip's mark both go; arm 0: not armed
+  // the dry switch stays as it is once a trip is prepared or under way (S1 review N7): refused, and nothing of the call
+  // changed (the arm with it); the same value again is no change and goes through
   fetchRecord(mem).trip = prepared({ dry: true });
   r = await tool('villager-moves', { dry: false, arm: 0 });
+  t.true(r.error);
+  t.regex(r.text, /trip 3 is prepared dry: the dry switch stays as it is until the trip is over \(villager-moves \{enabled:false\} puts a prepared trip back\)/);
+  t.true(dryNext(mem));
+  t.true(peekFetch(mem).trip!.dry);
+  t.is(peekFetch(mem).armed, 1, 'not disarmed by a refused call');
+  r = await tool('villager-moves', { dry: true });
+  t.false(r.error, r.text);
+  for (const state of ['out', 'hop', 'gate', 'lock', 'door'] as const) {
+    fetchRecord(mem).trip = prepared({ state, prepared: undefined });
+    r = await tool('villager-moves', { dry: true });
+    t.true(r.error, state);
+    t.regex(r.text, new RegExp(`trip 3 is ${state}: the dry switch stays as it is`));
+    t.is(peekFetch(mem).trip!.dry, undefined, state);
+  }
+  // before PREP's lifts (its reads and kit only) it may change: dry off, the switch and the trip's mark both go; arm 0
+  fetchRecord(mem).trip = prepared({ dry: true, prepared: undefined, prep: { read: T0 - HOUR, kit: T0 - HOUR } });
+  r = await tool('villager-moves', { dry: false, arm: 0 });
+  t.false(r.error, r.text);
   t.false(dryNext(mem));
   t.is(peekFetch(mem).trip!.dry, undefined);
   t.is(peekFetch(mem).armed, undefined);
   t.regex(r.text, /not armed: no trip begins\. not dry: the next trip is a real one\./);
+  // and once the trip is restoring
+  fetchRecord(mem).trip = prepared({ state: 'restore' });
+  r = await tool('villager-moves', { dry: true });
+  t.false(r.error, r.text);
+  t.true(dryNext(mem));
 });
 
 const fetchRecord = (w: WorldMemory) => w.fetch as FetchMemory;

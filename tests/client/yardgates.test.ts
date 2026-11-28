@@ -2,7 +2,7 @@ import test from 'ava';
 import type { GoalContext, Snapshot } from '../../src/client/brain/goals.js';
 import type { Pos, WorldMemory } from '../../src/client/brain/memory.js';
 import type { InventoryItem } from '../../src/client/tools.js';
-import { gateRead, gatesRead, inByGate, leaveYard, openGate, outByGate, outOfPen, penFences, shutGate, shutNow, strictGates, strictSet, throughPenGate, type PenWay } from '../../src/client/brain/yardgates.js';
+import { gateRead, gatesRead, inByGate, leaveYard, onYardFence, openGate, outByGate, outOfPen, penFences, shutGate, shutNow, strictGates, strictSet, throughPenGate, yardWhy, type PenWay } from '../../src/client/brain/yardgates.js';
 import { inHallOrLock } from '../../src/client/brain/fetch.js';
 import { lockOf } from '../../src/client/brain/villagerwalk.js';
 import { brainRun } from '../../src/client/tools.js';
@@ -666,4 +666,40 @@ test('the strict gates: the yard\'s four, the hall\'s, the lock\'s and the porta
   t.like(strictSet(bare.world), { pairs: [], guard: [] });
   // and a world with no yard: none
   t.deepEqual(strictSet(liveWorld({ yard: undefined, zones: {} })), { gates: [], pairs: [], guard: [] });
+});
+
+test('S1 follow-up R1: yardWhy, the yard whole on the records: the live yard is; a fence moving out, the ring off the box (taken down, or the box grown), no gate, a gate off the line each say why; onYardFence by the records', async (t) => {
+  const whole = (): WorldMemory => ({
+    landmarks: { chests: [], farmland: [] }, leash: 96, yard: { ...YARD },
+    zones: { fence: [{ x: YARD.x1, y: YARD.y, z: YARD.z1, width: YARD.x2 - YARD.x1 + 1, length: YARD.z2 - YARD.z1 + 1 }], 'fence:gate': Object.values(GATES).map(g => ({ ...g })) }
+  });
+  t.is(yardWhy(whole()), undefined);
+  t.true(onYardFence(whole(), GATES.west));
+  t.true(onYardFence(whole(), { x: -564.5, y: 63.2, z: 2183.9 }), 'by its cell');
+  t.false(onYardFence(whole(), { x: -549, y: 63, z: 2120 }));
+  t.is(yardWhy({ ...whole(), yard: undefined }), 'no yard');
+  // Nov 27, 06:07: the box grown north, the fence to move out (the old north gate now off the box's line)
+  const grown = whole();
+  grown.fenceMove = { side: 'north', old: { ...YARD } };
+  grown.yard = { ...YARD, z1: YARD.z1 - 16 };
+  t.is(yardWhy(grown), 'the fence is moving out to the north');
+  t.false(onYardFence(grown, GATES.north), 'the trip\'s north gate is no gate of the grown yard');
+  // 06:12: the old side taken down, the zones deleted, the move done but the ring not up yet
+  const down = whole();
+  down.yard = { ...YARD, z1: YARD.z1 - 16 };
+  delete down.zones!.fence;
+  down.zones!['fence:gate'] = [];
+  t.is(yardWhy(down), 'the fence is not up round the yard as it stands (being rebuilt)');
+  // a fence zone that is not the box (the box grown by hand, or an old ring)
+  const off = whole();
+  off.zones!.fence = [{ x: YARD.x1, y: YARD.y, z: YARD.z1 + 16, width: YARD.x2 - YARD.x1 + 1, length: YARD.z2 - YARD.z1 - 15 }];
+  t.is(yardWhy(off), 'the fence is not up round the yard as it stands (being rebuilt)');
+  const none = whole();
+  none.zones!['fence:gate'] = [];
+  t.is(yardWhy(none), 'no gate in the yard\'s fence on the records');
+  const stray = whole();
+  stray.zones!['fence:gate']!.push({ x: -549, y: 63, z: 2150 });
+  t.is(yardWhy(stray), '1 of the yard\'s 5 gate(s) off its fence line');
+  // the pasture's yard, as the fetch's tests build it, is whole
+  t.is(yardWhy(yard().world), undefined);
 });

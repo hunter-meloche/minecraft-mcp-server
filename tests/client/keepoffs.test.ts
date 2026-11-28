@@ -272,6 +272,32 @@ test('E21 R: the yard does not grow and the fence is not moved out while a villa
   t.like(await takeDown.run(moving(record()), { step: 0, data: {} }), { status: 'done', text: 'took down the north side (0 block(s))' });
 });
 
+test('S1 follow-up R3: grow yard and growStep (every caller\'s) wait from a trip\'s first PREP read, before its lifts make wardOut true; a trip restoring holds nothing; nothing with no record', async (t) => {
+  const { yardGrowGoal } = await import('../../src/client/brain/yardgrow.js');
+  const { growStep } = await import('../../src/client/brain/milestones.js');
+  const { wardOut } = await import('../../src/client/brain/fetch.js');
+  const asked = { yardGrow: { width: 9, length: 9, why: 'a barn', at: NOW } };
+  // PREP's read and kit stamped, no lifts yet: wardOut is false (the S1 follow-up's scratch check), the yard is held all the same
+  const read = record({ method: 'lure', trip: trip('prep', { prep: { read: NOW - 60_000, kit: NOW - 30_000 } }) });
+  t.false(wardOut(world({ fetch: read }), NOW));
+  t.is(yardGrowGoal.wants(snap(), world({ ...asked, fetch: read })), null);
+  t.is(yardGrowGoal.wants(snap(), world({ ...asked, fetch: record({ trip: trip('prep') }) })), null, 'from the trip\'s first record on');
+  t.is(yardGrowGoal.wants(snap(), world({ ...asked, fetch: record({ trip: trip('out') }) })), null);
+  t.regex(yardGrowGoal.wants(snap(), world({ ...asked, fetch: record({ trip: trip('restore') }) })) ?? '', /room asked for/, 'restoring: its lifts go back once nothing is out');
+  t.regex(yardGrowGoal.wants(snap(), world(asked)) ?? '', /room asked for/);
+  const calls: string[] = [];
+  const ctx = (fetch?: FetchMemory) => ({ ...blocksCtx(new Map(), {}, calls), world: world(fetch ? { fetch } : {}) }) as GoalContext;
+  const yard = { x1: -16, z1: -16, x2: 16, z2: 16, y: 63 };
+  t.deepEqual(await growStep(ctx(read), yard, { width: 9, length: 9 }, 'barn'),
+    { status: 'blocked', text: 'waiting: a villager trip is prepared or under way (the yard grows for the barn once it is over)', retryMs: 10 * 60_000 });
+  t.deepEqual(calls, [], 'nothing read or levelled');
+  // a ward out says so first, as before
+  t.regex((await growStep(ctx(out({ trip: trip('prep') })), yard, { width: 9, length: 9 }, 'barn')).text, /^waiting: a villager is on its way/);
+  // restoring: past the wait, on to its reads (the call refused here)
+  const on = (fetch: FetchMemory) => ({ ...blocksCtx(new Map(), { call: (async (m: string) => { throw new Error(`on to ${m}`); }) as GoalContext['call'] }), world: world({ fetch }) }) as GoalContext;
+  await t.throwsAsync(growStep(on(record({ trip: trip('restore') })), yard, { width: 9, length: 9 }, 'barn'), { message: 'on to world.region' });
+});
+
 // ------------------------------------------------------------------------------------------------ R: repair and tidy
 
 test('E21 R: the repair round puts back no block the fetch lifted, nor a fence segment it dug for a wedged villager, nor any job block while a villager is out', async (t) => {

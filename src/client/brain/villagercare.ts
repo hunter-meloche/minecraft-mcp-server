@@ -5,7 +5,7 @@ import {
   restoreAll, restoreOrder, tripTo, undo, wardSeen, type Change, type ClockSays, type FetchMemory, type LureClock, type Trip, type Ward, type YardGateWay
 } from './fetch.js';
 import { liveCritical, out as afield } from './pockets.js';
-import { gateRead, gatesRead, inByGate, inFence, openGate, outByGate, shutGate, strictGates, yardGates } from './yardgates.js';
+import { gateRead, gatesRead, inByGate, inFence, onYardFence, openGate, outByGate, shutGate, strictGates, yardGates, yardWhy } from './yardgates.js';
 import { inLock, isStand, lockOf, lockPlanOf, step, type Lock, type LockPlan } from './villagerwalk.js';
 import { gameDay, inHallBox, noteHall, throughLock } from './hallchores.js';
 import { plugOut } from './hallshells.js';
@@ -361,13 +361,19 @@ async function carriedOf(ctx: GoalContext, name: string): Promise<number> {
   return (inv?.items ?? []).filter(i => i.slot < 36 && i.name === name).reduce((a, i) => a + i.count, 0);
 }
 
-/** Why a trip in PREP is put back (2.2 `prep -> restore`): prepared and not out by 2000 (the dawn missed), the moves switched off, the method changed, halt. */
+/** Why a trip in PREP is put back (2.2 `prep -> restore`): prepared and not out by 2000 (the dawn missed), the moves switched off, the method changed, halt, the yard not whole or the trip's gate off its fence (yardgates.ts yardWhy). */
 function prepBack(world: WorldMemory, f: Pick<FetchMemory, 'trip' | 'halt' | 'method'>, tod: number): string | undefined {
   const t = f.trip;
   if (t?.state !== 'prep') return undefined;
   if (world.villagerMoves !== true) return 'villager moves switched off';
   if (f.method !== 'lure') return `the method is ${f.method ?? 'boat'}, not the lure`;
   if (f.halt) return `halted: ${f.halt.why}`;
+  // (the yard not whole, or the trip's gate gone off its fence: the trip would be prepared or set out on a stale gate
+  // into a yard open on one side, S1 follow-up R2, path P1. With the yard held while a trip exists, only a growth begun
+  // before it, or a hand from outside the brain, gets here; row 8 comes before PREP's row 10, so its next part never runs)
+  const yw = yardWhy(world);
+  if (yw) return `the yard is not whole: ${yw}`;
+  if (!onYardFence(world, t.gate.at)) return `its ${t.gate.side} gate is no longer on the yard's fence`;
   const m = morning(tod), p = t.prepared;
   // (by the time of day: past 2000 and before the next PREP's hours; by the game day too, where the idle tally counts one)
   if (p && ((m >= OUT_BY && m < PREP_FROM) || (gameDay(world) > p.day && m >= OUT_BY))) return `prepared and not out by ${OUT_BY}`;
@@ -384,9 +390,11 @@ const restoredHere = (world: WorldMemory) => (e: Change) => e.k !== 'lure' || in
 function leadAsks(world: WorldMemory, f: FetchMemory, now: number): string[] {
   const out: string[] = [];
   if (f.halt) out.push(`HALT: ${f.halt.why}`);
+  const yw = yardWhy(world);
   for (const w of f.wards.filter(x => x.where === 'astray' || x.where === 'dead')) {
     const days = now - w.last.t >= ASTRAY_HOLD;
-    out.push(`ward ${short(w.key)} ${w.where}${w.dim ? ' in the Nether' : ''} at ${fmt(w.last.at)}${w.note ? ` (${w.note})` : ''}${days ? ': 2 game days on, its lifts go back; villager-moves {forget} lets it go' : ''}`);
+    const held = !days && w.where === 'astray' && !w.dim && yw ? `: no rescue while the yard is not whole (${yw})` : '';
+    out.push(`ward ${short(w.key)} ${w.where}${w.dim ? ' in the Nether' : ''} at ${fmt(w.last.at)}${w.note ? ` (${w.note})` : ''}${days ? ': 2 game days on, its lifts go back; villager-moves {forget} lets it go' : held}`);
   }
   out.push(...lockAsks(world, f, now));
   if ((f.why?.prep?.n ?? 0) >= 3) out.push(`PREP declined ${f.why!.prep!.n} days: ${f.why!.prep!.text}`);
@@ -439,8 +447,9 @@ function tripRows(s: Pick<Snapshot, 'now' | 'timeOfDay' | 'position' | 'home'>, 
     else if (day) rows.push({ row: 3, want: `trip ${t.id} ${why}: resumed from its records` });
   }
   // 6. the armed rescue (4.9): the lead's go (armed, no halt), no trip, by day, the clock open for it, within R-8's two days
+  // (not on a yard that is not whole: its lead home would bring the ward into a yard open on one side, R2; row 9 says it)
   const lost = f.wards.find(w => w.where === 'astray' && !w.dim);
-  if (!t && lost && armedOk(f) && !f.halt && day && now - lost.last.t < ASTRAY_HOLD) {
+  if (!t && lost && armedOk(f) && !f.halt && day && now - lost.last.t < ASTRAY_HOLD && !yardWhy(world)) {
     const c = rescueClock(world, lost, tod);
     if (c?.go === 'on') rows.push({ row: 6, want: `ward ${short(lost.key)} astray at ${fmt(lost.tether ?? lost.last.at)}: the armed rescue (${c.text})` });
   }

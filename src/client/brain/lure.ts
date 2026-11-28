@@ -6,17 +6,17 @@ import { brainRun } from '../tools.js';
 import { out as afield } from './pockets.js';
 import { Ground, offSegment, readBand } from './boatroute.js';
 import {
-  APPROACH_FIRST_S, APPROACH_S, ARRIVE_S, BELL, FIRST_TRIES, GATE_OPEN_MAX, HOLD_MS, HOP_LEN, HOP_MAX, HOP_MIN, IN_BY, LAST_P, LURES, MISSES, MISSES_TRIP,
+  APPROACH_FIRST_S, APPROACH_S, BELL, FIRST_TRIES, GATE_OPEN_MAX, HOLD_MS, HOP_LEN, HOP_MAX, HOP_MIN, IN_BY, LAST_P, LURES, MISSES, MISSES_TRIP,
   NEUTRAL_MAX, NIGHT, RELEASE_R, RIVAL_R, SESSION, STILL_S, YARD_HOP, clock, dropEntry, endTrip, fetchOf, floorOk, journal, needLeft, needParts, newTrip,
   noteWhy, peekFetch, reconcile, restoreAll, settle, startLate, startNeed, tripTo, beat, cutTrip, undo, wardSeen,
   type Change, type ClockSays, type FetchMemory, type LureClock, type Looked, type Trip, type Ward, type WardSight, type YardGateWay
 } from './fetch.js';
 import {
-  RETRACE_DROP, botStand, corridor, firstSpot, gateLane, hopSpot, inLock, lockOf, pathFor, reachCells, ringPlanOf, stand, withBlock, yardWay, isStand,
-  type Area, type Circle, type HopSpot, type JobSite, type Lock, type YardGround
+  RETRACE_DROP, botStand, corridor, fenceFaults, firstSpot, gateLane, hopSpot, inLock, lockOf, pathFor, reachCells, ringPlanOf, stand, withBlock, yardWay, isStand,
+  type Area, type Circle, type FenceRead, type HopSpot, type JobSite, type Lock, type YardGround
 } from './villagerwalk.js';
-import { SIDE_STEP, gateRead, gatesRead, outByGate, shutGate, yardGates, type YardGate } from './yardgates.js';
-import { ILLAGER, JOB_SITE, peekVillages, pennedIn, siteNow, usedHow, variantOf, villagesOf, type Seen, type VillageSite } from './village.js';
+import { SIDE_STEP, gateRead, gatesRead, inFence, outByGate, shutGate, strictGates, strictSet, yardGates, yardWhy, type YardGate } from './yardgates.js';
+import { ILLAGER, JOB_SITE, USED_VILLAGERS, peekVillages, pennedIn, siteNow, usedHow, variantOf, villagesOf, type Seen, type VillageSite } from './village.js';
 import { dangerAt, dryNext, here, lureSite, playerNow, say, walkOut, PLAYER_SIGHT } from './villagemove.js';
 import { readShells } from './hallshells.js';
 import { gameDay, hallBeds, hallChoresOf, hallSites, headcount, inHallBox, noteHall } from './hallchores.js';
@@ -101,6 +101,15 @@ const RUN_ON_ARRIVE_S = 30;
 /** The ward's way through the yard gate: through 1.5 inside the fence line; the gate held 35 s at most with it standing in the gateway. */
 const THROUGH = 1.5;
 const GATE_IN_GATEWAY_MAX = 35_000;
+/** G shut against a hostile within 8 outside or an animal heading out within 2.5 inside (4.6 G step 4): this long, this many times a try. */
+const SHUT_SPELL_MS = 3000;
+const SHUT_SPELLS = 5;
+const HOSTILE_OUT_R = 8;
+const ANIMAL_OUT_R = 2.5;
+/** The gate's lure taken up and the bot's walk through G (it opens G): about this long, which a bell-alive ward's gate step must still have before the bell. */
+const GATE_IN_START_S = 6;
+/** A bell-alive ward's open spell at G ends this many ticks before BELL: a poll, and the release's click and read. */
+const GATE_SHUT_TICKS = 40;
 /** A critical section round the yard gate's and the lock's steps (only flight cuts them). */
 const CRITICAL_MS = 45_000;
 /** Animals of the bot's near a gate: waited out this long. */
@@ -110,8 +119,9 @@ const LOCK_TRIES = 3;
 /** DOOR: two reads this far apart find no villager in the lock and the ward in the hall; the run waits for them this long, then care does. */
 const DOOR_GAP_S = 10;
 const DOOR_WAIT_S = 90;
-/** Who stands about the socket as it opens: a baby within this is waited out. */
+/** Who stands about the socket as it opens: a baby within this is waited out, this long at most (then the door is care's). */
 const BABY_R = 3;
+const DOOR_BABY_S = 30;
 /** Monsters the watch answers (4.3's guards). */
 const ZOMBIE = /^(zombie|husk|drowned|zombie_villager)$/;
 const ZOMBIE_R = 16;
@@ -125,6 +135,8 @@ const GOLEM_WAIT_S = 10;
 const GOLEM_ASIDE = 3;
 /** D29: a ward that strolled more than 16 off its lure (before 2000 the lure is no pin) is waited for this long to come back by it before the break. */
 const BACK_S = 30;
+/** UNWEDGE step 1: the cells looked at for the lure on a still ward's other side lie about this far beyond it, away from the lure it could not reach. */
+const SIDE_NEAR = 4;
 /** E34: a pen's gate held for the ward this long at most (as G is, 4.6), its animals by the gate inside waited out. */
 const PEN_OUT_S = 25;
 /** The lure, fixed in S1 (decision 16), and the profession it gives. */
@@ -180,6 +192,34 @@ const yardArea = (world: WorldMemory): Area | undefined => (world.yard ? { x1: w
 const yardGround = (world: WorldMemory): YardGround | undefined => (world.yard ? { ...yardArea(world)!, y: world.yard.y, built: [] } : undefined);
 const inYard = (world: WorldMemory, p: { x: number; z: number }) => inArea(yardArea(world), { x: Math.floor(p.x), z: Math.floor(p.z) });
 
+/**
+ * The yard's fence read as blocks (R5: villagerwalk.ts fenceFaults), in one world.region of the yard's box at its
+ * level + 1..3. Undefined: no yard. A read that failed is every cell unread.
+ */
+async function fenceRead(ctx: Pick<GoalContext, 'call' | 'world'>): Promise<FenceRead | undefined> {
+  const y = ctx.world.yard;
+  if (!y) return undefined;
+  const box = { x: y.x1, y: y.y + 1, z: y.z1, width: y.x2 - y.x1 + 1, height: 3, length: y.z2 - y.z1 + 1 };
+  const b = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', box, 60_000).catch(() => undefined))?.blocks;
+  const state = (x: number, yy: number, z: number): string | null | undefined => {
+    const ix = x - box.x, iy = yy - box.y, iz = z - box.z;
+    if (ix < 0 || iy < 0 || iz < 0 || ix >= box.width || iy >= box.height || iz >= box.length) return undefined;
+    return Array.isArray(b) ? b[ix + iz * box.width + iy * box.width * box.length] ?? null : null;
+  };
+  return fenceFaults(y, (ctx.world.zones?.['fence:gate'] ?? []).map(g => ({ x: g.x, y: g.y, z: g.z })), { state });
+}
+/**
+ * What a fence read says against a trip: its first fault (and how many more); or, where `unread` is 'decline', more
+ * than a quarter of the ring not read (no chunk) is a decline too. 'stand': the cells not read let the last whole read
+ * stand (the gate step: the yard's far end may lie past the client's chunks; the dawn read it whole). Undefined: on.
+ */
+function fenceWhy(r: FenceRead | undefined, unread: 'decline' | 'stand'): string | undefined {
+  if (!r) return 'no yard to read';
+  if (r.faults.length) return `${r.faults[0]}${r.faults.length > 1 ? ` (and ${r.faults.length - 1} more)` : ''}`;
+  if (unread === 'decline' && r.unread * 4 > r.ring) return `the yard's fence not read: ${r.unread} cell(s) with no chunk`;
+  return undefined;
+}
+
 // ------------------------------------------------------------------------------------------------ what a run keeps in memory
 
 /**
@@ -222,6 +262,10 @@ interface Plan {
   /** when the ward's health last fell, and the last hostile seen within 8 of it: a ward gone within 3 s of either is dead (2.1) */
   fellAt?: number;
   hostileBy?: { name: string; t: number };
+  /** the yard found not whole with the ward inside it: said once (the lead goes on to the lock) */
+  yardSaid?: boolean;
+  /** the first lure's spots that took no ward: none of them is asked again (4.1's nearer spot, C7's one off: another cell) */
+  spentAt?: Pos[];
 }
 const plans = new WeakMap<WorldMemory, Plan>();
 
@@ -311,8 +355,12 @@ async function hallFor(ctx: GoalContext): Promise<{ box: Area; shut: boolean } |
 }
 /** The cells a lift of the journal holds (their job sites exempt from the rival test: lifted) and this trip's lures. */
 const liftedCells = (f: FetchMemory) => f.journal.filter(e => e.k === 'lift').map(e => e.at);
-/** The same for a plan: a dry trip's would-be lifts (the bot's own job sites it saw) count as made, so the plan is the real one's. */
-const liftedFor = (world: WorldMemory, plan: Plan, t: Trip) => [...liftedCells(fetchOf(world)), ...(t.dry ? plan.sites.filter(s => whose(world, s) === 'own').map(s => s.at) : [])];
+/**
+ * The same for a plan: a trip prepared dry has its would-be lifts (the bot's own job sites it saw) counted as made, so
+ * the plan is the real one's. Only one prepared dry (`prep.dry`, its lifts only said): a dry switch turned on over a
+ * trip whose lifts were real (N7) changes nothing of what its way keeps off.
+ */
+const liftedFor = (world: WorldMemory, plan: Plan, t: Trip) => [...liftedCells(fetchOf(world)), ...(t.dry && t.prep.dry ? plan.sites.filter(s => whose(world, s) === 'own').map(s => s.at) : [])];
 const tripLures = (f: FetchMemory, trip: number) => f.journal.filter(e => e.k === 'lure' && e.trip === trip).map(e => e.at);
 
 // ------------------------------------------------------------------------------------------------ PREP (4.1, 4.5)
@@ -584,6 +632,12 @@ export async function prep(ctx: GoalContext, clk: LureClock = realClock(ctx)): P
   const dawn = t < IN_BY && t > -24_000 + PREP_TO && !evening;
   const fresh = (k: 'read' | 'kit' | 'lifts') => stamped(k) && (dawn || now - f0.trip!.prep[k]! <= STALE_MS);
   if (!evening && !(dawn && stamped('read') && stamped('kit'))) return { ok: false, text: `no PREP at time of day ${Math.round(tod)} (from ${PREP_FROM} the day before)` };
+  // (the yard whole on the records, in every part, fresh stamps and the dawn's lifts too: a growth that moved the box or
+  // took a side down since the read leaves the gate, its lane and the yard way read on a yard that is gone, the dawn
+  // path P1 of Nov 27's growth; and none asked for: it would move the fence under the trip)
+  const yw = yardWhy(world);
+  if (yw) return declined(ctx, `the yard is not whole: ${yw}`, now);
+  if (world.yardGrow) return declined(ctx, `a yard growth is asked for (${world.yardGrow.width}x${world.yardGrow.length} for ${world.yardGrow.why}): the yard grows first, a trip after`, now);
   const lock = lockOf(world);
   if (!lock) return declined(ctx, 'no lock stands in front of the hall', now);
   let acted = false;
@@ -597,6 +651,9 @@ export async function prep(ctx: GoalContext, clk: LureClock = realClock(ctx)): P
     const shells = await readShells(ctx);
     if (shells.lock.faults.length) return declined(ctx, `the lock is not ready: ${shells.lock.faults[0].text}`, now);
     if (shells.ring.faults.length) return declined(ctx, `the portal's ring is not ready: ${shells.ring.faults[0]}`, now);
+    // (the fence itself, as blocks: a dug post, a creeper's hole, a gate nobody wrote down, a step against it inside)
+    const fw = fenceWhy(await fenceRead(ctx), 'decline');
+    if (fw) return declined(ctx, `the yard's fence: ${fw}`, now);
   }
   // (a new trip's village: the one choice of it, villagemove.ts lureSite, on the lock and the ring as just read)
   const pick = chosen ? { site: chosen } : prepSite({ ...ctx.s, now, timeOfDay: tod }, world);
@@ -631,7 +688,11 @@ export async function prep(ctx: GoalContext, clk: LureClock = realClock(ctx)): P
     ctx.save?.();
     say(ctx, `prep kit: ${LURES} ${LURE}`);
   }
-  // part 3: the lifts, last (from 9000, or at dawn while the trip still fits)
+  // part 3: the lifts, last (from 9000, or at dawn while the trip still fits); the trip's gate still one of the yard's
+  // (its read may be of the evening before), the spares that are not dropped
+  const onLine = yardGates(world);
+  if (!onLine.some(g => same(g.gate, trip.gate.at))) return declined(ctx, `the trip's ${trip.gate.side} gate at ${fmt(trip.gate.at)} is no longer on the yard's fence`, now, acted);
+  trip.spare = trip.spare.filter(sp => onLine.some(g => same(g.gate, sp.at)));
   const needS = startNeed(needParts(site, ctx.s.home ?? ctx.s.position, trip.gate.outer, trip.gate.yard));
   const liftsOk = (tod >= LIFTS_FROM && tod <= PREP_TO) || (dawn && !startLate(tod, needS + LIFTS_SLACK_S));
   if (!liftsOk) {
@@ -786,12 +847,15 @@ async function release(ctx: GoalContext, clk: LureClock, plan: Plan, why: string
  * (nothing of the bot's left in the open by plan), every strict gate read shut, the ward astray where it was last
  * seen, and `halt`: the lead decides (S1). The lifts stay for 2 game days (R-8).
  */
-async function stop(ctx: GoalContext, clk: LureClock, plan: Plan, why: string): Promise<LeadEnd> {
+async function stop(ctx: GoalContext, clk: LureClock, plan: Plan, why: string, o: { keepLure?: boolean } = {}): Promise<LeadEnd> {
   const f = fetchOf(ctx.world), t = f.trip!, w = wardOf(f), now = clk.now();
-  const left = await lureUp(ctx, plan, now);
+  // (`keepLure`: the standing lure is left as the ward's tether, inside the fence: by a G that will not shut, the ward
+  // drawn into the yard is held there, and one freed beside it walks out; RESTORE holds a tether while its ward is out)
+  const kept = o.keepLure ? standing(f, t) : undefined;
+  const left = kept ? '' : await lureUp(ctx, plan, now);
   for (const g of await gatesRead(ctx, ctx.world)) if (g.open) await shutGate(ctx, g.at);
   const at = w?.last.at ?? (await here(ctx));
-  if (w) { w.where = 'astray'; w.note = `stopped: ${why}`.slice(0, 120); delete w.tether; }
+  if (w) { w.where = 'astray'; w.note = `stopped: ${why}`.slice(0, 120); if (kept) w.tether = { ...kept.at }; else delete w.tether; }
   f.halt = { at: now, why: `STOPPED at ${fmt(at)}: ${why} (trip ${t.id}); villager-moves {halt:false, arm:1} leads it in by day`.slice(0, 300) };
   const text = `STOPPED at ${fmt(at)}: ${why}${left}`;
   say(ctx, text);
@@ -899,6 +963,12 @@ async function guards(ctx: GoalContext, clk: LureClock, plan: Plan, look: Look, 
   // the lead's stop (villager-moves {enabled:false}, 2.2 hop -> RELEASE): a trip not committed is let go by its
   // village at once; a committed one is finished, the safe end (set-autonomy {enabled:false} cuts it)
   if (ctx.world.villagerMoves !== true && !t.committed) return release(ctx, clk, plan, 'villager moves switched off', 'late');
+  // the yard not whole on the records (R4: a growth's fence moving, a side taken down, a gate off the line): outside the
+  // fence no farther toward it (not committed, let go by its village; committed, stopped: the lure up, the ward astray
+  // outside, halt, never through G into a yard open somewhere); inside, on to the lock, which holds by its own gates
+  const yw = yardWhy(ctx.world);
+  if (yw && !inside) return t.committed ? stop(ctx, clk, plan, `the yard is not whole: ${yw}`) : release(ctx, clk, plan, `the yard is not whole: ${yw}`, 'late');
+  if (yw && !plan.yardSaid) { plan.yardSaid = true; say(ctx, `the yard is not whole (${yw}): on to the lock, which holds by its own gates`); }
   // a screen (a trade window: the use key on a villager): closed; twice, halt
   if (look.screen) {
     await ctx.call('container.close', {}).catch(() => undefined);
@@ -1092,9 +1162,10 @@ function nearSpot(plan: Plan, world: WorldMemory, wc: Pos, cells: readonly Pos[]
 }
 
 /**
- * UNWEDGE step 1's spot (4.3): a cell for the lure on the still ward's other side (`side`: the old lure mirrored through
- * it), the far side only, nearest that point first, by nearSpot (it stands by it: no hop's least progress asked). Never
- * in the hall, the lock or a pen, within 5 of the portal's ring, in someone's build or an avoid circle.
+ * UNWEDGE step 1's spot (4.3): a cell for the lure on the still ward's other side (`side`: SIDE_NEAR beyond it, away from
+ * the lure it could not reach), the far side only, nearest that point first, by nearSpot (it stands by it: no hop's
+ * least progress asked). Never in the hall, the lock or a pen, within 5 of the portal's ring, in someone's build or an
+ * avoid circle.
  */
 function sideSpot(plan: Plan, world: WorldMemory, t: Trip, wc: Pos, side: Pos, me: Pos, now: number, lock: Lock | undefined, ring: Area | undefined): Spot | undefined {
   const ax = side.x - wc.x, az = side.z - wc.z, cells: Pos[] = [];
@@ -1172,13 +1243,18 @@ function spotOff<S extends { block: Pos } | { why: string }>(plan: Plan, ask: ()
   return { why: 'every spot near a pin' } as S;
 }
 /** The next lure's spot from where the ward stands (hopSpot), toward the way's point `len` on; the gate's spot as the last hop outside, S_out from the post as the last inside. */
-async function spotFor(ctx: GoalContext, plan: Plan, t: Trip, wc: Pos, rest: Pos[], inside: boolean, len: number, me: Pos, now: number, lock: Lock | undefined, ring?: Area): Promise<Spot | { why: string }> {
+async function spotFor(ctx: GoalContext, plan: Plan, t: Trip, wc: Pos, rest: Pos[], inside: boolean, len: number, me: Pos, now: number, lock: Lock | undefined, ring?: Area, so: { side?: boolean } = {}): Promise<Spot | { why: string }> {
   const f = fetchOf(ctx.world), kept: { at: Pos; t: number }[] = [];
   const o = {
     bot: cell(me), retrace: !t.committed, ...(plan.home ? { home: plan.home } : {}), zones: plan.zones, avoid: plan.golem ? [...t.avoid, plan.golem] : t.avoid, sites: plan.sites,
     lifted: liftedFor(ctx.world, plan, t), hall: await hallFor(ctx), lures: tripLures(f, t.id), used: plan.used, now, yard: yardGround(ctx.world),
     ...(ring && inside ? { keep: [{ ...ring, d: 5, why: '5 off the portal\'s ring' }] } : {})
   };
+  // (UNWEDGE's spot toward the ward's other side: neither the gate's spot nor S_out, a hop spot toward that point alone)
+  if (so.side) {
+    const s = spotOff(plan, () => hopSpot(plan.ground, wc, rest[0], { ...o, len, used: [...plan.used, ...kept] }), kept, now);
+    return 'why' in s ? { why: `no cell for a lure on the other side of the ward at ${fmt(wc)}: ${s.why}` } : s;
+  }
   if (!inside) {
     const m = gateSpotMid(t.gate), dm = horiz(wc, m);
     if (dm <= HOP_MAX + 1) {
@@ -1356,11 +1432,16 @@ async function lost(ctx: GoalContext, clk: LureClock, plan: Plan, w: Ward): Prom
   if (fell) return astray(ctx, clk, plan, `gone at ${fmt(at)} as its health fell (${plan.health.join(' > ')}): dead, not searched for`, true);
   if (hostile) return astray(ctx, clk, plan, `gone at ${fmt(at)} with a ${hostile.name} within 8 of it: dead, not searched for`, true);
   say(ctx, `lost the ward from sight at ${fmt(at)}: the lure stays; looking round`);
+  // (the trip's beat renewed through the walk and the search: up to 100 s without it and tripLive lapses (90 s), so a
+  // restart, a person's acting call and the thunder's cut would all be let through mid-search)
+  beat(ctx.world, clk.now());
   await walkTo(ctx, cell(at), 4);
+  beat(ctx.world, clk.now());
   const until = clk.now() + SEARCH_S * 1000;
   while (clk.now() < until) {
     stopped(ctx);
     const look = await lookNow(ctx, clk);
+    beat(ctx.world, look.now);
     if (!wardOf(fetchOf(ctx.world))) return dropped(ctx, clk, plan, OFF_RECORDS);
     const s = sightOf(ctx.world, look, standing(fetchOf(ctx.world), fetchOf(ctx.world).trip!)?.at);
     if (s?.taken) return dropped(ctx, clk, plan, s.taken);
@@ -1392,10 +1473,12 @@ function penAt(world: WorldMemory, c: Pos): { name: string; box: Area; gate: Pos
 
 /**
  * E34: the ward in a pen of the bot's in the yard (its gate left open behind a stroll): led out by the pen's gate as by
- * G (4.6), inside a critical section: the pen's animals by the gate inside waited out; the hold on the shut gate first
- * (journal first), the ward's lure up (jobless at once), the bot to 2 outside the gate and 1 aside, the gate read open,
- * a lure 3 outside on its axis; the hold renewed each second until the ward is 1.5 outside the gate's line, then
- * released shut and read shut. Not out in PEN_OUT_S: the lure up, stopped or let go (the clock's way).
+ * G (4.6), inside a critical section: the pen's animals by the gate inside waited out; the ward's lure up (jobless at
+ * once) and the bot to 2 outside the gate and 1 aside (the bot walks to it outside the pen: no walk of its own through
+ * the pen's gate), then the hold on the shut gate (journal first), the gate read open, held again, a lure 3 outside on
+ * its axis; the hold renewed each second until the ward is 1.5 outside the gate's line, then released shut and read
+ * shut. The cap, PEN_OUT_S from the hold (INV-3), is then the open spell's whole, however far the bot walked to the
+ * pen. Not out in it: the lure up, stopped or let go (the clock's way).
  */
 async function penOut(ctx: GoalContext, clk: LureClock, plan: Plan, pen: { name: string; box: Area; gate: Pos; out: [number, number] }): Promise<'on' | LeadEnd> {
   const world = ctx.world, f = fetchOf(world), t = f.trip!, w = wardOf(f)!, G = pen.gate, [dx, dz] = pen.out;
@@ -1407,16 +1490,19 @@ async function penOut(ctx: GoalContext, clk: LureClock, plan: Plan, pen: { name:
     let look = await lookNow(ctx, clk);
     while (animalsBy(look.rows, by, 2).length && clk.now() < until) { await clk.sleep(1000); look = await lookNow(ctx, clk); }
     if (animalsBy(look.rows, by, 2).length) return stopNot(ctx, clk, plan, t, `the ward in the ${pen.name.slice(4)} pen, its animals by the gate`);
-    critical(ctx, 'gate');
-    const ge = journal(ctx, { k: 'gate', trip: t.id, at: { ...G }, which: 'yard', until: clk.now() + HOLD_MS, t: clk.now() });
-    await ctx.call('gates.hold', { x: G.x, y: G.y, z: G.z, ms: HOLD_MS }).catch(() => undefined);
-    // (the cap counts from the hold, as G's does: INV-3's 25 s, whatever the lure's take and the walk cost)
-    const opened = clk.now();
     const L = standing(f, t);
     if (L) await takeLure(ctx, plan, L, clk.now());
     await walkTo(ctx, { x: G.x + 2 * dx + dz, y: G.y, z: G.z + 2 * dz + dx });
+    // (the hold once the bot stands by the gate, in a section renewed with it: the cap counts from the hold, as G's
+    // does, INV-3's 25 s, and the take and the walk are spent before it)
+    critical(ctx, 'gate');
+    const ge = journal(ctx, { k: 'gate', trip: t.id, at: { ...G }, which: 'yard', until: clk.now() + HOLD_MS, t: clk.now() });
+    await ctx.call('gates.hold', { x: G.x, y: G.y, z: G.z, ms: HOLD_MS }).catch(() => undefined);
+    const opened = clk.now();
     if ((await gateRead(ctx, G)) !== true) await ctx.call('useOn', { x: G.x, y: G.y, z: G.z, face: 'up', toggle: true }).catch(() => undefined);
     if ((await gateRead(ctx, G)) !== true) { await shutDown(ctx, G, ge); return stopNot(ctx, clk, plan, t, `the ${pen.name.slice(4)} pen's gate at ${fmt(G)} would not open`); }
+    critical(ctx, 'gate');
+    await ctx.call('gates.hold', { x: G.x, y: G.y, z: G.z, ms: HOLD_MS }).catch(() => undefined);
     const at = { x: G.x + 3 * dx, y: G.y, z: G.z + 3 * dz };
     const put = await putLure(ctx, plan, t, at, 'yard', clk.now());
     let held = clk.now(), through = false;
@@ -1425,6 +1511,7 @@ async function penOut(ctx: GoalContext, clk: LureClock, plan: Plan, pen: { name:
       if (clk.now() - held >= 1000) { critical(ctx, 'gate'); await ctx.call('gates.hold', { x: G.x, y: G.y, z: G.z, ms: HOLD_MS }).catch(() => undefined); held = clk.now(); ge.until = clk.now() + HOLD_MS; }
       const l = await lookNow(ctx, clk), row = rowOf(l.rows, w);
       beat(world, l.now);
+      seenAt(w, row, l);
       if (row?.position && (row.position.x - (G.x + 0.5)) * dx + (row.position.z - (G.z + 0.5)) * dz >= THROUGH) { through = true; break; }
       await clk.sleep(POLL_MS);
     }
@@ -1454,7 +1541,7 @@ async function penOut(ctx: GoalContext, clk: LureClock, plan: Plan, pen: { name:
 async function hops(ctx: GoalContext, clk: LureClock, plan: Plan, inside: boolean): Promise<'next' | LeadEnd> {
   const world = ctx.world, lock = lockOf(world), rz = ringPlanOf(world)?.zone;
   const ring = rz ? { x1: rz.x, z1: rz.z, x2: rz.x + rz.width - 1, z2: rz.z + rz.length - 1 } : undefined;
-  let len: number | undefined, side: Pos | undefined, gone: number | undefined;
+  let len: number | undefined, side: { near: Pos; far: Pos } | undefined, gone: number | undefined;
   for (;;) {
     stopped(ctx);
     const f = fetchOf(world), t = f.trip!, w = wardOf(f);
@@ -1524,8 +1611,11 @@ async function hops(ctx: GoalContext, clk: LureClock, plan: Plan, inside: boolea
     // the spot (the old lure's cell as it will be: air)
     if (L) plan.ground.set(L.at.x, L.at.y, L.at.z, 'air');
     const aim = len ?? (inside ? YARD_HOP : HOP_LEN), wedged = side;
-    // (UNWEDGE step 1: a cell on the ward's other side, by it already: no hop's least progress asked of it)
-    const S: Spot | { why: string } = wedged ? sideSpot(plan, world, t, wc, wedged, look.me, clk.now(), lock, ring) ?? { why: `no cell for a lure on the other side of the ward at ${fmt(wc)}` }
+    // (UNWEDGE step 1: a cell on the ward's other side, by it already: no hop's least progress asked of it; none there
+    // (the bot stands a hop's length off by the lure the ward could not reach, beyond its walk to the near cells), a hop
+    // spot toward that side, as far as 11)
+    const S: Spot | { why: string } = wedged
+      ? sideSpot(plan, world, t, wc, wedged.near, look.me, clk.now(), lock, ring) ?? await spotFor(ctx, plan, t, wc, [wedged.far], inside, 11, look.me, clk.now(), lock, ring, { side: true })
       : await spotFor(ctx, plan, t, wc, rest, inside, aim, look.me, clk.now(), lock, ring);
     if (L) plan.ground.set(L.at.x, L.at.y, L.at.z, LURE);
     len = undefined;
@@ -1620,7 +1710,14 @@ async function hops(ctx: GoalContext, clk: LureClock, plan: Plan, inside: boolea
         continue;
       case 'still': {
         const r = await unwedge(ctx, clk, plan, t, w, put.entry, (await lookWard(ctx, clk, w)) ?? wAt);
-        if (r === 'side') { const p = (await lookWard(ctx, clk, w)) ?? wAt; side = { x: Math.floor(2 * p.x - S.block.x), y: S.block.y, z: Math.floor(2 * p.z - S.block.z) }; continue; }
+        if (r === 'side') {
+          // (the other side is the direction away from the lure it could not reach, not as far again: wedged mid-hop it
+          // stands 8-22 off, and the mirrored point lay 20 past it, out of the bot's walk)
+          const p = (await lookWard(ctx, clk, w)) ?? wAt, ax = p.x - (S.block.x + 0.5), az = p.z - (S.block.z + 0.5), d = Math.hypot(ax, az) || 1;
+          const off = (n: number) => ({ x: Math.floor(p.x + n * ax / d), y: S.block.y, z: Math.floor(p.z + n * az / d) });
+          side = { near: off(SIDE_NEAR), far: off(HOP_LEN) };
+          continue;
+        }
         if (r === 'again') continue;
         return r;
       }
@@ -1663,59 +1760,122 @@ function critical(ctx: GoalContext, why: 'gate' | 'lock', ms = CRITICAL_MS): () 
 const animalsBy = (rows: readonly Looked[], at: Pos, r: number) => rows.filter(e => e.position && e.name !== 'villager' && e.name !== 'player' && e.name !== 'item'
   && !/zombie|skeleton|creeper|spider|pillager|vindicator|witch|enderman|slime|phantom|drowned|husk/.test(e.name) && dist(e.position, mid(at)) <= r);
 
+/** Hostiles a gate step shuts G against (4.6 G step 4's second rule). */
+const HOSTILE = /zombie|husk|drowned|skeleton|stray|creeper|spider|pillager|vindicator|evoker|ravager|vex|witch|enderman|slime|phantom/;
+
+/** The ward's last place from a row of the gate's or the lock's own looks (they read it by uuid, not by wardSeen): STOP's and the halt's words name where it is. */
+function seenAt(w: Ward, row: Looked | undefined, l: Pick<Look, 'now' | 'tod'>): void {
+  if (row?.position) w.last = { ...w.last, at: { ...row.position }, t: l.now, tod: l.tod };
+}
+
 /**
- * GATE (4.6, `gateIn`): a single hop through the yard gate, inside a critical section. Every strict gate read shut;
- * the lane read again (the bot's strays dug, anything else: the next gate); no animal of the bot's within 6 inside.
- * The hold on the SHUT gate before the walk (a hold never opens a gate; taken after the walk the closer has shut it
- * before the bot stops 2 beyond it); the gate's lure up; the bot through to 2 inside and 1 aside; the gate read open;
- * the hold renewed each second; a lure 4-6 inside on the lane's axis. The ward 1.5 inside the fence line: released
- * shut, read shut, the entry off. Never shut on it before the cap: the lure 2 farther in and the cap to 35 s. Three
- * tries, then the next gate of the spares, hop by hop.
+ * Why G is no gate to lead a ward in by (R4, asked before each try's hold, so before the gate spot's lure comes up):
+ * no longer one of the yard's gates on its fence line (a growth moved the box, the records lost it), its block not a
+ * fence gate (dug, or the moved side's), or the fence about it not whole as blocks (R5: a gap, a gate nobody wrote
+ * down, a step against it inside; its unread cells let the dawn's whole read stand). `gate`: G itself (the next gate
+ * may do); `fence`: the yard (no gate does). Undefined: on.
+ */
+async function gateGone(ctx: GoalContext, G: Pick<YardGateWay, 'at' | 'side'>): Promise<{ gate?: string; fence?: string } | undefined> {
+  const world = ctx.world;
+  const yw = yardWhy(world);
+  if (yw) return { fence: `the yard is not whole: ${yw}` };
+  if (!yardGates(world).some(g => same(g.gate, G.at))) return { gate: `the ${G.side} gate at ${fmt(G.at)} is no longer one of the yard's` };
+  const st = (await ctx.call<{ blocks?: (string | null)[] }>('world.region', { ...G.at, width: 1, height: 1, length: 1 }).catch(() => undefined))?.blocks?.[0];
+  if (st !== null && st !== undefined && !/_fence_gate$/.test(idOf(st))) return { gate: `no gate stands at ${fmt(G.at)} (${idOf(st)})` };
+  const fw = fenceWhy(await fenceRead(ctx), 'stand');
+  if (fw) return { fence: `the yard's fence: ${fw}` };
+  return undefined;
+}
+
+/**
+ * GATE (4.6, `gateIn`): a single hop through the yard gate, inside a critical section. The yard whole on the records;
+ * every strict gate read shut; the lane read again (the bot's strays dug, anything else: the next gate); no animal of
+ * the bot's within 6 inside. Before each try's hold, G still one of the yard's and a fence gate as read, and the fence
+ * whole as blocks (gateGone). The hold on the SHUT gate before the walk (a hold never opens a gate; taken after the
+ * walk the closer has shut it before the bot stops 2 beyond it; a reply of no gate there is the next gate); the gate's
+ * lure up; the bot through to 2 inside and 1 aside; the clock asked again (the walk took seconds: no G opened for a
+ * ward past the bell); the gate read open; the hold renewed each second; a lure 4-6 inside on the lane's axis. A
+ * hostile within 8 outside or an animal of the bot's heading out within 2.5 inside, with the ward not in the lane: G
+ * clicked shut, 3 s, open again (5 times a try). A bell-alive ward's open spell ends at the bell (BELL: it turns for
+ * its bell at 9000; shut on its feet as LOCK's from 8900). The ward 1.5 inside the fence line: released shut, read shut,
+ * the entry off. Never shut on it before the cap: the lure 2 farther in and the cap to 35 s. G that will not read shut
+ * with the ward through (2.2 asks it shut for `gate -> yardhop`): said, halt, and on into the yard all the same (the
+ * lock holds by itself; care's row 1 keeps on at G); not through, STOP with the yard's lure left standing as its tether
+ * (the ward by an open G is better drawn in than freed beside it). Three tries, then the next gate of the spares, hop by hop.
  */
 async function gateIn(ctx: GoalContext, clk: LureClock, plan: Plan): Promise<'yard' | 'hop' | LeadEnd> {
   const world = ctx.world, f = fetchOf(world), t = f.trip!, w = wardOf(f)!, G = t.gate;
   const [dx, dz] = SIDE_STEP[G.side], perp = { x: -dz, z: dx };
   const done = critical(ctx, 'gate');
   try {
+    // (the trip's beat renewed through the step, not in its poll loop alone: here, at each try, between the take and the
+    // walk in, and round the walk back out. A resumed trip's beat is stale until here, and a take and a walk of up to
+    // 40 s each with the animal wait went past tripLive's 90 s: a restart, a person's acting call and the run's own
+    // timeout let through mid-gate. S1 follow-up Y-1)
+    beat(world, clk.now());
+    const yw = yardWhy(world);
+    if (yw) return stopNot(ctx, clk, plan, t, `the yard is not whole: ${yw}`, 'late');
     for (const s of await gatesRead(ctx, world)) if (s.open && !same(s.at, G.at)) await shutGate(ctx, s.at);
     const lane = new Ground(G.at.y - 4, 10);
     await lane.read(ctx, G.at.x - 7 * Math.abs(dx) - 2, G.at.z - 7 * Math.abs(dz) - 2, G.at.x + 7 * Math.abs(dx) + 2, G.at.z + 7 * Math.abs(dz) + 2);
     const blocked = await laneWhy(ctx, lane, { gate: G.at, side: G.side, inner: G.inner, outer: G.outer }, 'dig');
     if (blocked) return nextGate(ctx, clk, plan, blocked);
     const inside = { x: G.at.x - 2 * dx + perp.x, y: G.at.y, z: G.at.z - 2 * dz + perp.z };
+    const laneCells = gateLane(G.at, G.side);
+    const inBy = (p: Pos) => -((p.x - (G.at.x + 0.5)) * dx + (p.z - (G.at.z + 0.5)) * dz);
     for (let tries = 0; tries < 3; tries++) {
+      beat(world, clk.now());
       // the bot's animals by the gate inside: waited out, else the next gate
       let look = await lookNow(ctx, clk);
       const waitUntil = clk.now() + ANIMAL_WAIT_S * 1000;
       while (animalsBy(look.rows, { x: G.at.x - 3 * dx, y: G.at.y, z: G.at.z - 3 * dz }, 6).length && clk.now() < waitUntil) { await clk.sleep(1000); look = await lookNow(ctx, clk); }
       if (animalsBy(look.rows, { x: G.at.x - 3 * dx, y: G.at.y, z: G.at.z - 3 * dz }, 6).length) return nextGate(ctx, clk, plan, 'an animal of the bot\'s by the gate inside');
-      // (no G opened for a ward past the bell, INV-4: the clock asked before the hold, as at every hop)
+      seenAt(w, rowOf(look.rows, w), look);
+      // (no G opened for a ward past the bell, INV-4: the clock asked before the hold, as at every hop; and for a
+      // bell-alive ward the take of the gate's lure and the walk through still before the bell, else the bot's own walk
+      // opens G past it: STOP outside with G shut, before anything is held or taken up)
       const late = await clockSays(ctx, clk, plan, false, look);
       if (late) return late;
+      const todSince = () => (look.tod + Math.max(0, clk.now() - look.now) / 50) % 24_000;
+      const bellNear = () => w.bell && morning(todSince()) + GATE_IN_START_S * 20 >= BELL;
+      if (bellNear()) return stopNot(ctx, clk, plan, t, `the bell (${BELL}) would come before the ${G.side} gate stood open for it (time of day ${Math.round(todSince())}): G not opened`, 'late');
+      // R4: G still a gate of the yard's, as the records and the blocks have it, and the fence whole: before anything is held or taken up
+      const gone = await gateGone(ctx, G);
+      if (gone?.fence) return stopNot(ctx, clk, plan, t, gone.fence, 'late');
+      if (gone?.gate) return nextGate(ctx, clk, plan, gone.gate);
       const before = animalsBy(look.rows, { x: (world.yard!.x1 + world.yard!.x2) / 2, y: G.at.y, z: (world.yard!.z1 + world.yard!.z2) / 2 }, 200).filter(a => inYard(world, a.position!)).length;
       // the hold first, on the shut gate (journal first), in a critical section renewed with every hold of it
       critical(ctx, 'gate');
       const ge = journal(ctx, { k: 'gate', trip: t.id, at: { ...G.at }, which: 'yard', until: clk.now() + HOLD_MS, t: clk.now() });
-      await ctx.call('gates.hold', { x: G.at.x, y: G.at.y, z: G.at.z, ms: HOLD_MS }).catch(() => undefined);
+      const hr = await ctx.call<{ held?: boolean; reason?: string }>('gates.hold', { x: G.at.x, y: G.at.y, z: G.at.z, ms: HOLD_MS }).catch(() => undefined);
+      if (hr?.held === false && /no gate/.test(hr.reason ?? '')) { dropEntry(ctx, ge); return nextGate(ctx, clk, plan, `no gate to hold at ${fmt(G.at)}: ${hr.reason}`); }
       const opened = clk.now();
       const L = standing(f, t);
       if (L) await takeLure(ctx, plan, L, clk.now());
+      beat(world, clk.now());
       await walkTo(ctx, inside);
+      // (the walk took seconds: the clock again before G stands open for it, INV-4; the bot's own walk may have opened it)
+      const c1 = clockNow(f, todSince(), false);
+      if (c1.go === 'release' || c1.go === 'stop') {
+        await shutDown(ctx, G.at, ge);
+        return c1.go === 'release' ? release(ctx, clk, plan, `the clock: ${c1.text}`, 'late') : stop(ctx, clk, plan, `the clock: ${c1.text}`);
+      }
       if ((await gateRead(ctx, G.at)) !== true) await ctx.call('useOn', { x: G.at.x, y: G.at.y, z: G.at.z, face: 'up', toggle: true }).catch(() => undefined);
       if ((await gateRead(ctx, G.at)) !== true) { say(ctx, `the ${G.side} gate at ${fmt(G.at)} does not read open`); await shutDown(ctx, G.at, ge); return nextGate(ctx, clk, plan, 'the gate would not open'); }
+      critical(ctx, 'gate');
       await ctx.call('gates.hold', { x: G.at.x, y: G.at.y, z: G.at.z, ms: HOLD_MS }).catch(() => undefined);
       let y = { x: G.at.x - 5 * dx, y: G.at.y, z: G.at.z - 5 * dz };
       let put = await putLure(ctx, plan, t, y, 'yard', clk.now());
       if (!put.entry) { y = { x: y.x + perp.x, y: y.y, z: y.z + perp.z }; put = await putLure(ctx, plan, t, y, 'yard', clk.now()); }
-      let cap = GATE_OPEN_MAX, moved = false, held = clk.now(), through = false;
+      let cap = GATE_OPEN_MAX, moved = false, held = clk.now(), through = false, bell = false, spells = 0, shutTill: number | undefined;
       while (clk.now() - opened < cap) {
         stopped(ctx);
         if (clk.now() - held >= 1000) { critical(ctx, 'gate'); await ctx.call('gates.hold', { x: G.at.x, y: G.at.y, z: G.at.z, ms: HOLD_MS }).catch(() => undefined); held = clk.now(); ge.until = clk.now() + HOLD_MS; }
         const l = await lookNow(ctx, clk), row = rowOf(l.rows, w);
         beat(world, l.now);
+        seenAt(w, row, l);
         if (row?.position) {
-          const inBy = -((row.position.x - (G.at.x + 0.5)) * dx + (row.position.z - (G.at.z + 0.5)) * dz);
-          if (inBy >= THROUGH) { through = true; break; }
+          if (inBy(row.position) >= THROUGH) { through = true; break; }
           const inGate = same(cell(row.position), G.at);
           if (inGate && !moved && put.entry) {
             // it stands in the gateway: never shut on it; the lure 2 farther in, the cap to 35 s
@@ -1726,25 +1886,74 @@ async function gateIn(ctx: GoalContext, clk: LureClock, plan: Plan): Promise<'ya
             put = await putLure(ctx, plan, t, y, 'yard', clk.now());
           }
         }
+        // a bell-alive ward turns for its bell at 9000: G shut by BELL (as LOCK's deadline), the poll and the release's
+        // click before it
+        if (w.bell && morning(l.tod) + GATE_SHUT_TICKS >= BELL) { bell = true; break; }
+        // 4.6 G step 4: a hostile within 8 outside, or an animal of the bot's heading out within 2.5 inside, the ward not
+        // in the lane: G clicked shut (the hold stays: it opens nothing), 3 s, then open again
+        const inLane = !!row?.position && laneCells.some(c => same(c, { ...cell(row.position!), y: c.y }));
+        if (shutTill === undefined && spells < SHUT_SPELLS && !inLane) {
+          const out = l.rows.find(e => e.position && HOSTILE.test(e.name) && inBy(e.position) < 0 && dist(e.position, mid(G.at)) <= HOSTILE_OUT_R)
+            ?? animalsBy(l.rows, G.at, ANIMAL_OUT_R).find(e => inBy(e.position!) >= 0);
+          if (out && (await gateRead(ctx, G.at)) === true) {
+            await ctx.call('useOn', { x: G.at.x, y: G.at.y, z: G.at.z, face: 'up', toggle: true }).catch(() => undefined);
+            spells++;
+            shutTill = clk.now() + SHUT_SPELL_MS;
+            say(ctx, `a ${out.name} at ${fmt(out.position!)} by the ${G.side} gate: shut ${SHUT_SPELL_MS / 1000} s (${spells} of ${SHUT_SPELLS})`);
+          }
+        } else if (shutTill !== undefined && clk.now() >= shutTill) {
+          shutTill = undefined;
+          if ((await gateRead(ctx, G.at)) !== true) await ctx.call('useOn', { x: G.at.x, y: G.at.y, z: G.at.z, face: 'up', toggle: true }).catch(() => undefined);
+        }
         await clk.sleep(POLL_MS);
       }
-      // released shut, read shut (the bridge shuts it on the release; shutGate reads it back)
-      const row = rowOf((await lookNow(ctx, clk)).rows, w);
-      if (!through && row?.position && same(cell(row.position), G.at)) await clk.sleep(1000);
-      const open = await shutHeld(ctx, clk, plan, G.at, ge, `the ${G.side} gate`);
-      if (open) return open;
+      // released shut, read shut (the bridge shuts it on the release; shutGate reads it back, and clicks once more); at
+      // the bell at once, else a second for one in the gateway
+      if (!bell) {
+        const l2 = await lookNow(ctx, clk), row = rowOf(l2.rows, w);
+        seenAt(w, row, l2);
+        if (!through && row?.position && same(cell(row.position), G.at)) await clk.sleep(1000);
+      }
+      let shut = await shutDown(ctx, G.at, ge);
+      if (!shut && await shutGate(ctx, G.at)) { dropEntry(ctx, ge); shut = true; }
+      // (which side it ended on, by a look after G shut, as LOCK's: past the gate's cell it is in the yard; a look that
+      // failed is asked again before it counts as outside)
+      if (!through) {
+        let l3 = await lookNow(ctx, clk), r3 = rowOf(l3.rows, w);
+        if (!r3?.position) { l3 = await lookNow(ctx, clk); r3 = rowOf(l3.rows, w); }
+        seenAt(w, r3, l3);
+        if (r3?.position && inBy(r3.position) > 0.5) through = true;
+      }
       const after = animalsBy((await lookNow(ctx, clk)).rows, { x: (world.yard!.x1 + world.yard!.x2) / 2, y: G.at.y, z: (world.yard!.z1 + world.yard!.z2) / 2 }, 200).filter(a => inYard(world, a.position!)).length;
       if (after < before) say(ctx, `${before - after} animal(s) of the bot's out by the ${G.side} gate: the pens round's strays`);
       if (through) {
-        say(ctx, `gate ${fmt(G.at)} held ${secs(clk.now() - opened)} s; shut, read shut; in the yard at ${Math.round((await todNow(ctx)))}`);
+        if (!shut) {
+          // (2.2 asks G read shut for `gate -> yardhop`; STOP here took the yard's lure up and left the ward jobless
+          // beside an open G, where it walked out again. The lock holds by itself: the ward led on, G left to care's
+          // row 1, its entry kept, and the lead told)
+          const why = `the ${G.side} gate at ${fmt(G.at)} does not read shut behind the ward (trip ${t.id}): care's row 1 keeps on at it; the ward led on to the lock`;
+          f.halt ??= { at: clk.now(), why };
+          ctx.save?.();
+          say(ctx, why);
+        }
+        say(ctx, `gate ${fmt(G.at)} held ${secs(clk.now() - opened)} s; ${shut ? 'shut, read shut' : 'NOT read shut'}; in the yard at ${Math.round((await todNow(ctx)))}`);
         tripTo(ctx, 'yardhop', clk.now());
         plan.yard = undefined;
         return 'yard';
       }
-      // not through: the yard's lure up, the bot back out, the gate's lure again
+      // not through and G will not shut: stopped, the yard's lure standing as the ward's tether (drawn in, not freed by an open G)
+      if (!shut) return stop(ctx, clk, plan, `the ${G.side} gate at ${fmt(G.at)} does not read shut`, { keepLure: true });
+      if (bell) return stop(ctx, clk, plan, `the bell (${BELL}) before the ward was through the ${G.side} gate: G shut`);
+      // not through: the yard's lure up, the bot back out, the gate's lure again; the clock first (the bot's walk back
+      // out by G opens it: not past the bell, nor for a trip the clock ends: then it is stopped from inside)
       say(ctx, `not through the ${G.side} gate in ${secs(cap)} s (try ${tries + 1} of 3)`);
+      const lateIn = await clockSays(ctx, clk, plan, false, look);
+      if (lateIn) return lateIn;
+      if (bellNear()) return stopNot(ctx, clk, plan, t, `the bell (${BELL}) before the ward was through the ${G.side} gate (time of day ${Math.round(todSince())}): G shut`, 'late');
       if (put.entry) await takeLure(ctx, plan, put.entry, clk.now());
+      beat(world, clk.now());
       await walkTo(ctx, { x: G.at.x + 3 * dx + perp.x, y: G.at.y, z: G.at.z + 3 * dz + perp.z });
+      beat(world, clk.now());
       await shutGate(ctx, G.at);
       // (a lure outside the fence again: the clock first, INV-4)
       const tooLate = await clockSays(ctx, clk, plan, false, look);
@@ -1808,6 +2017,9 @@ async function lockIn(ctx: GoalContext, clk: LureClock, plan: Plan): Promise<'do
   try {
     let f = fetchOf(world), t = f.trip!;
     const w = wardOf(f)!;
+    // (the beat at the top and with every look of the wait for a clear lock, as gateIn's: a resume in `lock` comes here
+    // on a stale beat, and the walk to the post with the wait went on to the loop's first poll without one: Y-1)
+    beat(world, clk.now());
     // (the deadline: a bell-alive ward turns for its bell at 9000, so P shuts on its feet from 8900 and nothing opens from
     // 8990; one whose bell the lead cleared has until the lock's gate is shut by 11800)
     const deadline = w.bell ? BELL : NIGHT, lastP = w.bell ? LAST_P : NIGHT - 90;
@@ -1817,6 +2029,7 @@ async function lockIn(ctx: GoalContext, clk: LureClock, plan: Plan): Promise<'do
     const until = clk.now() + ANIMAL_WAIT_S * 1000;
     for (;;) {
       const l = await lookNow(ctx, clk);
+      beat(world, l.now);
       const inIt = l.rows.filter(e => e.position && inLock(lock, cell(e.position)) && e.name !== 'item');
       const others = l.rows.filter(e => e.name === 'villager' && e.position && e.uuid !== w.uuid && !inHallBox(world, e.position) && dist(e.position, mid(lock.p)) <= 16);
       const byLane = animalsBy(l.rows, { x: lock.p.x, y: lock.p.y, z: lock.p.z + Math.sign(lock.p.z - lock.h.z) }, 4);
@@ -1860,6 +2073,7 @@ async function lockIn(ctx: GoalContext, clk: LureClock, plan: Plan): Promise<'do
         if (clk.now() - held >= 1000) { critical(ctx, 'lock'); await ctx.call('gates.hold', { x: lock.p.x, y: lock.p.y, z: lock.p.z, ms: HOLD_MS }).catch(() => undefined); held = clk.now(); ge.until = clk.now() + HOLD_MS; }
         const l = await lookNow(ctx, clk), row = rowOf(l.rows, w);
         beat(world, l.now);
+        seenAt(w, row, l);
         if (row?.position) {
           const c = cell(row.position);
           if (inLock(lock, c) || (morning(l.tod) >= lastP && same(c, lock.p))) break;
@@ -1870,8 +2084,11 @@ async function lockIn(ctx: GoalContext, clk: LureClock, plan: Plan): Promise<'do
       }
       const open = await shutHeld(ctx, clk, plan, lock.p, ge, 'the lock\'s gate');
       if (open) return open;
-      // which side it ended on (F-9: a gate shut on a villager in its cell; one that stepped in after the last poll is in)
-      const row = rowOf((await lookNow(ctx, clk)).rows, w);
+      // which side it ended on (F-9: a gate shut on a villager in its cell; one that stepped in after the last poll is in;
+      // a look that failed is asked again before the ward counts as outside: led back from the lock it would be a STOP)
+      let lr = await lookNow(ctx, clk), row = rowOf(lr.rows, w);
+      if (!row?.position) { lr = await lookNow(ctx, clk); row = rowOf(lr.rows, w); }
+      seenAt(w, row, lr);
       if (row?.position && inLock(lock, cell(row.position))) {
         const tod = await todNow(ctx);
         w.where = 'lock';
@@ -1930,12 +2147,20 @@ async function door(ctx: GoalContext, clk: LureClock): Promise<LeadEnd> {
   if (!(await shutGate(ctx, lock.p))) return { end: 'lock', text: 'the lock\'s gate does not read shut: the door is care\'s', placed: true };
   const sock = f.journal.find((e): e is LureEntry => e.k === 'lure' && e.role === 'lock' && e.trip === t.id);
   if (sock) {
-    const until = clk.now() + 30_000;
-    while (clk.now() < until && (await lookNow(ctx, clk)).rows.some(e => e.name === 'villager' && e.baby && e.position && dist(e.position, mid(lock.socket)) <= BABY_R)) await clk.sleep(1000);
+    // (not begun with a baby within 3 of the socket: the wall block's put beside it, and a failed one is a 1-high hole
+    // a baby walks out by; waited 30 s, then the door is care's, which goes on from the records)
+    const baby = async () => (await lookNow(ctx, clk)).rows.some(e => e.name === 'villager' && e.baby && e.position && dist(e.position, mid(lock.socket)) <= BABY_R);
+    const until = clk.now() + DOOR_BABY_S * 1000;
+    let by = await baby();
+    while (by && clk.now() < until) { await clk.sleep(1000); by = await baby(); }
+    if (by) return { end: 'lock', text: `door: a baby by the socket ${DOOR_BABY_S} s: the door is care's`, placed: true };
+    if (!(await shutGate(ctx, lock.p))) return { end: 'lock', text: 'the lock\'s gate does not read shut: the door is care\'s', placed: true };
     const r = await undo(ctx, sock, { now: () => clk.now() });
     if (!r.ok) return { end: 'lock', text: `door: ${r.text} (care puts it right)`, placed: true };
     say(ctx, 'door: socket lure out, wall back');
   }
+  // (P read shut again before H opens: the pair rule is the bridge's, this the design's own, before each act)
+  if (!(await shutGate(ctx, lock.p))) return { end: 'lock', text: 'the lock\'s gate does not read shut: the door is care\'s', placed: true };
   if (!fetchOf(world).journal.some(e => e.k === 'gate' && e.which === 'hall')) journal(ctx, { k: 'gate', trip: t.id, at: { ...lock.h }, which: 'hall', t: clk.now() });
   if ((await gateRead(ctx, lock.h)) !== true) await ctx.call('useOn', { x: lock.h.x, y: lock.h.y, z: lock.h.z, face: 'up', toggle: true }).catch(() => undefined);
   say(ctx, `door: H ${(await gateRead(ctx, lock.h)) ? 'open' : 'not read open'}`);
@@ -2010,7 +2235,8 @@ function endBefore(ctx: GoalContext, clk: LureClock, text: string): WorkResult {
 
 /**
  * SURVEY (4.1): the quick look of the trip's morning asks only for a candidate and no danger (one viewpoint cannot
- * count a village 126 x 121: the floor is the last whole look's). Illagers or an outpost: home. A player by the bot or
+ * count a village 126 x 121: the floor is the last whole look's), and the judge's word again as far as it sees (a
+ * trading setup in use: not free, home). Illagers or an outpost: home. A player by the bot or
  * the village: waited 60 s, then looked only. The candidates: unemployed adults, not named, on a lead, riding, past
  * level 1, penned in, nor a ward, of this village (two bells in one look: its own only). The clock from where the bot
  * stands. The village's ground read, its job sites sorted, others' builds kept off, and the corridor from the
@@ -2035,6 +2261,15 @@ async function survey(ctx: GoalContext, clk: LureClock, plan: Plan, t: Trip, sit
   const block = (x: number, y: number, z: number) => plan.ground.state(x, y, z) ?? null;
   const tally = { employed: 0, nitwits: 0, babies: 0, used: 0, penned: 0 };
   const mine = look.rows.filter(e => e.name === 'villager' && e.position && (site.area ? inArea(site.area, e.position) : horiz(e.position, site) <= 80));
+  // (2.2 out/survey -> restore on a verdict not free: the judge's rule a quick look can see again, a trading setup in
+  // use (village.ts USED_VILLAGERS of its villagers named, traded with, on a lead or seated); a village someone took up
+  // since its whole look is not lured from. The rest of the judge needs the whole look, and the floor is the last one's)
+  const usedBy = mine.filter(e => usedHow(e));
+  if (usedBy.length >= USED_VILLAGERS) {
+    const why = `${usedBy.length} of its villagers used by a player (${usedBy.slice(0, 2).map(e => `${fmt(e.position!)} ${usedHow(e)}`).join(', ')}): not free`;
+    noteSite(world, t, 'rival', why, clk.now());
+    return { end: endBefore(ctx, clk, `turned back at the village: ${why}`) };
+  }
   const candidates = mine.filter(e => {
     if (e.baby) { tally.babies++; return false; }
     if (e.profession === 'nitwit') { tally.nitwits++; return false; }
@@ -2094,8 +2329,8 @@ type FirstSays = { v: 'flip'; e: Looked; s: number } | { v: 'not acceptable'; e:
 /**
  * The watch at the first lure (4.1): a villager that read `none` in this look before it went down, a fletcher within
  * 2.5 of it now, is the ward whoever was expected (acceptable) or broken off at once (not); nobody 3 nearer in 15 s;
- * someone coming and no flip by 45 s (waited to 60: a claim holds the ticket up to 60 s); someone by it 10 s and no
- * flip (a nitwit, a baby, an employed one, one that has traded: let be).
+ * someone coming and no flip by 60 s (a claim holds the ticket up to 60 s: never broken before); someone by it 10 s
+ * and no flip (a nitwit, a baby, an employed one, one that has traded: let be).
  */
 async function watchFirst(ctx: GoalContext, clk: LureClock, plan: Plan, t: Trip, lure: Pos, none: Set<string>): Promise<FirstSays> {
   const t0 = clk.now(), key = (e: Looked) => e.uuid ?? `#${e.id}`;
@@ -2118,7 +2353,9 @@ async function watchFirst(ctx: GoalContext, clk: LureClock, plan: Plan, t: Trip,
     byLure = by ? byLure ?? look.now : undefined;
     if (by && byLure !== undefined && look.now - byLure >= BY_LURE_S * 1000) return { v: 'by', e: by };
     if (d0 - best < 3 && el >= APPROACH_FIRST_S) return { v: 'nobody' };
-    if (el >= SLOW_MAX_S || (el >= ARRIVE_S && d0 - best >= 3 && best > FLIP_R + 2)) return { v: 'claim', ...(near ? { e: near } : {}) };
+    // (someone came 3 nearer and has not flipped: the claim holds its ticket up to 60 s, so it is waited out to then,
+    // 4.1, never broken at 45 with the claimant still on its way)
+    if (el >= SLOW_MAX_S) return { v: 'claim', ...(near ? { e: near } : {}) };
     await clk.sleep(POLL_MS);
   }
 }
@@ -2158,8 +2395,8 @@ async function firstLure(ctx: GoalContext, clk: LureClock, plan: Plan, t: Trip, 
     toward = undefined;
     const spot = spotOff(plan, () => firstSpot(plan.ground, cands.map(c => cell(c.position!)), start, {
       bot: cell(me), marks: plan.marks ?? [], ...(plan.home ? { home: plan.home } : {}), zones: plan.zones, sites: plan.sites, avoid: t.avoid,
-      lifted: liftedFor(world, plan, t), lures: tripLures(f, t.id), used: [...plan.used, ...kept], now: clk.now(), retrace: true, yard: yardGround(world),
-      ...(nearer ? { path: NEARER_FIRST, level: true } : {})
+      lifted: liftedFor(world, plan, t), lures: tripLures(f, t.id), used: [...plan.used, ...kept, ...(plan.spentAt ?? []).map(c => ({ at: c, t: clk.now() }))], now: clk.now(),
+      retrace: true, yard: yardGround(world), ...(nearer ? { path: NEARER_FIRST, level: true } : {})
     }), kept, clk.now());
     nearer = false;
     if ('why' in spot) { last = spot.why; break; }
@@ -2184,6 +2421,9 @@ async function firstLure(ctx: GoalContext, clk: LureClock, plan: Plan, t: Trip, 
     }
     await takeLure(ctx, plan, put.entry, clk.now());
     tries++;
+    // (a spot that took no ward is spent for this first lure, whatever its verdict: the next is another cell, never the
+    // same one again, however long its watch took; the 20 s a lure's own cell is kept would let the third spot be the first)
+    (plan.spentAt ??= []).push({ ...spot.block });
     if (r.v === 'clock') { noteSite(world, t, 'late', r.text, clk.now()); return { ...endBefore(ctx, clk, `the first lure up: ${r.text}`), mark: 'same' }; }
     if (r.v === 'not acceptable') {
       last = `a villager not to take (${usedHow(r.e) || 'a baby'}) took the lure: let be`;
@@ -2248,9 +2488,9 @@ async function dryRun(ctx: GoalContext, clk: LureClock, plan: Plan, t: Trip, sit
   }
   const lock = lockOf(world);
   if (lock) {
-    const g = groundFor(world, site);
-    await readYard(ctx, g);
-    const w = yardWay(g, { gate: t.gate.at, side: t.gate.side, inner: t.gate.inner }, lock.sOut, { yard: yardGround(world) });
+    // (on the yard as the run read it at home as it set out: from the village its chunks are out of the client's reach)
+    await readYard(ctx, plan.ground);
+    const w = yardWay(plan.ground, { gate: t.gate.at, side: t.gate.side, inner: t.gate.inner }, lock.sOut, { yard: yardGround(world) });
     lines.push(w.ok ? `the ${t.gate.side} gate, the yard's way ${w.len}` : `the yard's way: ${w.text}`);
   }
   const s = liveSite(world, t);
@@ -2285,14 +2525,35 @@ const LEADING: readonly string[] = ['hop', 'gate', 'yardhop', 'lock'];
 const sprint = (ctx: GoalContext, allowed: boolean) => brainRun.exit(() => ctx.call('sprint.set', { allowed })).catch(() => undefined);
 
 /**
- * The dawn's re-read before a prepared trip sets out (2.2 `prep -> out`): the lock and the ring ready, every strict gate
- * read shut (shut where open), the kit whole, every lift as journaled (a planned one made true by a read). Why not.
+ * The dawn's re-read before a prepared trip sets out (2.2 `prep -> out`): the yard whole on the records (R1) with the
+ * trip's gate still one of its gates (the spares that are not dropped), the lock and the ring ready, the bridge keeping
+ * the whole strict set (sent again once if it counts another number: a relaunched client keeps none), every strict
+ * gate read shut (shut where open), the fence itself whole as blocks (R5, fenceRead), the kit whole, every lift as
+ * journaled (a planned one made true by a read). Why not.
  */
 async function reread(ctx: GoalContext, t: Trip): Promise<string | undefined> {
+  const world = ctx.world;
+  const yw = yardWhy(world);
+  if (yw) return `the yard is not whole: ${yw}`;
+  const onLine = yardGates(world);
+  if (!onLine.some(g => same(g.gate, t.gate.at))) return `the trip's ${t.gate.side} gate at ${fmt(t.gate.at)} is no longer on the yard's fence`;
+  t.spare = t.spare.filter(sp => onLine.some(g => same(g.gate, sp.at)));
   const shells = await readShells(ctx);
   if (shells.lock.faults.length) return `the lock is not ready: ${shells.lock.faults[0].text}`;
   if (shells.ring.faults.length) return `the portal's ring is not ready: ${shells.ring.faults[0]}`;
-  for (const g of await gatesRead(ctx, ctx.world)) if (g.open && !(await shutGate(ctx, g.at))) return `${g.name} at ${fmt(g.at)} does not read shut`;
+  const want = strictGates(world).length;
+  const counted = async () => (await ctx.call<{ count?: number }>('gates.status', {}).catch(() => undefined))?.count;
+  let n = await counted();
+  if (n !== want) {
+    await ctx.call('gates.strict', strictSet(world) as unknown as Record<string, unknown>).catch(() => undefined);
+    n = await counted();
+  }
+  if (n !== want) return `the bridge keeps ${typeof n === 'number' ? n : 'no'} strict gate(s), the records ${want}`;
+  for (const g of await gatesRead(ctx, world)) if (g.open && !(await shutGate(ctx, g.at))) return `${g.name} at ${fmt(g.at)} does not read shut`;
+  const fr = await fenceRead(ctx), fw = fenceWhy(fr, 'decline');
+  if (fw) return `the yard's fence: ${fw}`;
+  // (said every dawn, the dry one's too: what the gate steps will ask of the fence, for the lead)
+  if (fr) say(ctx, `the yard's fence read: ${fr.fences} fence(s) and ${fr.gates} gate(s) on its ring of ${fr.ring}, ${fr.unread + fr.rowUnread} cell(s) unread: whole`);
   const lures = await luresCarried(ctx);
   if (lures < LURES) return `the kit is not whole: ${lures} of ${LURES} lures carried`;
   for (const e of fetchOf(ctx.world).journal.filter(x => x.trip === t.id && x.k === 'lift')) {
@@ -2353,6 +2614,9 @@ export async function fetchRun(ctx: GoalContext, site: VillageSite, clk: RunCloc
     await readYard(ctx, plan.ground);
     const gate = await outByGate(ctx, { x: s.x, z: s.z }, [t.gate.side]);
     if (gate.shut) return endBefore(ctx, clk, `not out by the ${t.gate.side} gate: ${gate.shut}`);
+    // (outByGate's {} is "nothing to do", which with the bot inside the fence means no yard gate is known: never out of
+    // the fence gateless, by whatever gap)
+    if (!gate.gate && inFence(world, await here(ctx))) return endBefore(ctx, clk, `not out by the ${t.gate.side} gate: no gate of the yard's to go out by`);
     let scanned: Pos = await here(ctx);
     noteSites(plan, t, world, await sitesNear(ctx));
     const enough = clk.enough ?? (() => false);

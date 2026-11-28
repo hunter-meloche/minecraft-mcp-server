@@ -7,7 +7,7 @@ import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
 import { billLeft, billOf, type Blueprint } from './blueprints.js';
 import { YARD_FROM_BUILDS, zoneDistance, type Zone } from './courtesy.js';
-import { placeGuard, wardOut } from './fetch.js';
+import { placeGuard, wardOut, yardHeld } from './fetch.js';
 
 /**
  * Building blocks for milestones: find room in the yard (growing it when there is none), get the materials together,
@@ -118,8 +118,10 @@ export const FILL_KINDS = ['dirt', 'cobblestone', 'cobbled_deepslate'] as const;
 
 export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
   // not while a villager is on its way or may come by (fetch.ts wardOut): the fence moves out after the levelling, and
-  // a villager led across the yard, or loose in it, walks out by the gap
+  // a villager led across the yard, or loose in it, walks out by the gap. Nor while a trip of the fetch exists at all
+  // (fetch.ts yardHeld, from PREP's first read): its gate, lane and yard way are chosen on the yard as it stands
   if (wardOut(ctx.world, ctx.s.now)) return blocked(`waiting: a villager is on its way (the yard grows for the ${kind} once it is in)`, 10 * MINUTE);
+  if (yardHeld(ctx.world, ctx.s.now)) return blocked(`waiting: a villager trip is prepared or under way (the yard grows for the ${kind} once it is over)`, 10 * MINUTE);
   const m = 24;
   const box = { x: yard.x1 - m, y: yard.y - 4, z: yard.z1 - m, width: yard.x2 - yard.x1 + 1 + 2 * m, height: 14, length: yard.z2 - yard.z1 + 1 + 2 * m };
   const blocks = await readBox(ctx, box);

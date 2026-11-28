@@ -11,7 +11,7 @@ import { findLandmarks } from '../../src/client/brain/memory.js';
 import { Brain, CRITICAL_CUTS, LEAD_TIMEOUT_MS, NO_LOOP_HOLD, SURVIVAL, decide, wedgedOut } from '../../src/client/brain/brain.js';
 import { lockSeen, outOfHallGoal, outOfHallWants, villagerCareGoal } from '../../src/client/brain/villagercare.js';
 import { hallChoresGoal, inHallBox } from '../../src/client/brain/hallchores.js';
-import { fetchOf, peekFetch, type Trip } from '../../src/client/brain/fetch.js';
+import { fetchOf, peekFetch, type FetchMemory, type Trip } from '../../src/client/brain/fetch.js';
 import { strictGates, strictSet } from '../../src/client/brain/yardgates.js';
 import { H, HOME as YARD_HOME, T0, YARD_GATES, isOpen, yard, type Pasture } from '../helpers/pasture.js';
 import { brainRun, type ClientRuntime } from '../../src/client/tools.js';
@@ -139,9 +139,24 @@ function fakeRuntime(state: { pos: { x: number; y: number; z: number }; time: nu
  * (each a setTimeout 0, brain.ts soon) has run. A bare 20 ms timer under a loaded machine (the whole suite's workers at
  * once) fired before the chained tick, and the tick-chaining tests failed now and then; every other wait is a promise.
  */
-const settle = async () => {
+/** The event loop turned over until `ok` holds, at most 10 s of real time (the caller's checks then say what did not come). */
+const turnsUntil = async (ok: () => boolean) => {
+  const by = Date.now() + 10_000;
+  while (!ok() && Date.now() < by) await new Promise(r => setImmediate(r));
+};
+const settle = async (brain?: Brain, until?: () => boolean) => {
   await new Promise(r => setTimeout(r, 20));
   for (let i = 0; i < 25; i++) await new Promise(r => setImmediate(r));
+  if (!brain) return;
+  // then by the brain's own state, not by a time (the S1 follow-up: still red under the whole suite's load): the event
+  // loop turned over until no tick is under way and none waits to follow, three turns running, and what the test waits
+  // for (`until`) has come; at most 10 s of real time, after which the test's own checks say what did not happen
+  const by = Date.now() + 10_000;
+  for (let calm = 0; calm < 3 && Date.now() < by;) {
+    await new Promise(r => setImmediate(r));
+    const b = inside(brain);
+    calm = b.ticking || b.chained || (until && !until()) ? 0 : calm + 1;
+  }
 };
 
 test('the brain walks home in the evening, goes to bed at night and gets up in the morning', async (t) => {
@@ -171,8 +186,15 @@ test('the brain walks home in the evening, goes to bed at night and gets up in t
   brain.setEnabled(false);
 });
 
+/** A villager trip of the fetch's in `state` whose beat is `beat` (a lead's poll renews it): tripLive while it is under 90 s old. */
+const liveTrip = (beat: number, over: Partial<Trip> = {}): Trip => ({
+  id: 3, kind: 'bring', site: 'village -693,2262', state: 'hop', beat, prep: {},
+  gate: { at: { x: 0, y: 64, z: -20 }, side: 'north', inner: { x: 0, y: 64, z: -18 }, outer: { x: 0, y: 64, z: -22 }, yard: 20 },
+  spare: [], lure: 'fletching_table', avoid: [], times: {}, counts: { hops: 0, misses: 0, wedges: 0, pins: 0 }, ...over
+});
+
 // (serial: out.ledBy is the module's one hold, and another test's lead would take it over)
-test.serial('a run that leads a villager (out.ledBy its own) is not stopped at its goal\'s timeout, only at LEAD_TIMEOUT_MS; one that does not lead is; a lead that ended by a throw leaves no hold behind (S1 review S4, S5)', async (t) => {
+test.serial('a run that leads a villager (out.ledBy its own, its trip live) is not stopped at its goal\'s timeout, only at LEAD_TIMEOUT_MS; one that does not lead is; a lead that ended by a throw leaves no hold behind (S1 review S4, S5)', async (t) => {
   let now = 0;
   const state = { pos: { x: 0, y: 64, z: 0 }, time: 1000 };
   const { rt } = fakeRuntime(state);
@@ -185,9 +207,13 @@ test.serial('a run that leads a villager (out.ledBy its own) is not stopped at i
   const brain = new Brain(rt, { tickMs: 1e9, goals: [lead], now: () => now });
   brain.setEnabled(true);
   await brain.tick(); await settle();
-  now += 11 * 60_000; await brain.tick(); await settle();
+  // the trip it leads, its beat renewed at every poll as a lead's is
+  const w = brain.worldMemory()!;
+  w.fetch = { v: 1, journal: [], wards: [], nextId: 4, trip: liveTrip(now) };
+  const beat = () => { (w.fetch as FetchMemory).trip!.beat = now; };
+  now += 11 * 60_000; beat(); await brain.tick(); await settle();
   t.notRegex(brain.status(), /lead ran out of time/, 'a lead is not cut at the goal\'s 10 minutes');
-  now += LEAD_TIMEOUT_MS; await brain.tick(); await settle();
+  now += LEAD_TIMEOUT_MS; beat(); await brain.tick(); await settle();
   t.regex(brain.status(), /lead ran out of time/, 'the cap');
   brain.setEnabled(false);
   await settle();
@@ -210,6 +236,70 @@ test.serial('a run that leads a villager (out.ledBy its own) is not stopped at i
   t.regex(third.status(), /failed throws: bridge data not as expected/);
   t.is(afield.ledBy, undefined, 'no hold of a dead run left for care to take as a run at the trip');
   third.setEnabled(false);
+});
+
+test.serial('S1 follow-up V-3: the pens round\'s lead of an animal (out.ledBy, no villager trip) is stopped at its own timeout as before, and so is one whose trip\'s beat has lapsed', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 1000 };
+  t.teardown(() => { afield.ledBy = undefined; });
+  // pens.ts: 8 minutes, a cow on the lead the whole way (afield.ledBy its own signal)
+  const pens: Goal = {
+    name: 'pens', priority: 10, wants: () => 'test', timeoutMs: 8 * 60_000, retryMs: 1000,
+    run: async ctx => { afield.ledBy = ctx.signal; try { return (await ctx.act('slow')).text; } finally { if (afield.ledBy === ctx.signal) afield.ledBy = undefined; } }
+  };
+  const brain = new Brain(fakeRuntime(state).rt, { tickMs: 1e9, goals: [pens], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 7 * 60_000; await brain.tick(); await settle();
+  t.notRegex(brain.status(), /pens ran out of time/);
+  now += 2 * 60_000; await brain.tick(); await settle();
+  t.regex(brain.status(), /stopping pens: pens ran out of time/, 'cut at its own 8 minutes, not at LEAD_TIMEOUT_MS');
+  brain.setEnabled(false);
+  await settle();
+  // a villager lead whose trip nobody beats any more (a dead poll, an old record) is no lead to the clock either
+  now = 0;
+  const lead: Goal = { ...pens, name: 'lead', timeoutMs: 10 * 60_000 };
+  const other = new Brain(fakeRuntime(state).rt, { tickMs: 1e9, goals: [lead], now: () => now });
+  other.setEnabled(true);
+  await other.tick(); await settle();
+  other.worldMemory()!.fetch = { v: 1, journal: [], wards: [], nextId: 4, trip: liveTrip(now) };
+  now += 11 * 60_000; await other.tick(); await settle();
+  t.regex(other.status(), /stopping lead: lead ran out of time/);
+  other.setEnabled(false);
+});
+
+test.serial('S1 follow-up Y-1: a lead inside its own section at a yard gate or the lock is cut only at LEAD_TIMEOUT_MS, its beat stale or not (gateIn\'s and lockIn\'s walks and waits before their poll loops); not by a section of the hall\'s, nor once its section has lapsed', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 1000 };
+  t.teardown(() => { afield.ledBy = undefined; delete afield.critical; });
+  let signal: AbortSignal | undefined;
+  // care's 10 minutes: a resume that leads (out.ledBy its own)
+  const lead: Goal = {
+    name: 'lead', priority: 10, wants: () => 'test', timeoutMs: 10 * 60_000, retryMs: 1000,
+    run: async ctx => { signal = ctx.signal; afield.ledBy = ctx.signal; try { return (await ctx.act('slow')).text; } finally { if (afield.ledBy === ctx.signal) afield.ledBy = undefined; } }
+  };
+  const run = async (why: 'gate' | 'lock' | 'hall', o: { lapsed?: boolean; at?: number } = {}) => {
+    now = 0;
+    const brain = new Brain(fakeRuntime(state).rt, { tickMs: 1e9, goals: [lead], now: () => now });
+    brain.setEnabled(true);
+    await brain.tick(); await settle();
+    // the trip it leads, its beat 95 s stale at the 11th minute (the walk to the post, the clear wait: no poll yet)
+    brain.worldMemory()!.fetch = { v: 1, journal: [], wards: [], nextId: 4, trip: liveTrip(now, { state: why === 'lock' ? 'lock' : 'gate' }) };
+    now += o.at ?? 11 * 60_000;
+    (brain.worldMemory()!.fetch as FetchMemory).trip!.beat = now - 95_000;
+    afield.critical = { by: signal!, until: o.lapsed ? now - 1000 : now + 45_000, why };
+    await brain.tick(); await settle();
+    const status = brain.status();
+    brain.setEnabled(false);
+    await settle();
+    delete afield.critical;
+    return status;
+  };
+  t.notRegex(await run('gate'), /lead ran out of time/, 'inside its gate step: not cut at the goal\'s 10 minutes');
+  t.notRegex(await run('lock'), /lead ran out of time/, 'inside LOCK: not cut');
+  t.regex(await run('gate', { at: LEAD_TIMEOUT_MS + 60_000 }), /stopping lead: lead ran out of time/, 'the cap holds inside it');
+  t.regex(await run('hall'), /stopping lead: lead ran out of time/, 'a section of the hall\'s is no lead');
+  t.regex(await run('gate', { lapsed: true }), /stopping lead: lead ran out of time/, 'a section that has lapsed, its beat stale: cut at its own timeout');
 });
 
 test('an LLM tool call stops the running goal and keeps the brain out until it has been quiet', async (t) => {
@@ -545,6 +635,93 @@ test('live, Nov 13: wedged in its own pen\'s corner post where no step gets it o
   brain.setEnabled(false);
 });
 
+test('S1 follow-up R6: a run that leads a villager (its trip live) is neither wedge-stopped nor stuck-stopped, said once; its beat lapsed, the watch steps it out as ever', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0.5, y: 64, z: 0.95 }, time: 6000 };
+  const { rt, calls } = fakeRuntime(state);
+  const status = rt.status;
+  rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+  const call = rt.call;
+  const steered: unknown[] = [];
+  rt.call = (async (method: string, params?: Record<string, unknown>) => {
+    if (method === 'world.region' && params?.width === 3) return { blocks: box3('oak_fence[east=true,west=true]', [[1, 0], [-1, 0]]) };
+    if (method === 'steer') { steered.push(params); return { reached: true }; }
+    return call(method, params);
+  }) as ClientRuntime['call'];
+  const lead: Goal = { name: 'villager care', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [lead], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  const w = brain.worldMemory()!;
+  w.fetch = { v: 1, journal: [], wards: [], nextId: 4, trip: liveTrip(now, { state: 'gate' }) };
+  const beat = () => { (w.fetch as FetchMemory).trip!.beat = now; };
+  now += 5000; beat(); await brain.tick(); await settle();
+  now += 20_000; beat(); await brain.tick(); await settle();
+  now += 15_000; beat(); await brain.tick(); await settle();
+  t.false(calls.includes('cancel'), 'no wedge stop mid-lead');
+  t.is(steered.length, 0, 'no step-out beside a lead');
+  now += 3.1 * 60_000; beat(); await brain.tick(); await settle();
+  t.false(calls.includes('cancel'), 'no stuck stop mid-lead');
+  t.notRegex(brain.status(), /looks stuck|stepping out/);
+  t.is((brain.status().match(/leading a villager: not stopped \(the lead's own clock and guards end it\)/g) ?? []).length, 1, 'said once for the stand-still');
+  // the trip's beat lapsed (nobody leads it any more): the watch is as it was
+  now += 100_000; await brain.tick(); await settle();
+  t.true(calls.includes('cancel'));
+  t.regex(brain.status(), /villager care (is wedged in the oak_fence at 0,64,0: stepping out|looks stuck)/);
+  brain.setEnabled(false);
+});
+
+test('S1 follow-up R6: with a villager out (a ward in the lock) the wedge step-out makes its steps and digs nothing: its own post stands, said; with none out it is dug as on Nov 13', async (t) => {
+  const run = async (fetch?: FetchMemory) => {
+    let now = 0;
+    const state = { pos: { ...IN_CORNER }, time: 6000 };
+    const { rt } = fakeRuntime(state);
+    const status = rt.status;
+    rt.status = async () => ({ ...(await status()), process: 'Custom Goal' });
+    const call = rt.call;
+    const steered: unknown[] = [];
+    let dug = false;
+    rt.call = (async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'world.region' && params.width === 3) return { blocks: dug ? corner3().map((b, i) => (i === 4 || i === 13 ? 'air' : b)) : corner3() };
+      if (method === 'steer') {
+        steered.push({ x: params.x, z: params.z });
+        if (!dug) return { reached: false, distance: 1.49, at: { ...POST } };
+        state.pos = { x: Number(params.x), y: 63, z: Number(params.z) };
+        return { reached: true, distance: 0.1, at: { x: Math.floor(state.pos.x), y: 63, z: Math.floor(state.pos.z) } };
+      }
+      if (method === 'dig.here') { dug = true; return { dug: true, block: 'oak_fence', tool: 'diamond_axe' }; }
+      return call(method, params);
+    }) as ClientRuntime['call'];
+    rt.builtNear = () => [{ at: { ...POST }, state: 'oak_fence' }, { at: { ...POST, y: 64 }, state: 'torch' }];
+    const round: Goal = { name: 'pens', priority: 10, wants: () => 'test', run: async ctx => (await ctx.act('slow')).text, timeoutMs: 60 * 60_000, retryMs: 1000 };
+    const brain = new Brain(rt, { tickMs: 1e9, goals: [round], now: () => now });
+    brain.setEnabled(true);
+    await brain.tick(); await settle();
+    if (fetch) brain.worldMemory()!.fetch = fetch;
+    now += 5000; await brain.tick(); await settle();
+    now += 20_000; await brain.tick(); await settle();
+    now += 15_000; await brain.tick(); await settle();
+    const said = brain.status();
+    brain.setEnabled(false);
+    return { dug, steered, said };
+  };
+  const inLock = {
+    key: 'ffeeb80c', uuid: 'ffeeb80c', from: { site: 'village -693,2262', at: { x: -675, y: 71, z: 2249 } }, since: 0, bell: true, where: 'lock' as const,
+    last: { at: { x: -556.5, y: 63, z: 2135.5 }, t: 0, tod: 8600, health: 20, profession: 'none' }, health0: 20
+  };
+  const out = await run({ v: 1, journal: [], wards: [inLock], nextId: 2 });
+  t.false(out.dug, 'nothing dug with a villager out');
+  t.deepEqual(out.steered, [{ x: -556.5, z: 2170.5 }, { x: -558.5, z: 2171.5 }], 'the two steps made');
+  t.regex(out.said, /stopping pens: pens is wedged in the oak_fence at -558,63,2171: stepping out/);
+  t.regex(out.said, /wedged in the oak_fence at \(-558, 63, 2171\): could not step out; not dug: a villager is out/);
+  // inert: no record, or one with nobody out, digs as before
+  for (const fetch of [undefined, { v: 1 as const, journal: [], wards: [], nextId: 1 }]) {
+    const as = await run(fetch);
+    t.true(as.dug);
+    t.regex(as.said, /dug it out, stepped out, put it back/);
+  }
+});
+
 /**
  * getOut over a client where no plain step gets the bot out, and the dig's reply is `dig`: what it called and put
  * back (`log`), and what it put in the record of the bot's builds (`recorded`).
@@ -821,7 +998,7 @@ test('a LOOP back-off holds through the morning and the idle watchdog, and a loo
 // ---- the hand-over: the next look follows a run's end at once ----
 
 /** What the hand-over's tests look at inside the brain: the tick waiting to follow, one asked for mid-tick, the run in hand. */
-const inside = (brain: Brain) => brain as unknown as { chained?: unknown; again: boolean; running?: { done: Promise<void> } };
+const inside = (brain: Brain) => brain as unknown as { chained?: unknown; again: boolean; ticking: boolean; running?: { done: Promise<void> } };
 
 /**
  * A brain by day with two goals, each wanted once: `first` runs until the test ends it (`end`, with an error to fail
@@ -854,10 +1031,10 @@ test('the tick after a run ends follows at once: after 2 s of work the next goal
   // 2.1 s of work (and 2 s on the dot): the next goal has started, and one look did it
   for (const ms of [2100, 2000]) {
     const r = relay();
-    await r.brain.tick(); await settle();
+    await r.brain.tick(); await settle(r.brain);
     t.deepEqual(r.began, ['first']);
     r.at.clock += ms;
-    r.end(); await settle(); // no tick() from here
+    r.end(); await settle(r.brain, () => r.began.length > 1); // no tick() from here
     t.deepEqual(r.began, ['first', 'second'], `${ms} ms`);
     t.regex(r.brain.status(), /- 00:16:42 done first in 2s: through\n- 00:16:42 start second: next\n/, `${ms} ms`);
     t.is(r.at.looks, 2, `${ms} ms`); // the first tick's and the one that followed the run; the second run was over at once: nothing follows it
@@ -866,9 +1043,9 @@ test('the tick after a run ends follows at once: after 2 s of work the next goal
 
   // a run that failed after 2.1 s of trying is followed the same way: it is held, the next goal is not kept waiting
   const failed = relay();
-  await failed.brain.tick(); await settle();
+  await failed.brain.tick(); await settle(failed.brain);
   failed.at.clock += 2100;
-  failed.end(new Error('no way through')); await settle();
+  failed.end(new Error('no way through')); await settle(failed.brain, () => failed.began.length > 1);
   t.deepEqual(failed.began, ['first', 'second']);
   t.regex(failed.brain.status(), /- 00:16:42 failed first: no way through\n- 00:16:42 start second: next\n/);
   failed.brain.setEnabled(false);
@@ -877,14 +1054,14 @@ test('the tick after a run ends follows at once: after 2 s of work the next goal
   // next look is the tick's, so nothing goes round faster than the tick does
   for (const [ms, err] of [[100, 'no way through'], [1999, ''], [0, '']] as const) {
     const r = relay();
-    await r.brain.tick(); await settle();
+    await r.brain.tick(); await settle(r.brain);
     r.at.clock += ms;
-    r.end(err ? new Error(err) : undefined); await settle();
+    r.end(err ? new Error(err) : undefined); await settle(r.brain, () => !inside(r.brain).running);
     t.deepEqual(r.began, ['first'], `${ms} ms`);
     t.is(r.at.looks, 1, `${ms} ms`);
     t.is(inside(r.brain).chained, undefined, `${ms} ms`);
     r.at.clock += 5000;
-    await r.brain.tick(); await settle(); // the 5 s tick
+    await r.brain.tick(); await settle(r.brain); // the 5 s tick
     t.deepEqual(r.began, ['first', 'second'], `${ms} ms`);
     r.brain.setEnabled(false);
   }
@@ -924,7 +1101,7 @@ test('a chained tick and the interval tick never start two goals: asked for whil
   await brain.tick(); await brain.tick(); // both come back at once: a tick is under way
   t.is(looks, 1);
   t.true(inside(brain).again);
-  open(); await under; await settle();
+  open(); await under; await settle(brain);
   t.is(looks, 2);            // the one that follows: one, not two
   t.deepEqual(began, ['a']); // and it found the run in hand: nothing started beside it
   t.false(inside(brain).again);
@@ -934,11 +1111,13 @@ test('a chained tick and the interval tick never start two goals: asked for whil
   clock += 3000;
   shut();
   const looking = brain.tick();
-  ends.get('a')!(); await settle();
+  // (not settled on the brain: its tick waits on the look the test holds; the turns until the tick the end asked for has
+  // come and found it under way)
+  ends.get('a')!(); await settle(); await turnsUntil(() => !inside(brain).chained && inside(brain).again);
   t.is(looks, 3);
   t.true(inside(brain).again); // asked for, not lost, and not a second tick beside the one under way
   t.deepEqual(began, ['a']);
-  open(); await looking; await settle();
+  open(); await looking; await settle(brain, () => began.length > 1);
   t.is(looks, 4);
   t.deepEqual(began, ['a', 'b']);
 
@@ -946,16 +1125,16 @@ test('a chained tick and the interval tick never start two goals: asked for whil
   // wants to go on, and is not started beside it)
   clock += 3000;
   alarm = true;
-  await brain.tick(); await settle();
+  await brain.tick(); await settle(brain, () => began.length > 2);
   t.is(looks, 6);
   t.deepEqual(began, ['a', 'b', 'urgent']);
   t.regex(brain.status(), /stopping b: urgent is more urgent \(alarm\)\n- 00:16:46 stopped b: aborted\n- 00:16:46 start urgent: alarm$/);
   t.is(live, 1);
-  await settle();
+  await settle(brain);
   t.is(looks, 6); // nothing goes on looking
   t.is(most, 1);  // never two runs at once
 
-  brain.setEnabled(false); await settle();
+  brain.setEnabled(false); await settle(brain);
   t.is(live, 0);
   t.is(looks, 6);
   t.is(inside(brain).chained, undefined);
@@ -1151,11 +1330,11 @@ test('left at the far end of the yard with nothing to do, the bot walks home, an
   brain.worldMemory()!.yard = { x1: -16, z1: -64, x2: 16, z2: 32, y: 63 };
   state.pos = { x: 10, y: 64, z: -45 };
   due = true;
-  clock += 5000; await brain.tick(); await settle();
+  clock += 5000; await brain.tick(); await settle(brain);
   t.regex(brain.status(), /- 00:16:45 start idle: nothing to do out here: back to the yard$/);
   t.is(swept, 0);
   // home after 9 s: the chore is in reach, and starts in that second with no tick of the test's
-  clock += 9000; arrive(); await settle();
+  clock += 9000; arrive(); await settle(brain, () => swept > 0);
   t.regex(brain.status(), /- 00:16:54 done idle in 9s: back home\n- 00:16:54 start chore: due\n/);
   t.is(swept, 1);
   brain.setEnabled(false);
@@ -1463,6 +1642,37 @@ test.serial('E4: the strict set at the start (the closer on, then the set whole 
   t.deepEqual(peekFetch(world).gates!.leftOpen, [YARD_GATES.west]);
   t.true(isOpen(p.get(YARD_GATES.west)), 'the bridge only reports it: care shuts it');
   brain.setEnabled(false);
+});
+
+test.serial('S1 follow-up R7: the strict gates fewer than the set last sent while a villager trip exists (PREP\'s read on) halt the fetch, said; with no trip and nobody out the fall is only sent on', async (t) => {
+  const grow = (world: WorldMemory) => {
+    // (the growth's last run: the box 16 farther north, the fence to move out; the north gate is off the box's line)
+    const y = world.yard!;
+    world.fenceMove = { side: 'north', old: { ...y } };
+    world.yard = { ...y, z1: y.z1 - 16 };
+  };
+  for (const trip of [true, false]) {
+    const p = yard({ at: { x: -550, y: 63, z: 2145 } });
+    const { brain, said } = brainOn(t, p, []);
+    brain.setEnabled(true);
+    await brain.tick();
+    const world = brain.worldMemory()!;
+    t.is(strictGates(world).length, 7);
+    world.fetch = { v: 1, method: 'lure', armed: 1, journal: [], wards: [], nextId: 2, ...(trip ? { trip: liveTrip(p.now() - 60 * 60_000, { id: 1, state: 'prep', prep: { read: p.now() - 60_000, kit: p.now() - 60_000 } }) } : {}) };
+    grow(world);
+    t.is(strictGates(world).length, 6);
+    p.advance(20);
+    await brain.tick();
+    const halt = peekFetch(world).halt;
+    if (trip) {
+      t.regex(halt?.why ?? '', /^the strict gates fell from 7 to 6 while a villager trip is prep \(trip 1\): the yard's fence or a gate changed under it$/);
+      t.true(said().some(l => /^villagers: HALT: the strict gates fell from 7 to 6/.test(l)), said().join('\n'));
+    } else {
+      t.is(halt, undefined, 'no trip, nobody out: nothing of the fetch\'s');
+      t.false(said().some(l => /HALT/.test(l)));
+    }
+    brain.setEnabled(false);
+  }
 });
 
 test.serial('E4 end to end: the gate watch finds a gate left open, care cuts the chore that runs and shuts it; a jar with no gate holds sends nothing and the shells build nothing', async (t) => {

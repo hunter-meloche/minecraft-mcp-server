@@ -355,6 +355,18 @@ export function wardOut(world: WorldMemory, now: number): boolean {
 }
 
 /**
+ * The yard's box, fence and gates hold still (the yard-follow-up's R3): a trip exists that is not restoring (from PREP's
+ * first read on: its gate, its lane and its yard way were read on the yard as it stood then), or a villager is out
+ * (wardOut). Grow yard, growStep and the perimeter's take-down wait on it: wardOut alone is false through PREP until
+ * its lifts are stamped, and a growth in that window moved the box under a prepared trip (the dawn path P1). The
+ * rebuild of a ring already taken down is not held: it closes the yard.
+ */
+export function yardHeld(world: WorldMemory, now: number): boolean {
+  const t = sound(world.fetch).trip;
+  return (!!t && t.state !== 'restore') || wardOut(world, now);
+}
+
+/**
  * Why a job-site block may not be put up now, or undefined: while a ward is out no goal places one outside the hall's
  * box (the brewing milestone's stand, a structure job's cell, the repair of a lifted one). `at`: the cell, where the
  * caller knows it (one inside the hall is the chores' own business: the free lectern there is what draws the ward in).

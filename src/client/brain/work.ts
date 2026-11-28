@@ -971,7 +971,9 @@ export function workGoals(lastDeath: () => Death | undefined, tasks: WorkTask[] 
       name: `work: ${task.name}`,
       priority: 19 - task.rank,
       urgency: (s, world) => {
-        if (out.trip && current?.task === task) return TRIP_URGENCY;
+        // (a trip under way: TRIP_URGENCY, or the rung's own while it says one: the lure's dawn walk out to its first
+        // flip, which smelt, the stash and the kit would else cut near home, and the one armed trip with it)
+        if (out.trip && current?.task === task) return Math.max(TRIP_URGENCY, task.urgent?.(s, world) ?? TRIP_URGENCY);
         const c = pick(task, s, world);
         // (a rung's own, while it answers a variant: the lure's prepared trip at dawn, villagemove.ts)
         const own = 'variant' in c ? task.urgent?.(s, world) : undefined;

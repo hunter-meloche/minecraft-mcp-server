@@ -90,9 +90,9 @@ const YARD_BOX = { x1: -565, z1: 2119, x2: -533, z2: 2215 };
 /**
  * The invariants of 2.4 on a scenario's call log. INV-1: at every place, dig.here and gates.hold of the fetch's (not a
  * stray's of the lane) the saved brain.json holds the matching journal entry. INV-3: P and H never open together; P
- * never open with a villager in the lock but the ward under a hold; no gate held over 35 s; no job block of the hall
- * dug; gates.auto never off. INV-4: no lure down outside the fence at 8990 or after for a bell-alive ward; P never
- * opened from 8990. INV-5: from the first lure to P shut the ward took no job site but the trip's lures. INV-6: no chat,
+ * never open with a villager in the lock but the ward under a hold; no gate held over 35 s (a hold never released:
+ * to its last renewal); no job block of the hall dug; gates.auto never off. INV-4: no lure down outside the fence at
+ * 8990 or after for a bell-alive ward; P never opened from 8990. INV-5: from the first lure to P shut the ward took no job site but the trip's lures. INV-6: no chat,
  * no entity.use, no attack on a villager, no `force`, no dig of a block that was not the bot's, no lure on a path block
  * or farmland, only careful walks while a ward is led, nothing of the trip left outside the fence at the end.
  */
@@ -120,14 +120,19 @@ function invariants(t: ExecutionContext, p: Pasture, o: { strays?: Pos[]; ward?:
   for (const e of p.log) if (e.kind === 'act') t.false(/chat|send-chat/.test(e.name), 'INV-6: chat');
   // INV-3: no gate held over 35 s (GATE_IN_GATEWAY_MAX), from its first hold to its release, as the log has them (a
   // second of slack for the release's own call and the read after)
-  const holding = new Map<string, Entry>();
+  const holding = new Map<string, Entry>(), lastHold = new Map<string, Entry>();
   for (const e of p.log) {
     if (e.kind !== 'call' || (e.name !== 'gates.hold' && e.name !== 'gates.release')) continue;
     const k = key({ x: Number(e.params.x), y: Number(e.params.y), z: Number(e.params.z) });
-    if (e.name === 'gates.hold') { if (!holding.has(k)) holding.set(k, e); continue; }
+    if (e.name === 'gates.hold') { if (!holding.has(k)) holding.set(k, e); lastHold.set(k, e); continue; }
     const from = holding.get(k);
     holding.delete(k);
     if (from) t.true(e.t - from.t <= 36 * 20, `INV-3: the gate at ${k} held ${((e.t - from.t) / 20).toFixed(1)} s (log ${from.i} to ${e.i})`);
+  }
+  // (a hold never released, the run's end or a kill: from its first hold to its last renewal, the bridge's lapse after)
+  for (const [k, from] of holding) {
+    const last = lastHold.get(k)!;
+    t.true(last.t - from.t <= 36 * 20, `INV-3: the gate at ${k} held ${((last.t - from.t) / 20).toFixed(1)} s and never released (log ${from.i} to ${last.i})`);
   }
   // INV-3: P never open with a villager in the lock but the ward (the lock's watch, tick by tick)
   t.deepEqual(breaches.get(p) ?? [], [], 'INV-3: P open with a villager in the lock that is no ward');
@@ -290,7 +295,7 @@ test('D14 late and near: released (not committed, short of 1.3 x the time left):
   invariants(t, p);
 });
 
-test('D14 late and committed: runs on (the waits cut, no hold for a player) and is in the lock before the bell; P shut at 8996 on a ward in the gateway: in the lock; not in by 8990: stopped, halt', async (t) => {
+test('D14 late and committed: runs on (the waits cut, no hold for a player) and is in the lock before the bell; not in by 8990: stopped, halt (the LAST_P shut on a ward in P\'s cell: the next test)', async (t) => {
   const p = homestead({ tod: 8_500, candidates: 0, at: at(-550, 63, 2134) });
   led(p, { at: at(-550, 63, 2131), lure: at(-550, 63, 2130), state: 'yardhop', committed: 'far' });
   const r = await leadOn(p.ctx, p.clock);
@@ -304,6 +309,23 @@ test('D14 late and committed: runs on (the waits cut, no hold for a player) and 
   t.is(s.end, 'stopped', s.text);
   t.truthy(peekFetch(q.world).halt);
   invariants(t, q, { leftOut: true });
+});
+
+test('D14 (LAST_P): from 8900 P is shut on a ward standing in its cell (it counts as in, as the gate shuts on its feet: F-9), not held open to the cap past the bell', async (t) => {
+  const p = homestead({ tod: 8_860, candidates: 0, at: at(-553, 63, 2138) });
+  // (it stands in P's cell working at S_out and goes no farther)
+  led(p, { at: at(-555.5, 63, 2137.5), lure: SOUT, state: 'yardhop', committed: 'far', over: { mind: 'still' } });
+  const r = await leadOn(p.ctx, p.clock);
+  t.log(r.text, saidOf(p).join('\n'));
+  const todAt = (tick: number) => p.tod - (p.tick - tick);
+  const ps = p.changed.filter(c => key(c.at) === key(P));
+  const opened = ps.find(c => isOpen(c.to)), shut = ps.find(c => opened && c.t > opened.t && !isOpen(c.to));
+  t.truthy(opened && shut, 'P opened, then shut');
+  t.log(`P open ${Math.round(todAt(opened!.t))}, shut ${Math.round(todAt(shut!.t))}`);
+  // (opened from LAST_P with the ward in its cell: shut at the first poll that sees it there, not held to the bell)
+  t.true(todAt(opened!.t) >= 8900, 'P opened from LAST_P');
+  t.true(shut!.t - opened!.t <= 60 && todAt(shut!.t) < 8985, `P shut at ${Math.round(todAt(shut!.t))}, ${shut!.t - opened!.t} ticks after it opened: on its feet, before the bell`);
+  invariants(t, p, { leftOut: true });
 });
 
 // ------------------------------------------------------------------------------------------------ PREP (4.1, B rows)
@@ -536,6 +558,8 @@ test('C1 nobody comes: three spots, the lure up, the site marked `no claim`, a d
   t.is(p.world.villages!.sites[0].fetch?.kind, 'no claim');
   t.true(p.dumps.some(d => d.name === 'fetch-first'));
   t.is(p.log.filter(e => e.name === 'place').length, 3, 'three spots');
+  t.log(saidOf(p).join('\n'));
+  t.is(new Set(p.log.filter(e => e.name === 'place').map(e => `${e.params.x},${e.params.y},${e.params.z}`)).size, 3, `three cells (a spot nobody came to is not a nearer one): ${p.log.filter(e => e.name === 'place').map(e => `${e.params.x},${e.params.y},${e.params.z}@${e.tod}`).join(' ')}`);
   t.false(fetchOf(p.world).journal.some(e => e.k === 'lure'));
   // 4.1: after nobody came, a spot nearer the nearest candidate (within 12 path cells of it, on its level)
   const spots = p.changed.filter(c => c.how === 'placed' && idOf(c.to) === 'fletching_table').map(c => c.at);
@@ -825,9 +849,13 @@ test('A14 a cauldron 40 aside of the way: the corridor and every hop keep 56 off
   const ate = p.log.findIndex(e => e.name === 'eat'), out1 = p.log.findIndex((e, i) => i > ate && e.name === 'goto');
   t.true(ate > 0 && out1 > ate, 'ate before the walk out');
   const lures = p.changed.filter(c => c.how === 'placed' && idOf(c.to) === 'fletching_table' && !inBox(YARD_BOX, c.at));
-  t.true(r.gain === 1 || /cauldron/.test(r.text), r.text);
+  // (the trip went round it into the hall, every lure 56 or more off it; else it was refused for that cauldron by name)
+  t.true(r.gain === 1 || /(rival|keep|56).*cauldron at \(-640, 63, 2158\)|cauldron at \(-640, 63, 2158\).*(rival|keep|56)/.test(r.text), r.text);
   for (const c of lures) t.true(flat(c.at, cauldron) >= 56, `a lure at ${key(c.at)}, ${Math.round(flat(c.at, cauldron))} from the cauldron`);
-  t.true(peekFetch(p.world).trip === undefined || (peekFetch(p.world).trip?.avoid ?? []).some(a => key(a.at as Pos) === key(cauldron)));
+  t.true(lures.length > 0, 'the trip led a ward out there');
+  // the way kept off it: the trip's avoid circles had it (a free job site that is not the bot's), 56 round, as saved
+  const avoided = p.log.some(e => ((JSON.parse(e.saved) as { fetch?: FetchMemory }).fetch?.trip?.avoid ?? []).some(a => key(a.at as Pos) === key(cauldron) && a.r >= 56));
+  t.true(avoided, 'the cauldron among the trip\'s keep-offs, 56 round');
   invariants(t, p);
 });
 
@@ -1263,8 +1291,13 @@ test('E23 it stops in the gateway: never shut on it, the lure 2 farther in and t
   let snagged: number | undefined;
   const watchIt = () => { if (key(cellOf(v.position)) === key(NORTH)) { snagged = p.tick; p.at(p.tick + 240, () => p.set(holder, 'air')); } else p.at(p.tick + 2, watchIt); };
   p.at(p.tick + 2, watchIt);
+  // (tick by tick: never a tick with it in the gate's cell and the gate shut)
+  const shutOnIt: number[] = [];
+  const onIt = () => { if (key(cellOf(v.position)) === key(NORTH) && !isOpen(p.get(NORTH))) shutOnIt.push(p.tick); p.at(p.tick + 1, onIt); };
+  p.at(p.tick + 1, onIt);
   const r = await leadOn(p.ctx, p.clock);
   t.truthy(snagged, 'it stood in the gateway');
+  t.deepEqual(shutOnIt, [], 'never shut on it while it stood in the gateway');
   const yardLures = luresDown(p).filter(c => c.z > NORTH.z && c.x === NORTH.x);
   t.true(yardLures.some(c => c.z === NORTH.z + 7), `the lure 2 farther in: ${yardLures.map(key).join(' ')}`);
   const held = /^gate \(-549, 63, 2119\) held (\d+) s; shut, read shut/.exec(saidOf(p).find(x => /^gate \(-549, 63, 2119\) held/.test(x)) ?? '');
@@ -1565,10 +1598,10 @@ test.serial('S1 review S3: the critical section is renewed with every hold of P 
   for (const s of seen) t.true(s.why === 'lock' && s.left > 40_000, `a hold of P under a section with ${Math.round(s.left / 1000)} s left (${s.why})`);
 });
 
-test('S1 review #7: G that does not read shut after the ward is through (the hold released, a click refused) is no `gate -> yardhop`: STOPPED, halt, the lead decides', async (t) => {
+test('S1 follow-up V-1 (#7 at G): G that does not read shut after the ward is through (the hold released, a click refused) is said with halt, and the ward is led on into the yard to the lock (it holds by itself), never freed beside the open G: it never walks back out by it, and ends in the hall', async (t) => {
   const p = homestead({ tod: 3_000, candidates: 0, at: at(-549, 63, 2112) });
   const G = YARD_GATES.north;
-  led(p, { at: at(-550, 63, 2112), lure: at(-550, 63, 2114), state: 'hop', committed: 'far', toGate: 4 });
+  const { v } = led(p, { at: at(-550, 63, 2112), lure: at(-550, 63, 2114), state: 'hop', committed: 'far', toGate: 4 });
   // (from the release on, G will not shut: under redstone power, which the closer never clicks, its click refused)
   let through = false;
   p.on.call['gates.release'] = (q: Record<string, unknown>) => {
@@ -1578,12 +1611,51 @@ test('S1 review #7: G that does not read shut after the ward is through (the hol
     return { released: true, open: true };
   };
   p.on.call.useOn = (q: Record<string, unknown>) => (through && Number(q.x) === G.x && Number(q.z) === G.z ? { used: false, reason: 'refused' } : undefined);
+  // where the ward stands, tick by tick, once it is through
+  let outAgain = false;
+  const track = () => { if (through && v.position.z < G.z) outAgain = true; p.at(p.tick + 1, track); };
+  p.at(p.tick + 1, track);
+  const r = await leadOn(p.ctx, p.clock);
+  const said = saidOf(p);
+  t.log(said.join('\n'));
+  t.true(through, 'the ward through G, its release refused');
+  t.true(said.some(x => /^the north gate at \(-549, 63, 2119\) does not read shut behind the ward \(trip 9\): care's row 1 keeps on at it; the ward led on to the lock$/.test(x)), 'said');
+  t.regex(peekFetch(p.world).halt?.why ?? '', /the north gate at \(-549, 63, 2119\) does not read shut behind the ward/, 'halt: the lead looks at G');
+  t.false(said.some(x => /^STOPPED/.test(x)), 'no STOP by the open gate');
+  t.false(outAgain, 'the ward never back outside the fence by the open G');
+  t.true(r.end === 'hall' || r.end === 'lock', r.text);
+  t.true(inBox(HALL_BOX, v.position) || inBox(LOCK_BOX, v.position), `the ward in the hall or the lock (${key(cellOf(v.position))})`);
+});
+
+test('S1 follow-up V-1 (#7 at G, not through): G that will not shut with the ward still outside is a STOP that leaves the yard\'s lure standing inside as the ward\'s tether (drawn in, not freed by the open G); halt names where the ward is, not the last hop\'s cell', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-549, 63, 2112) });
+  const G = YARD_GATES.north;
+  // (it works at the gate's spot and goes no farther: never through in the cap)
+  const { v } = led(p, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2, over: { mind: 'still' } });
+  fetchOf(p.world).trip!.state = 'gate';
+  fetchOf(p.world).wards[0].last.at = at(-600, 63, 2120);
+  p.saved = JSON.stringify(p.world);
+  let released = false;
+  p.on.call['gates.release'] = (q: Record<string, unknown>) => {
+    if (Number(q.x) !== G.x || Number(q.z) !== G.z) return undefined;
+    if (!released) p.set(G, 'oak_fence_gate[facing=north,in_wall=false,open=true,powered=true]', 'powered');
+    released = true;
+    return { released: true, open: true };
+  };
+  p.on.call.useOn = (q: Record<string, unknown>) => (released && Number(q.x) === G.x && Number(q.z) === G.z ? { used: false, reason: 'refused' } : undefined);
   const r = await leadOn(p.ctx, p.clock);
   t.log(saidOf(p).join('\n'));
-  t.true(through, 'the ward through G, its release refused');
   t.is(r.end, 'stopped', r.text);
   t.regex(r.text, /the north gate at \(-549, 63, 2119\) does not read shut/);
-  t.truthy(peekFetch(p.world).halt);
+  const f = peekFetch(p.world);
+  const yardLure = f.journal.find(e => e.k === 'lure' && e.role === 'yard');
+  t.truthy(yardLure, 'the yard\'s lure left standing');
+  t.true(inBox(YARD_BOX, yardLure!.at) && yardLure!.at.z > G.z, 'inside the fence');
+  t.is(idOf(p.get(yardLure!.at)), 'fletching_table');
+  t.deepEqual(f.wards[0]?.tether, yardLure!.at, 'the ward astray at it: RESTORE holds it while the ward is out');
+  t.true(restoreOrder(p.world, p.now()).held.some(e => key(e.at) === key(yardLure!.at)));
+  t.regex(f.halt?.why ?? '', /^STOPPED at \(-54[789], 63, 211[3-6]\)/, `the halt names where the ward was seen (${f.halt?.why})`);
+  t.true(flat(v.position, G) < 8);
 });
 
 test('S1 review #12 (E13\'s real-yard pin): the yard as the bot read it on Nov 25 (tests/fixtures/yard-2026-11-25.json): each gate\'s lane as PREP reads it, and the villager\'s way across the yard to S_out from each gate that has one', async (t) => {
@@ -1603,7 +1675,9 @@ test('S1 review #12 (E13\'s real-yard pin): the yard as the bot read it on Nov 2
   t.log(Object.entries(got).map(([k, v]) => `${k}: ${v}`).join('\n'));
   // (the north, east and west lanes run into the land's own rise 3 out: not the bot's to dig, so not those gates; the
   // south lane is free, and its way waits on the cobblestone at (-553, 63, 2192), a stray of the bot's inside the fence:
-  // the tidy round's, or the lead's. Until one of them, the first live PREP declines with these words)
+  // the tidy round's, or the lead's. On THIS yard the first live PREP would decline with these words. The live yard is
+  // no longer it: on Nov 27 it grew 16 north (z1 2103, the north gate at (-549, 63, 2103), the chapel in the new strip),
+  // so this pins the code on the Nov 25 ground only; rollout step 3 wants a fresh dump and these checks run on it first)
   t.regex(got.north, /^lane dirt in the north gate's lane at \(-549, 63, 2116\), 3 outside the fence: not the bot's to dig; way \d+ cells$/);
   t.regex(got.east, /^lane dirt in the east gate's lane at \(-530, 63, 2183\), 3 outside the fence: not the bot's to dig; /);
   t.regex(got.west, /^lane dirt in the west gate's lane at \(-568, 63, 2183\), 3 outside the fence: not the bot's to dig; /);
@@ -1611,3 +1685,517 @@ test('S1 review #12 (E13\'s real-yard pin): the yard as the bot read it on Nov 2
 });
 /** The portal's ring as built (4.7): x -564..-555, z 2145..2149. */
 const RING = { x1: -564, z1: 2145, x2: -555, z2: 2149 };
+
+// ------------------------------------------------------------------------------------------------ the S1 follow-up (fixes of the fixer's fixes)
+
+test('S1 follow-up V-2 (#2, the far case): a ward wedged a hop\'s length from the lure it could not reach (D28\'s: wedged mid-hop) gets UNWEDGE step 1 all the same: the lure on its other side, by it (the direction mirrored, not the distance), never "no cell for a lure on the other side"', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-641, 63, 2118) });
+  const w = at(-640, 63, 2117);
+  led(p, { at: { x: w.x + 0.5, y: 63, z: w.z + 0.5 }, lure: at(-638, 63, 2117), state: 'hop', committed: 'far', toGate: 90 });
+  p.snag([w, { ...w, y: 64 }]);
+  const r = await leadOn(p.ctx, p.clock);
+  const said = saidOf(p);
+  t.log(said.filter(x => /wedged|stalled|STOP|other side|hop/.test(x)).join('\n'));
+  t.true(said.some(x => /: the lure to its other side$/.test(x)), 'step 1');
+  t.false(said.some(x => /no cell for a lure on the other side/.test(x)), 'a cell found on the other side');
+  const places = p.changed.filter(c => c.how === 'placed' && idOf(c.to) === 'fletching_table').map(c => c.at);
+  const step = said.findIndex(x => /: the lure to its other side$/.test(x));
+  t.true(places.length >= 2, `${places.length} lures down`);
+  // the lure it could not reach (a hop on, toward the gate) and the one after it, on the ward's other side
+  const [hop, other] = places.slice(-2);
+  t.true(flat(hop, w) >= 8, `the hop's lure ${key(hop)} a hop's length off (${flat(hop, w).toFixed(1)})`);
+  const dot = (hop.x - w.x) * (other.x - w.x) + (hop.z - w.z) * (other.z - w.z);
+  t.true(dot < 0, `the next (${key(other)}) on the other side of the ward from ${key(hop)}`);
+  t.true(flat(other, w) <= 13, `by it (${flat(other, w).toFixed(1)})`);
+  t.true(step >= 0);
+  t.is(r.end, 'stopped', r.text);
+  invariants(t, p, { leftOut: true });
+});
+
+test('S1 follow-up V-5 (S2 at G): a bell-alive ward\'s gate step stands G open past no bell: begun at 8940-8975, nothing opened (the take and the walk through would end past it); begun at 8700 with a ward that does not come, the open spell ends at the bell, shut; tried again near it, no lure down outside the fence from 8990 (INV-4)', async (t) => {
+  const cases: { tod: number; still?: true }[] = [{ tod: 8_940 }, { tod: 8_960 }, { tod: 8_975 }, { tod: 8_700, still: true }, ...[8_380, 8_400, 8_420, 8_440, 8_460, 8_480].map(tod => ({ tod, still: true as const }))];
+  for (const { tod, still } of cases) {
+    const p = homestead({ tod, candidates: 0, at: at(-551, 63, 2113) });
+    const G = YARD_GATES.north;
+    led(p, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2, ...(still ? { over: { mind: 'still' as const } } : {}) });
+    fetchOf(p.world).trip!.state = 'gate';
+    p.saved = JSON.stringify(p.world);
+    const r = await leadOn(p.ctx, p.clock);
+    t.log(tod, still ? 'still' : 'game', r.end, r.text);
+    const clicks = p.log.filter(e => e.name === 'useOn' && Number(e.params.x) === G.x && Number(e.params.z) === G.z && e.tod >= 8990 && e.tod < 12_000 && !isOpen(p.changed.filter(c => key(c.at) === key(G) && c.t <= e.t).at(-1)?.to ?? 'open=false'));
+    t.deepEqual(clicks.map(e => e.tod), [], `${tod}: no click opening G from the bell`);
+    // (G's state at 9000 and after, from its changes: the time of day runs a tick a tick with the pasture's clock)
+    const todAt = (tick: number) => p.tod - (p.tick - tick);
+    const gs = p.changed.filter(c => key(c.at) === key(G));
+    const at9000 = gs.filter(c => todAt(c.t) < 9000).at(-1);
+    t.false(!!at9000 && isOpen(at9000.to), `${tod}: G open at 9000 (since tod ${at9000 && Math.round(todAt(at9000.t))})`);
+    t.deepEqual(gs.filter(c => todAt(c.t) >= 9000 && isOpen(c.to)).map(c => Math.round(todAt(c.t))), [], `${tod}: G opened from 9000`);
+    t.false(isOpen(p.get(G)), `${tod}: G shut at the end`);
+    t.true(r.end === 'stopped' || r.end === 'hall' || r.end === 'lock', r.text);
+    invariants(t, p, { leftOut: true });
+  }
+});
+
+// ------------------------------------------------------------------------------------------------ the yard whole (the yard follow-up: R1, R2, R4, R5)
+
+/** The yard's records broken the ways Nov 27's growth broke them (yardgates.ts yardWhy), one at a time. */
+const yardBreaks: [string, (p: Pasture) => void, RegExp][] = [
+  ['the fence moving out', p => { p.world.fenceMove = { side: 'north', old: { ...p.world.yard! } }; }, /the yard is not whole: the fence is moving out to the north/],
+  ['the box grown, the ring not', p => { p.world.yard = { ...p.world.yard!, z1: p.world.yard!.z1 - 16 }; }, /the yard is not whole: the fence is not up round the yard as it stands/],
+  ['the zones taken down with the old side', p => { delete p.world.zones!.fence; delete p.world.zones!['fence:gate']; }, /the yard is not whole: the fence is not up round the yard/],
+  ['a gate off the line', p => { p.world.zones!['fence:gate'].push({ x: -550, y: 63, z: 2150 }); }, /the yard is not whole: 1 of the yard's 5 gate\(s\) off its fence line/]
+];
+
+test('S1 follow-up R2: PREP declines on a yard that is not whole on the records (each of Nov 27\'s ways), with a growth asked for, and on a fence that is not whole as blocks (a post dug; a step against it inside); nothing lifted, no trip left', async (t) => {
+  for (const [name, broke, why] of yardBreaks) {
+    const p = homestead();
+    broke(p);
+    const r = await prepNow(p);
+    t.false(r.ok, name);
+    t.regex(r.text, why, name);
+    t.is(peekFetch(p.world).trip, undefined, name);
+    t.is(idOf(p.get(SMITHING)), 'smithing_table', `${name}: nothing lifted`);
+  }
+  const g = homestead();
+  g.world.yardGrow = { width: 9, length: 9, why: 'a chapel', at: g.now() } as NonNullable<typeof g.world.yardGrow>;
+  t.regex((await prepNow(g)).text, /not prepared: a yard growth is asked for \(9x9 for a chapel\): the yard grows first/);
+  const d = homestead();
+  d.set(at(-540, 63, 2119), 'air');
+  t.regex((await prepNow(d)).text, /not prepared: the yard's fence: a gap in the yard's fence at \(-540, 63, 2119\)/);
+  const s = homestead();
+  s.set(at(-536, 63, 2120), 'crafting_table');
+  t.regex((await prepNow(s)).text, /not prepared: the yard's fence: a step against the yard's fence at \(-536, 63, 2120\) \(crafting_table\)/);
+  t.is(peekFetch(s.world).trip, undefined);
+});
+
+test('S1 follow-up R2 (the dawn path P1): PREP\'s read and kit in the evening, the yard grown and its side taken down in the night: the dawn\'s lifts on the old stamps decline, nothing lifted; a prepared trip whose gate went, or whose yard is not whole, is not set out at dawn', async (t) => {
+  const p = homestead({ tod: 7_000 });
+  const r = await prepNow(p);
+  t.regex(r.text, /read and kit done; the lifts from 9000/);
+  p.advance(23_600 - 7_000);
+  delete p.world.zones!.fence;
+  delete p.world.zones!['fence:gate'];
+  const u = await prepNow(p);
+  t.false(u.ok, u.text);
+  t.regex(u.text, /the yard is not whole/);
+  t.is(idOf(p.get(SMITHING)), 'smithing_table', 'nothing lifted on the old stamps');
+  t.is(peekFetch(p.world).trip, undefined, 'the trip dropped (no entry of it)');
+  // prepared, then the yard broken before dawn: not set out (reread)
+  for (const [name, broke, why] of yardBreaks) {
+    const q = homestead();
+    await prepared(t, q);
+    broke(q);
+    const from = q.log.length;
+    const s = await trip(q);
+    t.regex(s.text, new RegExp(`^not set out: ${why.source.replace(/^the yard/, 'the yard')}`), name);
+    t.is(peekFetch(q.world).trip?.state, 'restore', name);
+    t.false(q.log.slice(from).some(e => e.name === 'place'), `${name}: nothing placed`);
+  }
+  // the trip's own gate gone from the records (the others whole): not set out by it
+  const g = homestead();
+  await prepared(t, g);
+  g.world.zones!['fence:gate'] = g.world.zones!['fence:gate'].filter(z => !(z.x === NORTH.x && z.z === NORTH.z));
+  t.regex((await trip(g)).text, /^not set out: the trip's north gate at \(-549, 63, 2119\) is no longer on the yard's fence/);
+  // a dug post: the fence read at dawn
+  const d = homestead();
+  await prepared(t, d);
+  d.set(at(-540, 63, 2119), 'air');
+  t.regex((await trip(d)).text, /^not set out: the yard's fence: a gap in the yard's fence at \(-540, 63, 2119\)/);
+});
+
+test('S1 follow-up R2: the dawn\'s re-read asks the bridge for the whole strict set: a count that is not the records\' is sent again once, and still another number is no setting out', async (t) => {
+  const p = homestead();
+  await prepared(t, p);
+  await p.ctx.call('gates.strict', { gates: [{ ...NORTH }], pairs: [], guard: [] });
+  const from = p.log.length;
+  const r = await trip(p);
+  t.true(p.log.slice(from).some(e => e.name === 'gates.strict'), 'sent again');
+  t.is(r.gain, 1, r.text);
+  const q = homestead();
+  await prepared(t, q);
+  q.on.call['gates.status'] = () => ({ count: 3, strict: [], enabled: true });
+  t.regex((await trip(q)).text, /^not set out: the bridge keeps 3 strict gate\(s\), the records 7/);
+});
+
+test('S1 follow-up: outByGate\'s {} (no yard gate known) with the bot inside the fence is no setting out by a gap', async (t) => {
+  const p = homestead();
+  await prepared(t, p);
+  // (the gate zones gone between the re-read and the walk out: the sprint's switch is the call between them)
+  p.on.call['sprint.set'] = (q: Record<string, unknown>) => { if (q.allowed === false) delete p.world.zones!['fence:gate']; return undefined; };
+  const from = p.log.length;
+  const r = await trip(p);
+  t.regex(r.text, /^not out by the north gate: no gate of the yard's to go out by/);
+  t.false(p.log.slice(from).some(e => e.name === 'goto' && !inBox(YARD_BOX, { x: Number(e.params.x), z: Number(e.params.z) })), 'no walk out of the fence');
+  t.is(peekFetch(p.world).trip?.state, 'restore');
+});
+
+test('S1 follow-up R4: a lead outside the fence that finds the yard not whole goes no farther toward it (committed: stopped, the lure up, halt); inside the fence it goes on to the lock, said once', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-612, 63, 2116) });
+  led(p, { at: at(-610, 63, 2118), lure: at(-610, 63, 2117), state: 'hop', committed: 'far', toGate: 60 });
+  p.at(p.tick + 40, () => { p.world.fenceMove = { side: 'north', old: { ...p.world.yard! } }; });
+  const r = await leadOn(p.ctx, p.clock);
+  t.is(r.end, 'stopped', r.text);
+  t.regex(r.text, /the yard is not whole: the fence is moving out/);
+  t.truthy(peekFetch(p.world).halt);
+  t.false(p.log.some(e => e.name === 'gates.hold'), 'G never held');
+  invariants(t, p, { leftOut: true });
+  // not committed, by its village: let go there
+  const q = homestead({ tod: 3_000, candidates: 0, at: at(-694, 63, 2121) });
+  led(q, { at: at(-700, 63, 2120), lure: at(-700, 63, 2121), state: 'hop', toGate: 160, yard: 18 });
+  delete q.world.zones!['fence:gate'];
+  const s = await leadOn(q.ctx, q.clock);
+  t.is(s.end, 'released', s.text);
+  t.regex(s.text, /the yard is not whole/);
+  // in the yard: on to the lock
+  const y = homestead({ tod: 3_000, candidates: 0, at: at(-550, 63, 2134) });
+  led(y, { at: at(-550, 63, 2125), lure: at(-550, 63, 2124), state: 'yardhop', committed: 'far' });
+  y.world.fenceMove = { side: 'north', old: { ...y.world.yard! } };
+  const u = await leadOn(y.ctx, y.clock);
+  t.true(u.end === 'hall' || u.end === 'lock', u.text);
+  t.is(saidOf(y).filter(x => /^the yard is not whole \(.*\): on to the lock, which holds by its own gates$/.test(x)).length, 1, 'said once');
+});
+
+test('S1 follow-up R4 at G: a gate gone (air, or a fence where the records have a gate) is found before anything is held or taken up (no hold, no walk in): the next gate, or (none) stopped; a dug post anywhere on the fence stops the gate step (no gate leads into a yard open elsewhere)', async (t) => {
+  for (const [name, state] of [['air', 'air'], ['a fence', 'oak_fence']] as const) {
+    const p = homestead({ tod: 3_000, candidates: 0, at: at(-551, 63, 2113) });
+    led(p, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2 });
+    fetchOf(p.world).trip!.state = 'gate';
+    p.set(NORTH, state);
+    p.saved = JSON.stringify(p.world);
+    const r = await leadOn(p.ctx, p.clock);
+    t.log(name, r.text);
+    t.is(r.end, 'stopped', `${name}: ${r.text}`);
+    // (air at G passes the lane's read, which skips the gate's cell: the block read refuses it; a fence there the lane's floor already does)
+    t.regex(r.text, state === 'air' ? /no way in by the north gate: no gate stands at \(-549, 63, 2119\) \(air\)/ : /no way in by the north gate: (no gate stands at \(-549, 63, 2119\)|no floor a villager walks at \(-549, 2119\))/);
+    t.false(p.log.some(e => e.name === 'gates.hold' && Number(e.params.z) === NORTH.z), `${name}: nothing held at it`);
+    t.false(p.walks.some(w => w.to.z > NORTH.z && w.to.z < 2200), `${name}: the bot never walked in`);
+  }
+  const d = homestead({ tod: 3_000, candidates: 0, at: at(-551, 63, 2113) });
+  led(d, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2 });
+  fetchOf(d.world).trip!.state = 'gate';
+  d.set(at(-540, 63, 2119), 'air');
+  d.saved = JSON.stringify(d.world);
+  const r = await leadOn(d.ctx, d.clock);
+  t.is(r.end, 'stopped', r.text);
+  t.regex(r.text, /the yard's fence: a gap in the yard's fence at \(-540, 63, 2119\)/);
+  t.false(d.log.some(e => e.name === 'gates.hold'), 'G never held');
+});
+
+// ------------------------------------------------------------------------------------------------ the S1 follow-up: the reviews' notes in the lure's files
+
+test('S1 follow-up N1 (#21): lost() renews the trip\'s beat through its walk and its 60 s search: tripLive never lapses mid-search (fetch-safe, the acting-call guard and the thunder\'s exemption hold), then astray', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-550, 63, 2134) });
+  const { v } = led(p, { at: at(-550, 63, 2125), lure: at(-550, 63, 2124), state: 'yardhop', committed: 'far' });
+  // (after the first hop it is seen no more: the looks answer every row but it)
+  const stale: number[] = [];
+  let hidden = false;
+  p.on.call['world.entities'] = (q, pa) => {
+    if (!hidden && p.said.some(x => /^villagers: hop \d+:/.test(x))) hidden = true;
+    if (!hidden) return undefined;
+    if (p.said.some(x => /^villagers: lost the ward from sight/.test(x))) stale.push(pa.now() - (fetchOf(p.world).trip?.beat ?? 0));
+    const rows = (pa as unknown as { answer: (m: string, q: Record<string, unknown>) => { entities?: { uuid?: string }[] } }).answer('world.entities', q);
+    return { entities: (rows.entities ?? []).filter(e => e.uuid !== v.uuid) };
+  };
+  const r = await leadOn(p.ctx, p.clock);
+  t.is(r.end, 'astray', r.text);
+  t.true(stale.length >= 10, `${stale.length} looks in the search`);
+  t.true(Math.max(...stale) < 10_000, `the beat at most ${Math.round(Math.max(...stale) / 1000)} s old in the search`);
+});
+
+test('S1 follow-up #15 (4.6 G step 4): a hostile within 8 outside G while it stands open for the ward, the ward not in the lane: G clicked shut, 3 s, open again; the ward comes through all the same', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-551, 63, 2113) });
+  const G = YARD_GATES.north;
+  led(p, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2 });
+  fetchOf(p.world).trip!.state = 'gate';
+  p.saved = JSON.stringify(p.world);
+  // a spider 6 out of G as it opens (static: it stays), gone 4 s later
+  let spider: ReturnType<typeof p.animal> | undefined;
+  p.on.call.place = (q: Record<string, unknown>) => {
+    if (!spider && Number(q.z) > G.z) { spider = p.animal('spider', at(-551, 63, 2113)); p.at(p.tick + 80, () => { p.animals = p.animals.filter(a => a !== spider); }); }
+    return undefined;
+  };
+  const r = await leadOn(p.ctx, p.clock);
+  const said = saidOf(p);
+  t.log(said.filter(x => /spider|gate/.test(x)).join('\n'));
+  t.true(said.some(x => /^a spider at \(-551, 63, 2113\) by the north gate: shut 3 s \(1 of 5\)$/.test(x)), 'shut for it');
+  const gs = p.changed.filter(c => key(c.at) === key(G));
+  const shutAt = gs.findIndex((c, i) => i > 0 && isOpen(gs[i - 1].to) && !isOpen(c.to));
+  t.true(shutAt > 0 && gs.slice(shutAt + 1).some(c => isOpen(c.to)), 'shut, then open again');
+  t.true(r.end === 'hall' || r.end === 'lock', r.text);
+  invariants(t, p);
+});
+
+test('S1 follow-up #17: DOOR is not begun with a baby within 3 of the socket: waited 30 s, then the door is care\'s (nothing of the socket touched); and P is read shut before each act: one found open is no door', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-552, 63, 2138) });
+  p.villager({ at: at(-554, 63, 2133), mind: 'still', baby: true, id: 120 });
+  led(p, { at: at(-553.5, 63, 2139.5), lure: SOUT, state: 'yardhop', committed: 'far' });
+  const r = await leadOn(p.ctx, p.clock);
+  t.log(saidOf(p).filter(x => /door|LOCK/.test(x)).join('\n'));
+  t.is(r.end, 'lock', r.text);
+  t.regex(r.text, /^door: a baby by the socket 30 s: the door is care's/);
+  t.true(peekFetch(p.world).journal.some(e => e.k === 'lure' && e.role === 'lock'), 'the socket\'s lure stands (the baby by it)');
+  t.false(isOpen(p.get(H)), 'H not opened');
+  t.is(peekFetch(p.world).trip?.state, 'door');
+  // P opened (someone's click, powered: it will not shut) while DOOR waits for a baby to go off the socket: no socket work and no H
+  const q = homestead({ tod: 3_000, candidates: 0, at: at(-552, 63, 2138) });
+  const baby = q.villager({ at: at(-554, 63, 2133), mind: 'still', baby: true, id: 120 });
+  led(q, { at: at(-553.5, 63, 2139.5), lure: SOUT, state: 'yardhop', committed: 'far' });
+  let socketOut = false, powered = false;
+  q.on.call['dig.here'] = (x: Record<string, unknown>) => { if (Number(x.x) === SOCKET.x && Number(x.z) === SOCKET.z && saidOf(q).some(y => /^IN THE LOCK/.test(y))) socketOut = true; return undefined; };
+  q.on.call.useOn = (x: Record<string, unknown>) => (powered && Number(x.x) === P.x && Number(x.z) === P.z ? { used: false, reason: 'refused' } : undefined);
+  const waitDoor = () => {
+    if (saidOf(q).some(y => /^IN THE LOCK/.test(y))) {
+      q.at(q.tick + 100, () => { baby.position = { x: -559.5, y: 63, z: 2128.5 }; powered = true; q.set(P, `${String(q.get(P)).split('[')[0]}[facing=south,in_wall=false,open=true,powered=true]`, 'powered'); });
+    } else q.at(q.tick + 5, waitDoor);
+  };
+  q.at(q.tick + 5, waitDoor);
+  const s = await leadOn(q.ctx, q.clock);
+  t.log(saidOf(q).filter(x => /door|LOCK/.test(x)).join('\n'));
+  t.is(s.end, 'lock', s.text);
+  t.regex(s.text, /the lock's gate does not read shut: the door is care's/);
+  t.false(socketOut, 'the socket not touched with P open');
+  t.false(isOpen(q.get(H)), 'H not opened with P open');
+});
+
+test('S1 follow-up #18: a claim holds its ticket up to 60 s: a claimant held 5 off the first lure until 50 s, then free, is waited for and takes it (never broken at 45 with it still on its way)', async (t) => {
+  const p = homestead({ candidates: 1 });
+  await prepared(t, p);
+  const holder = at(-700, 75, 2200);
+  p.set(holder, 'stone');
+  let l0: Pos | undefined;
+  p.on.call.place = (params) => {
+    if (l0) return undefined;
+    l0 = cellOf({ x: Number(params.x), y: Number(params.y), z: Number(params.z) });
+    for (let dx = -5; dx <= 5; dx++) for (let dz = -5; dz <= 5; dz++) if (Math.max(Math.abs(dx), Math.abs(dz)) === 5) p.snag(at(l0.x + dx, l0.y, l0.z + dz), [holder]);
+    p.at(p.tick + 50 * 20, () => p.set(holder, 'air'));
+    return undefined;
+  };
+  const r = await trip(p);
+  const said = saidOf(p);
+  t.log(said.filter(x => /first lure|claim|took it/.test(x)).join('\n'));
+  t.false(said.some(x => /^a claim without arrival/.test(x)), 'not broken while the claimant was held');
+  const took = said.find(x => /^ward 00000000 took it in (\d+) s/.test(x));
+  t.truthy(took, 'it came');
+  t.true(Number(/took it in (\d+) s/.exec(took ?? '')?.[1] ?? 0) >= 45, took);
+  t.is(luresDown(p).length >= 1 && key(luresDown(p)[0]) === key(l0!), true, 'at the first lure');
+  t.true(r.gain === 1 || r.mark === 'same', r.text);
+});
+
+test('S1 follow-up #19: SURVEY asks the judge\'s rule its look can see again: a village whose villagers a player has taken up since its whole look (two named) is not lured from: turned back, nothing placed, the site waits', async (t) => {
+  const p = homestead({ candidates: 2 });
+  await prepared(t, p);
+  for (const [i, name] of [[0, 'Bob'], [1, 'Ann']] as const) p.villager({ at: at(BELL.x - 4 - 3 * i, 63, BELL.z - 2 * i), mind: 'still', profession: 'farmer', level: 1, id: 600 + i, customName: name });
+  const from = p.log.length;
+  const r = await trip(p);
+  t.regex(r.text, /^turned back at the village: 2 of its villagers used by a player .*: not free/);
+  t.false(p.log.slice(from).some(e => e.name === 'place'), 'nothing placed');
+  t.is(p.world.villages!.sites[0].fetch?.kind, 'rival');
+  t.is(peekFetch(p.world).trip?.state, 'restore');
+});
+
+test('S1 follow-up #3: LOCK reads which side the ward ended on twice when the first look after P shuts fails: a ward in the lock is in, on to DOOR (not led back from it)', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-553, 63, 2138) });
+  const { v } = led(p, { at: at(-553.5, 63, 2139.5), lure: SOUT, state: 'yardhop', committed: 'far', over: { mind: 'still' } });
+  let released = false, failed = false;
+  p.on.call['gates.release'] = (q: Record<string, unknown>) => {
+    if (Number(q.x) === P.x && Number(q.z) === P.z) { v.position = { x: -555.5, y: 63, z: 2135.5 }; released = true; }
+    return undefined;
+  };
+  p.on.call['world.entities'] = () => {
+    if (released && !failed) { failed = true; throw new Error('timed out'); }
+    return undefined;
+  };
+  const r = await leadOn(p.ctx, p.clock);
+  t.true(failed, 'the first look after P shut failed');
+  t.is(r.end, 'lock', r.text);
+  t.is(peekFetch(p.world).trip?.state, 'door');
+  t.false(saidOf(p).some(x => /led back to S_out/.test(x)), saidOf(p).join('\n'));
+});
+
+test('S1 follow-up #11: the pen\'s gate is held once the bot stands by it (the take and the walk spent before the hold): a ward found in the pen with the bot far off still has the whole 25 s to come out, and comes', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-545, 63, 2212) });
+  const gate = p.world.zones!['pen:cow:gate'][0];
+  led(p, { at: at(-556, 63, 2170), lure: at(-555, 63, 2170), state: 'yardhop', committed: 'far' });
+  const r = await leadOn(p.ctx, p.clock);
+  const said = saidOf(p);
+  t.log(said.filter(x => /pen|STOP/.test(x)).join('\n'));
+  t.true(said.some(x => /^out of the cow pen; its gate shut, read shut$/.test(x)), 'out of the pen');
+  // the hold to its release under 25 s and a little, and the bot by the gate at the hold
+  const hold = p.log.find(e => e.name === 'gates.hold' && Number(e.params.x) === gate.x && Number(e.params.z) === gate.z)!;
+  t.true(flat(hold.at, gate) <= 4, `the bot ${flat(hold.at, gate).toFixed(1)} from the pen's gate at its hold`);
+  t.true(r.end === 'hall' || r.end === 'lock', r.text);
+  invariants(t, p);
+});
+
+// ------------------------------------------------------------------------------------------------ the S1 follow-up V-7: pins for the fixer's fixes that had none
+
+test('S1 follow-up V-7 (S1): DOOR puts back only what stands in the yard: a pin of the trip in the village (no ward tethered to it) is row 7\'s walk out by day, never a walk of DOOR\'s from the lock', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-552, 63, 2138) });
+  led(p, { at: at(-553.5, 63, 2139.5), lure: SOUT, state: 'yardhop', committed: 'far' });
+  const pin = at(-700, 63, 2121);
+  p.set(pin, 'fletching_table', 'placed');
+  p.mine(pin);
+  fetchOf(p.world).journal.push({ k: 'lure', id: 3, trip: 9, at: { ...pin }, item: 'fletching_table', st: 'down', role: 'pin', inVillage: true, t: p.now() });
+  p.saved = JSON.stringify(p.world);
+  const r = await leadOn(p.ctx, p.clock);
+  t.is(r.end, 'hall', r.text);
+  t.true(peekFetch(p.world).journal.some(e => e.k === 'lure' && key(e.at) === key(pin)), 'the pin left for row 7');
+  t.is(idOf(p.get(pin)), 'fletching_table');
+  const inLock = p.log.findIndex(e => e.name === 'useOn' && Number(e.params.x) === H.x && Number(e.params.z) === H.z);
+  t.false(p.log.slice(Math.max(0, inLock)).some(e => e.name === 'goto' && !inBox(YARD_BOX, { x: Number(e.params.x), z: Number(e.params.z) })), 'no walk out of the yard from the lock');
+});
+
+test.serial('S1 follow-up V-7 (S3): every hold of G and of a pen\'s gate is made under a live critical section with most of its 45 s left (renewed with every hold)', async (t) => {
+  const real = Date.now;
+  t.teardown(() => { Date.now = real; });
+  // G: the ward at the gate's spot, going no farther (the open spell runs to its cap, renewed each second)
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-551, 63, 2113) });
+  Date.now = () => p.now();
+  led(p, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2, over: { mind: 'still' } });
+  fetchOf(p.world).trip!.state = 'gate';
+  p.saved = JSON.stringify(p.world);
+  const seen: { why?: string; left: number; tod: number }[] = [];
+  p.on.call['gates.hold'] = (q: Record<string, unknown>) => {
+    if (Number(q.z) === NORTH.z && Number(q.x) === NORTH.x) seen.push({ why: out.critical?.why, left: (out.critical?.until ?? 0) - Date.now(), tod: p.tod });
+    return undefined;
+  };
+  await leadOn(p.ctx, p.clock);
+  t.true(seen.length > 10, `${seen.length} holds of G`);
+  for (const s of seen) t.true(s.why === 'gate' && s.left > 40_000, `a hold of G at ${s.tod} with ${Math.round(s.left / 1000)} s (${s.why})`);
+  // the pen's gate: the bot far off, the ward going no farther
+  const q = homestead({ tod: 3_000, candidates: 0, at: at(-545, 63, 2212) });
+  Date.now = () => q.now();
+  const gate = q.world.zones!['pen:cow:gate'][0];
+  led(q, { at: at(-556, 63, 2170), lure: at(-555, 63, 2170), state: 'yardhop', committed: 'far', over: { mind: 'still' } });
+  const pen: { why?: string; left: number }[] = [];
+  q.on.call['gates.hold'] = (x: Record<string, unknown>) => {
+    if (Number(x.x) === gate.x && Number(x.z) === gate.z) pen.push({ why: out.critical?.why, left: (out.critical?.until ?? 0) - Date.now() });
+    return undefined;
+  };
+  await leadOn(q.ctx, q.clock);
+  t.true(pen.length > 10, `${pen.length} holds of the pen's gate`);
+  for (const s of pen) t.true(s.why === 'gate' && s.left > 40_000, `a hold of the pen's gate with ${Math.round(s.left / 1000)} s (${s.why})`);
+});
+
+test('S1 follow-up V-7 (S5): a ward taken off the records between two looks of the hop loop ends the trip at the loop\'s next look (dropped), not after a 3 s search for it', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-550, 63, 2134) });
+  led(p, { at: at(-550, 63, 2125), lure: at(-550, 63, 2124), state: 'yardhop', committed: 'far' });
+  let cleared: number | undefined;
+  p.on.call['world.entities'] = () => {
+    if (cleared === undefined && p.said.some(x => /^villagers: hop \d+:/.test(x))) { cleared = p.log.length; fetchOf(p.world).wards = []; }
+    return undefined;
+  };
+  const r = await leadOn(p.ctx, p.clock);
+  t.is(r.end, 'dropped', r.text);
+  t.true(cleared !== undefined);
+  const looks = p.log.slice(cleared!).filter(e => e.name === 'world.entities').length;
+  t.true(looks <= 3, `${looks} looks after it went off the records`);
+});
+
+test('S1 follow-up V-7 (#7 for P): P that will not read shut with the ward in the lock is no `lock -> door`: STOPPED, halt; the socket\'s lure stays (the ward works at it inside)', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-553, 63, 2138) });
+  led(p, { at: at(-553.5, 63, 2139.5), lure: SOUT, state: 'yardhop', committed: 'far' });
+  let rel = false;
+  p.on.call['gates.release'] = (q: Record<string, unknown>) => {
+    if (Number(q.x) !== P.x || Number(q.z) !== P.z) return undefined;
+    if (!rel) p.set(P, `${String(p.get(P)).split('[')[0]}[facing=south,in_wall=false,open=true,powered=true]`, 'powered');
+    rel = true;
+    return { released: true, open: true };
+  };
+  p.on.call.useOn = (q: Record<string, unknown>) => (rel && Number(q.x) === P.x && Number(q.z) === P.z ? { used: false, reason: 'refused' } : undefined);
+  const r = await leadOn(p.ctx, p.clock);
+  t.is(r.end, 'stopped', r.text);
+  t.regex(r.text, /the lock's gate at \(-556, 63, 2137\) does not read shut/);
+  t.truthy(peekFetch(p.world).halt);
+  t.not(peekFetch(p.world).trip?.state, 'door');
+  t.true(peekFetch(p.world).journal.some(e => e.k === 'lure' && e.role === 'lock'), 'the socket\'s lure stays');
+});
+
+test('S1 follow-up V-7 (#14): a cut inside DOOR (the run awaited to its end in the lead\'s try) runs the exit handler: the trip marked cut, where it was', async (t) => {
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-552, 63, 2138) });
+  led(p, { at: at(-553.5, 63, 2139.5), lure: SOUT, state: 'yardhop', committed: 'far' });
+  const ac = new AbortController();
+  p.on.call.useOn = (q: Record<string, unknown>) => { if (Number(q.x) === H.x && Number(q.z) === H.z && !ac.signal.aborted) p.at(p.tick + 2, () => ac.abort()); return undefined; };
+  await t.throwsAsync(leadOn({ ...p.ctx, signal: ac.signal }, p.clock));
+  const f = peekFetch(p.world);
+  t.is(f.trip?.state, 'door');
+  t.truthy(f.trip?.cut, 'cut: care\'s row 3 goes on from it');
+});
+
+test('S1 follow-up N7: the dry switch turned on over a trip prepared real (brain.ts writes trip.dry) counts only its real lifts as made: a job block of the bot\'s own off the way (not lifted by PREP) stays a rival its plan keeps 56 off, as the real trip\'s', async (t) => {
+  const p = homestead({ candidates: 1 });
+  const composter = at(-640, 63, 2158);
+  p.set(composter, 'composter[level=0]');
+  p.mine(composter);
+  p.world.zones!['farm:composter'] = [{ ...composter }];
+  await prepared(t, p);
+  t.false(peekFetch(p.world).journal.some(e => e.k === 'lift' && key(e.at) === key(composter)), 'not lifted: off the way in');
+  // (the switch as brain.ts setFetch turns it on a prepared trip: trip.dry, its lifts made for real)
+  fetchOf(p.world).trip!.dry = true;
+  const r = await trip(p);
+  t.regex(r.text, /^dry run at/);
+  const planned = saidOf(p).flatMap(x => { const m = /^dry: (?:hop \d+: .* -> |first lure at )\((-?\d+), (-?\d+), (-?\d+)\)/.exec(x); return m ? [at(Number(m[1]), Number(m[2]), Number(m[3]))] : []; });
+  t.log(saidOf(p).filter(x => /^dry:/.test(x)).join('\n'));
+  t.true(planned.length > 2, `${planned.length} spots planned`);
+  for (const c of planned) t.true(flat(c, composter) >= 56, `a spot at ${key(c)}, ${Math.round(flat(c, composter))} from the bot's own composter`);
+});
+
+test.serial('S1 follow-up Y-1: the trip\'s beat is renewed through the gate step\'s and the lock\'s walks and waits, not in their poll loops alone: the trip resumed on a beat 10 min old, every walk inside them with no gate held 38 s (the bridge\'s cap is 40); inside either section it is never 55 s old (a walk and 15 s: tripLive\'s 90, and with it the lead\'s 20 minutes, hold there with a margin)', async (t) => {
+  const real = Date.now;
+  t.teardown(() => { Date.now = real; });
+  // every bridge call of the lead's inside a 'gate' or 'lock' section, the beat's age before and after it; and every
+  // walk there (a careful goto: walkTo's, own.take's and own.put's) made 38 s long while the bridge holds no gate (with
+  // one held, the walk in by G, it is the pasture's own: 20 s of hold would not cover 38 s). Under 55 s, not 90: what
+  // the pasture answers at once (the reads, a put's walk into reach) takes the game seconds more
+  const watched = (p: Pasture, why: 'gate' | 'lock') => {
+    const ages: { age: number; call: string; tod: number }[] = [];
+    let heldTill = 0;
+    const note = (call: string) => { if (out.critical?.why === why) ages.push({ age: p.now() - (fetchOf(p.world).trip?.beat ?? 0), call, tod: p.tod }); };
+    p.on.call.goto = () => { if (out.critical?.why === why && p.now() >= heldTill) { p.advance(38_000 / 50); note('goto (38 s)'); } return undefined; };
+    const ctx = p.ctx, call = ctx.call;
+    const call2 = async <T>(m: string, q?: Record<string, unknown>) => {
+      note(m);
+      if (m === 'gates.hold') heldTill = p.now() + Number(q?.ms ?? 0);
+      if (m === 'gates.release') heldTill = 0;
+      const r = await call<T>(m, q);
+      note(m);
+      return r;
+    };
+    return { ages, ctx: { ...ctx, call: call2 } };
+  };
+  const worst = (ages: { age: number; call: string; tod: number }[]) => ages.reduce((a, b) => (b.age > a.age ? b : a));
+  // G: the ward at the gate's spot going no farther (V-7 S3's): three tries, each a walk in and a walk back out
+  const p = homestead({ tod: 3_000, candidates: 0, at: at(-551, 63, 2113) });
+  Date.now = () => p.now();
+  led(p, { at: at(-547.5, 63, 2114.5), lure: at(-548, 63, 2114), state: 'hop', committed: 'far', toGate: 2, over: { mind: 'still' } });
+  Object.assign(fetchOf(p.world).trip!, { state: 'gate', beat: p.now() - 10 * 60_000 });
+  p.saved = JSON.stringify(p.world);
+  const g = watched(p, 'gate');
+  await leadOn(g.ctx, p.clock);
+  t.log(saidOf(p).join('\n'));
+  const slowG = g.ages.filter(a => a.call === 'goto (38 s)').length;
+  t.true(slowG >= 3, `${slowG} walks of 38 s in the gate step`);
+  t.true(g.ages.filter(a => a.call === 'gates.hold').length > 10, 'G held');
+  const gw = worst(g.ages);
+  t.log(`the gate step: the beat at most ${Math.round(gw.age / 1000)} s old (${gw.call})`);
+  t.true(gw.age < 55_000, `in the gate step the beat ${Math.round(gw.age / 1000)} s old at ${gw.call} (time of day ${gw.tod})`);
+  // P: a resume in `lock` (care's: its beat stale), the bot far from the post, a cow by P's lane gone 9 s into the wait
+  const q = homestead({ tod: 3_000, candidates: 0, at: at(-549, 63, 2172) });
+  Date.now = () => q.now();
+  led(q, { at: at(-555.5, 63, 2137.5), lure: SOUT, state: 'yardhop', committed: 'far', over: { mind: 'still' } });
+  Object.assign(fetchOf(q.world).trip!, { state: 'lock', beat: q.now() - 10 * 60_000 });
+  q.saved = JSON.stringify(q.world);
+  const cow = q.animal('cow', at(-556, 63, 2139));
+  let posted = false, looks = 0;
+  const l = watched(q, 'lock');
+  const slow = q.on.call.goto!;
+  q.on.call.goto = (x: Record<string, unknown>, pa) => { const r = slow(x, pa); if (Number(x.x) === -553 && Number(x.z) === 2136) posted = true; return r; };
+  q.on.call['world.entities'] = () => { if (posted && ++looks === 9) cow.position = { x: -540.5, y: 63, z: 2180.5 }; return undefined; };
+  await leadOn(l.ctx, q.clock);
+  t.log(saidOf(q).join('\n'));
+  t.true(l.ages.some(a => a.call === 'goto (38 s)'), 'the walk to the post, 38 s');
+  t.true(l.ages.filter(a => a.call === 'gates.hold').length > 5, 'P held');
+  const lw = worst(l.ages);
+  t.log(`LOCK: the beat at most ${Math.round(lw.age / 1000)} s old (${lw.call})`);
+  t.true(lw.age < 55_000, `in LOCK the beat ${Math.round(lw.age / 1000)} s old at ${lw.call} (time of day ${lw.tod})`);
+});

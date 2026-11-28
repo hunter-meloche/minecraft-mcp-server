@@ -18,7 +18,7 @@ import {
   type LookZone, type Seen, type Verdict, type VillageLook, type VillageSite
 } from './village.js';
 import { GAME_DAY, IN_BY, fetchOf, floorOk, needMs as lureNeedMs, needParts, noteWhy, peekFetch, startLate, startNeed, wardOut, type FetchMemory, type NeedParts, type Trip as FetchTrip } from './fetch.js';
-import { yardGates } from './yardgates.js';
+import { onYardFence, yardGates, yardWhy } from './yardgates.js';
 import { lockOf } from './villagerwalk.js';
 
 /**
@@ -128,6 +128,18 @@ const horiz = (a: { x: number; z: number }, b: { x: number; z: number }) => Math
 const fmt = (p: { x: number; y?: number; z: number }) => `(${Math.floor(p.x)}, ${p.y === undefined ? '' : `${Math.floor(p.y)}, `}${Math.floor(p.z)})`;
 const idOf = (state: string) => state.replace(/^minecraft:/, '').replace(/\[.*$/, '');
 const pause = (ms: number) => new Promise<void>(res => setTimeout(res, ms));
+/**
+ * The rung's sleep for a lure trip (its LureClock): a real wait that ends with an error the moment the run is given up.
+ * The brain gives a stopped run 5 s; LOCK's 20 s and the guards' 20 s sleeps outlasted that, so the trip's exit handler
+ * (a held gate released shut, the ward's lure anchored) ran up to 20 s late, beside the wedge watch's step-out or the
+ * LLM's first tool (S1 review #24). Care's clock ends its waits the same way.
+ */
+export const runSleep = (signal: AbortSignal) => (ms: number): Promise<void> => new Promise<void>((res, rej) => {
+  if (signal.aborted) { rej(new Error('aborted')); return; }
+  const stop = () => { clearTimeout(t); rej(new Error('aborted')); };
+  const t = setTimeout(() => { signal.removeEventListener('abort', stop); res(); }, Math.max(0, ms));
+  signal.addEventListener('abort', stop, { once: true });
+});
 /** A turn for everything else waiting (the brain's ticks, the bridge's replies) between searches of whole seconds. */
 export const yieldNow = () => new Promise<void>(res => setImmediate(res));
 
@@ -272,6 +284,10 @@ export function lureSite(s: Pick<Snapshot, 'now' | 'timeOfDay' | 'position'> & {
   if (sh.building) return { why: `the ${sh.building === 'lock' ? 'lock' : 'portal\'s ring'} being built` };
   if (sh.lock.length) return { why: `the lock is not ready: ${sh.lock[0]}` };
   if (sh.ring.length) return { why: `the portal's ring is not ready: ${sh.ring[0]}` };
+  // (the yard whole on the records: no growth's fence move under way, the ring round the box as it stands, every gate
+  // on its line; a trip prepared on a yard about to open was the S1 follow-up's blocker, path P1)
+  const yw = yardWhy(world);
+  if (yw) return { why: `the yard is not whole: ${yw}` };
   const home = s.home ?? s.position, sites = peekVillages(world).sites;
   const all = sites.filter(q => siteOpen(q, home, s.now, 'lure')).map(q => ({ q, st: lureState(world, q, s, home) })).sort((a, b) => a.st.needS - b.st.needS);
   const go = all.find(x => x.st.kind === 'prep');
@@ -314,6 +330,9 @@ function bringWhy(s: Snapshot, world: WorldMemory): Decline | null {
   if (!f || !t || t.state !== 'prep' || !t.prepared) return { cause: 'unneeded', text: 'villagers: no trip prepared' };
   if (f.halt) return { cause: 'hold', text: `villagers: HALT (${f.halt.why}): no trip sets out until the lead clears it (villager-moves {halt:false})` };
   if (!armedOk(f)) return { cause: 'hold', text: 'villagers: not armed: no trip sets out (villager-moves {arm: 1} lets one)' };
+  const yw = yardWhy(world);
+  if (yw) return { cause: 'hold', text: `villagers: the yard is not whole: ${yw}: no trip sets out` };
+  if (!onYardFence(world, t.gate.at)) return { cause: 'hold', text: `villagers: the trip's ${t.gate.side} gate (${Math.floor(t.gate.at.x)}, ${Math.floor(t.gate.at.y)}, ${Math.floor(t.gate.at.z)}) is no longer on the yard's fence: no trip sets out` };
   const omen = (s.effects ?? []).find(e => OMEN.test(e.name.replace(/^minecraft:/, '')));
   if (omen) return { cause: 'hold', text: `villagers: ${omen.name.replace(/^minecraft:/, '').replace('_', ' ')} on the bot: no trip sets out (the village it walks into would be raided)` };
   const site = tripSiteOf(world, t.site);
@@ -411,9 +430,15 @@ export const villagersTask: WorkTask = {
     if (variant.startsWith(BRING)) return bringWhy(s, world);
     return null;
   },
-  // the dawn is the trip's (idle-plan V 6.1): while its prepared trip would set out, over the kit and the home chores
+  // the dawn is the trip's (idle-plan V 6.1): while its prepared trip would set out, over the kit and the home chores;
+  // and from its set-out to the first flip (out, survey, first: the rung's own run, no lead's hold yet), the same, or
+  // smelt (66), the kit (70) or the stash cut the walk out near home, and care's row 3 sent the trip to RESTORE with
+  // its arm spent (S1 review N11). Asked of the running rung too (work.ts: never under TRIP_URGENCY)
   urgent: (s, world) => {
-    const t = lureOn(world) && movesOn(world) ? preparedTrip(world) : undefined;
+    if (!lureOn(world) || !movesOn(world)) return undefined;
+    const state = fetchNow(world)?.trip?.state;
+    if (state === 'out' || state === 'survey' || state === 'first') return DAWN_URGENCY;
+    const t = preparedTrip(world);
     return t && villagersTask.ready(s, world, `${BRING}${t.site}`) === null ? DAWN_URGENCY : undefined;
   },
   run: async (ctx, variant, budgetMs, now) => {
@@ -460,9 +485,9 @@ async function lureRun(ctx: GoalContext, variant: string, clk: Clock): Promise<W
     if (!site || !t || t.site !== name) return { gain: 0, text: `no trip prepared for ${name} any more`, untried: true };
     if (dryNext(ctx.world) && !t.dry) { t.dry = true; ctx.save?.(); }
     // (loaded when first asked: the lure's acts import half the brain, and this rung is loaded by the work queue. Its
-    // waits run on the rung's clock with a real sleep: a LureClock, fetch.ts)
+    // waits run on the rung's clock with a real sleep that the run's end cuts short: a LureClock, fetch.ts)
     const { fetchRun } = await import('./lure.js');
-    return fetchRun(ctx, site, { ...clk, sleep: pause });
+    return fetchRun(ctx, site, rungClock(ctx, clk));
   }
   if (variant.startsWith(LOOK_AT)) {
     const name = variant.slice(LOOK_AT.length), site = siteOf(ctx.world, name);
@@ -471,6 +496,9 @@ async function lureRun(ctx: GoalContext, variant: string, clk: Clock): Promise<W
   }
   return { gain: 0, text: `[${variant}] the boat's move is not made under the lure (method lure)`, mark: 'forget' };
 }
+
+/** The clock a lure trip of the rung runs on: the rung's time, budget and `enough`, and its sleep that the run's end cuts short (runSleep). */
+export const rungClock = (ctx: Pick<GoalContext, 'signal'>, clk: Clock): Clock & { sleep: (ms: number) => Promise<void> } => ({ ...clk, sleep: runSleep(ctx.signal) });
 
 /**
  * The lure's look (a `look:` variant, idle-plan V 4.1): out to a village by the gate that way, a WHOLE look round it

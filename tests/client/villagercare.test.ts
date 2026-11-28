@@ -712,6 +712,52 @@ test.serial('the trip\'s rows in the order and urgencies of 6.1: 3 at 75 and it 
   t.false(villagerCareGoal.cuts!(p.look(), w));
 });
 
+test.serial('S1 follow-up R2: a trip in PREP (its reads and kit, or prepared) on a yard that is not whole, or whose gate is off the fence, is put back by row 8 before PREP goes on; no rescue is owed while the yard is not whole, and row 9 says why; a whole yard as before', async (t) => {
+  const p = homestead({ tod: 7000, at: START });
+  onTrip(t, () => p);
+  const w = p.world, f = fetchOf(w), now = p.now(), y0 = { ...w.yard! };
+  const want = () => { const o = careOwed(p.look(), w); return 'row' in o ? `${o.row}: ${o.want}` : `none: ${o.none.text}`; };
+  const prepTrip = (over: Partial<Trip> = {}): Trip => ({
+    id: 5, kind: 'bring', site: 'village -720,2128', state: 'prep', beat: now, prep: { read: now, kit: now }, gate: { ...NORTH_WAY }, spare: [],
+    lure: 'fletching_table', avoid: [], times: {}, counts: { hops: 0, misses: 0, wedges: 0, pins: 0 }, ...over
+  });
+  const grow = () => { w.fenceMove = { side: 'north', old: { ...y0 } }; w.yard = { ...y0, z1: y0.z1 - 16 }; };
+  const whole = () => { delete w.fenceMove; w.yard = { ...y0 }; };
+  // the reads and the kit stamped, the yard whole: nothing put back (its lifts wait for 9000)
+  f.trip = prepTrip();
+  t.false(want().startsWith('8:'), want());
+  // the growth's last run moved the box (P1: before PREP's lifts)
+  grow();
+  t.is(want(), '8: trip 5 in PREP put back: the yard is not whole: the fence is moving out to the north');
+  // prepared (its lifts made) the same: it never sets out on the old stamps
+  f.trip = prepTrip({ prep: { read: now, kit: now, lifts: now }, prepared: { at: now, day: 0 } });
+  t.is(want(), '8: trip 5 in PREP put back: the yard is not whole: the fence is moving out to the north');
+  // the old side taken down: the zones deleted
+  const zones = structuredClone(w.zones!);
+  delete w.zones!.fence;
+  delete w.fenceMove;
+  t.is(want(), '8: trip 5 in PREP put back: the yard is not whole: the fence is not up round the yard as it stands (being rebuilt)');
+  w.zones = zones;
+  whole();
+  t.false(want().startsWith('8:'), 'whole again: not put back');
+  // the trip's gate gone from the records (a gate moved by hand): put back
+  w.zones!['fence:gate'] = w.zones!['fence:gate']!.filter(g => !(g.x === NORTH.x && g.z === NORTH.z));
+  t.is(want(), '8: trip 5 in PREP put back: its north gate is no longer on the yard\'s fence');
+  w.zones = structuredClone(zones);
+  delete f.trip;
+  // the armed rescue: owed by day on a whole yard; not while the yard is not whole, and the lead's word says why
+  p.advance(((3000 - p.tod) % 24_000 + 24_000) % 24_000);
+  const { ward: wd } = underWay(p, { at: at(-551, 63, 2150), lure: at(-551, 63, 2149), state: 'yardhop', committed: 'far' });
+  delete f.trip;
+  wd.where = 'astray';
+  t.like(careOwed(p.look(), w), { row: 6 });
+  f.journal = f.journal.filter(e => e.k !== 'lure');
+  grow();
+  t.is(want(), `9: waits on the lead: ward ${wd.key.slice(0, 8)} astray at (-551, 63, 2150): no rescue while the yard is not whole (the fence is moving out to the north)`);
+  whole();
+  t.like(careOwed(p.look(), w), { row: 6 });
+});
+
 /**
  * A lead cut by a survival goal (an abort, as the brain's stopRunning gives it) after its `n`th lure went down: the exit
  * handler ran (the ward astray at its tether, the trip cut). Where the bot stood when it was cut.
@@ -1065,6 +1111,26 @@ test.serial('S1 review B1: a rescue whose first spot fails (the ward fenced in i
   t.truthy(f.halt, 'halt: the lead\'s');
   t.true(wardOut(p.world, p.now()), 'its lifts held for it');
   t.is(idOf(p.get(SMITHING_AT)), 'air');
+});
+
+test.serial('S1 review B1 (the S1 follow-up\'s pin): a rescue of a ward outside the fence beyond 96 of its village whose first spot fails is committed from its first record: STOPPED, halt, never released there', async (t) => {
+  const p = homestead({ tod: 1_000, at: at(-590, 63, 2160) });
+  onTrip(t, () => p);
+  shellsRead(p);
+  // 25 out of the west fence, 120 from its village's bell: fenced in where it stands, no hop spot it can walk to
+  const c = at(-600, 63, 2160);
+  strayed(p, { at: c, halt: false });
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) p.set(at(c.x + dx, 63, c.z + dz), 'oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]');
+  fetchOf(p.world).armed = 1;
+  t.is(rowNow(p), 6);
+  const r = await careTurn(p);
+  t.log(r?.said);
+  t.notRegex(r!.said, /released/, 'never let go 120 from its village');
+  t.regex(r!.said, /STOPPED/);
+  const f = peekFetch(p.world);
+  t.is(f.wards.length, 1, 'still on the records');
+  t.is(f.wards[0].where, 'astray');
+  t.truthy(f.halt, 'halt: the lead\'s');
 });
 
 test.serial('S1 review B1: a rescue is never let go by the bot\'s home: a ward astray in the yard is led in committed, a player by it for 60 s holds the lead (the lure standing), it is not released off the records; then into the hall', async (t) => {

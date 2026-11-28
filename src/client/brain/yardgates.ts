@@ -447,6 +447,34 @@ export async function gatesRead(ctx: Pick<WalkContext, 'call'>, world: WorldMemo
   return out;
 }
 
+// ------------------------------------------------------------------------------------------------ the yard whole (idle-plan V S1 follow-up, R1)
+
+/**
+ * Why the yard is not whole on the records, or undefined when it is (pure; R1): no yard; its fence moving out after a
+ * growth (`fenceMove`: the old side still to come down, the new ring still to go up); the fence's ring not the yard's
+ * box as it stands (taken down, being rebuilt round a grown box); no gate on the records, or one off the fence line.
+ * On Nov 27 the yard grew north and the strict gates fell 7 -> 6 (the moved side's gate off the box's line) -> 3 (the
+ * zones deleted with the old side) -> 7 (the ring whole again): a trip prepared or led in that hour would have led a
+ * villager into a yard open on one side. Nothing of a trip starts or goes on while this says anything.
+ */
+export function yardWhy(world: WorldMemory): string | undefined {
+  const y = world.yard;
+  if (!y) return 'no yard';
+  if (world.fenceMove) return `the fence is moving out to the ${world.fenceMove.side}`;
+  const f = world.zones?.fence?.at(-1);
+  if (!f || !f.width || !f.length || f.x !== y.x1 || f.z !== y.z1 || f.x + f.width - 1 !== y.x2 || f.z + f.length - 1 !== y.z2) {
+    return 'the fence is not up round the yard as it stands (being rebuilt)';
+  }
+  const gates = world.zones?.['fence:gate'] ?? [];
+  if (!gates.length) return 'no gate in the yard\'s fence on the records';
+  const on = yardGates(world).length;
+  if (on !== gates.length) return `${gates.length - on} of the yard's ${gates.length} gate(s) off its fence line`;
+  return undefined;
+}
+
+/** Whether a gate (a trip's G) is still one of the yard's on its fence line, as the records have them. */
+export const onYardFence = (world: WorldMemory, at: Pos): boolean => yardGates(world).some(g => same(g.gate, { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) }));
+
 // ------------------------------------------------------------------------------------------------ the pens' fences
 
 /**
