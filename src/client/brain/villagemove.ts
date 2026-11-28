@@ -13,10 +13,13 @@ import { chestTotals } from './chests.js';
 import { WORK_AT, daylightLeft } from './schedule.js';
 import { noteHall } from './hallchores.js';
 import {
-  AREA_GROW, HALL_FRESH, HALL_WANTS, ILLAGER, JOB_SITE, JUDGE_V, MARKERS_NEAR, OUTPOST_CLEAR, PLAYER_NOW, VILLAGE_MARK, VILLAGE_RANGE, VILLAGE_REACH, ZONES_NEAR, byJobSite, joinAreas, judgeVillage,
-  knownVillage, movesOn, noteSeen, noteVillage, peekVillages, pennedIn, reachOf, rejudge, siteNow, siteOf, siteOpen, usedHow, variantOf, villageArea, villagesOf,
+  AREA_GROW, FETCH_WAIT, HALL_FRESH, HALL_WANTS, ILLAGER, JOB_SITE, JUDGE_V, MARKERS_NEAR, OUTPOST_CLEAR, PLAYER_NOW, VILLAGE_MARK, VILLAGE_RANGE, VILLAGE_REACH, ZONES_NEAR, byJobSite, fetchWait, freshFree, joinAreas,
+  judgeVillage, knownVillage, lureOn, movesOn, noteSeen, noteVillage, peekVillages, pennedIn, reachOf, rejudge, siteNow, siteOf, siteOpen, usedHow, variantOf, villageArea, villagesOf, wholeLook,
   type LookZone, type Seen, type Verdict, type VillageLook, type VillageSite
 } from './village.js';
+import { GAME_DAY, IN_BY, fetchOf, floorOk, needMs as lureNeedMs, needParts, noteWhy, peekFetch, startLate, startNeed, wardOut, type FetchMemory, type NeedParts, type Trip as FetchTrip } from './fetch.js';
+import { yardGates } from './yardgates.js';
+import { lockOf } from './villagerwalk.js';
 
 /**
  * The villager move (P5c of the progression plan), run supervised behind the villager-moves switch: the `villagers` rung
@@ -139,17 +142,226 @@ export function homeMs(from: { x: number; z: number }, legs: readonly { x: numbe
   return Math.round(d / BOAT_PACE * 1000 * 1.3) + YARD_MS;
 }
 
+// ------------------------------------------------------------------------------------------------ the lure's gates (idle-plan V, S1)
+
+/**
+ * The lure's prepared trip at dawn (idle-plan V 6.1): over the kit's 70, under food's 76 and the villager care's 75.
+ * PREP left the kit whole and the bot fed the evening before; without it the home chores (the stash 60, the farm 47,
+ * the pens 46) took the first minutes of a morning that has 89 s to spare (F-14).
+ */
+export const DAWN_URGENCY = 71;
+/** A lure trip's run: the west village's 346 s (4.4) from the walk out to the lock shut, and room for a slow hop or two. */
+export const LURE_BUDGET = 9 * MINUTE;
+/** The variants of the lure: a prepared trip's dawn, and a whole look at a village (nothing placed). */
+const BRING = 'bring:', LOOK_AT = 'look:';
+/** PREP's hours (2.2, decision 5): its reads and kit from the afternoon before, its lifts last, to bedtime. */
+const PREP_FROM = 6000, PREP_TO = 12_300;
+/** The hour a trip's ward must be in the lock by, as the verdict's age is reckoned (the bell's pull at 9000, 4.1). */
+const TRIP_END = 9000;
+/** A bad omen on the bot makes a raid of the first village it walks into (26.3: raid_omen once inside). */
+const OMEN = /^(bad_omen|raid_omen)$/;
+
+/** The fetch's record as the gates read it (fetch.ts peekFetch: a copy, nothing made), or undefined in a world without one. */
+const fetchNow = (world: WorldMemory): FetchMemory | undefined => (world.fetch === undefined ? undefined : peekFetch(world));
+/** Trips that may still begin (villager-moves {arm}): a count above 0 (`free`: S1.5, refused by the tool until then). */
+const armedOk = (f: Pick<FetchMemory, 'armed'>): boolean => f.armed === 'free' || (typeof f.armed === 'number' && f.armed > 0);
+/** A trip prepared and waiting for its dawn (2.2: `prep` with `prepared` stamped). */
+function preparedTrip(world: WorldMemory): FetchTrip | undefined {
+  const t = fetchNow(world)?.trip;
+  return t && t.state === 'prep' && t.prepared ? t : undefined;
+}
+/**
+ * The dry switch (villager-moves {dry}, rollout step 3): every trip plans, logs and dumps and places nothing while it is
+ * on. The fetch's record keeps it (FetchMemory.dry: a switch turned before a trip exists must hold for the PREP and the
+ * morning after; a trip's own `dry` is that trip's record): PREP makes its new trip dry by it, and the run its trip.
+ */
+export const dryNext = (world: WorldMemory): boolean => (world.fetch as Partial<FetchMemory> | undefined)?.dry === true;
+/**
+ * A trip's village as remembered (the live site: a run writes on it), by the `x,z` its name ends in: fetch.ts keeps a
+ * trip's site as village.ts variantOf names it ("village x,z"), and reads a bare "x,z" alike.
+ */
+function tripSiteOf(world: WorldMemory, name: string): VillageSite | undefined {
+  const m = /(-?\d+),\s*(-?\d+)\s*$/.exec(name);
+  return m ? (world.villages?.sites ?? []).find(q => q.x === Number(m[1]) && q.z === Number(m[2])) : undefined;
+}
+/** Wards on their way to the hall (fetch.ts: led, or in the lock): the hall counts them as its own (idle-plan V 5.2, B4). */
+const wardsOnWay = (world: WorldMemory): number => fetchNow(world)?.wards.filter(w => w.where === 'led' || w.where === 'lock').length ?? 0;
+
+/**
+ * What a lure trip from home to `site` needs, s: the seconds its start must have in hand (fetch.ts startNeed, 4.4: the
+ * lock shut by 8700 with the margin, and the first hop's own rule met), by the parts the records have: the trip's own
+ * yard gate and yard way once PREP chose them (`t`), else the yard gate nearest the village with its way to the lock's
+ * S_out reckoned along the cells (no walker on whole cells has a shorter one), else from home itself. Pure.
+ */
+export function lureNeed(world: WorldMemory, site: Pick<VillageSite, 'x' | 'z' | 'fetch'>, home: { x: number; z: number }, t?: Pick<FetchTrip, 'gate'>): { s: number; parts: NeedParts } {
+  let outer: { x: number; z: number } = home, yard = 0;
+  if (t) { outer = t.gate.outer; yard = t.gate.yard; } else {
+    const g = yardGates(world).map(q => ({ q, d: horiz(q.outer, site) })).sort((a, b) => a.d - b.d)[0]?.q;
+    const lock = lockOf(world);
+    if (g) { outer = g.outer; if (lock) yard = Math.abs(g.inner.x - lock.sOut.x) + Math.abs(g.inner.z - lock.sOut.z); }
+  }
+  const parts = needParts(site, home, outer, yard);
+  return { s: startNeed(parts), parts };
+}
+/** A trip that fits one morning (pure): set out at the bot's dawn (WORK_AT), the ward in the lock by IN_BY (fetch.ts startLate). */
+export const fitsMorning = (needS: number): boolean => startLate(WORK_AT, needS) === undefined;
+/** The seconds of one morning, the bot's dawn to IN_BY (460: about 200 blocks straight). */
+const morningS = () => Math.floor((IN_BY - (WORK_AT - 24_000)) / 20);
+/** A site's tally word in brain-status for one judged free that is too far (village.ts villagersLine): one morning under the lure, a day's move else. */
+export const tooFarFor = (world: WorldMemory, home: { x: number; z: number }): ((site: VillageSite) => boolean) =>
+  (lureOn(world) ? site => !fitsMorning(lureNeed(world, site, home).s) : tooFarFrom(home));
+
+/** The real ms from now to the 9000 of the next morning's trip (2.2: a verdict must be under 72 h old then). */
+const toTripEnd = (tod: number): number => ((((WORK_AT - tod) % 24_000) + 24_000) % 24_000 + TRIP_END - (WORK_AT - 24_000)) * 50;
+/** The unemployed adults the judge counted at a free word's look (its words say so: "7 villagers, 2 unemployed adult(s) to take"); undefined where they do not. */
+const takersAt = (site: VillageSite): number | undefined => {
+  const m = /(\d+) unemployed adult\(s\) to take/.exec(site.judged?.why ?? '');
+  return m ? Number(m[1]) : undefined;
+};
+
+/**
+ * Where a village open to the lure stands (pure, idle-plan V 4.1): `far` (its trip does not fit one morning: neither
+ * brought from nor looked at, A9); `look` (it wants a whole look first: no free word of today's judge on a whole look
+ * that will still be under FRESH_FREE old by the trip's 9000, someone's to an older judge, no count for the floor or
+ * one too old, no unemployed adult at its last look a day ago); `wait` (nothing a look would change yet: no unemployed
+ * adult at a look under a day old, no take left at the floor); `prep` (ready for tomorrow's trip to be prepared). With
+ * why, and the trip's need.
+ */
+export function lureState(world: WorldMemory, site: VillageSite, s: Pick<Snapshot, 'now' | 'timeOfDay'>, home: { x: number; z: number }): { kind: 'far' | 'look' | 'wait' | 'prep'; why: string; needS: number } {
+  const needS = lureNeed(world, site, home).s, at = fmt(site);
+  if (!fitsMorning(needS)) return { kind: 'far', why: `the village at ${at} is too far for one morning (${Math.round(horiz(site, home))} from home: needs ${needS} s, a morning has ${morningS()} s): needs the relay`, needS };
+  const by = s.now + toTripEnd(s.timeOfDay), j = site.judged;
+  if (rejudge(site)) return { kind: 'look', why: `the village at ${at} is someone's to an older judge: judged again first`, needS };
+  if (!freshFree(site, by)) {
+    const word = !j ? 'not judged yet' : j.kind !== 'free' ? `judged ${j.kind} (${j.why})` : `its free word (${clockAgo(s.now, j.at)}) will be over 72 h old by the trip`;
+    return { kind: 'look', why: `the village at ${at}: ${word}: a whole look first`, needS };
+  }
+  const takers = takersAt(site);
+  if (takers === 0) {
+    return s.now - j!.at >= FETCH_WAIT['no unemployed'] ? { kind: 'look', why: `the village at ${at} had no unemployed adult at its last look (${clockAgo(s.now, j!.at)}): looked at again`, needS }
+      : { kind: 'wait', why: `no unemployed adult in the village at ${at} at its last look (${clockAgo(s.now, j!.at)})`, needS };
+  }
+  const floor = floorOk(site, by);
+  if (!floor.ok) return { kind: / a whole look first$/.test(floor.text) ? 'look' : 'wait', why: `the village at ${at}: ${floor.text}`, needS };
+  return { kind: 'prep', why: `the village at ${at}: free, ${floor.text}, needs ${needS} s`, needS };
+}
+/** How long ago, for the words (h, else min). */
+const clockAgo = (now: number, at: number) => { const m = Math.round((now - at) / MINUTE); return m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
+
+/**
+ * Tomorrow's trip (2.2's first row; the care's row 10 and the work queue's stay-in ask it): the village a lure trip
+ * would be prepared for now, the nearest by its need of those ready for one (lureState `prep`); or why none, the first
+ * thing in the way: the switches (the method, the moves, a halt, not armed), what the fetch still holds (a trip, a
+ * ward, the journal: care's first), the hall (stocked), the lock and the portal's ring as last read, then the villages.
+ * The hours and where the bot stands are the caller's. Pure.
+ */
+export function lureSite(s: Pick<Snapshot, 'now' | 'timeOfDay' | 'position'> & { home?: { x: number; z: number } }, world: WorldMemory): { site: VillageSite; variant: string; needS: number } | { why: string } {
+  if (!lureOn(world)) return { why: 'the method is not the lure (villager-moves {method: "lure"})' };
+  if (!movesOn(world)) return { why: 'villager moves are off' };
+  const f = peekFetch(world);
+  if (f.halt) return { why: `HALT: ${f.halt.why}` };
+  if (!armedOk(f)) return { why: 'not armed (villager-moves {arm: 1} lets one trip begin)' };
+  if (f.trip) return { why: `trip ${f.trip.id} is ${f.trip.state}` };
+  if (f.wards.length) return { why: `${f.wards.length} ward(s) on the records: the care's first` };
+  if (f.journal.length) return { why: `the journal holds ${f.journal.length} change(s) not undone: the care's first` };
+  const hall = hallWhy(s, world);
+  if (hall) return { why: hall.text };
+  const sh = f.shells;
+  if (!lockOf(world)) return { why: 'the lock does not stand yet' };
+  if (!sh) return { why: 'the lock and the portal\'s ring not read yet' };
+  if (sh.building) return { why: `the ${sh.building === 'lock' ? 'lock' : 'portal\'s ring'} being built` };
+  if (sh.lock.length) return { why: `the lock is not ready: ${sh.lock[0]}` };
+  if (sh.ring.length) return { why: `the portal's ring is not ready: ${sh.ring[0]}` };
+  const home = s.home ?? s.position, sites = peekVillages(world).sites;
+  const all = sites.filter(q => siteOpen(q, home, s.now, 'lure')).map(q => ({ q, st: lureState(world, q, s, home) })).sort((a, b) => a.st.needS - b.st.needS);
+  const go = all.find(x => x.st.kind === 'prep');
+  if (go) return { site: go.q, variant: variantOf(go.q), needS: go.st.needS };
+  // (none open: the nearest free one that waits, and why; the searches go on meanwhile)
+  const shut = sites.filter(q => q.judged?.kind === 'free' && !siteOpen(q, home, s.now, 'lure')).sort((a, b) => horiz(a, home) - horiz(b, home))[0];
+  return { why: all[0]?.st.why ?? (shut ? shutWhy(shut, home, s.now) : 'no village known open to a trip (the searches go on)') };
+}
+/** Why siteOpen keeps a free village shut to the lure, in words (pure): out of range, or its last trip's wait (fetchWait) with the hours left. */
+function shutWhy(site: VillageSite, home: { x: number; z: number }, now: number): string {
+  const at = fmt(site), w = fetchWait(site.fetch);
+  if (horiz(site, home) > VILLAGE_RANGE) return `the village at ${at} is beyond ${VILLAGE_RANGE} of home`;
+  if (w > 0 && now - site.fetch!.at < w) return `the village at ${at} waits ${Math.ceil((site.fetch!.at + w - now) / (60 * MINUTE))} h more (${site.fetch!.kind}: ${site.fetch!.why})`;
+  return `the village at ${at} is not open to a trip`;
+}
+
+/**
+ * The work queue's stay-in (idle-plan V 6.3; work.ts common): from 6000 to bedtime the rungs that leave the yard stay
+ * home while tomorrow's trip is owed its reads and its kit (PREP's first two parts: the evening alone has 65-75 s before
+ * the shelter beds the bot, F-13). Owed: a trip in `prep` whose kit is not stamped yet, or none and a village to prepare
+ * one for (lureSite) that PREP has not declined today (one decline a day: the afternoon is the chores' then). Bounded by
+ * the switches: the method, the moves, armed, no halt. Said, or undefined. Pure.
+ */
+export function prepStayIn(s: Pick<Snapshot, 'now' | 'timeOfDay' | 'home' | 'position'>, world: WorldMemory): string | undefined {
+  if (!lureOn(world) || !movesOn(world)) return undefined;
+  const tod = ((s.timeOfDay % 24_000) + 24_000) % 24_000;
+  if (tod < PREP_FROM || tod >= PREP_TO) return undefined;
+  const f = peekFetch(world), t = f.trip, said = 'staying in to prepare tomorrow\'s villager trip';
+  if (f.halt || !armedOk(f)) return undefined;
+  if (t) return t.state === 'prep' && !Number.isFinite(t.prep.kit) ? `${said} (trip ${t.id}: its kit not packed yet)` : undefined;
+  const no = f.why?.prep, day: unknown = world.idle?.today?.day;
+  if (no && (typeof day === 'number' && day > 0 && typeof no.day === 'number' ? no.day === day : s.now - no.at < GAME_DAY)) return undefined;
+  const site = lureSite(s, world);
+  return 'site' in site ? `${said} (the village at ${fmt(site.site)})` : undefined;
+}
+
+/** Why a prepared trip does not set out now (2.2's `prep` -> `out`; pure, a Decline): the halt, not armed, a bad omen, the clock (4.4's start rule). */
+function bringWhy(s: Snapshot, world: WorldMemory): Decline | null {
+  const f = fetchNow(world), t = f?.trip;
+  if (!f || !t || t.state !== 'prep' || !t.prepared) return { cause: 'unneeded', text: 'villagers: no trip prepared' };
+  if (f.halt) return { cause: 'hold', text: `villagers: HALT (${f.halt.why}): no trip sets out until the lead clears it (villager-moves {halt:false})` };
+  if (!armedOk(f)) return { cause: 'hold', text: 'villagers: not armed: no trip sets out (villager-moves {arm: 1} lets one)' };
+  const omen = (s.effects ?? []).find(e => OMEN.test(e.name.replace(/^minecraft:/, '')));
+  if (omen) return { cause: 'hold', text: `villagers: ${omen.name.replace(/^minecraft:/, '').replace('_', ' ')} on the bot: no trip sets out (the village it walks into would be raided)` };
+  const site = tripSiteOf(world, t.site);
+  if (!site) return { cause: 'unneeded', text: `villagers: the trip's village (${t.site}) is no longer known` };
+  const late = startLate(s.timeOfDay, lureNeed(world, site, s.home ?? s.position, t).s);
+  return late ? { cause: 'late', text: `villagers: the trip ${late}` } : null;
+}
+
+/**
+ * The rung's variants under the lure (idle-plan V 5.2): a prepared trip's `bring:<site>` alone at its dawn (the morning
+ * is the trip's); none while a trip is under way or a villager is out (the care's, and the yard holds its lifts); else a
+ * `look:<site>` for each village open to it that wants a whole look and whose trip would fit one morning, the nearest
+ * by its need first, then the searches as before. The boat's `village x,z` moves are never offered.
+ */
+function lureVariants(s: Snapshot, world: WorldMemory, searches: { id: string; dist: number; needMs: number; first?: true }[]): { id: string; dist: number; first?: true; needMs?: number }[] {
+  const home = s.home ?? s.position, f = fetchNow(world), t = f?.trip;
+  if (t?.state === 'prep' && t.prepared) {
+    const site = tripSiteOf(world, t.site);
+    return site ? [{ id: `${BRING}${t.site}`, dist: Math.round(horiz(site, home)), first: true, needMs: lureNeedMs(lureNeed(world, site, home, t).parts) }] : [];
+  }
+  if ((t && t.state !== 'prep' && t.state !== 'restore') || wardOut(world, s.now)) return [];
+  const looks = peekVillages(world).sites.filter(q => siteOpen(q, home, s.now, 'lure')).map(q => ({ q, st: lureState(world, q, s, home) }))
+    .filter(x => x.st.kind === 'look').sort((a, b) => a.st.needS - b.st.needS)
+    .map(x => ({ id: `${LOOK_AT}${variantOf(x.q)}`, dist: Math.round(horiz(x.q, home)), first: true as const, needMs: lookNeedMs(horiz(x.q, home)) }));
+  return [...looks, ...searches.filter(x => x.first), ...searches.filter(x => !x.first)];
+}
+
+/** What the rung says under the lure with no variant at all: a trip under way, a villager out. */
+function lureNone(s: Snapshot, world: WorldMemory): Decline | null {
+  const f = fetchNow(world), t = f?.trip;
+  if (t && t.state !== 'prep' && t.state !== 'restore') return { cause: 'unneeded', text: `villagers: trip ${t.id} is ${t.state} (the villager care's)` };
+  if (t?.state === 'prep' && t.prepared && !tripSiteOf(world, t.site)) return { cause: 'unneeded', text: `villagers: the trip's village (${t.site}) is no longer known` };
+  if (wardOut(world, s.now)) return { cause: 'hold', text: 'villagers: a villager is on its way: no search and no look until it is in' };
+  return null;
+}
+
 // ------------------------------------------------------------------------------------------------ the rung's gates
 
 /**
  * Why the rung has nothing to do (pure): the switch off; no hall; the hall with its villagers as last counted (under
- * half an hour ago: older, the run looks again first).
+ * half an hour ago: older, the run looks again first), and the lure's wards on their way to it (led, or in the lock:
+ * the hall's own once in).
  */
-function hallWhy(s: Snapshot, world: WorldMemory): Decline | null {
+function hallWhy(s: Pick<Snapshot, 'now'>, world: WorldMemory): Decline | null {
   if (!movesOn(world)) return { cause: 'unneeded', text: 'villager moves are off' };
   if (!world.zones?.hall?.length) return { cause: 'unneeded', text: 'no villager hall yet' };
-  const h = peekVillages(world).hall;
-  if (h && s.now - h.at < HALL_FRESH && h.count >= HALL_WANTS) return { cause: 'stocked', text: `the hall has ${h.count} villagers (${HALL_WANTS} wanted)` };
+  const h = peekVillages(world).hall, way = wardsOnWay(world);
+  if (h && s.now - h.at < HALL_FRESH && h.count + way >= HALL_WANTS) return { cause: 'stocked', text: `the hall has ${h.count} villagers${way ? ` and ${way} on its way` : ''} (${HALL_WANTS} wanted)` };
   return null;
 }
 
@@ -177,6 +389,8 @@ export const villagersTask: WorkTask = {
     if (hallWhy(s, world)) return [];
     const home = s.home ?? s.position;
     const v = peekVillages(world);
+    // (under the lure its own variants, and the searches as before: idle-plan V 5.2)
+    if (lureOn(world)) return lureVariants(s, world, searchesOf(v));
     // (the rails home as the gates read it: a village the boat found no way from is gone to again at once with the rails
     // switch on, its no-boat branch keeping the line, but none while a line is under way)
     const line = peekLine(world);
@@ -185,28 +399,36 @@ export const villagersTask: WorkTask = {
       .map(x => ({ ...x, need: rejudge(x.q) ? lookNeedMs(x.dist) : moveNeedMs(x.dist) }))
       // (a move that cannot be home with its villager by the day's end is never set out on: not offered at all)
       .filter(x => x.need <= DAY_MS).sort((a, b) => a.dist - b.dist);
-    const searches = SEARCHES.map(id => {
-      const from = v.searched?.[id]?.out ?? 0;
-      return { id, dist: VILLAGE_RANGE, needMs: searchNeedMs(from), ...(from > 0 ? { first: true as const } : {}) };
-    });
+    const searches = searchesOf(v);
     return [...sites.map(x => ({ id: variantOf(x.q), dist: Math.round(x.dist), first: true as const, needMs: x.need })), ...searches.filter(x => x.first), ...searches.filter(x => !x.first)];
   },
-  none: (s, world) => hallWhy(s, world) ?? { cause: 'unneeded', text: 'villagers: nothing to do' },
-  ready: (s, world) => {
+  none: (s, world) => hallWhy(s, world) ?? (lureOn(world) ? lureNone(s, world) : null) ?? { cause: 'unneeded', text: 'villagers: nothing to do' },
+  ready: (s, world, variant) => {
     if (s.raining || s.thundering) return { cause: 'late', text: 'raining: no villager is moved in the rain' };
     const open = peekVillages(world).open?.length;
     if (open) return { cause: 'unneeded', text: `${open} block(s) of the hall or the fence left open by a move: close up first` };
+    // (a prepared trip's dawn: the lead's switches, a bad omen, the clock)
+    if (variant.startsWith(BRING)) return bringWhy(s, world);
     return null;
+  },
+  // the dawn is the trip's (idle-plan V 6.1): while its prepared trip would set out, over the kit and the home chores
+  urgent: (s, world) => {
+    const t = lureOn(world) && movesOn(world) ? preparedTrip(world) : undefined;
+    return t && villagersTask.ready(s, world, `${BRING}${t.site}`) === null ? DAWN_URGENCY : undefined;
   },
   run: async (ctx, variant, budgetMs, now) => {
     const began = now();
-    const enough = () => now() - began > budgetMs;
-    const left = () => began + budgetMs - now();
+    // (a lure trip's budget is its morning's: idle-plan V 5.2; its looks and searches keep the rung's)
+    const lure = lureOn(ctx.world), budget = lure && variant.startsWith(BRING) ? Math.min(budgetMs, LURE_BUDGET) : budgetMs;
+    const enough = () => now() - began > budget;
+    const left = () => began + budget - now();
     // the hall counted first, whichever way the run goes: a count over half an hour old lets the gates through, and a
-    // full hall sent no one on a move but did send the side search out to 384
+    // full hall sent no one on a move but did send the side search out to 384 (the lure's wards on their way count too)
     const counted = await countHall(ctx, now());
-    if (counted !== undefined && counted >= HALL_WANTS) return { gain: 0, text: `the hall has ${counted} villagers already: none moved`, mark: 'same' };
+    const way = lure ? wardsOnWay(ctx.world) : 0;
+    if (counted !== undefined && counted + way >= HALL_WANTS) return { gain: 0, text: `the hall has ${counted} villagers already${way ? ` and ${way} on its way` : ''}: none moved`, mark: 'same' };
     if (isSearch(variant)) return searchSide(ctx, variant, enough, left, now);
+    if (lure) return lureRun(ctx, variant, { now, began, budgetMs: budget, enough });
     // (made whole first: a site folded into its village's judged one since the variant was chosen is no village of its own)
     villagesOf(ctx.world);
     const site = siteOf(ctx.world, variant);
@@ -216,10 +438,80 @@ export const villagersTask: WorkTask = {
   }
 };
 
+/** The searches of the eight bearings, as the rung offers them: one a day cut short goes on from where it stopped, ahead of the turn. */
+function searchesOf(v: Pick<ReturnType<typeof peekVillages>, 'searched'>): { id: string; dist: number; needMs: number; first?: true }[] {
+  return SEARCHES.map(id => {
+    const from = v.searched?.[id]?.out ?? 0;
+    return { id, dist: VILLAGE_RANGE, needMs: searchNeedMs(from), ...(from > 0 ? { first: true as const } : {}) };
+  });
+}
+
+/**
+ * A run of the rung under the lure: a prepared trip's dawn (lure.ts fetchRun: its walk out, the village, the hops home,
+ * the gate, the lock; made dry while the dry switch is on), or a whole look at a village. A boat's move chosen before
+ * the method was switched is not made.
+ */
+async function lureRun(ctx: GoalContext, variant: string, clk: Clock): Promise<WorkResult> {
+  // (made whole first: a site folded into its village's judged one since the variant was chosen is no village of its own)
+  villagesOf(ctx.world);
+  if (variant.startsWith(BRING)) {
+    const name = variant.slice(BRING.length), site = tripSiteOf(ctx.world, name);
+    const t = fetchOf(ctx.world).trip;
+    if (!site || !t || t.site !== name) return { gain: 0, text: `no trip prepared for ${name} any more`, untried: true };
+    if (dryNext(ctx.world) && !t.dry) { t.dry = true; ctx.save?.(); }
+    // (loaded when first asked: the lure's acts import half the brain, and this rung is loaded by the work queue. Its
+    // waits run on the rung's clock with a real sleep: a LureClock, fetch.ts)
+    const { fetchRun } = await import('./lure.js');
+    return fetchRun(ctx, site, { ...clk, sleep: pause });
+  }
+  if (variant.startsWith(LOOK_AT)) {
+    const name = variant.slice(LOOK_AT.length), site = siteOf(ctx.world, name);
+    if (!site) return { gain: 0, text: `no ${name} known any more`, mark: 'forget' };
+    return lookRun(ctx, site, clk);
+  }
+  return { gain: 0, text: `[${variant}] the boat's move is not made under the lure (method lure)`, mark: 'forget' };
+}
+
+/**
+ * The lure's look (a `look:` variant, idle-plan V 4.1): out to a village by the gate that way, a WHOLE look round it
+ * (every viewpoint the run's time allows) and today's judge; nothing placed, no villager touched, nothing carried for a
+ * trip. Its word is kept (noteVerdict), and with it, from a look that saw all of it, the count the floor keeps
+ * (`site.whole`). What came of it for a trip is counted while it stays the same (`fetch.why.look`, the Fetch: line:
+ * at 3 it asks the lead), and cleared once the village is ready for one to be prepared.
+ */
+async function lookRun(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<WorkResult> {
+  const { now, enough } = clk;
+  say(ctx, `to the village at ${fmt(site)} for a whole look (its count and its unemployed adults, for a lure trip): nothing placed`);
+  const gate = await outByGate(ctx, site);
+  if (gate.shut) return { gain: 0, text: `the village at ${fmt(site)} not looked at: ${gate.shut}`, untried: true };
+  const stopped = await walkOut(ctx, gate.at ?? await here(ctx), site, enough);
+  // (turned back by danger: no mark, so the wrapper's dry mark waits the longer each time; only the day's end the same)
+  if (stopped) { say(ctx, stopped); return { gain: 0, text: stopped, ...(/^turned back/.test(stopped) ? {} : { mark: 'same' as const }) }; }
+  const left = () => clk.began + clk.budgetMs - now();
+  const home = ctx.s.home ?? ctx.s.position;
+  const look = await lookVillage(ctx, { x: site.x, y: site.y, z: site.z }, now(), homeBy(enough, left, home));
+  const v = judgeVillage(look);
+  const kept = noteVerdict(ctx.world, site, look, v, now());
+  const word = wordOn(v, kept);
+  const seen = `${look.looked.chunks} of ${look.looked.of} chunks seen`;
+  const tod = (await ctx.status().catch(() => undefined))?.timeOfDay ?? ctx.s.timeOfDay;
+  const st = kept && word.kind === 'free' ? lureState(ctx.world, kept, { now: now(), timeOfDay: tod }, home) : undefined;
+  const text = v.kind === 'none' ? `nothing of the village at ${fmt(site)} seen (${v.why}): looked at again later`
+    : `looked at the village at ${fmt(site)} (${seen}): ${word.kind === 'free' ? `free (${word.why})${st ? `; for a trip: ${st.kind === 'prep' ? 'ready to prepare' : st.why}` : ''}`
+      : word.kind === 'theirs' ? `someone's, left alone: ${word.why}` : word.why}`;
+  say(ctx, text);
+  noteWhy(ctx.world, 'look', st?.kind === 'prep' ? undefined : text.slice(0, 200), now());
+  ctx.save?.();
+  // (judged: its word stands. Nothing seen there: tried again later, the longer each time)
+  return { gain: 0, text, ...(v.kind === 'none' ? {} : { mark: 'first' as const }) };
+}
+
 // ------------------------------------------------------------------------------------------------ looks
 
-const here = async (ctx: GoalContext): Promise<Pos> => (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
-const say = (ctx: GoalContext, text: string) => ctx.progress(`villagers: ${text}`);
+/** Where the bot stands now (status), else where the snapshot had it. */
+export const here = async (ctx: GoalContext): Promise<Pos> => (await ctx.status().catch(() => undefined))?.position ?? ctx.s.position;
+/** One step of the rung said (`villagers: ...`, brain.log): the boat's move and the lure's trip alike (lure.ts). */
+export const say = (ctx: GoalContext, text: string) => ctx.progress(`villagers: ${text}`);
 
 /** The villagers inside the hall's box (world.entities from home or the hall), noted with the time; undefined when not seen. */
 export async function countHall(ctx: GoalContext, now: number): Promise<number | undefined> {
@@ -242,7 +534,7 @@ export async function countHall(ctx: GoalContext, now: number): Promise<number |
  * boat way home: the side walks on past it (live in a probe, the north side walked back into a village it had judged
  * someone's every 20 minutes, and never searched beyond it). The villagers and players seen are remembered either way.
  */
-async function villageInSight(ctx: GoalContext, now: number): Promise<Pos | undefined> {
+export async function villageInSight(ctx: GoalContext, now: number): Promise<Pos | undefined> {
   const home = ctx.s.home ?? ctx.s.position;
   const seen = await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: LOOK }).catch(() => undefined);
   if (Array.isArray(seen?.entities)) noteSeen(ctx.world, seen.entities, now, ctx.s.dimension);
@@ -285,7 +577,7 @@ export function byVillage(villages: readonly VillageAt[], b: { x: number; z: num
  * walk out comes no nearer one than 96 - 56 = 40 (past the pillagers' 32 of sight), a search's 96 - 40 = 56. An older
  * jar has no foreign.banners: the scans' markers then (foreign.marks), as before.
  */
-async function outpostNear(ctx: GoalContext, p: { x: number; z: number }, r: number, also: readonly VillageAt[] = []): Promise<string | undefined> {
+export async function outpostNear(ctx: GoalContext, p: { x: number; z: number }, r: number, also: readonly VillageAt[] = []): Promise<string | undefined> {
   const held = await ctx.call<{ at?: BannerMark[] }>('foreign.banners', { x: Math.floor(p.x), z: Math.floor(p.z), r: Math.ceil(r), max: 32 }).catch(() => undefined);
   const b = Array.isArray(held?.at) ? held : await ctx.call<{ at?: BannerMark[] }>('foreign.marks', {
     x1: Math.floor(p.x - r), z1: Math.floor(p.z - r), x2: Math.floor(p.x + r), z2: Math.floor(p.z + r), match: '.*_banner', max: 32
@@ -300,7 +592,7 @@ async function outpostNear(ctx: GoalContext, p: { x: number; z: number }, r: num
  * pillager outpost within OUTPOST_CLEAR and a stop on (`ahead`, and the STOP_RANGE a walk may end short of it), not one
  * by a village (`also`: one in sight). Said, or undefined.
  */
-async function dangerAt(ctx: GoalContext, at: { x: number; y?: number; z: number }, ahead = SEARCH_LEG, also: readonly VillageAt[] = []): Promise<string | undefined> {
+export async function dangerAt(ctx: GoalContext, at: { x: number; y?: number; z: number }, ahead = SEARCH_LEG, also: readonly VillageAt[] = []): Promise<string | undefined> {
   const r = await ctx.call<{ entities?: Seen[] }>('world.entities', { maxDistance: ILLAGER_SIGHT }).catch(() => undefined);
   const ill = (r?.entities ?? []).filter(e => ILLAGER.test(e.name) && e.position).sort((a, b) => horiz(a.position!, at) - horiz(b.position!, at))[0];
   if (ill) return `a ${ill.name} at ${fmt(ill.position!)}, ${Math.round(horiz(ill.position!, at))} off`;
@@ -457,9 +749,19 @@ export function noteVerdict(world: WorldMemory, site: VillageSite, look: Village
   const was = held && v.kind !== 'theirs' ? kept.judged : undefined;
   const bell = look.bells[0];
   if (bell) { kept.x = bell.x; kept.y = bell.y; kept.z = bell.z; }
-  // (today's judge's word, with its version)
+  // (today's judge's word, with its version; under the lure a wait counts the equal ones in a row, which double its
+  // wait from the fourth: village.ts waitAgain)
   const judged: NonNullable<VillageSite['judged']> = { at: now, kind: v.kind, why: v.why.slice(0, 160), ...(v.kind === 'theirs' ? { rule: v.rule } : {}), v: JUDGE_V };
+  const lure = lureOn(world), before = kept.judged;
+  if (lure && v.kind === 'wait') {
+    const gist = (s: unknown) => String(s).replace(/-?\d+(\.\d+)?/g, '#');
+    judged.n = before?.kind === 'wait' && gist(before.why) === gist(judged.why) ? (typeof before.n === 'number' && before.n >= 1 ? before.n : 1) + 1 : 1;
+  }
   Object.assign(kept, counts, { seenAt: now, judged: was ?? judged });
+  // (under the lure, a look that saw all of it free: its count for the floor, no take since. A part look keeps the
+  // count it has: idle-plan V 4.1, F-15)
+  const whole = lure && !was ? wholeLook(look, v, now) : undefined;
+  if (whole) kept.whole = whole;
   const area = v.area ? { x1: v.area.x1, z1: v.area.z1, x2: v.area.x2, z2: v.area.z2 } : undefined;
   if (area || held) kept.area = held ? joinAreas(area, held) : area;
   // (made whole again: the fold, in place. Folded, the site it went into: not the nearest, which may be one not judged)
@@ -552,7 +854,7 @@ async function searchSide(ctx: GoalContext, side: Bearing, enough: () => boolean
  * a pillager outpost ahead: dangerAt) or the run's time: why it stopped, or undefined once there. `each`: what is done
  * at each stop (the move reads the boat's way home there).
  */
-async function walkOut(ctx: GoalContext, from: { x: number; z: number }, site: VillageSite, enough: () => boolean, each?: () => Promise<void>): Promise<string | undefined> {
+export async function walkOut(ctx: GoalContext, from: { x: number; z: number }, site: VillageSite, enough: () => boolean, each?: () => Promise<void>): Promise<string | undefined> {
   const target = { x: site.x + 0.5, z: site.z + 0.5 };
   const d = horiz(from, target);
   const legs = Math.max(1, Math.ceil(d / SURVEY_LEG));
@@ -609,7 +911,11 @@ async function relook(ctx: GoalContext, site: VillageSite, clk: Clock): Promise<
 
 // ------------------------------------------------------------------------------------------------ the move
 
-interface Clock { now: () => number; began: number; budgetMs: number; enough: () => boolean }
+/**
+ * A run's clock as the rung hands it on: `now` the wrapper's, `began` when the run set out, its budget, and `enough`
+ * once the budget is spent (the lure's trip starts from it too: lure.ts fetchRun).
+ */
+export interface Clock { now: () => number; began: number; budgetMs: number; enough: () => boolean }
 
 /** The bot's own boat (vehicle.place's): its id now and the uuid that names it after a restart. */
 export interface Boat { id: number; uuid: string }

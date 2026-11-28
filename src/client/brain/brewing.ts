@@ -11,6 +11,7 @@ import { brewingGate } from './netherfortress.js';
 import { CANE_KEEP } from './enchant.js';
 import { unseenIn } from './netherset.js';
 import { BREW_TICKS, brainRun, brewStandText, type BrewPut, type BrewStack, type BrewStatus, type BrewTake, type InventoryItem } from '../tools.js';
+import { heldByFetch, placeGuard } from './fetch.js';
 
 /**
  * Brewing (P4 of the progression plan): a brewing stand at the workshop's stand cell (the brewing milestone, after the
@@ -268,6 +269,9 @@ const gate = (s: Snapshot, world: WorldMemory): Gate => {
   if (world.brewing?.gone) return { cause: 'unneeded', text: `the brewing stand at ${fmt(world.brewing.gone)} is gone (the brewing milestone puts one back)` };
   const at = brewStand(world);
   if (!at) return { cause: 'unneeded', text: world.progress?.done?.includes(ID) ? 'no brewing stand in the yard' : 'no brewing stand yet' };
+  // lifted out of a villager's way (the stand's cell is 24 from the hall's gate): it goes back once the villager is in,
+  // and the batch waits. A run now would find the cell bare and have the milestone put a second stand up
+  if (heldByFetch(world, at)) return { cause: 'hold', text: `the brewing stand at ${fmt(at)} is lifted for a villager (back once it is in)` };
   const plan = brewPlan(s, world);
   if ('why' in plan) return { cause: plan.stocked ? 'stocked' : 'unneeded', text: `brewing: ${plan.why}` };
   if (!inYard(s, world)) {
@@ -630,6 +634,11 @@ export const placeStandStep: Step = {
     if (STAND.test(there)) return keep(`a brewing stand stands at ${fmt(at)}`);
     if (!there) return blocked(`the stand's cell at ${fmt(at)} is out of sight`, 5 * MINUTE);
     if (!AIR.test(there)) return blocked(`${there} stands in the stand's cell at ${fmt(at)}: left alone`, 60 * MINUTE);
+    // no stand goes up while a villager is on its way (fetch.ts placeGuard): a free one this near the hall takes it.
+    // One lifted from this cell for the villager is the fetch's to put back
+    if (heldByFetch(ctx.world, at)) return blocked(`the stand's cell at ${fmt(at)} is held for a villager: its stand goes back once it is in`, 10 * MINUTE);
+    const wait = placeGuard(ctx.world, 'brewing_stand', ctx.s.now, at);
+    if (wait) return blocked(wait, 10 * MINUTE);
     if (carried(await inventory(ctx), i => i.name === 'brewing_stand') < 1) {
       const short = await prepare(ctx, 'brewing_stand', 1);
       if (Object.keys(short).length) return shortOf(`the brewing stand to put in the workshop: short of ${list(short)}`, short);

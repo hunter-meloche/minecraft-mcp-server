@@ -30,8 +30,19 @@
  * The villagers of the core are still, or LEAK-SEEKING: awake and within 6 of an open gate with a way through it, one
  * walks out with probability 1, on through every open gate it comes to, and it follows the bot, through the very cell
  * the bot stands in (entities push, they do not block: the bot in a gateway is no wall). The lock's rule (never both
- * gates open, never P open onto a villager) is tested against that, not against luck. The game's own villager (job
- * sites, the bell, the bed) is the reference villagers' half (S1), written apart.
+ * gates open, never P open onto a villager) is tested against that, not against luck.
+ *
+ * The REFERENCE villagers (S1, mind 'game') are the game's own, written apart from villagerwalk.ts with the 26.3 jar's
+ * numbers (GAME), so that the planner's margins are tested against the game's rules and not against themselves: an
+ * unemployed adult looks every 20-39 ticks at the 5 nearest free job sites within 48 not in backoff and makes ONE
+ * search (the game's A*: rises of 1.125 by collision tops, falls of 3, 48 walked, 768 nodes; doors pass, fences, shut
+ * gates and rails are walls, a fence top only from a block beside it); a miss puts those sites in backoff (40-79 more
+ * a miss, to 400, forgotten 400 after); it walks 2 b/s and takes the profession within 2.0; employed, it looks no
+ * more, keeps within 9 of its block from 2000 and strolls before; its site gone within 16 it is jobless at once,
+ * never farther off (a `traded` one keeps its profession); fresh from its village (a bell and a bed remembered) the
+ * bell pulls it from 9000 by any way its search allows, and the bed from 12000, when it takes no lure; a snag holds
+ * it, a zombie within 8 makes it run, lava, fire and a cactus hurt it, a portal cell takes it to the Nether. The server's
+ * POI store is the pasture's too (tickets: one villager a site), and world.findBlocks reads it.
  *
  * A scenario's own: `on.call[method]` and `on.act[tool]` answer first (undefined: the pasture's own answer, which a
  * handler can also give itself by `answer`, to lose a reply after the act); `at(tick, run)` lets something happen;
@@ -381,18 +392,117 @@ export class GateHolds {
   }
 }
 
+// ------------------------------------------------------------------------------------------------ the reference villagers: the game's numbers
+
+/**
+ * The game's villager (S1): its numbers as the 26.3 jar has them (R3, read in the bytecode: AcquirePoi and its
+ * JitteredLinearRetry, PathNavigation and PathFinder, WalkNodeEvaluator, GoToPotentialJobSite,
+ * AssignProfessionFromJobSite, ValidateNearbyPoi, ResetProfession, SetWalkTargetFromBlockMemory,
+ * villager_schedule.json) and its pace as the lead saw it (E-results, Nov 24). Written apart from villagerwalk.ts, so
+ * that the planner's margins are tested against the game's rules and not against themselves. Ticks unless said.
+ */
+export const GAME = {
+  /** an unemployed adult looks for a job site every 20 + nextInt(20) ticks, its first look within 20 */
+  LOOK: 20, LOOK_JITTER: 20,
+  /** at the 5 nearest free sites within 48 (by the straight distance between block positions) not in backoff */
+  SITES: 5, SITE_R: 48,
+  /** with ONE path to that set: at most 48 walked (max(FOLLOW_RANGE 16, requiredPathLength 48)) and 768 nodes visited */
+  PATH: 48, NODES: 768,
+  /** a miss puts each site of the set in backoff: its delay up by 40 + nextInt(40) to 400 at most, forgotten 400 after its last try */
+  RETRY: 40, RETRY_JITTER: 40, RETRY_MAX: 400, RETRY_FORGET: 400,
+  /** reach (PoiType.validRange): the path's end within Manhattan 1 of a job site or a bed, 6 of a bell */
+  REACH: 1, BELL_REACH: 6,
+  /** the profession, once its position is within 2.0 of the block's middle */
+  FLIP: 2,
+  /** a memory is held against the world only within 16 of its block: farther, a site gone is not noticed */
+  VALIDATE: 16,
+  /** the walk to a site it claimed is given up after 1200 ticks, its ticket released */
+  GIVE_UP: 1200,
+  /** a rise to 1.125 by collision tops (getMobJumpHeight), a fall of 3 (getMaxFallDistance), a body 1.95 high (a baby's half) */
+  RISE: 1.125, DROP: 3, HEIGHT: 1.95,
+  /** the walk at speed modifier 0.5, 2 blocks a second as seen live (E8); a speed goes as the square of its modifier */
+  WALK_BPS: 2,
+  /** what it walks back to: within `close` (Manhattan) of its block at work, of its bell at the meeting, of its bed at rest;
+   *  legs toward it beyond `far`; the memory dropped after `lost` ticks of no way */
+  WORK: { close: 9, far: 100, lost: 1200 }, MEET: { close: 6, far: 100, lost: 200 }, HOME: { close: 1, far: 150, lost: 1200 },
+  /** a leg toward a memory beyond `far`: 15 out and 7 up or down, within a right angle of its bearing (DefaultRandomPos.getPosTowards) */
+  LEG: 15, LEG_UP: 7,
+  /** an idle stroll (VillageBoundRandomStroll: LandRandomPos 10, 7), a stroll round its block at work (StrollAroundPoi: 8, 6) */
+  STROLL: 10, STROLL_UP: 7, WORK_STROLL: 8, WORK_STROLL_UP: 6,
+  /** asleep once within 2.0 of its bed */
+  SLEEP: 2,
+  /** panic: hurt within the last 40 ticks, or a hostile within its own range (HOSTILE); it flees 16 off at modifier 0.75 */
+  HURT_TICKS: 40, FLEE: 16
+} as const;
+/** VillagerHostilesSensor: what a villager runs from, and from how near. Not skeletons, creepers, spiders, witches, players. */
+export const HOSTILE: Readonly<Record<string, number>> = {
+  zombie: 8, husk: 8, drowned: 8, zombie_villager: 8, vex: 8, vindicator: 10, zoglin: 10, evoker: 12, illusioner: 12, ravager: 12, pillager: 15
+};
+/** The acquirable job sites (PoiTypes, tag acquirable_job_site) and the profession each gives: an unemployed adult takes any, one with a profession only its own. */
+export const PROFESSION_OF: Readonly<Record<string, string>> = {
+  blast_furnace: 'armorer', smoker: 'butcher', cartography_table: 'cartographer', brewing_stand: 'cleric', composter: 'farmer', barrel: 'fisherman',
+  fletching_table: 'fletcher', cauldron: 'leatherworker', water_cauldron: 'leatherworker', lava_cauldron: 'leatherworker', powder_snow_cauldron: 'leatherworker',
+  lectern: 'librarian', stonecutter: 'mason', loom: 'shepherd', smithing_table: 'toolsmith', grindstone: 'weaponsmith'
+};
+/** What the pasture keeps an index of, as the server's POI store does: the job sites, the beds (both halves: world.findBlocks finds either), the bells. */
+const POI = new RegExp(`^(minecraft:)?(${Object.keys(PROFESSION_OF).join('|')}|[a-z_]+_bed|bell)(\\[|$)`);
+/** A bed's head: the HOME POI (the foot is no POI). */
+const isBedHead = (state: string) => /_bed$/.test(idOf(state)) && propsOf(state).part !== 'foot';
+const RAIL = /(^|_)rail$/;
+
+export type VillagerActivity = 'idle' | 'work' | 'meet' | 'rest' | 'play';
+/** villager_schedule.json (period 24000): an adult idles from 10, works from 2000, meets from 9000, idles from 11000, rests from 12000; a baby plays 3000-6000 and from 10000. */
+export function villagerSchedule(tod: number, baby = false): VillagerActivity {
+  const t = ((tod % 24_000) + 24_000) % 24_000;
+  if (t < 10 || t >= 12_000) return 'rest';
+  if (baby) return (t >= 3000 && t < 6000) || t >= 10_000 ? 'play' : 'idle';
+  return t < 2000 ? 'idle' : t < 9000 ? 'work' : t < 11_000 ? 'meet' : 'idle';
+}
+
+/**
+ * A block as the game's walker meets it (WalkNodeEvaluator over collision shapes): the top of what stands in its cell
+ * (1 for a full block, up to 1.5 for a fence, a wall or a shut gate, less for a slab, a path, a bed, a chest), nothing
+ * (the body goes through: air, water, plants, rails, an open gate, a wooden door, which a villager opens), or a wall it
+ * neither enters nor stands on: lava, a cactus, a berry bush, powder snow, a cobweb, a wither rose (malus -1), a shut
+ * iron door, and a cell not read, where nothing is known.
+ */
+type Top = number | undefined | 'wall';
+const LOW_TOPS: [RegExp, number][] = [
+  [/^(farmland|dirt_path|honey_block)$/, 15 / 16], [/^(soul_sand|mud)$/, 14 / 16], [/_bed$/, 9 / 16], [/^(chest|trapped_chest|ender_chest|brewing_stand|lectern)$/, 14 / 16],
+  [/^enchanting_table$/, 12 / 16], [/^(stonecutter|lantern|soul_lantern)$/, 9 / 16], [/^cake$/, 8 / 16], [/campfire$/, 7 / 16], [/^daylight_detector$/, 6 / 16], [/_carpet$/, 1 / 16]
+];
+function topOf(state: string | null): Top {
+  if (state === null) return 'wall';
+  const id = idOf(state);
+  if (/^(lava|cactus|sweet_berry_bush|powder_snow|cobweb|wither_rose)$/.test(id)) return 'wall';
+  if (SOFT.test(id) || /(_sign|_banner|^ladder)$/.test(id)) return undefined;
+  const props = id.length < state.length ? propsOf(state) : {};
+  if (isGate(id)) return props.open === 'true' ? undefined : 1.5;
+  if (isDoor(id)) return id === 'iron_door' && props.open !== 'true' ? 'wall' : undefined;
+  if (/_trapdoor$/.test(id)) return props.open === 'true' ? undefined : props.half === 'top' ? 1 : 3 / 16;
+  if (id === 'snow') { const n = Math.min(8, Math.max(1, Number(props.layers ?? 1) || 1)); return n > 1 ? (n - 1) / 8 : undefined; }
+  for (const [re, top] of LOW_TOPS) if (re.test(id)) return top;
+  if (/(_fence|_wall)$/.test(id)) return 1.5;
+  if (/_slab$/.test(id)) return (props.type ?? 'bottom') === 'bottom' ? 0.5 : 1;
+  return shapeOf(state).solid ? 1 : undefined;
+}
+/** What hurts where it stands: lava, fire, a lit campfire or a magma block underfoot (DAMAGE_FIRE); beside one of those or a cactus or a berry bush the game's walker pays a malus (DANGER). */
+const BURNS = /^(lava|fire|soul_fire|campfire|soul_campfire|magma_block)$/;
+const PRICKS = /^(cactus|sweet_berry_bush)$/;
+
 // ------------------------------------------------------------------------------------------------ who lives there
 
 /**
- * A villager of the core. `mind`: 'leak' leaves by any open way and follows the bot (awake, within 6 of an open gate
- * with a way through it: probability 1); 'still' stands where it is put; 'home' walks back to its `home` cell at the
- * game's pace whenever a way there is open (a resident shut in the lock, once the hall's gate is opened for it: an
- * employed villager goes back to its block in work hours). Its `id` is the client's for it and dies with an unload;
- * its `uuid` is the server's, and what the brain keeps.
+ * A villager. `mind`: 'leak' leaves by any open way and follows the bot (awake, within 6 of an open gate with a way
+ * through it: probability 1); 'still' stands where it is put; 'home' walks back to its `home` cell at the game's pace
+ * whenever a way there is open (a resident shut in the lock, once the hall's gate is opened for it: an employed
+ * villager goes back to its block in work hours); 'game' is the game's own villager (the reference villagers, S1): its
+ * job site, bed and bell, its schedule, its walk and its path search as the 26.3 jar has them (GAME). Its `id` is the
+ * client's for it and dies with an unload; its `uuid` is the server's, and what the brain keeps.
  */
 export interface Villager {
   id: number; uuid: string; position: Pos; profession: string; level: number; baby: boolean; health: number; sleeping: boolean;
-  mind: 'leak' | 'still' | 'home';
+  mind: 'leak' | 'still' | 'home' | 'game';
   home?: Pos;
   /** it waits rather than step into the cell the bot stands in (default: it does not wait, as in the game) */
   yields?: boolean;
@@ -400,7 +510,51 @@ export interface Villager {
   dim?: 'nether';
   /** the cells it is walking, the cell it came from, the gates it has gone through (it does not turn back through one) */
   way: Pos[]; last?: Pos; passed: string[];
+  /**
+   * Mind 'game': its memories by the game's names. JOB_SITE; POTENTIAL_JOB_SITE, a site it claimed and walks to;
+   * MEETING_POINT, its bell (a villager fresh from its village has one, one days away has none, E-results); HOME, its
+   * bed's head. Each holds its ticket but the bell.
+   */
+  job?: Pos; potential?: Pos; bell?: Pos; bed?: Pos;
+  /** it has traded (villagerXp > 0, which the client never sees): it keeps its profession for good */
+  traded?: boolean;
+  /** mind 'game': the core's leak-seeker on top, at its pace (awake within 6 of an open gate with a way through it, out; the bot within 6, after it), where a scenario asks for the worst case */
+  leaks?: boolean;
+  /** someone's, as world.entities marks it: named, on a lead, riding */
+  customName?: string; leashedTo?: string; vehicle?: string;
+  /** mind 'game': hurt to 0, gone from the world */
+  dead?: boolean;
+  /** mind 'game': the game's own bookkeeping */
+  ai?: VillagerAI;
 }
+/** A reference villager's timers, its walk, and the sites it holds in backoff. */
+export interface VillagerAI {
+  /** its own random draws */
+  seed: number;
+  /** when AcquirePoi looks next for a job site, a bed, a bell; the sites of each in backoff (JitteredLinearRetry), by cell */
+  look: { job: number; bed: number; bell: number };
+  retry: { job: Map<string, Retry>; bed: Map<string, Retry>; bell: Map<string, Retry> };
+  /** GoToPotentialJobSite under way since */
+  going?: number;
+  /** CANT_REACH_WALK_TARGET_SINCE: since when no walk of its reached */
+  cantReach?: number;
+  /** the walk, the tick its next step is made, and no new walk before `until` */
+  walk?: Walk; next: number; until: number;
+  /** at work: when it last walked up to its block (StrollToPoi, every 80 at most), strolled round it (StrollAroundPoi, every 180) */
+  toBlock: number; round: number;
+  /** hurt last; burning until */
+  hurtAt: number; burning: number;
+  /** legs drawn in vain in a row (1000 draws: the memory is dropped) */
+  legMiss: number;
+  /** the bot is its look target: taken within 4 (SetLookAndInteract), kept while in sight (16) */
+  looks: boolean;
+  /** it has begun to flee this panic */
+  fled?: boolean;
+  /** woken last (SleepInBed waits 100 ticks before it lies down again) */
+  wokeAt: number;
+}
+export interface Retry { last: number; next: number; delay: number }
+export interface Walk { act: VillagerActivity | 'job' | 'flee' | 'leak'; cells: Pos[]; reached: boolean; bps: number; ticks?: number }
 /** Anything else alive: a cow of the bot's, a zombie, a player (name 'player'). */
 export interface Animal { id: number; uuid: string; name: string; category: string; position: Pos; health: number; baby: boolean }
 /** An item lying: a dug block's drop (`since`: the tick it fell; it is picked up half a second on). */
@@ -453,9 +607,16 @@ function meets(a: Pos, d: Pos, b: Box): number | undefined {
   return t0;
 }
 
+/** The yard's lawn at y 62, dirt under it: the default ground. It holds no job site, bed or bell. */
+const LAWN = (p: Pos): string | null => (p.y < YARD.y ? 'dirt' : p.y === YARD.y ? 'grass_block[snowy=false]' : 'air');
+
 export interface PastureOpts {
-  /** the ground under everything set since: a block by cell, null where the world is not read (default: the yard's lawn at y 62, dirt under it) */
-  base?: (p: Pos) => string | null;
+  /**
+   * the ground under everything set since: a block by cell, null where the world is not read (default: the yard's
+   * lawn at y 62, dirt under it). Its job sites, beds and bells are what its own `pois` lists (dumpBase's: the dump's);
+   * any other ground holds none until a block is set
+   */
+  base?: ((p: Pos) => string | null) & { pois?: Pos[] };
   /** the time of day the world starts at (default 1000) */
   tod?: number;
   /** the bot's pockets (default: the kit of KIT) and where it stands (default: home) */
@@ -530,10 +691,27 @@ export class Pasture {
   private abort = new AbortController();
   private via?: Entry['via'];
   private nextId = 9000;
+  /** the server's POI store: the job sites, beds and bells set over the ground (by cell), and the ground's own (by chunk column) */
+  private readonly overSites = new Map<string, Pos>();
+  private readonly basePois = new Map<string, Pos[]>();
+  /** their tickets: a job site's or a bed's cell, and the uuid of the reference villager holding it */
+  readonly tickets = new Map<string, string>();
+  /** the game walker's nodes and maluses, until a block changes */
+  private readonly nodes = new Map<string, number | null>();
+  private readonly maluses = new Map<string, number>();
+  /** cells a reference villager is stuck in, and the blocks that hold it there (`snag`) */
+  readonly snags = new Map<string, Pos[]>();
+  /** every profession a reference villager took (entity event 14), every site, bed and bell it claimed */
+  readonly flips: { t: number; uuid: string; at: Pos; profession: string }[] = [];
+  readonly claims: { t: number; uuid: string; kind: 'job' | 'bed' | 'bell'; at: Pos }[] = [];
 
   constructor(opts: PastureOpts = {}) {
     this.tod0 = opts.tod ?? 1000;
-    this.base = opts.base ?? (p => (p.y < YARD.y ? 'dirt' : p.y === YARD.y ? 'grass_block[snowy=false]' : 'air'));
+    this.base = opts.base ?? LAWN;
+    for (const q of opts.base?.pois ?? []) {
+      const k = `${q.x >> 4},${q.z >> 4}`;
+      (this.basePois.get(k) ?? this.basePois.set(k, []).get(k)!).push(q);
+    }
     this.items = opts.items ?? KIT();
     if (opts.at) this.bot.at = cellOf(opts.at);
     this.world = opts.world ?? ({ landmarks: { chests: [], farmland: [] }, leash: 96, yard: { ...YARD }, chestItems: {}, lastDone: {}, zones: {} } as WorldMemory);
@@ -559,7 +737,7 @@ export class Pasture {
       this.tick++;
       for (const e of this.events.filter(x => x.t <= this.tick)) { this.events.splice(this.events.indexOf(e), 1); e.run(); }
       if (!this.away) this.bridgeTick();
-      for (const v of this.villagers) this.villagerTick(v);
+      for (const v of this.villagers) if (v.mind === 'game') this.gameTick(v); else this.villagerTick(v);
       if (!this.away) this.pickup();
     }
   }
@@ -578,6 +756,9 @@ export class Pasture {
     const c = cellOf(p), k = key(c), from = this.get(c), to = whole(state);
     this.over.set(k, to);
     if (isGate(to) || (isDoor(to) && !/half=upper/.test(to) && idOf(to) !== 'iron_door')) this.doors.set(k, c); else this.doors.delete(k);
+    if (POI.test(to)) this.overSites.set(k, c); else this.overSites.delete(k);
+    this.nodes.clear();
+    this.maluses.clear();
     if (how !== 'set') this.changed.push({ t: this.tick, at: c, from, to, how });
   }
   /** A spec put down with its minimum corner at `origin` (' ' left as it is, '.' air), as a finished build stands. */
@@ -670,6 +851,7 @@ export class Pasture {
   villager(o: Partial<Villager> & { at: Pos }): Villager {
     const { at: where, ...over } = o, id = o.id ?? this.nextId++;
     const v: Villager = { id, uuid: uuidOf(id), position: feet(cellOf(where)), profession: 'none', level: 1, baby: false, health: 20, sleeping: false, mind: 'leak', way: [], passed: [], ...over };
+    if (v.mind === 'game') this.reference(v, where);
     this.villagers.push(v);
     return v;
   }
@@ -680,7 +862,15 @@ export class Pasture {
     return a;
   }
   /** Everything alive, with the cell it stands in (a block is not placed into one). */
-  private bodies(): { position: Pos }[] { return [...this.villagers.filter(v => !v.dim), ...this.animals]; }
+  private bodies(): { position: Pos }[] { return [...this.villagers.filter(v => !v.dim && !v.dead), ...this.animals]; }
+  /** The client's ids die with an unload, a rejoin, a relaunch: each villager and animal given gets a new one (default: all); the uuid, the server's, holds. */
+  unload(who: (Villager | Animal)[] = [...this.villagers, ...this.animals]): void { for (const e of who) e.id = this.nextId++; }
+  /**
+   * A reference villager standing in one of `cells` is stuck (it moves nothing, though it still looks and claims) while
+   * every block of `by` stands: the bench against the pavilion's fence, live, freed when the fence segment was dug.
+   * No `by`: for good.
+   */
+  snag(cells: Pos | Pos[], by: Pos[] = []): void { for (const c of [cells].flat()) this.snags.set(key(cellOf(c)), by.map(cellOf)); }
   /** The server ticks what is within its simulation distance of a player: the bot while its client is up, or anyone else. */
   private ticking(p: Pos): boolean {
     return (!this.away && flat(p, this.bot.at) <= SIMULATION) || this.animals.some(a => a.name === 'player' && flat(p, a.position) <= SIMULATION);
@@ -825,6 +1015,552 @@ export class Pasture {
     if (isGate(this.get(here))) { v.passed.push(key(here)); this.leaks.push({ t: this.tick, uuid: v.uuid, gate: here, to: next }); }
     // into a portal's cells: gone from this world
     if ([next, up(next)].some(c => idOf(this.get(c)) === 'nether_portal')) { v.dim = 'nether'; v.way = []; }
+  }
+
+  // ---------------------------------------------------------------- the reference villagers (S1): the game's villager
+
+  /**
+   * The cell as the server has it: a block set, the ground's, or null where the ground was never read (a wall to a
+   * villager: nothing is known there).
+   */
+  private raw(c: Pos): string | null { return this.over.get(key(c)) ?? this.base(c); }
+  /** The job sites, beds and bells within `r` of a cell (the server's POI store: by the straight distance between block positions). */
+  private poisNear(c: Pos, r: number): Pos[] {
+    const out: Pos[] = [];
+    const near = (q: Pos) => (q.x - c.x) ** 2 + (q.y - c.y) ** 2 + (q.z - c.z) ** 2 <= r * r;
+    for (const q of this.overSites.values()) if (near(q)) out.push(q);
+    for (let cx = (c.x - r) >> 4; cx <= (c.x + r) >> 4; cx++) for (let cz = (c.z - r) >> 4; cz <= (c.z + r) >> 4; cz++) {
+      for (const q of this.basePois.get(`${cx},${cz}`) ?? []) if (!this.over.has(key(q)) && near(q)) out.push(q);
+    }
+    return out;
+  }
+  /**
+   * The floor a villager stands on with its feet in cell `c` (the game's node: a low block in the cell, the top of the
+   * one under it, the water it wades or swims in), or none: no floor, or no room for its body there. Cached until a
+   * block changes.
+   */
+  private floorAt(c: Pos, baby = false): number | undefined {
+    const k = `${c.x},${c.y},${c.z}${baby ? 'b' : ''}`, hit = this.nodes.get(k);
+    if (hit !== undefined) return hit ?? undefined;
+    const f = this.floorOf(c, baby);
+    this.nodes.set(k, f ?? null);
+    return f;
+  }
+  private floorOf(c: Pos, baby: boolean): number | undefined {
+    const s0 = this.raw(c), t0 = topOf(s0);
+    if (t0 === 'wall' || (t0 !== undefined && t0 >= 1)) return undefined;
+    let f: number;
+    if (t0 !== undefined) f = c.y + t0;
+    else {
+      const below = this.raw(up(c, -1)), t1 = topOf(below);
+      if (typeof t1 === 'number' && t1 >= 1) f = c.y - 1 + t1;
+      // water: it floats (canFloat), at the top of what is deep
+      else if (idOf(s0) === 'water' && idOf(below) === 'water' && idOf(this.raw(up(c))) !== 'water') f = c.y + 0.5;
+      else return undefined;
+    }
+    const head = f + (baby ? GAME.HEIGHT / 2 : GAME.HEIGHT);
+    for (let y = c.y; y < head; y++) if ((y !== c.y || t0 === undefined) && topOf(this.raw(at(c.x, y, c.z))) !== undefined) return undefined;
+    return f;
+  }
+  /** What a step onto a node costs over its length (PathType maluses): in water 8; burning there 16; beside fire, lava, a cactus or a berry bush 8. */
+  private malusOf(c: Pos): number {
+    const k = key(c), hit = this.maluses.get(k);
+    if (hit !== undefined) return hit;
+    const id = (q: Pos) => idOf(this.raw(q));
+    let m = 0;
+    if ([c, up(c)].some(q => BURNS.test(id(q))) || /^(magma_block|campfire|soul_campfire)$/.test(id(up(c, -1)))) m = 16;
+    else if (id(c) === 'water') m = 8;
+    else {
+      for (let dx = -1; dx <= 1 && !m; dx++) for (let dy = -1; dy <= 1 && !m; dy++) for (let dz = -1; dz <= 1 && !m; dz++) {
+        const n = id(at(c.x + dx, c.y + dy, c.z + dz));
+        if (BURNS.test(n) || PRICKS.test(n)) m = 8;
+      }
+    }
+    this.maluses.set(k, m);
+    return m;
+  }
+  /**
+   * The game walker's steps from a node, as near as cells go: the four sides level (a lower or higher floor in the
+   * same cell row is level); up a rise of 1.125 by collision tops with room over its own head; down an open column to
+   * a floor within 3; the diagonals level only, with both sides stepped onto. So it climbs single steps and never two,
+   * stands on a fence top only from a block beside it (1.5 from the ground is no rise), and goes through doors and
+   * open gates, never through a shut gate, a fence or a wall.
+   */
+  private gameSteps(c: Pos, f: number, baby: boolean): { c: Pos; f: number; d: number }[] {
+    const out: { c: Pos; f: number; d: number }[] = [];
+    const h = baby ? GAME.HEIGHT / 2 : GAME.HEIGHT;
+    const room = (x: number, z: number, from: number, top: number) => {
+      for (let y = from; y < top; y++) if (topOf(this.raw(at(x, y, z))) !== undefined) return false;
+      return true;
+    };
+    const level = new Set<string>();
+    for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+      const x = c.x + dx, z = c.z + dz, there = at(x, c.y, z), same = this.floorAt(there, baby);
+      if (same !== undefined) {
+        if (same - f <= GAME.RISE) { out.push({ c: there, f: same, d: 1 }); level.add(`${dx},${dz}`); }
+        continue;
+      }
+      const t = topOf(this.raw(there));
+      if (t === 'wall') continue;
+      if (t !== undefined) {
+        // something at its feet there: a jump onto it, with room over its own head for it
+        const upF = this.floorAt(up(there), baby);
+        if (upF !== undefined && upF - f <= GAME.RISE && room(c.x, c.z, Math.floor(f + h), upF + h)) out.push({ c: up(there), f: upF, d: Math.SQRT2 });
+        continue;
+      }
+      // open there: its body through the cells it walks into, then down to the first floor
+      if (!room(x, z, c.y, f + h)) continue;
+      for (let y = c.y - 1; y >= c.y - GAME.DROP - 1; y--) {
+        const down = this.floorAt(at(x, y, z), baby);
+        if (down !== undefined) { if (f - down <= GAME.DROP) out.push({ c: at(x, y, z), f: down, d: Math.hypot(1, c.y - y) }); break; }
+        if (topOf(this.raw(at(x, y, z))) !== undefined) break;
+      }
+    }
+    for (const [dx, dz] of [[1, -1], [1, 1], [-1, 1], [-1, -1]]) {
+      if (!level.has(`${dx},0`) || !level.has(`0,${dz}`)) continue;
+      const d = at(c.x + dx, c.y, c.z + dz), df = this.floorAt(d, baby);
+      if (df !== undefined && Math.abs(df - f) <= 0.5) out.push({ c: d, f: df, d: Math.SQRT2 });
+    }
+    return out;
+  }
+  /**
+   * The game's ONE path search (PathFinder over the walker above): an A* from a villager's cell toward the nearest of
+   * `targets`, done once a polled node is within Manhattan `reach` of one, at most 48 walked and 768 nodes visited. A
+   * rail is a wall to it unless it stands on one (UNPASSABLE_RAIL). Not reached: the way to the node that came nearest,
+   * which the game walks all the same.
+   */
+  gamePath(from: Pos, targets: Pos[], reach: number, o: { baby?: boolean; onRail?: boolean; floor?: number } = {}): { cells: Pos[]; reached: boolean; target?: Pos; visited: number } {
+    type N = { c: Pos; f: number; g: number; walked: number; h: number; prev?: N; closed: boolean };
+    const baby = !!o.baby;
+    const hOf = (c: Pos) => Math.min(...targets.map(q => dist(c, q)));
+    const hit = (c: Pos) => targets.filter(q => Math.abs(q.x - c.x) + Math.abs(q.y - c.y) + Math.abs(q.z - c.z) <= reach).sort((a, b) => dist(c, a) - dist(c, b))[0];
+    const start: N = { c: from, f: o.floor ?? this.floorAt(from, baby) ?? from.y, g: 0, walked: 0, h: hOf(from), closed: false };
+    const seen = new Map<string, N>([[key(from), start]]);
+    const heap: N[] = [start];
+    const less = (a: N, b: N) => a.g + a.h < b.g + b.h;
+    const push = (n: N) => {
+      heap.push(n);
+      for (let i = heap.length - 1; i > 0;) { const p = (i - 1) >> 1; if (!less(heap[i], heap[p])) break; [heap[i], heap[p]] = [heap[p], heap[i]]; i = p; }
+    };
+    const pop = (): N => {
+      const top = heap[0], last = heap.pop()!;
+      if (heap.length) {
+        heap[0] = last;
+        for (let i = 0; ;) {
+          const l = 2 * i + 1, r = l + 1;
+          let m = i;
+          if (l < heap.length && less(heap[l], heap[m])) m = l;
+          if (r < heap.length && less(heap[r], heap[m])) m = r;
+          if (m === i) break;
+          [heap[i], heap[m]] = [heap[m], heap[i]];
+          i = m;
+        }
+      }
+      return top;
+    };
+    const back = (n: N) => { const cells: Pos[] = []; for (let q: N | undefined = n; q && q !== start; q = q.prev) cells.unshift(q.c); return cells; };
+    let best = start, visited = 0;
+    while (heap.length && visited < GAME.NODES) {
+      const n = pop();
+      if (n.closed) continue;
+      n.closed = true;
+      visited++;
+      const t = hit(n.c);
+      if (t) return { cells: back(n), reached: true, target: t, visited };
+      if (n.h < best.h) best = n;
+      for (const s of this.gameSteps(n.c, n.f, baby)) {
+        if (!o.onRail && RAIL.test(idOf(this.raw(s.c)))) continue;
+        const walked = n.walked + s.d;
+        if (walked >= GAME.PATH) continue;
+        const g = n.g + s.d + this.malusOf(s.c), k = key(s.c), had = seen.get(k);
+        if (had && (had.closed || had.g <= g)) continue;
+        const m: N = { c: s.c, f: s.f, g, walked, h: had?.h ?? hOf(s.c), prev: n, closed: false };
+        seen.set(k, m);
+        push(m);
+      }
+    }
+    return { cells: back(best), reached: false, visited };
+  }
+
+  /** Its own random draws (mulberry32 on a seed of its own: every run of a scenario the same). */
+  private rand(v: Villager): number {
+    const ai = v.ai!;
+    let x = (ai.seed = (ai.seed + 0x6d2b79f5) >>> 0);
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4_294_967_296;
+  }
+  private roll(v: Villager, n: number): number { return Math.floor(this.rand(v) * n); }
+  /** A villager made the game's: where it stands on its cell's floor (or the nearest in its column), its tickets taken, its looks due within a second. */
+  private reference(v: Villager, where: Pos): void {
+    const c = cellOf(where);
+    for (const dy of [0, 1, -1, 2, -2, 3, -3]) {
+      const f = this.floorAt(at(c.x, c.y + dy, c.z), v.baby);
+      if (f !== undefined) { v.position = { x: c.x + 0.5, y: f, z: c.z + 0.5 }; break; }
+    }
+    const t = this.tick, seed = (Math.imul(v.id, 2_654_435_761) ^ 0x9e3779b9) >>> 0;
+    v.ai = { seed, look: { job: t, bed: t, bell: t }, retry: { job: new Map(), bed: new Map(), bell: new Map() }, next: t, until: t, toBlock: -Infinity, round: -Infinity, hurtAt: -Infinity, burning: -Infinity, legMiss: 0, looks: false, wokeAt: -Infinity };
+    for (const k of ['job', 'bed', 'bell'] as const) v.ai.look[k] = t + this.roll(v, GAME.LOOK);
+    if (v.sleeping && v.bed) v.position = { x: v.bed.x + 0.5, y: v.bed.y + 9 / 16, z: v.bed.z + 0.5 };
+    for (const m of [v.job, v.potential, v.bed]) if (m) this.tickets.set(key(m), v.uuid);
+  }
+  private release(c: Pos | undefined, v: Villager): void { if (c && this.tickets.get(key(c)) === v.uuid) this.tickets.delete(key(c)); }
+  private onRail(v: Villager): boolean { const c = cellOf(v.position); return RAIL.test(idOf(this.raw(c))) || RAIL.test(idOf(this.raw(up(c, -1)))); }
+  private acquirable(v: Villager, id: string): boolean {
+    const kind = PROFESSION_OF[id];
+    return !!kind && v.profession !== 'nitwit' && (v.profession === 'none' || v.profession === kind);
+  }
+  private sleeperIn(bed: Pos, v: Villager): boolean { return this.villagers.some(o => o !== v && o.sleeping && !o.dim && !o.dead && same(o.bed, bed)); }
+  /** Its schedule's activity, unless the activity's memory is missing (work needs a job site, the meeting a bell: else idle), or it panics. */
+  private activityOf(v: Villager): VillagerActivity | 'panic' {
+    const ai = v.ai!;
+    if (this.tick - ai.hurtAt < GAME.HURT_TICKS || this.hostileNear(v)) return 'panic';
+    const a = villagerSchedule(this.tod, v.baby);
+    return (a === 'work' && !v.job) || (a === 'meet' && !v.bell) ? 'idle' : a;
+  }
+  private hostileNear(v: Villager): Animal | undefined {
+    return this.animals.filter(a => HOSTILE[a.name] !== undefined && a.health > 0 && dist(a.position, v.position) <= HOSTILE[a.name])
+      .sort((a, b) => dist(a.position, v.position) - dist(b.position, v.position))[0];
+  }
+
+  /**
+   * One game tick of a reference villager, the core behaviours in the game's order (they run in every activity, asleep
+   * too): what hurts it, its memories held against the world within 16, the looks for a job site, a bed and a bell,
+   * the walk to a claimed site given up at 1200, the profession at 2.0 of it, the reset to none; then sleep, a fall, a
+   * snag, and the walk its activity wants.
+   */
+  private gameTick(v: Villager): void {
+    if (v.dim || v.dead || !v.ai || !this.ticking(v.position)) return;
+    const ai = v.ai, t = this.tick;
+    if ((t + v.id) % 10 === 0) this.harm(v);
+    if (!v.dead && [cellOf(v.position), up(cellOf(v.position))].some(c => idOf(this.raw(c)) === 'nether_portal')) this.toNether(v);
+    if (v.dead || v.dim) return;
+    this.validate(v);
+    if (!v.baby && !v.job && !v.potential && v.profession !== 'nitwit') this.acquire(v, 'job');
+    if (!v.bed) this.acquire(v, 'bed');
+    if (!v.baby && !v.bell) this.acquire(v, 'bell');
+    if (v.potential && ai.going !== undefined && t - ai.going >= GAME.GIVE_UP) { this.release(v.potential, v); v.potential = undefined; ai.going = undefined; }
+    this.assign(v);
+    if (!v.job && v.profession !== 'none' && v.profession !== 'nitwit' && !v.traded && v.level <= 1) v.profession = 'none';
+    const me = this.away ? Infinity : dist(feet(this.bot.at), v.position);
+    ai.looks = me <= 4 || (ai.looks && me <= 16);
+    const act = this.activityOf(v);
+    if (v.sleeping) {
+      if (act === 'rest' && v.bed && isBedHead(this.get(v.bed))) return;
+      this.wake(v);
+    }
+    if (this.fall(v)) return;
+    if (this.snagged(v)) { ai.walk = undefined; return; }
+    this.choose(v, act);
+    this.stepGame(v);
+  }
+  /** In lava 4 every half second, in fire or on a magma block or a lit campfire 1, burning after it 1 a second, a cactus beside it or a berry bush in its cell 1; water puts it out. */
+  private harm(v: Villager): void {
+    const ai = v.ai!, c = cellOf(v.position), body = [c, up(c)], ids = body.map(q => idOf(this.raw(q))), under = idOf(this.raw(up(c, -1)));
+    let n = 0;
+    if (ids.includes('lava')) { n += 4; ai.burning = this.tick + 300; }
+    else if (ids.some(id => FIRE.test(id) || /campfire$/.test(id)) || under === 'magma_block') { n += 1; ai.burning = Math.max(ai.burning, this.tick + 160); }
+    else if (this.tick < ai.burning && (this.tick + v.id) % 20 === 0) n += 1;
+    if (ids.includes('water')) ai.burning = -Infinity;
+    if (ids.includes('sweet_berry_bush') || body.some(q => [[0, -1], [1, 0], [0, 1], [-1, 0]].some(([dx, dz]) => idOf(this.raw(at(q.x + dx, q.y, q.z + dz))) === 'cactus'))) n += 1;
+    if (n) this.hurt(v, n);
+  }
+  /** Hurt (it panics for 2 s after); at 0 it is dead, gone from the world and from every list the bridge gives, its tickets free. */
+  hurt(v: Villager, n: number): void {
+    v.health = Math.max(0, v.health - n);
+    if (v.ai) v.ai.hurtAt = this.tick;
+    if (v.sleeping) this.wake(v);
+    if (v.health > 0) return;
+    v.dead = true;
+    for (const m of [v.job, v.potential, v.bed]) this.release(m, v);
+  }
+  /** ValidateNearbyPoi, each memory alone: within 16 of its block and the block not what it was (a bed slept in by another), it is dropped. */
+  private validate(v: Villager): void {
+    const check = (m: 'job' | 'potential' | 'bed' | 'bell', ok: (state: string, c: Pos) => boolean) => {
+      const c = v[m];
+      if (!c || dist(mid(c), v.position) >= GAME.VALIDATE || ok(this.get(c), c)) return;
+      v[m] = undefined;
+      this.release(c, v);
+      if (m === 'potential') v.ai!.going = undefined;
+      // (live, Nov 25: the table dug out of the hall at night woke the villager that worked at it, and it was out by
+      // the open gate in the 4 s; the game's own rules do not wake it. The worst case is kept)
+      if (m === 'job' && v.sleeping) this.wake(v);
+    };
+    check('job', s => PROFESSION_OF[idOf(s)] === v.profession);
+    check('potential', s => this.acquirable(v, idOf(s)));
+    check('bed', (s, c) => isBedHead(s) && !this.sleeperIn(c, v));
+    check('bell', s => idOf(s) === 'bell');
+  }
+  /**
+   * AcquirePoi for one kind, on its own timer (20-39 ticks): the 5 nearest free ones within 48 that are not in backoff
+   * (one due again is tried, and its delay grows), ONE path to that set, and the ticket of the one the path reaches.
+   * No way: each of the set is in backoff, 40-79 ticks more each miss up to 400, forgotten 400 after its last try.
+   */
+  private acquire(v: Villager, kind: 'job' | 'bed' | 'bell'): void {
+    const ai = v.ai!, t = this.tick;
+    if (t < ai.look[kind]) return;
+    ai.look[kind] = t + GAME.LOOK + this.roll(v, GAME.LOOK_JITTER);
+    const retries = ai.retry[kind];
+    for (const [k, r] of retries) if (t - r.last >= GAME.RETRY_FORGET) retries.delete(k);
+    const here = cellOf(v.position);
+    const free = (c: Pos): boolean => {
+      const s = this.get(c);
+      if (kind === 'job') return this.acquirable(v, idOf(s)) && !this.tickets.has(key(c));
+      if (kind === 'bed') return isBedHead(s) && !this.tickets.has(key(c)) && !this.sleeperIn(c, v);
+      return idOf(s) === 'bell';
+    };
+    const found = this.poisNear(here, GAME.SITE_R).filter(free)
+      .sort((a, b) => ((a.x - here.x) ** 2 + (a.y - here.y) ** 2 + (a.z - here.z) ** 2) - ((b.x - here.x) ** 2 + (b.y - here.y) ** 2 + (b.z - here.z) ** 2));
+    const set: Pos[] = [];
+    for (const c of found) {
+      if (set.length === GAME.SITES) break;
+      const r = retries.get(key(c));
+      if (r) { if (t < r.next) continue; this.retry(v, r, t); }
+      set.push(c);
+    }
+    if (!set.length) return;
+    const way = this.gamePath(here, set, kind === 'bell' ? GAME.BELL_REACH : GAME.REACH, { baby: v.baby, onRail: this.onRail(v), floor: v.position.y });
+    if (way.reached && way.target) {
+      const c = { ...way.target };
+      if (kind !== 'bell') this.tickets.set(key(c), v.uuid);
+      if (kind === 'job') v.potential = c; else if (kind === 'bed') v.bed = c; else v.bell = c;
+      this.claims.push({ t, uuid: v.uuid, kind, at: { ...c } });
+      retries.clear();
+      return;
+    }
+    for (const c of set) if (!retries.has(key(c))) { const r = { last: t, next: t, delay: 0 }; this.retry(v, r, t); retries.set(key(c), r); }
+  }
+  private retry(v: Villager, r: Retry, t: number): void {
+    r.last = t;
+    r.delay = Math.min(r.delay + GAME.RETRY + this.roll(v, GAME.RETRY_JITTER), GAME.RETRY_MAX);
+    r.next = t + r.delay;
+  }
+  /** AssignProfessionFromJobSite: within 2.0 of the site it claimed, that is its job site, and an unemployed one takes the site's profession. */
+  private assign(v: Villager): void {
+    const c = v.potential, kind = c && PROFESSION_OF[idOf(this.get(c))];
+    if (!c || !kind || dist(mid(c), v.position) >= GAME.FLIP) return;
+    v.job = c;
+    v.potential = undefined;
+    v.ai!.going = undefined;
+    if (v.profession === 'none') v.profession = kind;
+    this.flips.push({ t: this.tick, uuid: v.uuid, at: { ...c }, profession: v.profession });
+    if (v.ai!.walk?.act === 'job') v.ai!.walk = undefined;
+  }
+  private wake(v: Villager): void {
+    if (!v.sleeping) return;
+    v.sleeping = false;
+    v.ai!.wokeAt = this.tick;
+    // it stands up beside the bed (BedBlock.findStandUpPosition: a free cell round it)
+    const b = cellOf(v.position);
+    for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0], [1, -1], [1, 1], [-1, 1], [-1, -1], [0, -2], [2, 0], [0, 2], [-2, 0]]) {
+      for (const dy of [0, 1, -1]) {
+        const c = at(b.x + dx, b.y + dy, b.z + dz), f = this.floorAt(c, v.baby);
+        if (f !== undefined && !isBedHead(this.get(c))) { v.position = { x: c.x + 0.5, y: f, z: c.z + 0.5 }; return; }
+      }
+    }
+  }
+  /** Nothing under it any more (its floor dug): down the open column to the first floor, hurt by what is over 3. */
+  private fall(v: Villager): boolean {
+    const c = cellOf(v.position);
+    if (this.floorAt(c, v.baby) !== undefined) return false;
+    for (let y = c.y - 1; y > c.y - 32; y--) {
+      const f = this.floorAt(at(c.x, y, c.z), v.baby);
+      if (f !== undefined) {
+        const drop = v.position.y - f;
+        v.position = { x: v.position.x, y: f, z: v.position.z };
+        v.ai!.walk = undefined;
+        if (drop > GAME.DROP) this.hurt(v, Math.ceil(drop - GAME.DROP));
+        return true;
+      }
+      if (topOf(this.raw(at(c.x, y, c.z))) !== undefined) break;
+    }
+    return false;
+  }
+  /** Stuck where a snag holds it (the bench against the pavilion's fence, live): until one of the blocks the snag names is gone. */
+  private snagged(v: Villager): boolean {
+    const by = this.snags.get(key(cellOf(v.position)));
+    return !!by && by.every(b => !shapeOf(this.get(b)).soft);
+  }
+
+  /**
+   * The walk it wants now: the leak (when asked for: the worst case first), the flight from a hostile, the walk to the
+   * site it claimed (GoToPotentialJobSite: begun only at idle, work or play, then held to its end), then its
+   * activity's own: to its bed and asleep, to its bell, back to and round its block, the idle strolls.
+   */
+  private choose(v: Villager, act: VillagerActivity | 'panic'): void {
+    const ai = v.ai!, t = this.tick;
+    if (v.leaks) {
+      // a gate shut is a gate it may leave by again the next time it opens (the core's leak-seeker never turns back
+      // through one; a game villager lives longer than one opening)
+      const here = cellOf(v.position);
+      v.passed = v.passed.filter(k => isOpen(this.get(parse(k))) || k === key(here));
+      if (ai.walk?.act === 'leak') return;
+      const way = this.leakWay(v) ?? this.followWay(v);
+      if (way?.length) { ai.walk = { act: 'leak', cells: way, reached: true, bps: 0, ticks: LEAK_TICKS }; ai.next = t + LEAK_TICKS; return; }
+    }
+    if (act === 'panic') {
+      // (panic cuts whatever it was about, a walk or a pause; a flight that ended is begun again after its pause)
+      const fresh = !ai.fled || (ai.walk !== undefined && ai.walk.act !== 'flee');
+      if (ai.walk?.act !== 'flee' && (fresh || t >= ai.until)) { ai.fled = true; this.flee(v); }
+      return;
+    }
+    ai.fled = false;
+    if (v.potential && (ai.going !== undefined || act === 'idle' || act === 'work' || act === 'play')) {
+      ai.going ??= t;
+      if (ai.walk?.act === 'job') return;
+      ai.walk = undefined;
+      if (t >= ai.until && !this.walkTo(v, 'job', [v.potential], GAME.REACH, 0.5)) this.pause(v, 10);
+      return;
+    }
+    if (ai.walk) { if (ai.walk.act === act) return; ai.walk = undefined; }
+    if (t < ai.until) return;
+    if (act === 'rest') this.rest(v);
+    else if (act === 'meet') { if (!this.memoryWalk(v, 'bell', GAME.MEET, act)) this.runOne(v, [[1, () => this.stroll(v, GAME.WORK_STROLL, GAME.WORK_STROLL_UP, act, 0.4)], [3, () => this.pause(v, 60)]]); }
+    else if (act === 'work') this.work(v);
+    else this.idle(v);
+  }
+  /**
+   * SetWalkTargetFromBlockMemory: beyond `far` a leg toward it, else the block itself, to within `close`; nothing when
+   * there. No way for `lost` ticks and the memory is dropped, its ticket free (and CANT_REACH set to now, as the 26.3
+   * jar has it). A leg within `close` of where it stands is reached at once, and one that a way reaches clears the
+   * count too: a memory far off is kept while legs keep landing round it (from the yard's west fence toward the west
+   * village, about one leg in four).
+   */
+  private memoryWalk(v: Villager, m: 'job' | 'bed' | 'bell', rule: { close: number; far: number; lost: number }, act: VillagerActivity): boolean {
+    const ai = v.ai!, c = v[m], t = this.tick;
+    if (!c) return false;
+    const drop = () => { v[m] = undefined; this.release(c, v); ai.cantReach = t; ai.legMiss = 0; };
+    if (ai.cantReach !== undefined && t - ai.cantReach > rule.lost) { drop(); return false; }
+    const here = cellOf(v.position), far = Math.abs(c.x - here.x) + Math.abs(c.y - here.y) + Math.abs(c.z - here.z);
+    if (far <= rule.close) return false;
+    if (far <= rule.far) return this.walkTo(v, act, [c], rule.close, 0.5) || this.pause(v, 20);
+    const leg = this.leg(v, c, GAME.LEG, GAME.LEG_UP);
+    // (1000 draws with no place to stand toward it, as boxed in a cell: dropped at once)
+    if (!leg) { if (++ai.legMiss >= 100) drop(); return true; }
+    ai.legMiss = 0;
+    return this.walkTo(v, act, [leg], rule.close, 0.5) || this.pause(v, 20);
+  }
+  /**
+   * A walk to within `reach` (Manhattan) of the nearest of `targets` at a speed modifier, by the game's path: the way,
+   * or the way to the nearest it comes (CANT_REACH_WALK_TARGET_SINCE set, and cleared by a way that reaches or by being
+   * there). False when there is nothing to walk.
+   */
+  private walkTo(v: Villager, act: Walk['act'], targets: Pos[], reach: number, modifier: number): boolean {
+    const ai = v.ai!, here = cellOf(v.position);
+    if (targets.some(q => Math.abs(q.x - here.x) + Math.abs(q.y - here.y) + Math.abs(q.z - here.z) <= reach)) { ai.cantReach = undefined; return false; }
+    const way = this.gamePath(here, targets, reach, { baby: v.baby, onRail: this.onRail(v), floor: v.position.y });
+    if (way.reached) ai.cantReach = undefined; else ai.cantReach ??= this.tick;
+    if (!way.cells.length) return false;
+    const bps = GAME.WALK_BPS * (modifier / 0.5) ** 2;
+    ai.walk = { act, cells: way.cells, reached: way.reached, bps };
+    ai.next = this.tick + this.stepTicks(here, way.cells[0], bps);
+    return true;
+  }
+  private stepTicks(a: Pos, b: Pos, bps: number): number { return Math.max(1, Math.round(Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) * 20 / bps)); }
+  private pause(v: Villager, ticks: number): boolean { v.ai!.until = this.tick + ticks + this.roll(v, ticks); return true; }
+  /**
+   * A place to walk to: up to 10 draws of a column `r` out (uniform over the area, the square's corners refused) and a
+   * floor in it within `vr` of its own height, with no malus; `toward` (or away from it) within a right angle of the
+   * bearing.
+   */
+  private leg(v: Villager, toward: Pos | undefined, r: number, vr: number, away = false): Pos | undefined {
+    const here = cellOf(v.position);
+    const bearing = toward ? Math.atan2(toward.z - here.z, toward.x - here.x) + (away ? Math.PI : 0) : 0;
+    for (let n = 0; n < 10; n++) {
+      const a = toward ? bearing + (2 * this.rand(v) - 1) * (Math.PI / 2) : this.rand(v) * 2 * Math.PI;
+      const d = Math.sqrt(this.rand(v)) * Math.SQRT2 * r, dx = Math.round(Math.cos(a) * d), dz = Math.round(Math.sin(a) * d);
+      if (Math.abs(dx) > r || Math.abs(dz) > r || (!dx && !dz)) continue;
+      for (let i = 0; i <= 2 * vr; i++) {
+        const c = at(here.x + dx, here.y + (i % 2 ? (i + 1) / 2 : -i / 2), here.z + dz);
+        if (this.floorAt(c, v.baby) !== undefined && !this.malusOf(c)) return c;
+      }
+    }
+    return undefined;
+  }
+  private stroll(v: Villager, r: number, vr: number, act: Walk['act'], modifier: number): boolean {
+    const c = this.leg(v, undefined, r, vr);
+    return !!c && this.walkTo(v, act, [c], 0, modifier);
+  }
+  /** RunOne, shuffled by weight: the first choice that starts; none: a short pause. */
+  private runOne(v: Villager, choices: [number, () => boolean][]): void {
+    const left = [...choices];
+    while (left.length) {
+      let r = this.rand(v) * left.reduce((s, c) => s + c[0], 0), i = 0;
+      while (i < left.length - 1 && (r -= left[i][0]) >= 0) i++;
+      const [choice] = left.splice(i, 1);
+      if (choice[1]()) return;
+    }
+    this.pause(v, 20);
+  }
+  /**
+   * Idle (the RunOne of the idle package, as it runs for an adult with no cat, no bed to jump on and nobody to breed
+   * with): up to another villager within 8 (2), a stroll of 10 (1), up to the player it looks at (1: the bot, once it
+   * came within 4 and while it is in sight), nothing for 30-60 ticks (1).
+   */
+  private idle(v: Villager): void {
+    const mate = this.villagers.find(o => o !== v && !o.dim && !o.dead && dist(o.position, v.position) <= 8 && dist(o.position, v.position) > 2);
+    const choices: [number, () => boolean][] = [[1, () => this.stroll(v, GAME.STROLL, GAME.STROLL_UP, 'idle', 0.5)], [1, () => this.pause(v, 30)]];
+    if (mate) choices.push([2, () => this.walkTo(v, 'idle', [cellOf(mate.position)], 2, 0.5)]);
+    if (v.ai!.looks) choices.push([1, () => this.walkTo(v, 'idle', [this.bot.at], 2, 0.5)]);
+    this.runOne(v, choices);
+  }
+  /** At work: back to within 9 of its block (Manhattan); there, now and then right up to it (every 80 ticks at most) or a stroll round it (every 180, within 4), else at its work. */
+  private work(v: Villager): void {
+    const ai = v.ai!, t = this.tick;
+    if (this.memoryWalk(v, 'job', GAME.WORK, 'work') || !v.job) return;
+    const c = v.job, here = cellOf(v.position);
+    const choices: [number, () => boolean][] = [[7, () => this.pause(v, 20)]];
+    if (t - ai.toBlock >= 80) choices.push([5, () => { ai.toBlock = t; return this.walkTo(v, 'work', [c], GAME.REACH, 0.4); }]);
+    if (t - ai.round >= 180 && Math.abs(c.x - here.x) + Math.abs(c.y - here.y) + Math.abs(c.z - here.z) <= 4) {
+      choices.push([2, () => { ai.round = t; return this.stroll(v, GAME.WORK_STROLL, GAME.WORK_STROLL_UP, 'work', 0.4); }]);
+    }
+    this.runOne(v, choices);
+  }
+  /** At rest: asleep within 2.0 of its bed when nobody else sleeps in it (and not within 100 ticks of waking); else to its bed; with none, it shuffles about where it is. */
+  private rest(v: Villager): void {
+    const b = v.bed;
+    if (b && isBedHead(this.get(b)) && dist(mid(b), v.position) < GAME.SLEEP && !this.sleeperIn(b, v)) {
+      if (this.tick - v.ai!.wokeAt <= 100) { this.pause(v, 20); return; }
+      v.sleeping = true;
+      v.position = { x: b.x + 0.5, y: b.y + 9 / 16, z: b.z + 0.5 };
+      v.ai!.walk = undefined;
+      return;
+    }
+    if (b) { if (!this.memoryWalk(v, 'bed', GAME.HOME, 'rest')) this.pause(v, 20); return; }
+    this.runOne(v, [[4, () => this.stroll(v, 3, 1, 'rest', 0.5)], [4, () => this.pause(v, 20)]]);
+  }
+  /** Panic: away from the hostile, 16 off at modifier 0.75; hurt by nothing that walks, a short run anywhere. */
+  private flee(v: Villager): void {
+    const foe = this.hostileNear(v);
+    const c = foe ? this.leg(v, cellOf(foe.position), GAME.FLEE, GAME.LEG_UP, true) : this.leg(v, undefined, 2, 2);
+    if (!c || !this.walkTo(v, 'flee', [c], 0, 0.75)) this.pause(v, 10);
+  }
+  /** One step of its walk when it is due: the way shut before it (a gate clicked shut, a block put down), it looks again. */
+  private stepGame(v: Villager): void {
+    const ai = v.ai!, w = ai.walk;
+    if (!w || this.tick < ai.next) return;
+    const next = w.cells[0], here = cellOf(v.position);
+    if (!next) {
+      ai.walk = undefined;
+      // (MoveToTargetSink's cooldown after a way that ended short)
+      if (!w.reached) this.pause(v, 20);
+      return;
+    }
+    const f = w.act === 'leak' ? (this.steps(here, VILLAGER).some(c => same(c, next)) ? this.floorAt(next, v.baby) ?? next.y : undefined)
+      : (!this.onRail(v) && RAIL.test(idOf(this.raw(next))) ? undefined : this.gameSteps(here, v.position.y, v.baby).find(s => same(s.c, next))?.f);
+    if (f === undefined) { ai.walk = undefined; return; }
+    w.cells.shift();
+    v.position = { x: next.x + 0.5, y: f, z: next.z + 0.5 };
+    v.last = here;
+    if (w.cells.length) ai.next = this.tick + (w.ticks ?? this.stepTicks(next, w.cells[0], w.bps));
+    if (isGate(this.get(here))) { v.passed.push(key(here)); this.leaks.push({ t: this.tick, uuid: v.uuid, gate: here, to: next }); }
+    if ([next, up(next)].some(c => idOf(this.get(c)) === 'nether_portal')) this.toNether(v);
+  }
+  /** Into a portal's cells (a mob goes through at once): gone from this world, its tickets free. */
+  private toNether(v: Villager): void {
+    v.dim = 'nether';
+    v.ai!.walk = undefined;
+    for (const m of [v.job, v.potential, v.bed]) this.release(m, v);
   }
 
   // ---------------------------------------------------------------- the bridge: the gate closer (Gates.java) and GateHolds' clicks
@@ -1046,13 +1782,30 @@ export class Pasture {
     const seen = (e: { id: number; uuid: string; position: Pos }, name: string, category: string, height: number, more: Reply) =>
       ({ id: e.id, uuid: e.uuid, name, category, position: { ...e.position }, distance: round(dist(e.position, me)), height, ...more });
     const all = [
-      ...this.villagers.filter(v => !v.dim).map(v => seen(v, 'villager', 'misc', v.baby ? 0.98 : 1.95, {
-        health: v.health, ...(v.sleeping ? { sleeping: true } : {}), baby: v.baby, aggressive: false, merchant: true, profession: v.profession, level: v.level, type: 'plains'
+      ...this.villagers.filter(v => !v.dim && !v.dead).map(v => seen(v, 'villager', 'misc', v.baby ? 0.98 : 1.95, {
+        health: v.health, ...(v.sleeping ? { sleeping: true } : {}), baby: v.baby, aggressive: false,
+        ...(v.customName ? { named: true, customName: v.customName } : {}), ...(v.leashedTo ? { leashed: true, leashedTo: v.leashedTo } : {}), ...(v.vehicle ? { vehicle: v.vehicle } : {}),
+        merchant: true, profession: v.profession, level: v.level, type: 'plains'
       })),
       ...this.animals.map(a => seen(a, a.name, a.category, 1.4, { health: a.health, baby: a.baby, aggressive: false })),
       ...this.drops.map(d => seen(d, 'item', 'misc', 0.25, { item: d.item, count: d.count }))
     ];
     return { entities: all.filter(e => e.distance <= max && (p.type === undefined || e.name === p.type)).sort((a, b) => a.distance - b.distance) };
+  }
+  /**
+   * world.findBlocks {block, maxDistance?, count?, yMin?, yMax?} (Handlers.java): the cells of that block the client
+   * holds within maxDistance (128 at most) of the bot's position, the nearest first, `count` of them (256 at most).
+   * Only of the kinds the POI store holds (job sites, beds, bells): the S1 code asks for nothing else, and another name
+   * throws, as an unknown call does.
+   */
+  private findBlocks(p: Reply): Reply {
+    const name = String(p.block ?? '').replace(/^minecraft:/, '');
+    if (!POI.test(name)) throw new Error(`world.findBlocks ${name}: the pasture finds job sites, beds and bells only`);
+    if (p.openAbove || p.awayMin || p.awayX1 !== undefined) throw new Error('world.findBlocks: openAbove and away are not ported');
+    const max = Math.min(Math.trunc(Number(p.maxDistance ?? 32)), 128), count = Math.min(Math.trunc(Number(p.count ?? 1)), 256);
+    const yMin = p.yMin === undefined ? -Infinity : Number(p.yMin), yMax = p.yMax === undefined ? Infinity : Number(p.yMax), eye = feet(this.bot.at);
+    const found = this.poisNear(this.bot.at, max + 1).filter(q => idOf(this.get(q)) === name && this.loaded(q) && q.y >= yMin && q.y <= yMax && dist(mid(q), eye) <= max);
+    return { block: name, positions: found.sort((a, b) => dist(mid(a), eye) - dist(mid(b), eye)).slice(0, count).map(q => ({ ...q })) };
   }
   /** The pasture's own answer to a bridge call (a scenario's handler wraps it: the block goes down, the reply is lost). */
   answer(method: string, p: Reply): unknown {
@@ -1071,6 +1824,7 @@ export class Pasture {
       case 'world.block': return this.loaded(q) ? { loaded: true, name: idOf(this.get(q)), properties: propsOf(this.get(q)) } : { loaded: false };
       case 'world.region': return { blocks: this.region(q, Number(p.width ?? 1), Number(p.height ?? 1), Number(p.length ?? 1)) };
       case 'world.entities': return this.entities(p);
+      case 'world.findBlocks': return this.findBlocks(p);
       case 'goto': return this.goto(p);
       case 'place': return this.place(p);
       case 'dig.here': return this.dig(p);
@@ -1420,7 +2174,17 @@ export function yard(opts: YardOpts = {}): Pasture {
   return p;
 }
 
-/** A debug record's ground (boatroute.ts Ground.dump, as tests/fixtures/west-village.json keeps one) as a pasture's base; `beyond` outside its box. */
-export function dumpBase(d: { y0: number; height: number; cols: Record<string, (string | null)[]> }, beyond: (p: Pos) => string | null = () => null): (p: Pos) => string | null {
-  return p => { const col = d.cols[`${p.x},${p.z}`]; return col ? (p.y < d.y0 ? 'stone' : p.y >= d.y0 + d.height ? 'air' : col[p.y - d.y0]) : beyond(p); };
+/**
+ * A debug record's ground (boatroute.ts Ground.dump, as tests/fixtures/west-village.json keeps one) as a pasture's
+ * base; `beyond` outside its box. Its `pois` are the dump's job sites, beds and bells (read once, when a pasture is
+ * first made on it: keep one base for a file's pastures).
+ */
+export function dumpBase(d: { y0: number; height: number; cols: Record<string, (string | null)[]> }, beyond: (p: Pos) => string | null = () => null): ((p: Pos) => string | null) & { readonly pois: Pos[] } {
+  const base = (p: Pos) => { const col = d.cols[`${p.x},${p.z}`]; return col ? (p.y < d.y0 ? 'stone' : p.y >= d.y0 + d.height ? 'air' : col[p.y - d.y0]) : beyond(p); };
+  let pois: Pos[] | undefined;
+  const scan = () => Object.entries(d.cols).flatMap(([k, col]) => {
+    const [x, z] = k.split(',').map(Number);
+    return col.flatMap((st, i) => (st && POI.test(st) ? [at(x, d.y0 + i, z)] : []));
+  });
+  return Object.defineProperty(base, 'pois', { get: () => (pois ??= scan()) }) as typeof base & { readonly pois: Pos[] };
 }

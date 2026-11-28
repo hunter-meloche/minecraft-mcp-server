@@ -7,6 +7,7 @@ import { findSite, growYard, occupancy, type Area } from './site.js';
 import type { WorldMemory } from './memory.js';
 import { billLeft, billOf, type Blueprint } from './blueprints.js';
 import { YARD_FROM_BUILDS, zoneDistance, type Zone } from './courtesy.js';
+import { placeGuard, wardOut } from './fetch.js';
 
 /**
  * Building blocks for milestones: find room in the yard (growing it when there is none), get the materials together,
@@ -116,6 +117,9 @@ export function siteStep(kind: string, width: number, length: number): Step {
 export const FILL_KINDS = ['dirt', 'cobblestone', 'cobbled_deepslate'] as const;
 
 export async function growStep(ctx: GoalContext, yard: Yard, footprint: { width: number; length: number }, kind: string): Promise<StepResult> {
+  // not while a villager is on its way or may come by (fetch.ts wardOut): the fence moves out after the levelling, and
+  // a villager led across the yard, or loose in it, walks out by the gap
+  if (wardOut(ctx.world, ctx.s.now)) return blocked(`waiting: a villager is on its way (the yard grows for the ${kind} once it is in)`, 10 * MINUTE);
   const m = 24;
   const box = { x: yard.x1 - m, y: yard.y - 4, z: yard.z1 - m, width: yard.x2 - yard.x1 + 1 + 2 * m, height: 14, length: yard.z2 - yard.z1 + 1 + 2 * m };
   const blocks = await readBox(ctx, box);
@@ -219,6 +223,10 @@ export function buildStep(kind: string, plan: (st: MilestoneState) => BuildPlan,
       const origin0 = { x: site.x, y: site.y + bp.groundOffset, z: site.z };
       const there = await readBox(ctx, { ...origin0, ...bp.size });
       const left = billLeft(bp.spec, there, bp.size);
+      // a job block still to go up waits while a villager is on its way (fetch.ts placeGuard): a free one in the yard
+      // takes it, as the workshop's smithing table did three times (Nov 23-24)
+      const guard = Object.keys(left).map(item => placeGuard(ctx.world, item, ctx.s.now)).find(Boolean);
+      if (guard) return blocked(guard, 10 * MINUTE);
       const all = billOf(bp.spec);
       const bill = { ...left };
       for (const [k, n] of Object.entries(bp.bill)) { const extra = n - (all[k] ?? 0); if (extra > 0) bill[k] = (bill[k] ?? 0) + extra; }

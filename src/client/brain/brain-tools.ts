@@ -8,13 +8,14 @@ import { fillAt, sourcesInSight } from './fluidpick.js';
 import { castObsidian } from './cast.js';
 import { activeMissions, community, communityStatus, left, owed, sourceOf, syncReserve } from './community.js';
 import { netherLine } from './nether.js';
-import { villagersLine } from './village.js';
+import { lureOn, villagersLine } from './village.js';
 import { hallChoresText, hallSites, SITE_PROFESSION } from './hallchores.js';
 import { shellsText } from './hallshells.js';
 import { gatesRead } from './yardgates.js';
 import type { Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import { lastRailPlan } from './villagemove.js';
+import { fetchLine } from './fetch.js';
 import { railsHomeLine } from './railshome.js';
 import { railsText } from './railroute.js';
 
@@ -155,21 +156,35 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
 
   factory.registerTool(
     'villager-moves',
-    "Turn the bot's villager moves on or off. Off by default: the villagers rung of the work queue does nothing (villages and the players seen are only remembered). On: by day and dry, with the villager hall standing and fewer than 3 villagers in it, the bot looks for villages within 384 of home, judges each (someone's, and left alone, if a villager is named, rides something or is penned in, a sign, rail, redstone or portal stands in it or within 16, a player was ever seen within 64, it is within 256 of the world spawn or near another build), and from a free village of 5 or more takes one unemployed adult home a run by boat, on a way judged flat, downhill or water and 16 off every build, through its own fence and the hall's panel, put back after. Where no boat way is found, the rails home (the fallback) are planned: with `rails` off (as it ships) a dry run, never laid; with it on (and the moves on) the line is kept and laid: the bill made at home, laid from the yard's fence out over as many days as it takes, the villager brought home in a minecart, everything taken back up after (or at a give-up; `rails` off with a line under way gives it up). The last plan this session is shown in full (the route, every block it would put down and take back up, the bill, the time). Nothing given: says which, with the villages' and the line's state.",
+    "Turn the bot's villager moves on or off, and choose how a villager is brought home. Off by default: the villagers rung of the work queue does nothing (villages and the players seen are only remembered). On: by day and dry, with the villager hall standing and fewer than 3 villagers in it, the bot looks for villages within 640 of home and judges each (someone's, and left alone, within 256 of the world spawn or with two or more villagers named, traded with, on a lead or riding). `method` says how one is brought from a free village of 5 or more: 'boat' (as it ships: one unemployed adult home a run by boat, on a way judged flat, downhill or water and 16 off every build; where the boat finds no way the rails home are planned, and laid only with `rails` on) or 'lure' (the job-site lure: the evening before, the bot checks the lock in front of the hall, packs fletching tables and lifts its own job blocks out of the way; at dawn it walks out, puts a table down by an unemployed adult and leapfrogs it home hop by hop, through a yard gate, into the lock by 8700 and on into the hall; everything it put down or took away is written first and undone after). Under the lure every trip is supervised: `arm` is how many may still begin (1 for one trip), `dry` makes them plan, log and dump and place nothing, a halt (harm, or something the lead must see) stops new ones until `halt: false` clears it, `bell: false` says the wards' village bells no longer bind them (the lead knows them long away), `forget` lets a ward go (its key from brain-status). The rails home are retired under the lure. Nothing given: says which, with the villages' state and the fetch's (or the line's).",
     {
       enabled: z.boolean().optional().describe('On or off'),
-      rails: z.boolean().optional().describe('The rails home laid where the boat finds no way (off: planned only)'),
+      method: z.enum(['lure', 'boat']).optional().describe("How a villager is brought home: 'lure' (the job-site lure) or 'boat' (as before)"),
+      arm: z.union([z.literal('free'), z.coerce.number().int().min(0).max(9)]).optional().describe('Lure trips that may still begin (0: none; "free" is refused until the unsupervised stage)'),
+      dry: z.boolean().optional().describe('Lure trips plan, log and dump only, placing and digging nothing (on until turned off)'),
+      halt: z.literal(false).optional().describe('false: clear the halt, so new lure trips may begin again'),
+      bell: z.literal(false).optional().describe("false: the wards' village bells no longer bind them (led by daylight, not by 8700)"),
+      forget: z.string().min(4).max(64).optional().describe('Let a ward go: its key or uuid (8 or more of its first characters will do)'),
+      rails: z.boolean().optional().describe('The rails home laid where the boat finds no way (off: planned only; retired under the lure)'),
       by: z.string().max(40).optional().describe('Who turns it, for the log (e.g. "the lead", "maintenance")')
     },
-    async ({ enabled, rails: railsSwitch, by }: { enabled?: boolean; rails?: boolean; by?: string }) => {
+    async ({ enabled, method, arm, dry, halt, bell, forget, rails: railsSwitch, by }: { enabled?: boolean; method?: 'lure' | 'boat'; arm?: number | 'free'; dry?: boolean; halt?: false; bell?: false; forget?: string; rails?: boolean; by?: string }) => {
       const world = brain.worldMemory();
       if (!world) return factory.createErrorResponse('Not in a world yet');
+      const who = by?.trim() || 'a tool call';
+      let said: string[] = [];
       try {
-        if (enabled !== undefined) brain.setVillagerMoves(enabled, by?.trim() || 'a tool call');
-        if (railsSwitch !== undefined) brain.setRailsHome(railsSwitch, by?.trim() || 'a tool call');
+        // (the lure's switches first: a refusal there changes nothing, the moves' switch included)
+        if ([method, arm, dry, halt, bell, forget].some(v => v !== undefined)) said = brain.setFetch({ method, arm, dry, halt, bell, forget }, who);
+        if (enabled !== undefined) brain.setVillagerMoves(enabled, who);
+        if (railsSwitch !== undefined && !lureOn(world)) brain.setRailsHome(railsSwitch, who);
       } catch (e) { return factory.createErrorResponse((e as Error).message); }
+      const now = Date.now();
+      const head = [...said, ...(railsSwitch !== undefined && lureOn(world) ? ['rails: retired under the lure (the switch is left as it was)'] : [])].map(l => `${l}.`).join(' ');
+      const villages = villagersLine(world, now, undefined, hallChoresText(world, now));
+      if (lureOn(world)) return factory.createResponse(`${head ? `${head}\n` : ''}${villages}\n${fetchLine(world, now)}`);
       const rails = lastRailPlan(world);
-      return factory.createResponse(`${villagersLine(world, Date.now(), undefined, hallChoresText(world, Date.now()))}\n${railsHomeLine(world, Date.now())}` + (rails ? `\n${railsText(rails)}` : ''));
+      return factory.createResponse(`${head ? `${head}\n` : ''}${villages}\n${railsHomeLine(world, now)}` + (rails ? `\n${railsText(rails)}` : ''));
     }
   );
 

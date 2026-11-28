@@ -30,6 +30,7 @@ import { holdHarmless, isHazard } from './fluidpick.js';
 import { EXPLORE_MIN, exploreReach, leaveYard } from './yardgates.js';
 // (cast.ts reaches this file through deep.ts and pockets.ts: its list is read inside castingAhead only)
 import { OBSIDIAN_MILESTONES } from './cast.js';
+import { heldByFetch, inHallOrLock, journalItems, peekFetch } from './fetch.js';
 
 /**
  * The chores that keep the bot equipped and its home in order: emptying its pockets into the chests, smelting ore,
@@ -104,9 +105,13 @@ const CAST_EMPTY_BUCKETS = 5;
  * Not while a build job is building: its load is in the pockets to be placed, and stays there whoever asks.
  *
  * A trip to the Nether keeps its own kit and the home kit's tools only (netherKeep), not what the bot carries for
- * life at home.
+ * life at home. Whatever the room is for, what the villager fetch carries stays (withFetchKit).
  */
 export function stashKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
+  return withFetchKit(world, homeKeep(world, kind));
+}
+
+function homeKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
   const building = activeJobs(world).some(j => j.phase === 'building');
   if (kind === 'nether' && !building) return netherKeep();
   const away = (kind === 'trip' || kind === 'deep') && !building;
@@ -133,6 +138,38 @@ export function stashKeep(world: WorldMemory, kind?: RoomKind): StashOptions {
   // would go back to the chests for before the trip: the kit's torches and stone, a food enough for what the food goal
   // fills to from the chests (its target and a few meals more)
   return { foods: foods(), keep, cap, ...(away ? { oneSlot: tripLeast } : {}) };
+}
+
+/** The lures a villager trip packs (fetch.ts LURES): four fletching tables, the trip's `lure`. */
+const TRIP_LURES = 4;
+/** The planks it packs for the lock's socket (the lock's wall block, put back at DOOR): two, of whatever wood the lock is. */
+const TRIP_PLANKS = 2;
+const PLANKS = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'pale_oak', 'bamboo', 'crimson', 'warped'].map(w => `${w}_planks`);
+
+/**
+ * What the villager fetch has the stash leave carried, whatever the room is made for (idle-plan V, 3.3 and 6.3): every
+ * job block lifted out of a villager's way (fetch.ts journalItems: it goes back from the pockets once no villager is
+ * out), and a trip's kit from its PREP to its restore (the lures and the socket's planks; its tools and food are kept
+ * as ever). The kit is packed the evening before: put in the chests overnight, the dawn would set out without it. A
+ * cap of the home's own that is higher, or none, stands. With no journal entry and no trip (always, but on a trip's
+ * days) this changes nothing.
+ */
+function withFetchKit(world: WorldMemory, opts: StashOptions): StashOptions {
+  const lifted = journalItems(world);
+  if (!lifted.length && !world.fetch?.trip) return opts;
+  const f = peekFetch(world), trip = f.trip;
+  const want: Record<string, number> = trip && trip.state !== 'restore' ? { [trip.lure]: TRIP_LURES, ...Object.fromEntries(PLANKS.map(p => [p, TRIP_PLANKS])) } : {};
+  // (one of a kind for each block lifted: the socket's wall block lifted is one of the kit's planks)
+  for (const name of lifted) want[name] = Math.max(want[name] ?? 0, f.journal.filter(e => e.k === 'lift' && e.item === name).length);
+  if (!Object.keys(want).length) return opts;
+  const keep = new Set(opts.keep ?? []), cap = { ...(opts.cap ?? {}) };
+  for (const [name, n] of Object.entries(want)) {
+    // (kept already and uncapped: all of it stays; capped lower: the higher of the two)
+    if (keep.has(name) && cap[name] === undefined) continue;
+    keep.add(name);
+    cap[name] = Math.max(cap[name] ?? 0, n);
+  }
+  return { ...opts, keep, cap };
 }
 
 /**
@@ -1017,7 +1054,8 @@ export const smelt: Goal = {
   timeoutMs: 10 * MINUTE,
   retryMs: 10 * MINUTE,
   wants: (s, world) => {
-    if (!awakeAtHome(s) || !world.landmarks.furnace) return null;
+    // (a smoker or a blast furnace as the furnace is a job block: lifted out of a villager's way, it waits to go back)
+    if (!awakeAtHome(s) || !world.landmarks.furnace || heldByFetch(world, world.landmarks.furnace)) return null;
     // what the furnace has cooked comes out first: no room for it, the stash goes first
     if (!outputRoom(s, world)) return null;
     const ore = oreWaiting(s, world);
@@ -1488,7 +1526,10 @@ export const lights: Goal = {
     let torches = ctx.s.counts.get('torch') ?? 0;
     const out: string[] = [];
 
-    const r = await lightArea(ctx, centre, radius, { place: true, max: torches, ignore, only: yard ? p => outsideBy(yard, p) === 0 : undefined });
+    // (not in the villager hall nor its lock: those cells are the hall chores' alone, and a walk in there for a torch
+    // is a walk past villagers by an open gate)
+    const offHall = (p: Pos) => !inHallOrLock(ctx.world, p);
+    const r = await lightArea(ctx, centre, radius, { place: true, max: torches, ignore, only: yard ? p => outsideBy(yard, p) === 0 && offHall(p) : offHall });
     torches -= r.placed.length;
     ctx.gain(r.placed.length);
     // what no torch reached is out of reach for this plan (enclosed, or out of the bot's reach): leave it be

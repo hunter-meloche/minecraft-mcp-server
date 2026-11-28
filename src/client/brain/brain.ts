@@ -36,6 +36,12 @@ export const SURVIVAL: ReadonlySet<string> = new Set(['wake', 'out from under', 
  */
 export const CRITICAL_CUTS: ReadonlySet<string> = new Set(['retreat', 'out of a pit', 'out from under', 'break out', 'recover']);
 /**
+ * How long a run that holds a lead (out.ledBy) may go before the brain stops it for its time, whatever the goal's own
+ * timeout: the trip's clock ends a lead (8990 with the bell alive, 11800 at the latest: 10 minutes from dawn), DOOR's
+ * wait is 90 s and a rescue's walk out a few minutes more. The cap is a net for a lead that never ends, not a clock.
+ */
+export const LEAD_TIMEOUT_MS = 20 * 60_000;
+/**
  * Never the loop watch's to hold: the villager care goal. Its rows that find nothing, and its turns with the chores, are
  * what the watch calls going round, and a goal that shuts the gates a villager would leave by must not be silenced.
  */
@@ -64,13 +70,13 @@ import { homeSetGoal, netherGearLine } from './netherset.js';
 import { oneSpareSet, unreachableLine } from './chests.js';
 import { goldGoal } from './netherbarter.js';
 import { homeBed } from './villagers.js';
-import { closeUpGoal, tooFarFrom } from './villagemove.js';
+import { closeUpGoal, dryNext, tooFarFor } from './villagemove.js';
 import { railsHomeLine } from './railshome.js';
-import { VILLAGE_RANGE, movesOn, noteBells, noteSeen, villagersLine, villagesOf, type Seen } from './village.js';
+import { VILLAGE_RANGE, lureOn, movesOn, noteBells, noteSeen, peekVillages, villagersLine, villagesOf, type Seen } from './village.js';
 import { smithDropsGoal } from './netherite.js';
 import { shellsGoal } from './hallshells.js';
 import { careNotes, noteLock, outOfHallGoal, villagerCareGoal } from './villagercare.js';
-import { fetchLine, fetchOf, fetchSafe, peekFetch } from './fetch.js';
+import { UNSUPERVISED, fetchLine, fetchOf, fetchSafe, heldByFetch, peekFetch, tripLive, wardSeen, type FetchMemory } from './fetch.js';
 import { lockOf } from './villagerwalk.js';
 
 // (the wedge watch's step-out lives in wedge.ts; its tests know it by this file)
@@ -143,6 +149,40 @@ function hallWhole(world: WorldMemory, box: { x: number; y: number; z: number; w
   }
   return true;
 }
+
+/**
+ * Whether the same read saw the whole of the lock (its six inside cells, feet and head: `lock:inside`): none of them
+ * null. A lock outside the box, or none, counts as seen. With hallWhole it makes a look WHOLE for the wards (idle-plan
+ * V 3.2 R-9): only such a look lowers one (a blind look just after a rejoin reads every cell null and sees nobody).
+ */
+function lockWhole(world: WorldMemory, box: { x: number; y: number; z: number; width: number; height: number; length: number }, blocks: (string | null)[]): boolean {
+  for (const c of world.zones?.['lock:inside'] ?? []) {
+    for (const y of [c.y, c.y + 1]) {
+      const x = c.x - box.x, h = y - box.y, z = c.z - box.z;
+      if (x < 0 || h < 0 || z < 0 || x >= box.width || h >= box.height || z >= box.length) continue;
+      const b = blocks[x + z * box.width + h * box.width * box.length];
+      if (b === null || b === undefined) return false;
+    }
+  }
+  return true;
+}
+
+/** The landmarks one look finds that a cell the fetch holds would mislead: a job block lifted for a villager, a lure of the bot's own. */
+const HELD_MARKS = ['bed', 'furnace', 'table', 'anvil', 'smithing', 'portal', 'fletching', 'brewing'] as const;
+
+/**
+ * The other players about, for the Fetch: line (fetch.ts fetchLine: with one awake the night is not skipped, and a
+ * ward left out has a real night ahead, F-6): those the looks saw in the last OTHERS_MS, by where. The bridge names no
+ * player in its looks and lists none online: a sighting is the evidence there is.
+ */
+const OTHERS_MS = 5 * 60_000;
+function othersAbout(world: WorldMemory, now: number): string[] {
+  return peekVillages(world).players.filter(p => now - p.at >= 0 && now - p.at < OTHERS_MS).sort((a, b) => b.at - a.at).slice(0, 2)
+    .map(p => `a player seen at (${p.x}, ${p.z}) ${Math.max(1, Math.round((now - p.at) / 60_000))} min ago`);
+}
+
+/** The lure's switches as the villager-moves tool turns them (idle-plan V 5.5). */
+export interface FetchSwitches { method?: 'lure' | 'boat'; arm?: number | 'free'; dry?: boolean; halt?: false; bell?: false; forget?: string }
 
 /**
  * The goals in the order they are tried: the most urgent first. Each urgency is asked once: inside the sort it was
@@ -357,6 +397,63 @@ export class Brain {
   }
 
   /**
+   * The lure's switches (the villager-moves tool, idle-plan V 5.5), every one the lead's: `method` ('lure': the
+   * job-site lure; 'boat': the move as before), `arm` (how many trips, brings and rescues, may still begin: 'free' is
+   * refused until S1.5 is in), `dry` (every trip plans, logs and dumps and places nothing: the trip prepared now and
+   * the ones after, until turned off), `halt: false` (the halt cleared: new trips may begin again), `bell: false` (the
+   * wards' village bells no longer bind them: the lead knows them long away), `forget` (a ward let go of: its key or
+   * uuid, or 8 or more of its first characters). Checked whole before anything is written: a refusal throws and changes
+   * nothing. The method is not changed under a villager being led, nor is the led ward forgotten. Each change is said
+   * in the log with who made it, and saved at once. Returns what was done, a line each.
+   */
+  setFetch(o: FetchSwitches, by: string): string[] {
+    if (!this.worldId) throw new Error('not in a world yet');
+    const world = this.memory.world(this.worldId), now = this.now(), seen = peekFetch(world);
+    if (o.arm === 'free' && !UNSUPERVISED) throw new Error('arm "free" waits for S1.5 (the computed yard and the unattended morning after): every trip is supervised until then; arm a number (arm: 1)');
+    if (typeof o.arm === 'number' && (!Number.isInteger(o.arm) || o.arm < 0)) throw new Error(`arm ${o.arm}: a whole number of trips, 0 or more`);
+    const live = tripLive(world, now);
+    if (o.method && o.method !== (seen.method ?? 'boat') && live) throw new Error(`a villager is being led (trip ${seen.trip?.id}): the method stays while it is (villager-moves {enabled:false} lets the trip release it or finish)`);
+    let forget: FetchMemory['wards'][number] | undefined;
+    if (o.forget !== undefined) {
+      const k = o.forget.trim(), hits = seen.wards.filter(w => w.key === k || w.uuid === k || (k.length >= 8 && (w.key.startsWith(k) || w.uuid?.startsWith(k))));
+      if (!hits.length) throw new Error(`no ward ${k} on the records${seen.wards.length ? ` (the wards: ${seen.wards.map(w => w.key).join(', ')})` : ''}`);
+      if (hits.length > 1) throw new Error(`${k} names ${hits.length} wards: give more of its key`);
+      forget = hits[0];
+      if (live && seen.trip?.ward === forget.key) throw new Error(`ward ${forget.key} is being led (trip ${seen.trip.id}): it is not let go of mid-way`);
+    }
+    const f = fetchOf(world), said: string[] = [];
+    if (o.method && o.method !== (f.method ?? 'boat')) { f.method = o.method; said.push(`method ${o.method}${o.method === 'lure' ? ' (the job-site lure; the rails home retired)' : ' (the boat\'s move as before)'}`); }
+    if (o.arm !== undefined) {
+      if (o.arm === 0) delete f.armed; else f.armed = o.arm;
+      said.push(o.arm === 0 ? 'not armed: no trip begins' : `armed ${o.arm}: ${o.arm} trip(s) may begin`);
+    }
+    if (o.dry !== undefined) {
+      // (the switch beside the record: the trip prepared now is made dry too, and every one after until it is turned off)
+      const raw = f as FetchMemory & { dry?: true };
+      if (o.dry) raw.dry = true; else delete raw.dry;
+      if (f.trip && f.trip.state !== 'restore') { if (o.dry) f.trip.dry = true; else delete f.trip.dry; }
+      said.push(o.dry ? `dry: trips plan, log and dump, and place nothing${f.trip ? ` (trip ${f.trip.id} too)` : ''}` : 'not dry: the next trip is a real one');
+    }
+    if (o.halt === false) {
+      said.push(f.halt ? `the halt cleared (it was: ${f.halt.why})` : 'no halt to clear');
+      delete f.halt;
+    }
+    if (o.bell === false) {
+      const bound = f.wards.filter(w => w.bell);
+      for (const w of bound) w.bell = false;
+      said.push(bound.length ? `the bell cleared for ${bound.map(w => `ward ${w.key.slice(0, 8)}`).join(', ')}: it is led by the light of day, not by 8700` : 'no ward bound by a bell');
+    }
+    if (forget) {
+      const key = forget.key;
+      f.wards = f.wards.filter(w => w.key !== key);
+      said.push(`ward ${key.slice(0, 8)} let go of (it was ${forget.where}, last at (${Math.floor(forget.last.at.x)}, ${Math.floor(forget.last.at.y)}, ${Math.floor(forget.last.at.z)}))`);
+    }
+    for (const line of said) this.note(`villagers: ${line} (by ${by})`);
+    this.memory.save();
+    return said;
+  }
+
+  /**
    * The LLM ran a tool: step back now and stay out until it has been quiet for a while. Not while a villager is being
    * led or a run is in a step only flight may cut short (a gate held for a villager, the whole of a chores visit
    * inside the villager hall): the tool is refused with why, since stopping the run there leaves a gate open by a
@@ -493,7 +590,11 @@ export class Brain {
           this.holdFor(r.goal.name, this.now() + 3 * 60_000, 'stuck');
           return;
         }
-        if (this.now() - r.started > r.goal.timeoutMs) {
+        // (a run that leads a villager, out.ledBy its own, is cut by no clock of the brain's but at LEAD_TIMEOUT_MS: a
+        // lead runs by the trip's own clock, to 8990 or 11800, and care's 10 minutes would cut a resume or a rescue
+        // anywhere, a gate held open included; 6.2: only survival cuts a lead)
+        const leads = afield.ledBy === r.abort.signal && !r.abort.signal.aborted;
+        if (this.now() - r.started > (leads ? Math.max(r.goal.timeoutMs, LEAD_TIMEOUT_MS) : r.goal.timeoutMs)) {
           await this.stopRunning(`${r.goal.name} ran out of time`);
           this.holdFor(r.goal.name, this.now() + r.goal.retryMs, 'timed out');
           return;
@@ -595,6 +696,9 @@ export class Brain {
     const lines: string[] = [];
     const world = this.worldId ? this.memory.world(this.worldId) : undefined;
     lines.push(`Autonomy ${this.enabled ? 'on' : 'off'}${world ? ` (leash ${world.leash} blocks)` : ''}.`);
+    // (said first, where the maintenance run looks: a restart now stops the client with a gate held for a villager)
+    const led = world && tripLive(world, this.now()) ? peekFetch(world).trip : undefined;
+    if (led) lines.push(`A villager is being led (trip ${led.id}, ${led.hop ? `hop ${led.hop.n}` : led.state}): do not restart (scripts/safe-restart.sh waits for it).`);
     const lease = this.leaseUntil - this.now();
     if (lease > 0) lines.push(`Paused for the LLM for ${(lease / 60_000).toFixed(1)} more min (last tool: ${this.leaseTool}).`);
     const s = this.last;
@@ -647,11 +751,16 @@ export class Brain {
     // the Nether gear: the EPF against fire dressed for it, and what the fortress's and the tunnel's 20 are short of
     if (world && s) this.measure('status', () => lines.push(netherGearLine(s.items, world)));
     // the villagers: the switch, the hall and its villagers, the villages known and judged, the last move
-    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFrom(s.home) : undefined, hallChoresText(world, this.now(), s?.counts.get('emerald') ?? 0))));
+    if (world) this.measure('status', () => lines.push(villagersLine(world, this.now(), s?.home ? tooFarFor(world, s.home) : undefined, hallChoresText(world, this.now(), s?.counts.get('emerald') ?? 0))));
     // the rails home (the villager move's fallback): the switch, the line's state
     if (world) this.measure('status', () => lines.push(railsHomeLine(world, this.now())));
     // the villager fetch (fetch.ts): the lock, the ring, the gates left open, the journal; only where it has a record
-    if (world?.fetch) this.measure('status', () => lines.push(fetchLine(world, this.now(), careNotes(world, this.now()))));
+    if (world?.fetch) {
+      this.measure('status', () => {
+        const notes = [...careNotes(world, this.now()), ...(dryNext(world) && !peekFetch(world).trip ? ['dry: the next trip plans and places nothing'] : [])];
+        lines.push(fetchLine(world, this.now(), notes, lureOn(world) ? othersAbout(world, this.now()) : []));
+      });
+    }
     if (world) this.measure('status', () => {
       // from the idle tally, in real time (the old line counted ticks: one that started a goal weighed like an idle one)
       const today = todayLine(world);
@@ -936,8 +1045,34 @@ export class Brain {
     if (lock && now - this.lockAt >= LOCK_LOOK_MS && Math.hypot(s.position.x - lock.p.x, s.position.z - lock.p.z) <= 96 && onHomeLevel(s.position, s.home)) {
       this.lockAt = now;
       const r = await this.rt.call<{ entities?: Seen[] }>('world.entities', { maxDistance: 128 }).catch(() => undefined);
-      if (Array.isArray(r?.entities)) noteLock(world, r.entities, now);
+      if (Array.isArray(r?.entities)) {
+        noteLock(world, r.entities, now);
+        // (and the wards with it: no box read here, so this look raises a ward, never lowers one: R-9)
+        this.seeWards(world, r.entities, false, s.timeOfDay);
+      }
     }
+  }
+
+  /**
+   * The wards brought up to one of the brain's own looks (idle-plan V 3.2 R-9, fetch.ts wardSeen): the gate watch's
+   * look into the lock and discover's look at the hall, overworld looks both. `whole`: the same read saw every cell of
+   * the hall's floor and the lock (only such a look lowers a ward). The lock's gate P counts shut as the gate watch read
+   * it in the last 15 s. A ward someone has taken (theirs, never contested) and a ward whose place changed are said.
+   * Saved when anything of the fetch's record changed. Nothing without a ward on the records: a world with none has no
+   * record made for it.
+   */
+  private seeWards(world: WorldMemory, seen: readonly Seen[], whole: boolean, tod: number): void {
+    const f = world.fetch ? peekFetch(world) : undefined;
+    if (!f?.wards.length) return;
+    const now = this.now(), g = f.gates, p = world.zones?.['lock:gate']?.[0];
+    const pShut = !!p && !!g && now - g.at <= 15_000 && !g.open.some(o => o.x === p.x && o.y === p.y && o.z === p.z);
+    // (the record's own wards, which wardSeen writes: where each stood before the look)
+    const before = JSON.stringify(world.fetch), was = new Map(fetchOf(world).wards.map(w => [w, w.where] as const));
+    for (const x of wardSeen(world, seen, whole, now, { tod, pShut })) {
+      if (x.taken) this.note(`villagers: ward ${x.ward.key.slice(0, 8)} ${x.taken}`);
+      else if (x.seen && was.has(x.ward) && was.get(x.ward) !== x.ward.where) this.note(`villagers: ward ${x.ward.key.slice(0, 8)} now ${x.ward.where}${x.ward.note ? `: ${x.ward.note}` : ''}`);
+    }
+    if (JSON.stringify(world.fetch) !== before) this.memory.save();
   }
 
   /** when the bells the scans saw were last asked for (seeVillages) */
@@ -1051,7 +1186,17 @@ export class Brain {
     const blocks = await readBox({ call: (m, p, t) => this.rt.call(m, p, t) }, box);
     const before = JSON.stringify({ ...world.landmarks, foundAt: 0 });
     // what it could not see (unloaded, just after a rejoin) stays as it was known (keepUnseen)
-    world.landmarks = { ...findLandmarks(box, blocks, s.home, world.landmarks), foundAt: this.now() };
+    const known = world.landmarks;
+    world.landmarks = { ...findLandmarks(box, blocks, s.home, known), foundAt: this.now() };
+    // and a cell the villager fetch holds is not what the look says it is (idle-plan V 6.3): a job block lifted out of a
+    // villager's way stays known where it goes back (the workshop's smithing table lifted for a trip must not drop
+    // landmarks.smithing, which the netherite job and its gate read), and a lure of the bot's own in the yard is no
+    // fletching table of the hall's
+    for (const k of HELD_MARKS) {
+      const was = known[k], is = world.landmarks[k];
+      if (was && heldByFetch(world, was)) world.landmarks[k] = was;
+      else if (is && heldByFetch(world, is)) { if (was) world.landmarks[k] = was; else delete world.landmarks[k]; }
+    }
     // a chest inside one of the LLM's structures is that structure's (a valuables chest in a hut 40 blocks out), not
     // home storage: the kit walked out to it at dusk, and the shelter pulled it back, three times over
     const theirs = this.structureChests(world);
@@ -1069,9 +1214,12 @@ export class Brain {
       if (Array.isArray(r?.entities)) {
         // whole: no cell of the hall's floor read null (just after a rejoin every one does, and the look sees nobody:
         // noteHall lowers no count then); with the time of day, whose job block is whose builds from these looks too
-        const count = noteHall(world, r.entities, this.now(), hallWhole(world, box, blocks), s.timeOfDay);
+        const whole = hallWhole(world, box, blocks);
+        const count = noteHall(world, r.entities, this.now(), whole, s.timeOfDay);
         if (count !== undefined) villagesOf(world).hall = { count, at: this.now() };
         noteLock(world, r.entities, this.now());
+        // (the wards: a look that read the hall's floor and the lock whole may lower one, R-9)
+        this.seeWards(world, r.entities, whole && lockWhole(world, box, blocks), s.timeOfDay);
       }
     }
     if (JSON.stringify({ ...world.landmarks, foundAt: 0 }) !== before) {
@@ -1194,8 +1342,10 @@ export class Brain {
       })
       .finally(() => {
         const mine = this.running?.abort === abort;
-        // a critical section the run left set as it ended is over with it (its own code ends it; this is the net)
+        // a critical section the run left set as it ended is over with it (its own code ends it; this is the net), and
+        // so is a lead's hold (a lead that ended by a throw: care's row 3 must not take it for a run still at the trip)
         if (afield.critical?.by === abort.signal) delete afield.critical;
+        if (afield.ledBy === abort.signal) afield.ledBy = undefined;
         // booked before the run is let go of: the stretch since the last tick is still its own
         this.measure('run', () => this.bookRun(goal, used, mine));
         if (mine) this.running = undefined;

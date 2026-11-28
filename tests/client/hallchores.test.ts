@@ -560,7 +560,9 @@ test.serial('a stay ends itself before its critical section does: slow rerolls s
   slow(h3, 6 * MINUTE - 30_000, 'goto');
   t.is(await hallChoresGoal.run(h3.ctx), 'a lectern at (-553, 63, 2127); not waited by: the stay inside is at its end');
   t.is(h3.blocks.get(k(LECTERN)), 'lectern');
-  t.like(hallChoresOf(w3).librarian, { placedAt: T0 });
+  // (stamped by the run's clock: the snapshot's time and the real ms the run has taken so far, so T0 and a few ms)
+  const placedAt = hallChoresOf(w3).librarian?.placedAt;
+  t.true(Number.isFinite(placedAt) && placedAt! >= T0 && placedAt! < T0 + MINUTE, `placedAt ${placedAt}`);
   t.is(hallChoresOf(w3).librarian?.waits, undefined, 'no wait counted');
 });
 

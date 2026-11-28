@@ -1,5 +1,5 @@
 import { brainRun } from '../tools.js';
-import { fromGate, nearHome, no, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
+import { fromGate, nearHome, no, type Decline, type Gate, type Goal, type GoalContext, type Snapshot } from './goals.js';
 import type { Pos, WorldMemory } from './memory.js';
 import type { Milestone, MilestoneState } from './progress.js';
 import { buildStep, siteStep } from './milestones.js';
@@ -11,6 +11,7 @@ import { someones, type Creature } from './courtesy.js';
 import { makeRoom, noRoom, out as afield, room } from './pockets.js';
 import { addSite, alongSide, byYard, CLEAR, dropSite, gatesBetween, inFence, notePen, outByGate, sitesOf, type Bound, type HomeSide, type WorkResult } from './work.js';
 import { openGate, penGateWay, shutGate, shutNow, throughPenGate, type PenWay } from './yardgates.js';
+import { wardOut } from './fetch.js';
 
 /**
  * Animal pens: a 7 x 7 fenced pen per kind (cows, then sheep) with a gate toward home, and a chore that keeps each
@@ -1181,13 +1182,27 @@ function penVisit(ctx: GoalContext, p: Pen, way: Way) {
 }
 
 /**
- * Run now? The "no" is said in this order: no pen to see to (none built, or the round is not due); then what keeps a
- * round that is due from going (not in the yard, no room for what the animals drop); the hour last.
+ * Why the pens' work waits for the villager fetch, or null (idle-plan V, 6.3): while a villager is on its way or may
+ * come by (fetch.ts wardOut), no animal is led in through a gate and the closer is not switched off for a pen's walk.
+ * A gate held open for a cow is a way out for a villager in the yard, and with the closer off every gate Baritone
+ * opens stands open. The pens round's gate asks it, and the cows fetch (fetchForPens) as the net under its rung, whose
+ * `ready` (worktasks.ts) is to ask it first.
+ */
+export function pensWait(s: Pick<Snapshot, 'now'>, world: WorldMemory): Decline | null {
+  return wardOut(world, s.now) ? { cause: 'hold', text: 'a villager is on its way: no animal led through a gate until it is in' } : null;
+}
+
+/**
+ * Run now? The "no" is said in this order: no pen to see to (none built, or the round is not due); a villager on its
+ * way (pensWait); then what keeps a round that is due from going (not in the yard, no room for what the animals drop);
+ * the hour last.
  */
 const gate = (s: Snapshot, world: WorldMemory): Gate => {
   if (!Object.keys(world.zones ?? {}).some(k => /^pen:[a-z]+$/.test(k))) return { cause: 'unneeded', text: 'no pen' };
   const last = world.lastDone?.pens ?? 0;
   if (!(s.now - last > 6 * MINUTE)) return no.notDue('pens', s.now, last, 6 * MINUTE);
+  const wait = pensWait(s, world);
+  if (wait) return wait;
   if (!nearHome(s, 24)) return no.away(s, 'pens', 24);
   // two slots free for what the animals drop, or the stash able to make them (the round does that first)
   if (room('yard', s, world) === 'no') return noRoom('yard', 'pens', s, world);
@@ -1367,6 +1382,9 @@ export async function fetchForPens(ctx: GoalContext, from: string, opts: { kind?
   const now = opts.now ?? (() => ctx.s.now);
   const where = penAt(ctx.world, kind);
   if (!where) return { gain: 0, text: `no ${kind} pen with a gate`, untried: true };
+  // (the rung's `ready` asks pensWait first: this is the net under a run begun all the same)
+  const wait = pensWait({ now: now() }, ctx.world);
+  if (wait) return { gain: 0, text: `${kind}: ${wait.text}`, untried: true };
   const { p, way } = where;
   const home = ctx.s.home ?? ctx.s.position;
   const centre = { x: (p.x1 + p.x2 + 1) / 2, z: (p.z1 + p.z2 + 1) / 2 };

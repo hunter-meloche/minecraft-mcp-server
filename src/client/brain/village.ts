@@ -2,6 +2,8 @@ import type { Pos, WorldMemory } from './memory.js';
 import { zoneDistance, type Zone } from './courtesy.js';
 import { clock } from './idlelog.js';
 import { cellOf } from './boatroute.js';
+// (fetch.ts reads this file only inside its functions, and this one reads it only inside its own: either loads first)
+import { FRESH_FREE } from './fetch.js';
 
 /**
  * Villages for the villager move (P5c of the progression plan): where they are (remembered from any walk: a bell, a
@@ -64,6 +66,20 @@ export const JOB_NEAR = 2;
 export const NO_BOAT_WAIT = 24 * HOUR;
 /** A village too small, or not all seen, is looked at again after this. */
 export const WAIT_AGAIN = 6 * HOUR;
+/** Under the lure a wait for the same reason doubles from the fourth in a row, up to this (a village too small is looked at weekly). */
+export const WAIT_MAX = 7 * 24 * HOUR;
+/**
+ * The lure's wait on a village after a trip or a look there came to nothing (`site.fetch.kind`, idle-plan V 3.1): nobody
+ * came to the first lure (6 h, doubling), no villager's way home or a job site of someone's by every way (72 h,
+ * doubling), no unemployed adult (24 h and never doubling: a baby is an adult in 20 minutes), too late (no wait: it is
+ * the clock's, not the village's). At most FETCH_WAIT_MAX.
+ */
+export const FETCH_WAIT: Readonly<Record<NonNullable<VillageSite['fetch']>['kind'], number>> = {
+  'no claim': 6 * HOUR, 'no way': 72 * HOUR, rival: 72 * HOUR, 'no unemployed': 24 * HOUR, late: 0
+};
+export const FETCH_WAIT_MAX = 7 * 24 * HOUR;
+/** A villager seen this near a lure of the bot's is no village's: it is at work there (fetchKeeps). */
+const LURE_NEAR = 48;
 /**
  * A pillager outpost (a build with an ominous banner, of nothing but what the game builds an outpost of) is danger, not
  * someone's: its pillagers spawn round it all day and shoot from 32 off (26.3 Pillager FOLLOW_RANGE). No villager by
@@ -185,10 +201,13 @@ export interface Seen {
   /** a villager's trade xp, where reported (26.3 syncs no villager's xp to the client: none from the bridge today) */
   xp?: number;
   type?: string;
-  /** a boat or minecart: the bot's own (vehicle.place's), its uuid, its riders' ids (front seat first) */
+  /** a boat or minecart: the bot's own (vehicle.place's), its riders' ids (front seat first) */
   own?: boolean;
+  /** the game's own id for it: a boat's or a minecart's before the S0 jar of Nov 25, every row's since (a ward is keyed by it: fetch.ts) */
   uuid?: string;
   passengers?: number[];
+  /** a creature asleep (in its bed): true only then, never false (the S0 jar's world.entities) */
+  sleeping?: boolean;
 }
 
 /** One village as remembered. */
@@ -211,6 +230,8 @@ export interface VillageSite {
      * judge's version (JUDGE_V; none: before it)
      */
     rule?: TheirsRule; v?: number;
+    /** under the lure, a wait word's count of equal ones in a row (the same reason, its numbers aside): from the fourth its wait doubles (waitAgain) */
+    n?: number;
   };
   /** no boat way home found from it (the rails fallback's): why, and when (tried again after NO_BOAT_WAIT) */
   noBoat?: { at: number; why: string };
@@ -218,6 +239,14 @@ export interface VillageSite {
   rails?: { at: number; ok: boolean; text: string };
   /** villagers brought home from it */
   moved?: number;
+  /**
+   * the lure's last trip or look there that came to nothing (fetch.ts, lure.ts): why, its kind and how many in a row
+   * (siteOpen waits by the kind, doubling with `n`), and what a dry run measured of the way: the corridor's cells home
+   * and the walk out's seconds (the clock's `need` counts on them once known)
+   */
+  fetch?: { at: number; ok: boolean; kind: 'no claim' | 'no unemployed' | 'no way' | 'rival' | 'late'; why: string; n: number; pathLen?: number; outS?: number };
+  /** the villagers counted at the last WHOLE look and the takes since: the floor a lure trip keeps (fetch.ts floorOk) */
+  whole?: { at: number; villagers: number; takes: number };
   /**
    * its area as the judge last saw it (the box round its bell, beds, job sites and villagers, grown by AREA_GROW): a
    * sighting or a bell in it is this village, whatever its distance from the middle
@@ -380,6 +409,9 @@ function foldSites(sites: VillageSite[], inPlace: boolean): { sites: VillageSite
         if (fin(c.moved) && c.moved > 0) m.moved = (m.moved ?? 0) + c.moved;
         if (c.noBoat && fin(c.noBoat.at) && (!m.noBoat || c.noBoat.at > m.noBoat.at)) m.noBoat = c.noBoat;
         if (c.rails && fin(c.rails.at) && (!m.rails || c.rails.at > m.rails.at)) m.rails = c.rails;
+        // (the lure's words, the newer of each: a trip's that came to nothing, and the count of a whole look)
+        if (c.fetch && fin(c.fetch.at) && (!m.fetch || !fin(m.fetch.at) || c.fetch.at > m.fetch.at)) m.fetch = c.fetch;
+        if (c.whole && fin(c.whole.at) && (!m.whole || !fin(m.whole.at) || c.whole.at > m.whole.at)) m.whole = c.whole;
         const add = c.judged?.kind === 'theirs' ? reachOf(c) : areaOk(c.area) ? c.area : undefined;
         if (add) m.area = joinAreas(m.area, add);
         into.set(s, t);
@@ -455,6 +487,11 @@ export function peekVillages(world: WorldMemory): VillagesMemory {
 
 /** The villager-moves switch: the move runs only while it is true (off, undefined, as it ships). */
 export const movesOn = (world: WorldMemory): boolean => world.villagerMoves === true;
+/**
+ * The method switch (villager-moves {method}, fetch.ts FetchMemory.method): the job-site lure (idle-plan V) only when it
+ * says so; absent, as it ships, or 'boat': the boat's move as before. Read where it stands, nothing made (the gates ask it).
+ */
+export const lureOn = (world: WorldMemory): boolean => (world.fetch as { method?: unknown } | undefined)?.method === 'lure';
 
 // ------------------------------------------------------------------------------------------------ sightings
 
@@ -469,7 +506,9 @@ export function noteSeen(world: WorldMemory, seen: readonly Seen[], now: number,
   const players = seen.filter(e => e.name === 'player' && isPos(e.position));
   const yard = world.yard;
   const out = (p: Pos) => !yard || Math.max(yard.x1 - p.x, 0, p.x - yard.x2, yard.z1 - p.z, p.z - yard.z2) > OUT_OF_YARD;
-  const villagers = seen.filter(e => e.name === 'villager' && isPos(e.position) && out(e.position!));
+  // (nor the fetch's own: its wards, and whoever works at a lure of the bot's)
+  const keeps = fetchKeeps(world);
+  const villagers = seen.filter(e => e.name === 'villager' && isPos(e.position) && out(e.position!) && !keeps(e));
   if (!players.length && !villagers.length) return false;
   const v = villagesOf(world);
   const spots = players.map(p => ({ x: Math.round(p.position!.x), y: Math.round(p.position!.y), z: Math.round(p.position!.z) }));
@@ -492,6 +531,25 @@ export function noteSeen(world: WorldMemory, seen: readonly Seen[], now: number,
   }
   v.sites = trimSites(v.sites);
   return true;
+}
+
+/**
+ * The villagers the fetch answers for (its wards, by uuid) and whoever stands within LURE_NEAR of a lure of the bot's (a
+ * journal entry): never a village of their own. A ward led home from 180 out walks the last hops 50 to 100 off the
+ * fence, where a look would found a "village" of it by the yard. Pure: world.fetch read as it stands, nothing made; a
+ * world without one (as it ships) keeps no one back.
+ */
+function fetchKeeps(world: WorldMemory): (e: Seen) => boolean {
+  const f: unknown = world.fetch;
+  if (!f || typeof f !== 'object') return () => false;
+  const { wards, journal } = f as { wards?: unknown; journal?: unknown };
+  const ids = new Set<string>();
+  for (const w of Array.isArray(wards) ? wards : []) {
+    for (const k of [(w as { key?: unknown })?.key, (w as { uuid?: unknown })?.uuid]) if (typeof k === 'string') ids.add(k);
+  }
+  const lures = (Array.isArray(journal) ? journal : []).filter(e => (e as { k?: unknown })?.k === 'lure' && isPos((e as { at?: unknown }).at)).map(e => (e as { at: Pos }).at);
+  if (!ids.size && !lures.length) return () => false;
+  return e => (typeof e.uuid === 'string' && ids.has(e.uuid)) || (isPos(e.position) && lures.some(l => horiz({ x: l.x + 0.5, z: l.z + 0.5 }, e.position!) <= LURE_NEAR));
 }
 
 /**
@@ -564,19 +622,76 @@ export const railsFailed = (site: VillageSite): boolean =>
   && (site.rails.ok === false || (typeof site.rails.text === 'string' && site.rails.text.startsWith('given up and taken up')));
 
 /**
+ * How long the lure waits on a village after its last trip or look there came to nothing (`site.fetch`, pure): by the
+ * kind (FETCH_WAIT), doubling with each such word in a row (`n`) up to FETCH_WAIT_MAX, but `no unemployed` (no doubling)
+ * and `late` (none). A word that came to something (`ok`), or one with no time (written by hand), holds nothing: the
+ * sanitizer of the villages does not read these words, so this is where they are read whole.
+ */
+export function fetchWait(f: unknown): number {
+  if (!f || typeof f !== 'object') return 0;
+  const r = f as Partial<NonNullable<VillageSite['fetch']>>;
+  if (r.ok === true || !fin(r.at)) return 0;
+  const kind = typeof r.kind === 'string' && Object.hasOwn(FETCH_WAIT, r.kind) ? r.kind : 'no claim';
+  if (kind === 'no unemployed' || kind === 'late') return FETCH_WAIT[kind];
+  const n = fin(r.n) && r.n > 1 ? Math.floor(r.n) : 1;
+  return Math.min(FETCH_WAIT_MAX, FETCH_WAIT[kind] * 2 ** Math.min(n - 1, 16));
+}
+
+/**
+ * A wait word's own wait under the lure (pure): WAIT_AGAIN, doubling from the fourth equal word in a row (`judged.n`,
+ * the same reason with its numbers aside) up to WAIT_MAX. A village of 4 is looked at every 6 h three times, then at 12,
+ * 24, 48, 96 h and weekly: its babies grow up in 20 minutes, its count changes in days.
+ */
+export const waitAgain = (j: { n?: unknown }): number => {
+  const n = fin(j.n) && j.n > 3 ? Math.floor(j.n) : 3;
+  return Math.min(WAIT_MAX, WAIT_AGAIN * 2 ** Math.min(n - 3, 16));
+};
+
+/**
  * A site the rung may go to now: within range, not someone's (but for a word of someone's to be judged again, which is
  * gone to for a look: rejudge), no recent failure of the boat's way, not waiting. With the rails switch on (`rails`), a
  * recent failure of the boat's way is no wait: the move's no-boat branch keeps the rails line (the user, Nov 21), unless
  * the rails fallback failed there too (railsFailed) or a line is under way (one at a time). The village of the line
- * under way is never gone to: the rails rung owns it. Pure.
+ * under way is never gone to: the rails rung owns it. Under the lure (`'lure'`, idle-plan V) the boat's and the rails'
+ * words are never read (it takes neither way home): a wait word waits as it doubles (waitAgain), and the lure's own last
+ * word on the village (`site.fetch`) waits by its kind (fetchWait). Pure.
  */
-export function siteOpen(site: VillageSite, home: { x: number; z: number }, now: number, rails?: RailsGate): boolean {
+export function siteOpen(site: VillageSite, home: { x: number; z: number }, now: number, rails?: RailsGate | 'lure'): boolean {
   if (horiz(site, home) > VILLAGE_RANGE) return false;
+  if (rails === 'lure') {
+    if (site.judged?.kind === 'theirs') return rejudge(site);
+    if (site.judged?.kind === 'wait' && now - site.judged.at < waitAgain(site.judged)) return false;
+    const w = fetchWait(site.fetch);
+    return !(w > 0 && now - site.fetch!.at < w);
+  }
   if (rails?.line && covers(site, rails.line)) return false;
   if (site.judged?.kind === 'theirs') return rejudge(site);
   if (site.judged?.kind === 'wait' && now - site.judged.at < WAIT_AGAIN) return false;
   if (!(site.noBoat && now - site.noBoat.at < NO_BOAT_WAIT)) return true;
   return !!rails?.on && !rails.line && !railsFailed(site);
+}
+
+/**
+ * The village's free word of today's judge (JUDGE_V), given on a look that saw it whole (the judge says free of no
+ * other) less than FRESH_FREE ago, and the area it saw; else undefined (pure). Moved here for the lure (idle-plan V 5.2:
+ * its PREP and its looks read it); railshome.ts keeps its own copy until its package is taken out.
+ */
+export function freshFree(site: VillageSite, now: number): { judged: NonNullable<VillageSite['judged']>; area: NonNullable<VillageSite['area']> } | undefined {
+  const j = site.judged, a = site.area;
+  if (!j || j.kind !== 'free' || !fin(j.v) || j.v < JUDGE_V || !fin(j.at) || now - j.at >= FRESH_FREE || now < j.at) return undefined;
+  if (!areaOk(a)) return undefined;
+  return { judged: { ...j }, area: { x1: a.x1, z1: a.z1, x2: a.x2, z2: a.z2 } };
+}
+
+/**
+ * What a look leaves of the village's count for the lure's floor (fetch.ts floorOk; pure): a free word on a look that
+ * saw all of it (every chunk of its area read: the judge says free of no other), with the villagers it counted in it and
+ * no take since; anything else: undefined, and the count kept stands. One viewpoint sees a part of a village 126 x 121
+ * (the west village, Nov 21): the trip morning's quick look must never lower the floor's count.
+ */
+export function wholeLook(look: Pick<VillageLook, 'looked'>, v: Verdict, now: number): VillageSite['whole'] {
+  if (v.kind !== 'free' || !(look.looked.chunks >= look.looked.of)) return undefined;
+  return { at: now, villagers: v.villagers, takes: 0 };
 }
 
 // ------------------------------------------------------------------------------------------------ the judge
@@ -905,14 +1020,23 @@ export function pennedIn(block: (x: number, y: number, z: number) => string | nu
 export function villagersLine(world: WorldMemory, now: number, far?: (site: VillageSite) => boolean, chores = ''): string {
   const v = peekVillages(world);
   const hall = world.zones?.hall?.[0];
+  const lure = lureOn(world);
   const ago = (t: number) => { const m = Math.round((now - t) / MINUTE); return m < 1 ? 'just now' : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
   const hallText = !hall ? 'no villager hall yet'
     : `the hall at (${hall.x}, ${hall.y}, ${hall.z}): ${v.hall ? `${v.hall.count} of ${HALL_WANTS} villagers (counted ${ago(v.hall.at)})` : `not counted yet (${HALL_WANTS} wanted)`}`;
-  const kinds = v.sites.map(s => (s.noBoat && now - s.noBoat.at < NO_BOAT_WAIT ? 'no boat way'
-    : s.judged?.kind === 'free' && far?.(s) ? 'free but too far for a day\'s move' : s.judged?.kind ?? 'not judged'));
+  // (under the lure the boat's words are not its, and its own wait on a village is: its last trip there came to nothing)
+  const waiting = (s: VillageSite) => { const w = fetchWait(s.fetch); return w > 0 && now - s.fetch!.at < w; };
+  const kinds = v.sites.map(s => (!lure && s.noBoat && now - s.noBoat.at < NO_BOAT_WAIT ? 'no boat way'
+    : lure && s.judged?.kind === 'free' && waiting(s) ? `free, waiting (${s.fetch!.kind})`
+      : s.judged?.kind === 'free' && far?.(s) ? (lure ? 'free but too far for one morning (needs the relay)' : 'free but too far for a day\'s move') : s.judged?.kind ?? 'not judged'));
   const tally = [...new Set(kinds)].map(k => `${kinds.filter(x => x === k).length} ${k}`).join(', ');
   const theirs = v.sites.filter(s => s.judged?.kind === 'theirs').map(s => `(${s.x}, ${s.z}): ${s.judged!.why}${rejudge(s) ? ' (to be judged again: an older word)' : ''}`).slice(0, 2);
-  const villages = v.sites.length ? `${v.sites.length} village(s) known (${tally})${theirs.length ? `; someone's: ${theirs.join('; ')}` : ''}` : 'no village known';
+  // (A2: with none that a lure could go to, said: the searches go on out to the range, and a world with no usable
+  // village at all is the cure's (S5, with brewing))
+  const usable = !lure || v.sites.some(s => s.judged?.kind === 'free' && !far?.(s));
+  const cure = '(the searches go on; none at all: the cure route, which needs brewing)';
+  const none = usable ? '' : v.sites.length ? `; no usable village known within ${VILLAGE_RANGE} ${cure}` : ` ${cure}`;
+  const villages = (v.sites.length ? `${v.sites.length} village(s) known (${tally})${theirs.length ? `; someone's: ${theirs.join('; ')}` : ''}` : 'no village known') + none;
   // (the rails fallback's last dry run, from a village the boat found no way home from)
   const dry = v.sites.find(s => s.rails && typeof s.rails.text === 'string' && fin(s.rails.at) && now - s.rails.at < NO_BOAT_WAIT);
   const rails = dry ? `; rails from (${dry.x}, ${dry.z}) ${dry.rails!.ok ? `planned (a dry run, nothing laid): ${dry.rails!.text}` : `not planned: ${dry.rails!.text}`}` : '';
@@ -923,5 +1047,5 @@ export function villagersLine(world: WorldMemory, now: number, far?: (site: Vill
   const searched = Object.entries(v.searched ?? {}).map(([b, q]) => `${b} to ${q.out}`);
   const half = searched.length ? `; searched part way (out of ${VILLAGE_RANGE}): ${searched.join(', ')}` : '';
   // (the chores in the hall, once it has been looked into: its adults and babies, the librarian, the emeralds)
-  return `Villagers: moves ${movesOn(world) ? 'on' : 'off'}; ${hallText}${chores}; ${villages}${rails}${open}${boat}${half}${last}`;
+  return `Villagers: moves ${movesOn(world) ? 'on' : 'off'}${lure ? ', method lure' : ''}; ${hallText}${chores}; ${villages}${lure ? '' : rails}${open}${boat}${half}${last}`;
 }

@@ -22,6 +22,8 @@ import { walkHome } from './homeward.js';
 import { outByGate, type HomeSide } from './yardgates.js';
 import { brainRun } from '../tools.js';
 import { railsTick } from './railshome.js';
+// (after the ladder and the rails: the rung's module is in by then, so this adds no new load order)
+import { prepStayIn } from './villagemove.js';
 import { BEARINGS, NETHER, NETHER_WORTH_MS, deathHold, netherBudgetMs, netherEnd, netherHome, netherStart, netherTick, netherUnstart, tripHold, type Bearing } from './nether.js';
 
 // (the yard's gates and the walks through them live in yardgates.ts: the walk home comes in by a gate too)
@@ -94,6 +96,11 @@ export interface WorkTask {
   variants(s: Snapshot, world: WorldMemory): { id: string; dist: number; first?: true; needMs?: number; duskMs?: number }[];
   /** null = ready; sync, reads only, no calls */
   ready(s: Snapshot, world: WorldMemory, variant: string): Decline | null;
+  /**
+   * an urgency of its own for its goal, over the rung's (19 - rank), while it answers one; sync, reads only. The lure's
+   * prepared trip at dawn (villagemove.ts): 71, over the kit's 70, or the home chores take the first minutes of it
+   */
+  urgent?(s: Snapshot, world: WorldMemory): number | undefined;
   /** what it says with no variant at all (default: `unneeded`, nothing to do) */
   none?(s: Snapshot, world: WorldMemory): Decline;
   /**
@@ -538,6 +545,13 @@ function common(task: WorkTask, s: Snapshot, world: WorldMemory): Decline | null
   // with full pockets to `pockets`). The hour itself is said only by a rung that is otherwise ready (choose): with
   // the kit short, or every ore dry, that is the afternoon's reason, and the 30 s release can see the dry marks
   if (byDay(task) && lateFor(task, 0, s)) return null;
+  // the afternoon before a villager trip is PREP's (idle-plan V 6.3): from 6000 nothing leaves the yard while its reads
+  // and its kit are owed, or the far rungs keep the bot out to 11000, and the 65 s of evening before the shelter beds it
+  // are not enough for them (F-13). Inert but under the lure, and bounded by its switches
+  if (task.reach !== 'yard') {
+    const stay = prepStayIn(s, world);
+    if (stay) return { cause: 'hold', text: `${who}: ${stay}` };
+  }
   if (isTrip(task)) {
     // (a Nether trip has its own: deaths down there, its probation, two a game day)
     const held = kitHold(s, world) ?? (task.reach === 'deep' ? deepHold(s, world) : task.reach === 'nether' ? deathHold(s, world) ?? tripHold(s, world) : null);
@@ -959,6 +973,9 @@ export function workGoals(lastDeath: () => Death | undefined, tasks: WorkTask[] 
       urgency: (s, world) => {
         if (out.trip && current?.task === task) return TRIP_URGENCY;
         const c = pick(task, s, world);
+        // (a rung's own, while it answers a variant: the lure's prepared trip at dawn, villagemove.ts)
+        const own = 'variant' in c ? task.urgent?.(s, world) : undefined;
+        if (own !== undefined) return own;
         return 'variant' in c && c.demoted ? 9 - task.rank / 2 : 19 - task.rank;
       },
       gate,

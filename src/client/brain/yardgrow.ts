@@ -1,6 +1,7 @@
 import { nearHome, type Goal } from './goals.js';
 import type { WorldMemory } from './memory.js';
 import { growStep, yardOf } from './milestones.js';
+import { wardOut } from './fetch.js';
 
 /**
  * The yard grown on request: the LLM (the daily design run, or the user through it) wants room for something the yard
@@ -37,6 +38,9 @@ export const yardGrowGoal: Goal = {
     if (!r || s.activity !== 'work' || s.sleeping || s.dimension !== 'overworld' || !s.home || !nearHome(s, 32)) return null;
     // the fence still moving out after the last growth: that first (the perimeter project sees to it)
     if (world.fenceMove) return null;
+    // nor while a villager is on its way or may come by (fetch.ts wardOut): the fence comes down on one side and goes
+    // up again further out, and a villager in the yard walks out by the gap
+    if (wardOut(world, s.now)) return null;
     return `room asked for: ${r.width}x${r.length} for ${r.why}`;
   },
   run: async ctx => {

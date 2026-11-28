@@ -6,8 +6,8 @@ import { Ground } from '../../src/client/brain/boatroute.js';
 import { hallLock } from '../../src/client/brain/blueprints.js';
 import { lockOf, lockReady, ringReady, seesFace } from '../../src/client/brain/villagerwalk.js';
 import {
-  ACTIVATABLE, ADOPT, CLEAR, CLICK_REACH, CLIENT_BACK_TICKS, EYE, GateHolds, H, HALL, HOME, Killed, LEAK_R, P, PORTAL, Pasture, REACH, SMITHING, T0, TICK_MS, YARD, YARD_GATES,
-  dumpBase, idOf, isOpen, key, shapeOf, yard, type Entry
+  ACTIVATABLE, ADOPT, CLEAR, CLICK_REACH, CLIENT_BACK_TICKS, EYE, GAME, GateHolds, H, HALL, HOME, HOSTILE, Killed, LEAK_R, P, PORTAL, PROFESSION_OF, Pasture, REACH, SMITHING, T0, TICK_MS,
+  YARD, YARD_GATES, dumpBase, fmt, idOf, isOpen, key, shapeOf, villagerSchedule, yard, type Entry, type Villager
 } from '../helpers/pasture.js';
 
 // The pasture (tests/helpers/pasture.ts): the fake world the villager fetch is tested against, held to the game and the
@@ -1308,4 +1308,603 @@ test('the real ground: the west village as the bot read it (tests/fixtures/west-
   t.deepEqual(p.region(at(-641, 70, 2250), 2, 1, 1).map(b => b === null), [false, true]);
   t.truthy(p.villagerWay(l0, c => Math.hypot(c.x - l0.x, c.z - l0.z) >= 8));
   t.is(p.loaded(at(0, 63, 0)), false, 'nothing is read beyond the dump');
+});
+
+// ------------------------------------------------------------------------------------------------ the reference villagers (S1)
+
+// The game's own villager (mind 'game'), written apart from villagerwalk.ts with the 26.3 jar's numbers, held to what
+// the lead saw it do live (E-results): the hops of the leapfrog, the first lure on the west village's real ground,
+// two tables and two villagers, the workshop's smithing table, the bell at 9000, the bed at 12000, the gate left open.
+// What it does here is the game's rules as R3 read them; where the live record and the rules part, the row says so.
+
+/** A lure down or up as the world's own change: the reference villager meets the block, and the bot's acts are the lure's tests'. */
+const down = (p: Pasture, c: Pos, block = 'fletching_table') => p.set(c, block, 'placed');
+const dug = (p: Pasture, c: Pos) => p.set(c, 'air', 'dug');
+/** Ticks until `done`, at most `max` (undefined: not by then). */
+const until = (p: Pasture, done: () => boolean, max: number): number | undefined => {
+  for (let n = 0; n <= max; n++) { if (done()) return n; p.advance(1); }
+  return undefined;
+};
+const cellAt = (v: { position: Pos }) => at(Math.floor(v.position.x), Math.floor(v.position.y), Math.floor(v.position.z));
+const flat = (a: { x: number; z: number }, b: { x: number; z: number }) => Math.hypot(a.x - b.x, a.z - b.z);
+const game = (p: Pasture, where: Pos, over: Partial<Villager> = {}) => p.villager({ at: where, mind: 'game', ...over });
+const mid = (c: Pos): Pos => ({ x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 });
+const seconds = (ticks: number | undefined) => (ticks === undefined ? Infinity : ticks / 20);
+const WEST_BELL = at(-693, 69, 2262);
+const WEST_BED = at(-699, 76, 2243);
+
+test('the reference villagers\' numbers are the 26.3 jar\'s (R3: AcquirePoi, PathFinder, WalkNodeEvaluator, the schedule) and the walk seen live (E8: 2 b/s)', (t) => {
+  t.like(GAME, {
+    LOOK: 20, LOOK_JITTER: 20, SITES: 5, SITE_R: 48, PATH: 48, NODES: 768, RETRY: 40, RETRY_JITTER: 40, RETRY_MAX: 400, RETRY_FORGET: 400,
+    REACH: 1, BELL_REACH: 6, FLIP: 2, VALIDATE: 16, GIVE_UP: 1200, RISE: 1.125, DROP: 3, HEIGHT: 1.95, WALK_BPS: 2, LEG: 15, LEG_UP: 7, STROLL: 10, SLEEP: 2
+  });
+  t.deepEqual([GAME.WORK, GAME.MEET, GAME.HOME], [{ close: 9, far: 100, lost: 1200 }, { close: 6, far: 100, lost: 200 }, { close: 1, far: 150, lost: 1200 }]);
+  // villager_schedule.json: an adult idles from 10, works from 2000, meets from 9000, idles from 11000, rests from 12000
+  const day = [0, 9, 10, 1999, 2000, 8999, 9000, 10_999, 11_000, 11_999, 12_000, 23_999].map(tod => villagerSchedule(tod));
+  t.deepEqual(day, ['rest', 'rest', 'idle', 'idle', 'work', 'work', 'meet', 'meet', 'idle', 'idle', 'rest', 'rest']);
+  t.deepEqual([2999, 3000, 6000, 10_000].map(tod => villagerSchedule(tod, true)), ['idle', 'play', 'idle', 'play']);
+  // what makes it run, and from how near (VillagerHostilesSensor); the job blocks and what each makes of it
+  t.like(HOSTILE, { zombie: 8, husk: 8, drowned: 8, zombie_villager: 8, vex: 8, vindicator: 10, zoglin: 10, evoker: 12, illusioner: 12, ravager: 12, pillager: 15 });
+  t.deepEqual(['skeleton', 'creeper', 'spider', 'witch', 'player'].filter(n => n in HOSTILE), []);
+  t.like(PROFESSION_OF, { fletching_table: 'fletcher', lectern: 'librarian', smithing_table: 'toolsmith', composter: 'farmer', brewing_stand: 'cleric', water_cauldron: 'leatherworker' });
+  t.is(new Set(Object.values(PROFESSION_OF)).size, 13);
+  // the walk: a site claimed 20 cells off on the lawn is reached in 10 s; the claim came within the 20 ticks of its first look
+  const p = new Pasture({ tod: 1000, at: at(0, 63, 4) });
+  const v = game(p, at(0, 63, 0), { id: 3 });
+  const lure = at(21, 63, 0);
+  down(p, lure);
+  t.true(until(p, () => p.claims.length > 0, 20)! <= 20);
+  const from = p.tick;
+  t.true(until(p, () => v.profession === 'fletcher', 400)! > 0);
+  const walked = (p.tick - from) / 20;
+  t.true(walked >= 9.5 && walked <= 10.5, `${walked} s for 20 cells`);
+  t.deepEqual(p.flips.map(f => [f.uuid, f.at, f.profession]), [[v.uuid, lure, 'fletcher']]);
+  t.true(flat(v.position, { x: lure.x + 0.5, z: lure.z + 0.5 }) < GAME.FLIP, 'within 2.0 of its middle');
+  t.is(p.tickets.get(key(lure)), v.uuid, 'its ticket');
+});
+
+test('the leapfrog on the lawn: hops of 22, 23 (3 up, single steps), 24 and 25 blocks arrive in 4-18 s (E8: 8.5, 6.1, 6.7, 10.9 s), jobless at once on the break', (t) => {
+  const p = new Pasture({ tod: 64, at: at(0, 63, 4) });
+  // three single steps up between the first and second hop's lures: a terrace 3 up from x 30 on
+  for (let x = 26; x <= 130; x++) for (let z = -6; z <= 6; z++) for (let y = 63; y <= 62 + Math.min(3, Math.floor((x - 24) / 2)); y++) p.set(at(x, y, z), 'dirt');
+  const v = game(p, at(0, 63, 0), { id: 7 });
+  let lure = at(4, 63, 0);
+  down(p, lure);
+  t.truthy(until(p, () => v.profession === 'fletcher', 400));
+  const hops: { len: number; s: number }[] = [];
+  for (const [dx, y] of [[22, 63], [23, 66], [24, 66], [25, 66]]) {
+    // the break with the ward by it (the lure is its job site): jobless on the very tick
+    t.true(flat(v.position, lure) < GAME.VALIDATE);
+    dug(p, lure);
+    p.advance(1);
+    t.deepEqual([v.profession, v.job], ['none', undefined]);
+    // the next one down a second on, as the bot that already stands there does; the hop measured from where the ward is
+    p.advance(20);
+    const next = at(lure.x + dx, y, 0);
+    down(p, next);
+    hops.push({ len: Math.round(flat(v.position, next)), s: seconds(until(p, () => v.profession === 'fletcher', 600)) });
+    lure = next;
+  }
+  t.log(hops.map(h => `${h.len} blocks: ${h.s} s`).join(', '));
+  for (const h of hops) t.true(h.len >= 20 && h.len <= 27 && h.s >= 4 && h.s <= 18, `${h.len} blocks in ${h.s} s`);
+  t.is(lure.y, 66, 'and up the three single steps');
+  t.is(p.flips.length, 5);
+});
+
+test('the bot\'s cycle as live (5 s from the break to the place, the ward on its own meanwhile): never under 4 s, a median of 12-13 s, a stroll back makes the slowest', (t) => {
+  // the game's idle villager strolls (legs of 10) and walks after the player it looks at; at the design's 2 b/s a ward
+  // that strolled 6-10 back before the place walks 30 and more: what the live hops (4-18 s) never showed at 22-25.
+  // The game's derived pace (R3: 2.7 b/s) would put every one of these inside 4-15 s
+  const all: number[] = [];
+  for (let id = 1; id <= 12; id++) {
+    const p = new Pasture({ tod: 64, at: at(0, 63, 3) });
+    const v = game(p, at(0, 63, 0), { id });
+    let lure = at(4, 63, 0);
+    down(p, lure);
+    until(p, () => v.profession === 'fletcher', 400);
+    for (const len of [22, 23, 24, 25]) {
+      dug(p, lure);
+      const next = at(lure.x + len, 63, 0);
+      for (let i = 0; i < len - 2; i++) { p.bot.at = at(lure.x + i, 63, 3); p.advance(5); }
+      down(p, next);
+      all.push(seconds(until(p, () => v.profession === 'fletcher', 1000)));
+      lure = next;
+    }
+  }
+  all.sort((a, b) => a - b);
+  const median = all[all.length >> 1], within = all.filter(s => s <= 18).length / all.length;
+  t.log(`48 hops: ${all[0]} s at the quickest, ${median} s the median, ${all.at(-1)} s the slowest; ${Math.round(within * 100)} % within 18 s`);
+  t.true(all[0] >= 4 && median >= 10 && median <= 15 && within >= 0.85 && all.at(-1)! <= 22);
+});
+
+/** The fixture's ground, read once for the file (its POI scan with it). */
+let westBase: ReturnType<typeof dumpBase> | undefined;
+const westVillage = () => {
+  const f = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'tests', 'fixtures', 'west-village.json'), 'utf8')) as { site: Pos; lures: { l0: Pos }; look: { jobs: { at: Pos }[] }; ground: Parameters<typeof dumpBase>[0] };
+  westBase ??= dumpBase(f.ground);
+  return { f, base: westBase };
+};
+
+test('on the real ground (the fixture): E8\'s first lure, the house\'s villager 24 off and 5 up woken at dawn: a fletcher in 4-18 s (live 13.3 s); then a hop of 22 down the slope in 4-18 s; the farmers keep their composters', (t) => {
+  const { f, base } = westVillage();
+  const l0 = f.lures.l0;
+  t.true(base.pois.some(q => key(q) === key(WEST_BED)) && base.pois.some(q => key(q) === key(f.site)), 'the dump\'s beds and bell are in the POI store');
+  const p = new Pasture({ base, tod: 0, at: at(l0.x - 3, l0.y, l0.z + 3) });
+  // the house's villager asleep in its bed, the three farmers at the three composters (Nov 24: 3 farmers, 4 unemployed)
+  const ward = game(p, WEST_BED, { id: 3_464_482, bed: WEST_BED, bell: { ...f.site }, sleeping: true });
+  const farmers = f.look.jobs.map((j, i) => game(p, at(j.at.x + 1, j.at.y, j.at.z), { id: 3_464_520 + i, profession: 'farmer', job: { ...j.at }, bell: { ...f.site } }));
+  p.advance(64);
+  t.false(ward.sleeping, 'awake from 10');
+  const off = flat(ward.position, l0);
+  t.true(off >= 18 && off <= 26 && ward.position.y - l0.y >= 3, `${fmt(cellAt(ward))}: ${off.toFixed(1)} off, ${ward.position.y - l0.y} up`);
+  down(p, l0);
+  const first = seconds(until(p, () => ward.profession === 'fletcher', 600));
+  t.log(`the first lure: ${first} s from ${off.toFixed(1)} off (live 13.3 s from 23 off)`);
+  t.true(first >= 4 && first <= 18, `${first} s (live 13.3 s)`);
+  // the leapfrog's next hop, 22 east and 4 down the hillside
+  const next = at(-653, 67, 2248);
+  dug(p, l0);
+  p.advance(20);
+  t.is(ward.profession, 'none');
+  down(p, next);
+  const hop = seconds(until(p, () => ward.profession === 'fletcher', 600));
+  t.true(hop >= 4 && hop <= 18, `${hop} s`);
+  t.deepEqual(farmers.map(v => [v.profession, key(v.job!)]), f.look.jobs.map(j => ['farmer', key(j.at)]));
+  t.deepEqual(p.claims.filter(c => c.kind === 'job').map(c => c.uuid), [ward.uuid, ward.uuid], 'nobody else claimed a lure');
+});
+
+test('two tables hold two villagers, one each (E8): the second taken by the second adult with the first standing; at work each keeps by its own, and a third takes neither', (t) => {
+  const p = new Pasture({ tod: 1500, at: at(0, 63, 6) });
+  const a = game(p, at(0, 63, 0), { id: 11 }), b = game(p, at(2, 63, 2), { id: 12 });
+  const t1 = at(6, 63, 0), t2 = at(34, 63, 0);
+  down(p, t1);
+  t.truthy(until(p, () => a.profession === 'fletcher' || b.profession === 'fletcher', 400));
+  const [first, second] = a.profession === 'fletcher' ? [a, b] : [b, a];
+  p.advance(200);
+  t.is(second.profession, 'none', 'the first table is not free: its ticket is held');
+  down(p, t2);
+  t.truthy(until(p, () => second.profession === 'fletcher', 600));
+  t.deepEqual([key(first.job!), key(second.job!)], [key(t1), key(t2)]);
+  t.deepEqual([p.tickets.get(key(t1)), p.tickets.get(key(t2))], [first.uuid, second.uuid]);
+  const third = game(p, at(20, 63, 2), { id: 13 });
+  // through the work hours: each walks back to within 9 (Manhattan) of its block and strolls round it (legs of 8 from
+  // within 4: up to 12 off), and the third looks and finds no free site
+  p.advance(3000 - p.tod);
+  let far = 0;
+  for (; p.tod < 8900; p.advance(20)) far = Math.max(far, flat(first.position, mid(t1)), flat(second.position, mid(t2)));
+  t.true(far <= 12.5, `${far} off at the most`);
+  t.deepEqual([first.profession, second.profession, third.profession], ['fletcher', 'fletcher', 'none']);
+  t.deepEqual(p.claims.filter(c => c.uuid === third.uuid && c.kind === 'job'), []);
+});
+
+test('the workshop\'s smithing table takes the ward (E8, three times): jobless between hops it claims the free site within 48 before the next lure is down; lifted 27 off nothing changes, within 16 it is jobless at once and takes the lure', (t) => {
+  const p = yard({ tod: 1200, at: at(-549, 63, 2188) });
+  // the yard hop north along its path: the ward a fletcher at a lure 20 inside the south gate, the workshop's table 36 off
+  const l1 = at(-549, 63, 2190), l2 = at(-549, 63, 2166);
+  down(p, l1);
+  const v = game(p, at(-549, 63, 2192), { id: 21, bell: { ...WEST_BELL }, bed: { ...WEST_BED } });
+  t.truthy(until(p, () => v.profession === 'fletcher', 400));
+  t.true(flat(v.position, SMITHING) < GAME.SITE_R);
+  dug(p, l1);
+  // the bot picks the drop up and walks the 24 on: five seconds, in which the jobless ward looks two or three times
+  p.advance(100);
+  down(p, l2);
+  t.truthy(until(p, () => v.profession !== 'none', 1200));
+  t.is(v.profession, 'toolsmith', 'the smithing table, not the lure');
+  t.deepEqual(v.job, SMITHING);
+  t.is(p.tickets.get(key(l2)), undefined, 'the lure free all along');
+  // the lead lifted the table with the ward 27 off (it was before 2000: employed, it strolls): no effect
+  p.advance(100);
+  v.position = { x: SMITHING.x + 0.5, y: 63, z: SMITHING.z + 27.5 };
+  v.ai!.walk = undefined;
+  dug(p, SMITHING);
+  p.advance(40);
+  t.deepEqual([v.profession, key(v.job!)], ['toolsmith', key(SMITHING)], 'a job site gone 27 off is not noticed');
+  // within 16 of the cell it is jobless at once, and the lure, free and within reach, is what it takes then
+  v.position = { x: SMITHING.x + 0.5, y: 63, z: SMITHING.z + 10.5 };
+  v.ai!.walk = undefined;
+  p.advance(1);
+  t.deepEqual([v.profession, v.job], ['none', undefined]);
+  t.truthy(until(p, () => v.profession === 'fletcher', 800));
+  t.deepEqual(v.job, l2);
+  // at work the game walks a toolsmith whose table is gone back toward it: once within 16 it is jobless too. (E8 saw no
+  // reset after the lift 27 off; the hour of the lift is not recorded, and before 2000 an employed villager strolls)
+  const q = yard({ tod: 2100, at: at(-549, 63, 2188) });
+  const w = game(q, at(SMITHING.x, 63, SMITHING.z + 27), { id: 22, profession: 'toolsmith', job: { ...SMITHING } });
+  dug(q, SMITHING);
+  t.truthy(until(q, () => w.profession === 'none', 600));
+  t.true(flat(w.position, SMITHING) < GAME.VALIDATE);
+  // two free sites at the same look: the nearer by the way wins (one search to the set)
+  const r = yard({ tod: 1200, at: at(-549, 63, 2188) });
+  const near = at(-544, 63, 2160);
+  const u = game(r, at(-546, 63, 2162), { id: 23 });
+  down(r, near);
+  t.truthy(until(r, () => u.profession !== 'none', 400));
+  t.deepEqual([u.profession, u.job], ['fletcher', near]);
+});
+
+test('the bell at 9000 pulls a villager fresh from its village (E8): it leaves its lure for the bell by any way its search allows; the shut yard holds it at the west fence; over the bot\'s stair and a bridge it is out', (t) => {
+  // employed at a lure by the west side of the yard, the west village's bell 180 off
+  const ward = (p: Pasture, lure: Pos, over: Partial<Villager> = {}) => {
+    down(p, lure);
+    return game(p, at(lure.x + 1, lure.y, lure.z), { id: 31, profession: 'fletcher', job: { ...lure }, bell: { ...WEST_BELL }, bed: { ...WEST_BED }, ...over });
+  };
+  const shut = yard({ tod: 8800, crossings: false, at: at(-550, 63, 2186) });
+  const lure = at(-552, 63, 2186);
+  const v = ward(shut, lure);
+  let before = 0;
+  for (; shut.tod < 9000; shut.advance(10)) before = Math.max(before, flat(v.position, mid(lure)));
+  t.true(before <= 12.5, 'at work: by its block');
+  let west = Infinity, gone = 0;
+  for (; shut.tod < 10_900; shut.advance(10)) { west = Math.min(west, v.position.x); gone = Math.max(gone, flat(v.position, mid(lure))); }
+  t.true(gone > 9, `left its lure (${gone.toFixed(1)} off)`);
+  t.true(west < -561, `to the west fence (x ${west})`);
+  t.true(v.position.x > YARD.x1 && !v.dim, 'held');
+  t.log(`at 10900 its bell ${v.bell ? 'still pulls' : 'is forgotten'}`);
+  t.deepEqual(shut.leaks, []);
+  // the staircase by the west gate (63 -> 67, as live) and the five-block bridge over the gate it led to, with a way
+  // down the bank outside: at 9000 it is over the fence
+  const open = yard({ tod: 8900, at: at(-552, 63, 2186) });
+  for (let x = -567; x <= -563; x++) open.set(at(x, 66, 2183), 'cobblestone');
+  for (const [x, top] of [[-568, 65], [-569, 64], [-570, 63]]) for (let y = 63; y <= top; y++) open.set(at(x, y, 2183), 'cobblestone');
+  const w = ward(open, at(-558, 63, 2185), { id: 32 });
+  t.truthy(until(open, () => w.position.x < YARD.x1 - 1, 2400), 'out over the bridge');
+  t.true(open.tod > 9000);
+  // a villager days away from its village has no bell: 9000 is nothing to it, and at 9250 it walks to a lure (E8: 9253)
+  const settled = yard({ tod: 9250, at: at(-550, 63, 2186) });
+  const s = game(settled, at(-552, 63, 2190), { id: 33 });
+  down(settled, at(-552, 63, 2172));
+  t.truthy(until(settled, () => s.profession === 'fletcher', 600));
+  // a fresh one at the same hour claims nothing it walks to: GoToPotentialJobSite starts only at idle, work or play
+  const fresh = yard({ tod: 9250, at: at(-550, 63, 2186) });
+  const u = game(fresh, at(-552, 63, 2190), { id: 34, bell: { ...WEST_BELL }, bed: { ...WEST_BED } });
+  down(fresh, at(-552, 63, 2172));
+  fresh.advance(600);
+  t.is(u.profession, 'none');
+  t.true(flat(u.position, at(-552, 63, 2172)) > 8);
+});
+
+test('in the lock at 9000 the bell pulls in vain: contained by its six cells; a bell within 100 is a target it cannot reach and is forgotten in 200 ticks (R3), one farther is walked toward in legs', (t) => {
+  const p = yard({ tod: 8950, at: at(-553, 63, 2136) });
+  const l = lock(p);
+  // the ward in the lock, P and H shut (the lure in the socket's place)
+  const near = at(-600, 63, 2150);
+  p.set(near, 'bell');
+  const v = game(p, at(-556, 63, 2136), { id: 41, bell: { ...near }, bed: { ...WEST_BED } });
+  const w = game(p, at(-555, 63, 2135), { id: 42, bell: { ...WEST_BELL }, bed: { ...WEST_BED } });
+  t.truthy(until(p, () => v.bell === undefined, 600), 'the near bell forgotten');
+  t.true(p.tod > 9000 + 200 && p.tod < 9000 + 400, `at ${p.tod}`);
+  p.advance(10_950 - p.tod);
+  const inside = (u: Villager) => { const c = cellAt(u); return c.x >= l.box.x1 && c.x <= l.box.x2 && c.z >= l.box.z1 && c.z <= l.box.z2; };
+  t.true(inside(v) && inside(w), 'both still in the lock at 10950');
+  t.deepEqual(p.leaks, []);
+});
+
+test('out by an open gate in 4 s (E8, trip 2): at 9000 the bell takes a fresh ward out of the hall by the gate left open; with the lock it gets no farther than the lock; the leak at night (the table dug with the gate open) is the worst case\'s', (t) => {
+  // the table the lead put in the hall from the gateway, the ward a fletcher at it, H standing open at 9000
+  const table = at(-558, 63, 2131);
+  const bare = yard({ lock: false, tod: 8990, at: at(-556, 63, 2138) });
+  down(bare, table);
+  const v = game(bare, at(-557, 63, 2131), { id: 51, profession: 'fletcher', job: { ...table }, bell: { ...WEST_BELL }, bed: { ...WEST_BED } });
+  bare.swing(H, true, 'the lead');
+  bare.advance(10);
+  t.is(bare.tod, 9000);
+  const out = until(bare, () => bare.leaks.some(e => e.uuid === v.uuid), 200);
+  t.true(seconds(out) <= 4, `out by H in ${seconds(out)} s`);
+  t.true(v.position.z > H.z);
+  // the lock standing: H open behind a shut P, it comes as far as the lock
+  const p = yard({ tod: 8990, at: at(-553, 63, 2140) });
+  down(p, table);
+  const w = game(p, at(-557, 63, 2131), { id: 52, profession: 'fletcher', job: { ...table }, bell: { ...WEST_BELL }, bed: { ...WEST_BED } });
+  p.swing(H, true, 'the lead');
+  let lockSeen = false;
+  for (let n = 0; n < 60; n++) { p.advance(10); lockSeen ||= w.position.z > H.z && w.position.z < P.z; }
+  t.true(lockSeen && p.leaks.some(e => e.uuid === w.uuid && key(e.gate) === key(H)), 'out of the hall by H, into the lock');
+  t.false(p.leaks.some(e => key(e.gate) === key(P)));
+  t.deepEqual(outside(p), [], 'never in the yard');
+  // the night the second villager was lost: asleep in a hall bed, its table 3 off dug from the gateway with H open. The
+  // game's rules put it back to bed; the live record has it awake and out in the 4 s (the worst case: `leaks`)
+  const night = (leaks: boolean) => {
+    const q = yard({ lock: false, tod: 14_000, at: H });
+    const bed = at(-558, 63, 2127), its = at(-557, 63, 2129);
+    down(q, its);
+    const u = game(q, bed, { id: 53, profession: 'fletcher', job: { ...its }, bed: { ...bed }, sleeping: true, ...(leaks ? { leaks } : {}) });
+    q.swing(H, true, 'the lead');
+    dug(q, its);
+    // in for the drop and back out, the gate standing open behind the lead
+    const walk = [at(-556, 63, 2133), at(-556, 63, 2132), at(-557, 63, 2131), at(-557, 63, 2130), at(-557, 63, 2131), at(-556, 63, 2132), at(-556, 63, 2133), H, at(-556, 63, 2135), at(-556, 63, 2136), at(-556, 63, 2137)];
+    const from = q.tick;
+    for (const c of walk) { q.bot.at = c; q.advance(5); }
+    const left = until(q, () => q.leaks.some(e => e.uuid === u.uuid), 200);
+    return { u, left: left === undefined ? undefined : q.tick - from };
+  };
+  const game1 = night(false), worst = night(true);
+  t.deepEqual([game1.u.profession, worst.u.profession], ['none', 'none'], 'jobless at once, within 16');
+  t.is(game1.left, undefined, 'the game\'s own rules: back to its bed');
+  t.true(seconds(worst.left) <= 4, `the worst case: out in ${seconds(worst.left)} s`);
+});
+
+test('the bed at 12000 (E8): fresh from its village it heads for its bed there, unreachable from the shut yard; 1200 ticks of no way and it takes the nearest free bed within 48 and sleeps (live: the bot\'s bed at 13620); from 12000 it walks to no lure, at dawn it does', (t) => {
+  const p = yard({ tod: 11_950, crossings: false, at: at(-545, 63, 2188) });
+  dug(p, SMITHING);
+  const bot = at(-537, 63, 2193);
+  p.set(bot, 'red_bed[facing=north,occupied=false,part=head]');
+  p.set(at(-537, 63, 2194), 'red_bed[facing=north,occupied=false,part=foot]');
+  const v = game(p, at(-556, 63, 2190), { id: 61, bell: { ...WEST_BELL }, bed: { ...WEST_BED } });
+  p.advance(200);
+  // a lure 8 off the bot's bed, down at night: claimed or not, not walked to
+  const lure = at(-541, 63, 2187);
+  down(p, lure);
+  // (from the west fence a leg toward the bed that lands inside the yard is reached and starts the 1200 again: when it
+  // gives up is the legs' luck; live it was 80 s into the night)
+  t.truthy(until(p, () => v.sleeping, 11_800), 'asleep before dawn');
+  t.log(`asleep at ${p.tod} (live 13620)`);
+  t.true(p.tod >= 13_200 && p.tod < 23_990, `at ${p.tod}`);
+  t.deepEqual(v.bed, bot);
+  t.is(v.profession, 'none', 'no lure taken at night');
+  t.deepEqual(p.claims.filter(c => c.kind === 'bed').map(c => key(c.at)), [key(bot)]);
+  // dawn: awake at 10, and the lure taken
+  p.advance(24_000 - p.tod + 5);
+  t.true(v.sleeping);
+  t.truthy(until(p, () => v.profession === 'fletcher', 800));
+  t.true(p.tod > 10 && p.tod < 900);
+});
+
+test('the game\'s walker: single steps and never two, a fall of 3 and not 4, a fence top only from a block beside it; doors pass, shut gates, fences, lava and rails are walls (on a rail it crosses rails), water passes; 48 walked at the most', (t) => {
+  const lawn = () => new Pasture({ tod: 1000, at: at(0, 63, 6) });
+  const way = (p: Pasture, from: Pos, to: Pos, o: { onRail?: boolean } = {}) => p.gamePath(from, [to], GAME.REACH, o).reached;
+  const wall = (p: Pasture, x: number, block: string, ys = [63, 64]) => { for (let z = -40; z <= 40; z++) for (const y of ys) p.set(at(x, y, z), block); };
+  // a rise of one onto a block, of two never; a terrace with steps cut is a way
+  const rise = lawn();
+  for (let z = -12; z <= 12; z++) for (let x = 4; x <= 12; x++) { rise.set(at(x, 63, z), 'dirt'); rise.set(at(x, 64, z), 'dirt'); }
+  t.false(way(rise, at(0, 63, 0), at(8, 65, 0)), 'a 2-high step');
+  rise.set(at(3, 63, 0), 'dirt');
+  t.true(way(rise, at(0, 63, 0), at(8, 65, 0)), 'cut to single steps');
+  // falls: 3 down is a way (and no way back up), 4 is not
+  for (const [h, ok] of [[3, true], [4, false]] as const) {
+    const fall = lawn();
+    for (let z = -12; z <= 12; z++) for (let x = -12; x <= 2; x++) for (let y = 63; y < 63 + h; y++) fall.set(at(x, y, z), 'dirt');
+    t.is(way(fall, at(0, 63 + h, 0), at(8, 63, 0)), ok, `a fall of ${h}`);
+    t.false(way(fall, at(8, 63, 0), at(0, 63 + h, 0)));
+  }
+  // a fence line: a wall; a block beside it is a way over its top (1.5: no rise from the ground, 0.5 from the block)
+  const fence = lawn();
+  wall(fence, 4, 'oak_fence', [63]);
+  t.false(way(fence, at(0, 63, 0), at(8, 63, 0)));
+  fence.set(at(3, 63, 0), 'cobblestone');
+  t.true(way(fence, at(0, 63, 0), at(8, 63, 0)), 'over the fence by the block beside it');
+  // a wall with a doorway: a wooden door passes (a villager opens it), an iron one, a shut gate, lava do not; an open gate does
+  for (const [block, ok] of [['oak_door[half=lower,open=false]', true], ['iron_door[half=lower,open=false]', false], ['oak_fence_gate[open=false]', false], ['oak_fence_gate[open=true]', true], ['lava', false]] as const) {
+    const door = lawn();
+    wall(door, 4, 'stone', [63, 64, 65]);
+    door.set(at(4, 63, 0), block);
+    door.set(at(4, 64, 0), block.includes('door') ? block.replace('lower', 'upper') : 'air');
+    t.is(way(door, at(0, 63, 0), at(8, 63, 0)), ok, block);
+  }
+  // a line of rails across the way: a wall to it from off the rails, none to one standing on one (UNPASSABLE_RAIL)
+  const rails = lawn();
+  for (let z = -40; z <= 40; z++) rails.set(at(4, 63, z), 'rail[shape=north_south]');
+  t.false(way(rails, at(0, 63, 0), at(8, 63, 0)));
+  t.true(way(rails, at(4, 63, 0), at(8, 63, 0), { onRail: true }));
+  // water three wide passes (at its cost), as do the burning cells' neighbours; lava never
+  const ford = lawn();
+  for (let z = -12; z <= 12; z++) for (let x = 3; x <= 5; x++) { ford.set(at(x, 62, z), 'water'); ford.set(at(x, 61, z), 'water'); }
+  t.true(way(ford, at(0, 63, 0), at(8, 63, 0)), 'water');
+  // 48 walked at the most: a lure 6 straight off behind a wall whose way round is 50 is out of its reach
+  const far = lawn();
+  for (let z = -24; z <= 24; z++) for (const y of [63, 64]) far.set(at(3, y, z), 'stone');
+  t.true(way(far, at(0, 63, 20), at(6, 63, 20)), 'round the wall\'s end, 4 + 3 + 4 + 3 + ...: under 48');
+  t.false(way(far, at(0, 63, 0), at(6, 63, 0)), 'round from its middle: over 48');
+  t.true(far.gamePath(at(0, 63, 0), [at(6, 63, 0)], GAME.REACH).visited <= GAME.NODES);
+  // the lock's sill: from the yard no cell beside the socket stands (a rail in it), from inside the lock one does
+  const p = yard({ tod: 1000, at: at(-553, 63, 2140) });
+  const l = lock(p);
+  p.set(l.socket, 'fletching_table');
+  t.false(p.gamePath(at(-552, 63, 2138), [l.socket], GAME.REACH).reached, 'not from the yard');
+  t.true(p.gamePath(at(-556, 63, 2136), [l.socket], GAME.REACH).reached, 'from inside the lock');
+});
+
+test('the retry backoff (JitteredLinearRetry): a lure it has no way to is tried again 40-79 ticks later each miss, to 400, and forgotten 400 after its last try; a way opened then is taken up to 400 late, a lure put down after the way is open within 39 (E35)', (t) => {
+  const p = new Pasture({ tod: 1000, at: at(0, 63, 8) });
+  // the lure ringed by a fence, the villager outside
+  const lure = at(8, 63, 0);
+  for (let x = 6; x <= 10; x++) for (let z = -2; z <= 2; z++) if (Math.abs(x - 8) === 2 || Math.abs(z) === 2) p.set(at(x, 63, z), 'oak_fence');
+  down(p, lure);
+  const v = game(p, at(0, 63, 0), { id: 71 });
+  v.ai!.until = Infinity;
+  const tries: { t: number; delay: number }[] = [];
+  let last = -1;
+  for (let n = 0; n < 3000; n++) {
+    p.advance(1);
+    const r = v.ai!.retry.job.get(key(lure));
+    if (r && r.last !== last) { tries.push({ t: r.last, delay: r.delay }); last = r.last; }
+  }
+  t.is(v.profession, 'none');
+  t.is(p.claims.length, 0);
+  t.true(tries.length >= 6);
+  // each miss 40-79 longer, to 400; at 400 it is forgotten (400 after its last try) and begins again at 40-79; never tried before it is due
+  for (let i = 1; i < tries.length; i++) {
+    const a = tries[i - 1], b = tries[i], step = b.delay - a.delay;
+    if (b.t - a.t >= GAME.RETRY_FORGET) t.true(b.delay >= 40 && b.delay < 80, `forgotten, begun again at ${b.delay}`);
+    else t.true((step >= 40 && step < 80) || (b.delay === GAME.RETRY_MAX && step >= 0), `${a.delay} -> ${b.delay}`);
+    t.true(b.t - a.t >= a.delay, 'not before it was due');
+  }
+  t.true(tries.some(r => r.delay === GAME.RETRY_MAX), 'at the cap');
+  // the way opened with the delay at its cap: the claim comes at the next try, not within the next look
+  let n = 0;
+  while (v.ai!.retry.job.get(key(lure))?.delay !== GAME.RETRY_MAX && n++ < 4000) p.advance(1);
+  p.advance(5);
+  dug(p, at(6, 63, 0));
+  const late = until(p, () => p.claims.length > 0, 600)!;
+  t.true(late > GAME.LOOK + GAME.LOOK_JITTER && late <= GAME.RETRY_MAX + GAME.LOOK + GAME.LOOK_JITTER, `claimed ${late} ticks after the way opened`);
+  // a lure put down where the way is open already: claimed at its next look
+  const q = new Pasture({ tod: 1000, at: at(0, 63, 8) });
+  const w = game(q, at(0, 63, 0), { id: 72 });
+  q.advance(60);
+  down(q, lure);
+  t.true(until(q, () => q.claims.some(c => c.uuid === w.uuid), 60)! <= 39);
+});
+
+test('jobless at once when its site goes within 16, never while farther off; a traded villager keeps its profession, as does one of level 2; employed it looks no more; before 2000 an employed one strolls, at work it keeps by its block', (t) => {
+  const lawn = (tod = 1000) => new Pasture({ tod, at: at(0, 63, 8) });
+  const site = at(0, 63, 0);
+  // within 16: the next tick
+  const p = lawn();
+  down(p, site);
+  const v = game(p, at(3, 63, 0), { id: 81, profession: 'fletcher', job: { ...site } });
+  p.advance(2);
+  dug(p, site);
+  p.advance(1);
+  t.deepEqual([v.profession, v.job, p.tickets.get(key(site))], ['none', undefined, undefined]);
+  // 20 off: kept for as long as it stays off (walked there, it is noticed)
+  const q = lawn();
+  down(q, site);
+  const w = game(q, at(20, 63, 0), { id: 82, profession: 'fletcher', job: { ...site } });
+  w.ai!.until = Infinity;
+  dug(q, site);
+  q.advance(200);
+  t.deepEqual([w.profession, key(w.job!)], ['fletcher', key(site)]);
+  w.position = { x: 12.5, y: 63, z: 0.5 };
+  q.advance(1);
+  t.is(w.profession, 'none');
+  // traded (xp > 0) or level 2: the profession stays; with no site it wants its own kind only
+  const r = lawn();
+  down(r, site);
+  const traded = game(r, at(2, 63, 0), { id: 83, profession: 'fletcher', job: { ...site }, traded: true });
+  const level2 = game(r, at(-2, 63, 0), { id: 84, profession: 'fletcher', level: 2, job: { ...site } });
+  dug(r, site);
+  r.advance(1);
+  t.deepEqual([traded.profession, traded.job, level2.profession], ['fletcher', undefined, 'fletcher']);
+  down(r, at(5, 63, 3), 'lectern');
+  r.advance(200);
+  t.deepEqual(r.claims, [], 'a lectern is no fletcher\'s');
+  down(r, at(-5, 63, 3));
+  t.truthy(until(r, () => r.claims.length > 0, 60));
+  // employed: no look, a free site 3 off notwithstanding
+  const e = lawn();
+  down(e, site);
+  game(e, at(1, 63, 0), { id: 85, profession: 'fletcher', job: { ...site } });
+  down(e, at(3, 63, 0), 'composter');
+  e.advance(400);
+  t.deepEqual(e.claims, []);
+  // before 2000 an employed villager strolls where it will (E-results D29: found again 20 off); from 2000 it walks
+  // back within 9 of its block (Manhattan) and strolls round it, up to 12 off
+  const d = lawn(100);
+  down(d, site);
+  const u = game(d, at(1, 63, 0), { id: 5, profession: 'fletcher', job: { ...site } });
+  let idle = 0, work = 0;
+  for (; d.tod < 1990; d.advance(10)) idle = Math.max(idle, flat(u.position, mid(site)));
+  d.advance(3000 - d.tod);
+  for (; d.tod < 8900; d.advance(10)) work = Math.max(work, flat(u.position, mid(site)));
+  t.true(idle > 12, `${idle.toFixed(1)} off before 2000`);
+  t.true(work <= 12.5, `${work.toFixed(1)} off at work`);
+});
+
+test('a snag holds it until its block is gone (the bench by the pavilion\'s fence, live: free in 3 s); a zombie within 8 makes it run; lava, fire and a cactus hurt it, and at 0 it is gone from world.entities; a portal cell takes it to the Nether', async (t) => {
+  // wedged on the bot's bench against the fence rail (-544, 63, 2127..2128), the lure free 9 off
+  const p = yard({ tod: 3000, at: at(-546, 63, 2132) });
+  const bench = at(-544, 64, 2127), fence = at(-544, 63, 2128);
+  const v = game(p, bench, { id: 91 });
+  p.snag([bench, at(-544, 63, 2127)], [fence]);
+  down(p, at(-547, 63, 2134));
+  p.advance(400);
+  t.is(v.profession, 'none');
+  t.deepEqual(cellAt(v), bench, 'still on the bench');
+  // the stair dug drops it against the fence: still stuck; the fence segment dug frees it
+  dug(p, at(-544, 63, 2127));
+  p.advance(100);
+  t.deepEqual(cellAt(v), at(-544, 63, 2127));
+  t.is(v.profession, 'none');
+  dug(p, fence);
+  t.true(seconds(until(p, () => v.profession === 'fletcher', 400)) <= 8);
+  // a zombie 7 off: it runs at once, faster than it walks (modifier 0.75: 4.5 b/s), and keeps about 8 off it (calm
+  // beyond, it walks back to its block and runs again); the zombie gone, it is back at its work
+  const q = new Pasture({ tod: 3000, at: at(0, 63, 8) });
+  down(q, at(0, 63, 0));
+  const w = game(q, at(1, 63, 0), { id: 92, profession: 'fletcher', job: at(0, 63, 0) });
+  const z = q.animal('zombie', at(-6, 63, 0));
+  q.advance(2);
+  t.like(w.ai!.walk, { act: 'flee', bps: 4.5 });
+  t.truthy(until(q, () => flat(w.position, z.position) > HOSTILE.zombie, 60));
+  let nearest = Infinity;
+  for (let n = 0; n < 600; n++) { q.advance(1); nearest = Math.min(nearest, flat(w.position, z.position)); }
+  t.true(nearest >= 7, `${nearest.toFixed(1)} off it at the nearest`);
+  q.animals.splice(q.animals.indexOf(z), 1);
+  q.advance(600);
+  t.true(flat(w.position, at(0, 63, 0)) <= 12.5);
+  // lava 4 a half second, fire 1 and burning after, a cactus beside it 1: at 0 it is gone from every list
+  const r = new Pasture({ tod: 3000, at: at(0, 63, 8) });
+  const burnt = game(r, at(0, 63, 0), { id: 93, health: 17 });
+  const pricked = game(r, at(10, 63, 0), { id: 94, health: 17 });
+  // (each held where it stands: hurt, it panics and would run out of the fire)
+  r.snag([at(0, 63, 0), at(10, 63, 0)]);
+  r.set(at(0, 63, 0), 'fire');
+  r.set(at(11, 63, 0), 'cactus');
+  r.advance(20);
+  t.true(burnt.health < 17 && pricked.health < 17, `${burnt.health}, ${pricked.health}`);
+  r.set(at(0, 63, 0), 'lava');
+  r.advance(60);
+  t.is(burnt.health, 0);
+  t.true(burnt.dead);
+  const listed = await r.ctx.call<{ entities: { uuid: string }[] }>('world.entities', { maxDistance: 64 });
+  t.false(listed.entities.some(e => e.uuid === burnt.uuid));
+  t.true(listed.entities.some(e => e.uuid === pricked.uuid));
+  // the portal: the game's walker has a way into its cells from the yard (a mob paths through them) unless it is ringed;
+  // in one, it is gone from this world, as villager 2 went
+  const ringed = yard({ tod: 3000, at: at(-556, 63, 2152) }), bare = yard({ ring: false, tod: 3000, at: at(-556, 63, 2152) });
+  const lit = at(-559, 64, 2147);
+  t.false(ringed.gamePath(at(-556, 63, 2153), [lit], 0).reached);
+  t.true(bare.gamePath(at(-556, 63, 2153), [lit], 0).reached);
+  const lost = game(bare, at(-556, 63, 2153), { id: 95 });
+  lost.position = { x: lit.x + 0.5, y: lit.y, z: lit.z + 0.5 };
+  bare.advance(2);
+  t.is(lost.dim, 'nether');
+  t.false((await bare.ctx.call<{ entities: { uuid: string }[] }>('world.entities', { maxDistance: 64 })).entities.some(e => e.uuid === lost.uuid));
+});
+
+test('the uuid holds when unload() renumbers the ids; someone\'s villager says so on world.entities (Handlers.java marks: named, leashed, riding)', async (t) => {
+  t.regex(fs.readFileSync(path.join(mod, 'Handlers.java'), 'utf8'), /if \(e\.hasCustomName\(\)\) \{\s*o\.addProperty\("named", true\);[\s\S]*?o\.addProperty\("leashed", true\);\s*o\.addProperty\("leashedTo", holder == self \? "me" : Names\.entity\(holder\)\);[\s\S]*?o\.addProperty\("vehicle", Names\.entity\(vehicle\)\);/);
+  const p = new Pasture({ tod: 3000, at: at(0, 63, 4) });
+  const v = game(p, at(0, 63, 0), { id: 101 });
+  const named = game(p, at(3, 63, 0), { id: 102, customName: 'Bob' }), leashed = game(p, at(-3, 63, 0), { id: 103, leashedTo: 'Hunter3035' }), riding = game(p, at(0, 63, -3), { id: 104, vehicle: 'minecart' });
+  const look = async () => (await p.ctx.call<{ entities: { id: number; uuid: string; named?: boolean; customName?: string; leashed?: boolean; leashedTo?: string; vehicle?: string }[] }>('world.entities', { maxDistance: 32 })).entities;
+  const before = await look();
+  t.like(before.find(e => e.uuid === named.uuid), { named: true, customName: 'Bob' });
+  t.like(before.find(e => e.uuid === leashed.uuid), { leashed: true, leashedTo: 'Hunter3035' });
+  t.like(before.find(e => e.uuid === riding.uuid), { vehicle: 'minecart' });
+  t.is(before.find(e => e.uuid === v.uuid)!.named, undefined);
+  p.unload();
+  const after = await look();
+  t.deepEqual(after.map(e => e.uuid).sort(), before.map(e => e.uuid).sort());
+  t.true(after.every(e => before.find(b => b.uuid === e.uuid)!.id !== e.id), 'every id new, every uuid as it was');
+});
+
+test('world.findBlocks is Handlers.java\'s: the kind within maxDistance (128 at most) of the bot\'s position, the nearest first, count of them (256 at most), on cells the client holds; the POI store the villagers claim from', async (t) => {
+  const java = fs.readFileSync(path.join(mod, 'Handlers.java'), 'utf8');
+  const fb = body(java, 'world.findBlocks');
+  t.regex(fb, /int maxDistance = Math\.min\(intParam\(p, "maxDistance", 32\), 128\);/);
+  t.regex(fb, /int count = Math\.min\(intParam\(p, "count", 1\), 256\);/);
+  t.regex(fb, /Vec3 eye = pl\.position\(\);/);
+  t.regex(fb, /\.filter\(bp -> Vec3\.atCenterOf\(bp\)\.distanceTo\(eye\) <= maxDistance\)/);
+  t.regex(fb, /\.sorted\(Comparator\.comparingDouble\(bp -> Vec3\.atCenterOf\(bp\)\.distanceTo\(eye\)\)\)/);
+  t.regex(fb, /return obj\("block", name, "positions", out\);/);
+  const p = yard({ at: at(-549, 63, 2160) });
+  const find = (o: Any) => p.ctx.call<{ block: string; positions: Pos[] }>('world.findBlocks', o);
+  t.deepEqual(await find({ block: 'smithing_table', maxDistance: 128, count: 4 }), { block: 'smithing_table', positions: [SMITHING] });
+  t.deepEqual((await find({ block: 'minecraft:fletching_table', maxDistance: 64 })).positions, [at(-552, 63, 2127)]);
+  // the nearest first, within maxDistance, count of them; a lure down is found, dug it is gone
+  down(p, at(-549, 63, 2150));
+  t.deepEqual((await find({ block: 'fletching_table', maxDistance: 64, count: 5 })).positions, [at(-549, 63, 2150), at(-552, 63, 2127)]);
+  t.deepEqual((await find({ block: 'fletching_table', maxDistance: 20, count: 5 })).positions, [at(-549, 63, 2150)]);
+  t.deepEqual((await find({ block: 'fletching_table', maxDistance: 64 })).positions, [at(-549, 63, 2150)], 'count 1 by default');
+  dug(p, at(-549, 63, 2150));
+  t.deepEqual((await find({ block: 'fletching_table', maxDistance: 64 })).positions, [at(-552, 63, 2127)]);
+  t.is((await find({ block: 'white_bed', maxDistance: 64, count: 9 })).positions.length, 6, 'both halves of the three beds');
+  // the cells the client holds: out of its sight nothing (the real ground's bell, from the yard)
+  const { base } = westVillage();
+  const far = new Pasture({ base, at: at(-560, 63, 2186) });
+  t.deepEqual((await far.ctx.call<{ positions: Pos[] }>('world.findBlocks', { block: 'bell', maxDistance: 128 })).positions, []);
+  const near = new Pasture({ base, at: at(-690, 69, 2262) });
+  t.deepEqual((await near.ctx.call<{ positions: Pos[] }>('world.findBlocks', { block: 'bell', maxDistance: 128 })).positions, [WEST_BELL]);
+  await t.throwsAsync(find({ block: 'stone' }), { message: /job sites, beds and bells only/ });
 });

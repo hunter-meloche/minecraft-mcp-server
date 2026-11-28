@@ -9,6 +9,7 @@ import { onEdge, onRing, yardRing, type FenceRing } from './fence.js';
 import { roundDue, roundFrom, toRound } from './work.js';
 import { reservedSites } from './progress.js';
 import { takeFromChests } from './chests.js';
+import { heldByFetch, inHallOrLock } from './fetch.js';
 
 /**
  * Once a day: take away the stray blocks left standing on the lawn: an emergency wall-in, Baritone's scaffold, a
@@ -165,6 +166,17 @@ export function strayCells(clusters: Cluster[], groundY: number, built: Set<stri
     out.push(...dig.sort((a, b) => b.y - a.y).map(({ x, y, z }) => ({ x, y, z, ...mark })));
   }
   return out;
+}
+
+/**
+ * A stray the round may take (idle-plan V, 6.3): not in a cell the villager fetch holds (a lure or a cover of the
+ * bot's, set down for a villager: heldByFetch), and not in the villager hall nor its lock (inHallOrLock): those cells
+ * are the hall chores' alone, and a walk in there is a walk past villagers with a gate open. But a doorway of the bot's
+ * builds there (the cell over the hall's gate or the lock's) is still cleared, from outside: a stray over the hall's
+ * gate shut every chore out on Nov 24 (doorwayCells), and the lock is not ready with one over its own.
+ */
+export function mayTidy(world: WorldMemory, p: Pos, doorways: Set<string> = new Set()): boolean {
+  return !heldByFetch(world, p) && (!inHallOrLock(world, p) || doorways.has(key(p)));
 }
 
 /**
@@ -451,7 +463,8 @@ async function plugFluid(ctx: GoalContext, f: StrayFluid, groundY: number, here:
  */
 async function sweepFluids(ctx: GoalContext, at: (p: Pos) => string, yard: { x1: number; z1: number; x2: number; z2: number; y: number },
   built: Set<string>, here: { at: Pos }): Promise<{ text: string; changed: boolean; stays: boolean }> {
-  const { stray } = strayFluids(at, yard, fluidOwner(ctx.world), built);
+  // (none in the villager hall or its lock, nor in a cell the villager fetch holds: mayTidy)
+  const stray = strayFluids(at, yard, fluidOwner(ctx.world), built).stray.filter(f => mayTidy(ctx.world, f));
   const tk = (p: Pos) => `fluid:${key(p)}`;
   // forget the ones gone (plugged, or dried up some other way)
   for (const k of Object.keys(ctx.world.tidyTries ?? {})) if (k.startsWith('fluid:') && !stray.some(f => tk(f) === k)) delete ctx.world.tidyTries![k];
@@ -520,7 +533,8 @@ export function tidyGoal(rt: ClientRuntime): Goal {
       const portal = portalFence(ctx.world);
       const inner = portal ? [{ ring: portal, fence: yardFence(builtList.map(b => b.at), at, portal), at }] : [];
       const rings = [yard, ...(ring ? [ring] : []), ...(portal ? [portal] : []), ...(ctx.world.fenceMove ? [ctx.world.fenceMove.old] : [])];
-      const cells = strayCells(r.placed, yard.y, built, fence, doorwayCells(builtList.map(b => b.at), at, rings), inner).slice(0, 40);
+      const doorways = doorwayCells(builtList.map(b => b.at), at, rings);
+      const cells = strayCells(r.placed, yard.y, built, fence, doorways, inner).filter(c => mayTidy(ctx.world, c, doorways)).slice(0, 40);
       // (with stray fluid still on it the lawn is not clear: its blocks are)
       if (!cells.length) return said(fluids.stays ? 'no stray blocks' : 'the lawn is clear');
       const tries = (ctx.world.tidyTries ??= {});
@@ -531,8 +545,8 @@ export function tidyGoal(rt: ClientRuntime): Goal {
       for (const c of todo) {
         if (ctx.signal.aborted) break;
         const k = key(c);
-        // only the cell's place: digByHand hands what it is given on to the bridge
-        const why = await digByHand(ctx, blocks, box, { x: c.x, y: c.y, z: c.z }, here, gone);
+        // only the cell's place: digByHand hands what it is given on to the bridge (never from in the hall or its lock)
+        const why = await digByHand(ctx, blocks, box, { x: c.x, y: c.y, z: c.z }, here, gone, p => inHallOrLock(ctx.world, p));
         if (!why) { dug++; if (c.fence) byFence++; if (c.ring) byRing++; gone.add(k); delete tries[k]; } else tries[k] = (tries[k] ?? 0) + 1;
       }
       // forget strays that are gone (dug, or taken down by someone else); the fluid's are the sweep's own

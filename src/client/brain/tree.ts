@@ -15,6 +15,7 @@ import { hallMilestone } from './villagers.js';
 import { brewingMilestone } from './brewing.js';
 import { wartFarmMilestone } from './wart.js';
 import { netheriteMilestone } from './netherite.js';
+import { wardOut } from './fetch.js';
 
 /**
  * The bot's long game, in order. Each milestone is done once the world shows it (a zone the build registered), so
@@ -125,6 +126,9 @@ const perimeter: Milestone = {
       run: async (ctx: GoalContext, st: MilestoneState) => {
         const mv = ctx.world.fenceMove;
         if (!mv) return { status: 'done', text: 'no fence to move' };
+        // not begun while a villager is on its way or may come by (fetch.ts wardOut): from here until the new side
+        // stands the yard has a gap a villager in it walks out by
+        if (wardOut(ctx.world, ctx.s.now)) return { status: 'blocked', text: 'waiting: a villager is on its way (the fence moves out once it is in)', retryMs: 10 * MINUTE };
         const yard = await yardOf(ctx);
         const cells = sideCells(mv.old, mv.side).filter(p => !onRing(p, yard));
         let dug = 0;

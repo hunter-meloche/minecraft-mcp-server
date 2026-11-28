@@ -12,6 +12,7 @@ import { slice } from './terraslicer/slicer.js';
 import { haveFor, provisionStep, release, reserve, toolpathBill, toolsFor } from './terraslicer/provision.js';
 import { runLoad } from './terraslicer/executor.js';
 import { FURNACE_TURN, furnaceTurn } from '../brain/chores.js';
+import { heldByFetch, placeGuard } from '../brain/fetch.js';
 
 /**
  * Build jobs: the LLM asks for a structure (structure-apply) and the brain works on it at priority 3.5, below staying
@@ -56,6 +57,21 @@ export function jobText(j: BuildJob): string {
   return `#${j.id} ${j.mode} ${j.structure}: ${j.status}${phase}${j.note ? ` (${j.note})` : ''}${extra ? `; ${extra}` : ''} [${when}]`;
 }
 
+/**
+ * The cells the villager fetch keeps the structures off (idle-plan V, 6.3): one it holds (a job block of the bot's
+ * lifted out of a villager's way, a lure or a cover of its own standing there: put back or dug by a job, the fetch's
+ * own act is undone), and while a villager is out a job block still to go up outside the villager hall (a free one in
+ * the yard takes the villager: the workshop's smithing table, put back too early, took one a third time, Nov 23-24).
+ * The cells, not the job: the homestead's design covers the whole yard and holds a smithing table, and the rest of it
+ * is built meanwhile. Nothing is kept off with no fetch record, nor while its journal is empty and no villager is out.
+ */
+export function keptOff(world: WorldMemory, now: number): (c: Change) => boolean {
+  if (!world.fetch) return () => false;
+  return c => heldByFetch(world, c.at) || (c.kind !== 'ok' && placeGuard(world, c.want, now, c.at) !== undefined);
+}
+/** How long a job whose last cells are kept off waits before it looks again. */
+const HELD_WAIT = 10 * MINUTE;
+
 /** Scaffold blocks dug in one tidy round, at most. */
 const TIDY_BATCH = 48;
 
@@ -63,14 +79,17 @@ const TIDY_BATCH = 48;
  * Dig one block by hand, changing nothing else: from where the bot stands if it's in reach, else from a floor spot in
  * reach (tidy.ts standSpots) walked to carefully (Baritone breaking and placing nothing on the way). Baritone's own
  * dig walked into reach by breaking fences and walls and pillaring up on new scaffold. Returns why not, or ''.
+ * `keepOut`: cells it never stands in to dig (the tidy round's: the villager hall and its lock, the hall chores' alone).
  */
-export async function digByHand(ctx: GoalContext, blocks: (string | null)[], box: Box, p: Pos, here: { at: Pos }, gone: Set<string>): Promise<string> {
+export async function digByHand(ctx: GoalContext, blocks: (string | null)[], box: Box, p: Pos, here: { at: Pos }, gone: Set<string>,
+  keepOut?: (at: Pos) => boolean): Promise<string> {
   type Dug = { dug: boolean; reason?: string };
   const dig = () => ctx.call<Dug>('dig.here', { ...p, timeoutMs: 15_000 }, 25_000).catch(e => ({ dug: false, reason: (e as Error).message }));
   let r = await dig();
   if (r.dug || r.reason === 'air') return '';
   let why = r.reason ?? 'not dug';
-  for (const spot of standSpots(blocks, box, p, here.at, gone, 3)) {
+  const spots = keepOut ? standSpots(blocks, box, p, here.at, gone, Infinity).filter(q => !keepOut(q)).slice(0, 3) : standSpots(blocks, box, p, here.at, gone, 3);
+  for (const spot of spots) {
     if (ctx.signal.aborted) return 'stopped';
     const g = await ctx.call<{ arrived: boolean; at?: Pos }>('goto', { ...spot, range: 0, careful: true, timeoutMs: 30_000 }, 45_000)
       .catch(() => ({ arrived: false, at: undefined }));
@@ -330,10 +349,15 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
         const unseen = changes.filter(x => x.unknown).length;
         if (unseen) return `${job.structure}: ${unseen} cell(s) still out of sight (not loaded): later`;
       }
+      // the cells the villager fetch keeps it off are left as they stand, unprotected and unbuilt (keptOff): the rest
+      // goes on
+      const off = keptOff(ctx.world, ctx.s.now);
+      const held = changes.filter(off);
+      if (held.length) changes = changes.filter(x => !off(x));
       // what stands right is the bot's now: Baritone's walks and mining leave it alone (the mod's no-break rule)
       protect?.(changes.filter(x => x.kind === 'ok' && x.want !== 'air' && x.have && !/^(minecraft:)?(air|cave_air)$/.test(x.have))
         .map(x => ({ at: x.at, state: x.have })));
-      const finish = (leftCells: number) => {
+      const complete = (leftCells: number) => {
         const st = store.loadState(job.world, job.structure);
         st.completeAt = ctx.s.now;
         st.verified = Object.fromEntries(changes.map(x => [key(x.at), x.have]));
@@ -345,6 +369,15 @@ export function structureGoal(store: StructureStore, protect?: (blocks: { at: Po
         release(ctx.world, job.id);
         stamp(`complete${left}`, 'done');
         return `${job.structure} complete${left}`;
+      };
+      // all else in place and a kept cell still to do: the job waits for it, and is not called complete without it (a
+      // design's job block skipped while a villager was out would else never go up)
+      const finish = (leftCells: number) => {
+        const waiting = pending(held).length;
+        if (!waiting) return complete(leftCells);
+        job.retryAt = ctx.s.now + HELD_WAIT;
+        stamp(`waiting: ${waiting} cell(s) kept for a villager on its way (the rest is built)`, 'waiting');
+        return jobText(job);
       };
       return terraslice(ctx, job, c, changes, new Set(st0.tidy!.keep), stamp, finish, protect, built);
   }
@@ -370,13 +403,15 @@ export function driftGoal(store: StructureStore): Goal {
       (ctx.world.lastDone ??= {}).structures = ctx.s.now;
       const w = ctx.world.id!;
       const out: string[] = [];
+      // (a cell the villager fetch keeps off is no drift: keptOff)
+      const off = keptOff(ctx.world, ctx.s.now);
       for (const name of store.listStructures(w)) {
         if (ctx.signal.aborted) break;
         const s = store.loadStructure(w, name);
         if (!s) continue;
         let c: Compiled;
         try { c = compile(store.designOf(s), s.anchor, s.rotation ?? 0); } catch { continue; }
-        const todo = pending(await plan(ctx, c));
+        const todo = pending(await plan(ctx, c)).filter(x => !off(x));
         const st = store.loadState(w, name);
         st.drift = { at: ctx.s.now, changes: todo.length, sample: todo.slice(0, 5).map(x => `${x.kind} ${x.want === 'air' ? x.have : x.want} at ${key(x.at)}`) };
         if (todo.length) st.history.push({ at: ctx.s.now, text: `drift: ${todo.length} cell(s) differ` });

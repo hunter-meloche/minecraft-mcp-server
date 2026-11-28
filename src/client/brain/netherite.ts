@@ -14,6 +14,7 @@ import { holdHarmless } from './fluidpick.js';
 import { goHome } from './homeward.js';
 import { inFence } from './yardgates.js';
 import { REPAIR_BELOW } from './anvil.js';
+import { heldByFetch } from './fetch.js';
 
 /**
  * Netherite (P6 of the progression plan): the chain from the Nether's ancient debris to the main set's four netherite
@@ -171,6 +172,15 @@ export function smithingTable(world: WorldMemory): Pos | undefined {
   if (own) return { x: own.x, y: own.y, z: own.z };
   const seen = world.landmarks.smithing;
   return seen && world.yard && inYardBox(seen, world.yard) ? { ...seen } : undefined;
+}
+
+/**
+ * The smithing table lifted out of a villager's way (the workshop's took a villager led home three times, Nov 23-24),
+ * or undefined: the smithing waits until the villager is in and the table is back.
+ */
+export function tableLifted(world: WorldMemory): string | undefined {
+  const at = smithingTable(world);
+  return at && heldByFetch(world, at) ? `the smithing table at ${fmt(at)} is lifted for a villager (back once it is in)` : undefined;
 }
 
 /**
@@ -343,7 +353,7 @@ async function ingotFor(ctx: GoalContext): Promise<Record<string, number>> {
 export function pieceStep(kind: ArmourKind): Step {
   return {
     name: `smith the netherite ${kind}`,
-    waits: v => pieceWaits(kind, v.s.items, v.world),
+    waits: v => (netheritePiece(v.s.items, v.world, kind) ? undefined : tableLifted(v.world)) ?? pieceWaits(kind, v.s.items, v.world),
     run: async ctx => {
       let items = await inventory(ctx);
       const has = netheritePiece(items, ctx.world, kind);
@@ -352,6 +362,8 @@ export function pieceStep(kind: ArmourKind): Step {
       if (wait) return blocked(wait, 30 * MINUTE);
       const at = smithingTable(ctx.world);
       if (!at) return blocked('no smithing table in the workshop (workshop:smithing) nor in the yard', 60 * MINUTE);
+      const lifted = tableLifted(ctx.world);
+      if (lifted) return blocked(lifted, 30 * MINUTE);
       // (a wait of its own, short: the stash makes the room meanwhile)
       const used = new Set(items.filter(pocket).map(i => i.slot)).size;
       if (36 - used < SMITH_SLOTS) return blocked(`pockets: ${used}/36, the smithing wants ${SMITH_SLOTS} free (the templates, the ingot's makings, the piece)`, 5 * MINUTE);

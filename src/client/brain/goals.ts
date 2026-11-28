@@ -11,7 +11,7 @@ import { walkHome } from './homeward.js';
 // homeward.ts already; villagerwalk.ts and fetch.ts use nothing of their imports at their top level)
 import { shutGate, strictGates } from './yardgates.js';
 import { inLock, lockOf, type Lock } from './villagerwalk.js';
-import { dropEntry, fetchOf } from './fetch.js';
+import { dropEntry, fetchOf, tripLive } from './fetch.js';
 
 /** What the brain knows at one moment: read fresh each tick. */
 export interface Snapshot {
@@ -457,6 +457,11 @@ export function shelterGoal(): Goal {
     interruptible: false,
     wants: (s, world) => {
       if (s.activity === 'work') { holedUp = false; holedAt = undefined; return null; }
+      // thunder by day (the work day's hours, until 11000) calls the bot in at any hour (schedule.ts: rest), and would
+      // cut a villager's lead midway: the lead runs on by the clock instead, finishing being the safer end (monsters
+      // spawn in thunder, and a villager let go out there is lost), and the run takes the bot home after. At night,
+      // and with no live lead, as ever
+      if (s.thundering && daylightLeft(s.timeOfDay) > 0 && tripLive(world, s.now)) return null;
       if (stillHoled(s.position) || s.sleeping || s.dimension !== 'overworld' || !s.home) return null;
       // in the evening the fenced, lit yard is home enough (the chests and the furnace are in it: pulled back to the
       // doorstep, the kit and the food goal never got to them); at night, the house. On its level: a cave under the

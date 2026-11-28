@@ -8,7 +8,7 @@ import { ToolFactory } from '../../src/tool-factory.js';
 import { registerBrainTools } from '../../src/client/brain/brain-tools.js';
 import { activityAt, daylightLeft } from '../../src/client/brain/schedule.js';
 import { findLandmarks } from '../../src/client/brain/memory.js';
-import { Brain, CRITICAL_CUTS, NO_LOOP_HOLD, SURVIVAL, decide, wedgedOut } from '../../src/client/brain/brain.js';
+import { Brain, CRITICAL_CUTS, LEAD_TIMEOUT_MS, NO_LOOP_HOLD, SURVIVAL, decide, wedgedOut } from '../../src/client/brain/brain.js';
 import { lockSeen, outOfHallGoal, outOfHallWants, villagerCareGoal } from '../../src/client/brain/villagercare.js';
 import { hallChoresGoal, inHallBox } from '../../src/client/brain/hallchores.js';
 import { fetchOf, peekFetch, type Trip } from '../../src/client/brain/fetch.js';
@@ -134,7 +134,15 @@ function fakeRuntime(state: { pos: { x: number; y: number; z: number }; time: nu
   return { rt, calls };
 }
 
-const settle = () => new Promise(r => setTimeout(r, 20));
+/**
+ * The brain's work after a tick or a run's end, done: 20 ms, then the event loop turned over until its chain of ticks
+ * (each a setTimeout 0, brain.ts soon) has run. A bare 20 ms timer under a loaded machine (the whole suite's workers at
+ * once) fired before the chained tick, and the tick-chaining tests failed now and then; every other wait is a promise.
+ */
+const settle = async () => {
+  await new Promise(r => setTimeout(r, 20));
+  for (let i = 0; i < 25; i++) await new Promise(r => setImmediate(r));
+};
 
 test('the brain walks home in the evening, goes to bed at night and gets up in the morning', async (t) => {
   const state = { pos: { x: 60, y: 64, z: 0 }, time: 11_500 };
@@ -161,6 +169,47 @@ test('the brain walks home in the evening, goes to bed at night and gets up in t
   t.false(!!(state as { sleeping?: boolean }).sleeping);
   t.regex(brain.status(), /done wake/);
   brain.setEnabled(false);
+});
+
+// (serial: out.ledBy is the module's one hold, and another test's lead would take it over)
+test.serial('a run that leads a villager (out.ledBy its own) is not stopped at its goal\'s timeout, only at LEAD_TIMEOUT_MS; one that does not lead is; a lead that ended by a throw leaves no hold behind (S1 review S4, S5)', async (t) => {
+  let now = 0;
+  const state = { pos: { x: 0, y: 64, z: 0 }, time: 1000 };
+  const { rt } = fakeRuntime(state);
+  t.teardown(() => { afield.ledBy = undefined; });
+  // care's 10 minutes, a resume that leads: on at 11 min, stopped past the lead's cap
+  const lead: Goal = {
+    name: 'lead', priority: 10, wants: () => 'test', timeoutMs: 10 * 60_000, retryMs: 1000,
+    run: async ctx => { afield.ledBy = ctx.signal; return (await ctx.act('slow')).text; }
+  };
+  const brain = new Brain(rt, { tickMs: 1e9, goals: [lead], now: () => now });
+  brain.setEnabled(true);
+  await brain.tick(); await settle();
+  now += 11 * 60_000; await brain.tick(); await settle();
+  t.notRegex(brain.status(), /lead ran out of time/, 'a lead is not cut at the goal\'s 10 minutes');
+  now += LEAD_TIMEOUT_MS; await brain.tick(); await settle();
+  t.regex(brain.status(), /lead ran out of time/, 'the cap');
+  brain.setEnabled(false);
+  await settle();
+  // the same goal without the hold: cut at its own timeout
+  const plain: Goal = { name: 'plain', priority: 10, wants: () => 'test', timeoutMs: 10 * 60_000, retryMs: 1000, run: async ctx => (await ctx.act('slow')).text };
+  const other = new Brain(fakeRuntime(state).rt, { tickMs: 1e9, goals: [plain], now: () => now });
+  other.setEnabled(true);
+  await other.tick(); await settle();
+  now += 11 * 60_000; await other.tick(); await settle();
+  t.regex(other.status(), /plain ran out of time/);
+  other.setEnabled(false);
+  await settle();
+  // a lead that throws (no cut): its hold goes with the run
+  let mine: AbortSignal | undefined;
+  const throws: Goal = { name: 'throws', priority: 10, wants: () => 'test', timeoutMs: 60_000, retryMs: 1000, run: async ctx => { mine = ctx.signal; afield.ledBy = ctx.signal; throw new TypeError('bridge data not as expected'); } };
+  const third = new Brain(fakeRuntime(state).rt, { tickMs: 1e9, goals: [throws], now: () => now });
+  third.setEnabled(true);
+  await third.tick(); await settle();
+  t.truthy(mine);
+  t.regex(third.status(), /failed throws: bridge data not as expected/);
+  t.is(afield.ledBy, undefined, 'no hold of a dead run left for care to take as a run at the trip');
+  third.setEnabled(false);
 });
 
 test('an LLM tool call stops the running goal and keeps the brain out until it has been quiet', async (t) => {

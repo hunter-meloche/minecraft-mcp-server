@@ -186,8 +186,13 @@ export interface RailLine {
 /** Kept per world (world.rails): the job under way, and the last one's end. */
 export interface RailsMemory { line?: RailLine; last?: { at: number; text: string } }
 
-/** The rails switch (the villager-moves tool's `rails`): a line is laid only while it is true, off as it ships. */
-export const railsOn = (world: WorldMemory): boolean => world.railsHome === true;
+/**
+ * The rails switch (the villager-moves tool's `rails`): a line is laid only while it is true, off as it ships. Off as
+ * well while the world's fetch is by the lure (fetch.ts `method: 'lure'`, idle-plan V decision 14): the rails are
+ * unhooked there, not deleted, until two clean lure trips. Their rung, their gates and the boat's no-boat branch all ask
+ * here, so a line under way is taken up as with the switch off (giveUpWhy); the switch itself stays as the user set it.
+ */
+export const railsOn = (world: WorldMemory): boolean => world.railsHome === true && world.fetch?.method !== 'lure';
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);

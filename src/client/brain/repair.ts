@@ -6,6 +6,7 @@ import { doorFloors, lostBed, missingBuilt, type BuiltBlock } from './integrity.
 import type { Pos, WorldMemory } from './memory.js';
 import { roundDue, roundFrom, toRound } from './work.js';
 import { FILL_MAX, fenceBuilt, fenceGround, mendFence, yardRing } from './fence.js';
+import { heldByFetch, placeGuard } from './fetch.js';
 
 /**
  * Once a day: look over everything the bot built around home and put back what went missing (a creeper's crater in
@@ -43,11 +44,15 @@ export async function readCells(ctx: Pick<GoalContext, 'call'>, positions: Pos[]
 /** The daily home-integrity round (register it with the brain's goals). */
 export function repairGoal(rt: ClientRuntime): Goal {
   // the fence's own blocks near home are the fence pass's (its walks are careful, and it sees to the ground first);
-  // what of the ring that pass leaves (past a leash set under 24) is the round's own still, as it always was
+  // what of the ring that pass leaves (past a leash set under 24) is the round's own still, as it always was. Neither
+  // looks at a cell the villager fetch holds (heldByFetch): a job block lifted out of a villager's way is missing on
+  // purpose (put back while one is out, the workshop's smithing table took the villager a third time, Nov 23-24), and a
+  // segment of fence dug to free a wedged one goes back with the fetch's own record
   const builtAround = (home: Pos, world: WorldMemory): BuiltBlock[] => {
     const fence = new Set(fenceBuilt(rt, world, home).map(b => key(b.at)));
-    return rt.builtNear(home, REPAIR_RADIUS).filter(b => !fence.has(key(b.at)));
+    return rt.builtNear(home, REPAIR_RADIUS).filter(b => !fence.has(key(b.at)) && !heldByFetch(world, b.at));
   };
+  const ringAround = (home: Pos, world: WorldMemory): BuiltBlock[] => fenceBuilt(rt, world, home).filter(b => !heldByFetch(world, b.at));
   return {
     name: 'repair',
     priority: 38,
@@ -70,7 +75,7 @@ export function repairGoal(rt: ClientRuntime): Goal {
       const ctx: GoalContext = { ...run, s: await toRound(run, NEAR_HOME) };
       const home = ctx.s.home!;
       const ring = yardRing(ctx.world);
-      const fence = fenceBuilt(rt, ctx.world, home);
+      const fence = ringAround(home, ctx.world);
       // blocks built before states were kept: take what stands there now as how they should be (once)
       const unknown = [...builtAround(home, ctx.world), ...fence].filter(b => !b.state);
       if (unknown.length) {
@@ -81,9 +86,13 @@ export function repairGoal(rt: ClientRuntime): Goal {
         if (adopt.length) ctx.progress(`took the current state of ${adopt.length} older built block(s) as their baseline`);
       }
       const built = builtAround(home, ctx.world).filter(b => b.state);
-      const ringBuilt = fenceBuilt(rt, ctx.world, home).filter(b => b.state);
+      const ringBuilt = ringAround(home, ctx.world).filter(b => b.state);
       if (!built.length && !ringBuilt.length) { done(ctx.world, 'repair', ctx.s.now); return 'nothing built near home to check'; }
       const plan = missingBuilt(built, await readCells(ctx, built.map(b => b.at)));
+      // a job block of the bot's that went missing waits while a villager is on its way (fetch.ts placeGuard): put back
+      // free in the yard, it takes the villager
+      const waits = plan.restore.filter(r => placeGuard(ctx.world, r.item, ctx.s.now, r.at));
+      if (waits.length) plan.restore = plan.restore.filter(r => !waits.includes(r));
       // a door going back stands on its threshold: put one in first where it is open (integrity.ts doorFloors)
       const doors = plan.restore.filter(r => /_door$/.test(r.item));
       if (doors.length) {
@@ -108,13 +117,14 @@ export function repairGoal(rt: ClientRuntime): Goal {
       const fails = ctx.world.repairFails ?? {};
       const fenceTodo = fencePlan?.restore.filter(r => (fails[key(r.at)] ?? 0) < 2) ?? [];
       const ground = ring && fenceTodo.length ? await fenceGround(ctx, ring, fenceTodo) : undefined;
-      const taken = plan.occupied ? `; ${plan.occupied} cell(s) hold another block now (left alone)` : '';
+      const taken = (plan.occupied ? `; ${plan.occupied} cell(s) hold another block now (left alone)` : '')
+        + (waits.length ? `; ${waits.map(r => `${r.item} at ${key(r.at)}`).join(', ')} not put back yet: a villager is on its way` : '');
       const lost = plan.lost.length
         ? `; not put back: ${plan.lost.slice(0, 5).map(l => `${l.state.replace(/\[.*$/, '')} at ${key(l.at)} (${l.why})`).join(', ')}` : '';
       // a whole fence is counted with the rest; one with a hole says so in its own words, after the rest
       const fenceDue = !!(fencePlan && (fencePlan.restore.length || fencePlan.lost.length || fencePlan.occupied));
       const checked = built.length + (fenceDue ? 0 : ringBuilt.length);
-      const nearText = !checked ? '' : `${plan.lost.length ? 'missing blocks' : `all ${checked} built blocks checked, none missing`}${lost}${taken}`;
+      const nearText = !checked ? '' : `${plan.lost.length || waits.length ? 'missing blocks' : `all ${checked} built blocks checked, none missing`}${lost}${taken}`;
       const both = (...parts: string[]) => parts.filter(Boolean).join('; ');
       if (!plan.restore.length && !fenceTodo.length) return fenceDue ? both(nearText, await mendFence(ctx, rt, ring!, fencePlan!, ground, new Map())) : nearText;
       if (plan.restore.length) ctx.progress(`${plan.restore.length} block(s) to put back`);
