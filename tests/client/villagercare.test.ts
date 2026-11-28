@@ -527,6 +527,15 @@ test.serial('D22: fetch-safe says no while a villager is led, in a critical sect
   delete afield.critical;
   p.bot.at = { ...INSIDE };
   t.is(await tool('fetch-safe'), 'not safe: the bot stands in the villager hall or its lock');
+  // in the Nether: no restart (the bot would come back up there and find its portal home on its own)
+  const atHall = p.bot.at;
+  p.bot.at = { ...START };
+  const plain = p.on.call.status;
+  p.on.call.status = () => ({ ...(p.answer('status', {}) as Record<string, unknown>), dimension: 'the_nether' });
+  t.is(await tool('fetch-safe'), 'not safe: the bot is in the_nether (a restart there leaves it to find its portal home on its own; it is back by dusk)');
+  if (plain) p.on.call.status = plain; else delete p.on.call.status;
+  t.regex(await tool('fetch-safe'), /^safe: /);
+  p.bot.at = atHall;
   // with stop: off in this process, saved (what the harness's /stop does before it closes)
   t.true(brain.enabled);
   fetchOf(world).last = { at: p.now(), text: 'a mark to find in brain.json', got: 0 };

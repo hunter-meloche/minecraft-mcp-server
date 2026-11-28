@@ -209,12 +209,18 @@ Placed ${r.placed.length} torch(es)${r.placed.length ? ` at ${list(r.placed)}` :
 
   factory.registerTool(
     'fetch-safe',
-    "Whether the bot may be restarted (or taken over) now without leaving a villager in harm's way: 'safe', or 'not safe' with why (a villager is being led, the bot is in a step only flight may cut short such as a gate held open for a villager, or it stands in the villager hall or its lock). Read only. With stop: the bot's autopilot is switched off in this process first, whatever it was doing stopped and waited for (its exit handler shuts what it held open), and its memory saved: what the harness's /stop does before it closes. scripts/safe-restart.sh waits for 'safe' before it restarts the bot.",
+    "Whether the bot may be restarted (or taken over) now without leaving a villager in harm's way: 'safe', or 'not safe' with why (a villager is being led, the bot is in a step only flight may cut short such as a gate held open for a villager, or it stands in the villager hall or its lock; for a restart also: the bot is in another dimension). Read only. With stop: the bot's autopilot is switched off in this process first, whatever it was doing stopped and waited for (its exit handler shuts what it held open), and its memory saved: what the harness's /stop does before it closes. scripts/safe-restart.sh waits for 'safe' before it restarts the bot.",
     { stop: z.boolean().optional().describe('Switch the autopilot off, stop and wait out what runs, and save (for a restart)') },
     async ({ stop }: { stop?: boolean }) => {
       const st = await rt.status().catch(() => undefined);
       const v = brain.safeNow(st?.position ?? st?.block, st?.dimension ?? undefined);
-      const verdict = v.safe ? 'safe: no villager is being led, nothing a villager depends on is under way, and the bot is not in the villager hall or its lock' : `not safe: ${v.why}`;
+      // (a restart in another dimension is not safe either: the bot comes back up where it was and must find its
+      // portal home itself. A maintenance restart caught a Nether barter trip on Nov 28; the rule for a deploy has
+      // always been "on the surface, never in the Nether". The takeover check, manual(), does not ask this)
+      const away = st?.dimension && st.dimension !== 'overworld' ? st.dimension : undefined;
+      const verdict = !v.safe ? `not safe: ${v.why}`
+        : away ? `not safe: the bot is in ${away} (a restart there leaves it to find its portal home on its own; it is back by dusk)`
+        : 'safe: no villager is being led, nothing a villager depends on is under way, and the bot is not in the villager hall or its lock';
       if (!stop) return factory.createResponse(verdict);
       const was = await brain.stopForRestart();
       return factory.createResponse(`stopped: the autopilot is off in this process${was ? `, ${was} stopped (its exit handler ran)` : ''}, its memory saved. Before the stop it was ${verdict}`);
